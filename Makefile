@@ -51,8 +51,12 @@ benchmark: ## TODO: Run write-rate / shoe-shining benchmarks (real hardware; own
 ##@ Code Generation
 
 .PHONY: generate-schema
-generate-schema: ## TODO: Regenerate committed config JSON schema (owned by later issue).
-	@echo "generate-schema: not yet implemented" >&2; exit 1
+generate-schema: ## Regenerate committed config JSON schema.
+	go run ./cmd/gen-config-schema schemas/run-config.schema.json
+
+.PHONY: check-schema
+check-schema: ## Verify committed schema matches generated output (CI check fails on diff).
+	go run ./cmd/gen-config-schema | diff schemas/run-config.schema.json -
 
 ##@ Dependencies
 
@@ -72,8 +76,12 @@ $(BIN_DIR)/worker: $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/worker
 
+$(BIN_DIR)/gen-config-schema: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/gen-config-schema
+
 .PHONY: build
-build: $(BIN_DIR)/worker ## Build all binaries into bin/.
+build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema ## Build all binaries into bin/.
 
 .PHONY: clean
 clean: ## Remove build artifacts.

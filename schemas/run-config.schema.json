@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/solidDoWant/tape-archiver/internal/config/config",
+  "$ref": "#/$defs/Config",
+  "$defs": {
+    "Config": {
+      "properties": {
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "type": "array"
+        },
+        "copies": {
+          "type": "integer"
+        },
+        "library": {
+          "$ref": "#/$defs/Library"
+        },
+        "redundancy": {
+          "$ref": "#/$defs/Redundancy"
+        },
+        "encryption": {
+          "$ref": "#/$defs/Encryption"
+        },
+        "delivery": {
+          "$ref": "#/$defs/Delivery"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "sources",
+        "copies",
+        "library",
+        "redundancy",
+        "encryption",
+        "delivery"
+      ]
+    },
+    "Delivery": {
+      "properties": {
+        "webhookUrl": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "webhookUrl"
+      ]
+    },
+    "Encryption": {
+      "properties": {
+        "recipients": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "recipients"
+      ]
+    },
+    "FillConfig": {
+      "properties": {
+        "floor": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "floor"
+      ]
+    },
+    "K8sRef": {
+      "properties": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "labelSelector": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "namespace"
+      ]
+    },
+    "Library": {
+      "properties": {
+        "changer": {
+          "type": "string"
+        },
+        "drives": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blankSlots": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "changer",
+        "drives",
+        "blankSlots"
+      ]
+    },
+    "Redundancy": {
+      "properties": {
+        "targetPercentage": {
+          "type": "number"
+        },
+        "fillToCapacity": {
+          "$ref": "#/$defs/FillConfig"
+        },
+        "sliceSizeBytes": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "sliceSizeBytes"
+      ]
+    },
+    "Source": {
+      "properties": {
+        "compression": {
+          "type": "boolean"
+        },
+        "k8s": {
+          "$ref": "#/$defs/K8sRef"
+        },
+        "zfsPath": {
+          "$ref": "#/$defs/ZFSPathSource"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "ZFSPathSource": {
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name"
+      ]
+    }
+  }
+}
