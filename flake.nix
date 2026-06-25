@@ -15,6 +15,12 @@
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.go
+            pkgs.golangci-lint
+            pkgs.gnumake
+            pkgs.kubernetes-helm
+            pkgs.gh
+            pkgs.docker
+            pkgs.docker-compose
 
             # Teleport 18. Only `tsh` is needed, but nixpkgs ships Teleport as a
             # single monolithic package (tsh/tctl/tbot/teleport) with no
