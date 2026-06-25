@@ -39,34 +39,46 @@ func (c *Config) Validate() error {
 }
 
 func (s Source) validate(index int) error {
-	hasK8s := s.K8sSnapshot != nil
+	hasK8s := s.K8s != nil
 
 	hasZFS := s.ZFSPath != nil
 	switch {
 	case !hasK8s && !hasZFS:
-		return fmt.Errorf("sources[%d]: exactly one of k8sSnapshot or zfsPath must be set", index)
+		return fmt.Errorf("sources[%d]: exactly one of k8s or zfsPath must be set", index)
 	case hasK8s && hasZFS:
-		return fmt.Errorf("sources[%d]: k8sSnapshot and zfsPath are mutually exclusive", index)
+		return fmt.Errorf("sources[%d]: k8s and zfsPath are mutually exclusive", index)
 	case hasK8s:
-		return s.K8sSnapshot.validate(index)
+		return s.K8s.validate(index)
 	default:
-		if s.ZFSPath.Path == "" {
-			return fmt.Errorf("sources[%d].zfsPath.path: must not be empty", index)
+		if s.ZFSPath.Name == "" {
+			return fmt.Errorf("sources[%d].zfsPath.name: must not be empty", index)
 		}
 	}
 
 	return nil
 }
 
-func (k *K8sSnapshot) validate(index int) error {
-	hasExplicit := k.Name != "" || k.Namespace != ""
+func (k *K8sRef) validate(index int) error {
+	if k.APIVersion == "" {
+		return fmt.Errorf("sources[%d].k8s.apiVersion: must not be empty", index)
+	}
 
+	if k.Kind == "" {
+		return fmt.Errorf("sources[%d].k8s.kind: must not be empty", index)
+	}
+
+	if k.Namespace == "" {
+		return fmt.Errorf("sources[%d].k8s.namespace: must not be empty", index)
+	}
+
+	hasName := k.Name != ""
 	hasSelector := k.LabelSelector != ""
+
 	switch {
-	case !hasExplicit && !hasSelector:
-		return fmt.Errorf("sources[%d].k8sSnapshot: one of (name/namespace) or labelSelector must be set", index)
-	case hasExplicit && hasSelector:
-		return fmt.Errorf("sources[%d].k8sSnapshot: (name/namespace) and labelSelector are mutually exclusive", index)
+	case !hasName && !hasSelector:
+		return fmt.Errorf("sources[%d].k8s: one of name or labelSelector must be set", index)
+	case hasName && hasSelector:
+		return fmt.Errorf("sources[%d].k8s: name and labelSelector are mutually exclusive", index)
 	}
 
 	return nil

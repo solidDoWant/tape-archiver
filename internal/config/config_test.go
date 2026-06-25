@@ -17,7 +17,7 @@ func ptr[T any](v T) *T { return &v }
 func validConfig() Config {
 	return Config{
 		Sources: []Source{
-			{ZFSPath: &ZFSPathSource{Path: "bulk-pool-01/archive@snap-20240101"}},
+			{ZFSPath: &ZFSPathSource{Name: "bulk-pool-01/archive@snap-20240101"}},
 		},
 		Copies: 2,
 		Library: Library{
@@ -42,14 +42,20 @@ func TestConfigRoundTrip(t *testing.T) {
 	original := validConfig()
 	original.Sources = append(original.Sources, Source{
 		Compression: ptr(true),
-		K8sSnapshot: &K8sSnapshot{
-			Name:      "my-snapshot",
-			Namespace: "default",
-			Group:     true,
+		K8s: &K8sRef{
+			APIVersion: "groupsnapshot.storage.k8s.io/v1alpha1",
+			Kind:       "VolumeGroupSnapshot",
+			Namespace:  "plex",
+			Name:       "plex-group-snap",
 		},
 	})
 	original.Sources = append(original.Sources, Source{
-		K8sSnapshot: &K8sSnapshot{LabelSelector: "app=myapp"},
+		K8s: &K8sRef{
+			APIVersion:    "snapshot.storage.k8s.io/v1",
+			Kind:          "VolumeSnapshot",
+			Namespace:     "default",
+			LabelSelector: "app=myapp",
+		},
 	})
 	original.Redundancy = Redundancy{
 		FillToCapacity: &FillConfig{Floor: 5.0},
@@ -94,36 +100,76 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name: "source with both types",
 			mutate: func(c *Config) {
-				c.Sources[0].K8sSnapshot = &K8sSnapshot{Name: "s", Namespace: "ns"}
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshot",
+					Namespace:  "ns",
+					Name:       "s",
+				}
 			},
 			wantErr:     require.Error,
 			errContains: "sources[0]",
 		},
 		{
-			name:        "zfsPath empty path",
-			mutate:      func(c *Config) { c.Sources[0].ZFSPath.Path = "" },
+			name:        "zfsPath empty name",
+			mutate:      func(c *Config) { c.Sources[0].ZFSPath.Name = "" },
 			wantErr:     require.Error,
-			errContains: "sources[0].zfsPath.path",
+			errContains: "sources[0].zfsPath.name",
+		},
+		{
+			name: "k8s no apiVersion",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{Kind: "VolumeSnapshot", Namespace: "ns", Name: "s"}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.apiVersion",
+		},
+		{
+			name: "k8s no kind",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{APIVersion: "snapshot.storage.k8s.io/v1", Namespace: "ns", Name: "s"}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.kind",
+		},
+		{
+			name: "k8s no namespace",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Name: "s",
+				}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.namespace",
 		},
 		{
 			name: "k8s no name and no selector",
 			mutate: func(c *Config) {
 				c.Sources[0].ZFSPath = nil
-				c.Sources[0].K8sSnapshot = &K8sSnapshot{}
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", Namespace: "ns",
+				}
 			},
 			wantErr:     require.Error,
-			errContains: "sources[0].k8sSnapshot",
+			errContains: "sources[0].k8s",
 		},
 		{
 			name: "k8s both name and selector",
 			mutate: func(c *Config) {
 				c.Sources[0].ZFSPath = nil
-				c.Sources[0].K8sSnapshot = &K8sSnapshot{
-					Name: "s", Namespace: "ns", LabelSelector: "app=foo",
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion:    "snapshot.storage.k8s.io/v1",
+					Kind:          "VolumeSnapshot",
+					Namespace:     "ns",
+					Name:          "s",
+					LabelSelector: "app=foo",
 				}
 			},
 			wantErr:     require.Error,
-			errContains: "sources[0].k8sSnapshot",
+			errContains: "sources[0].k8s",
 		},
 		{
 			name:        "copies zero",

@@ -10,27 +10,30 @@ type Config struct {
 	Delivery   Delivery   `json:"delivery"`
 }
 
-// Source is a single item to archive. Exactly one of K8sSnapshot or ZFSPath must be set.
+// Source is a single item to archive. Exactly one of K8s or ZFSPath must be set.
 // Compression defaults to enabled when nil.
 type Source struct {
 	Compression *bool          `json:"compression,omitempty"`
-	K8sSnapshot *K8sSnapshot   `json:"k8sSnapshot,omitempty"`
+	K8s         *K8sRef        `json:"k8s,omitempty"`
 	ZFSPath     *ZFSPathSource `json:"zfsPath,omitempty"`
 }
 
-// K8sSnapshot references a VolumeSnapshot or snapshot group.
-// Exactly one of (Name + Namespace) or LabelSelector must be set.
-type K8sSnapshot struct {
+// K8sRef identifies a Kubernetes snapshot resource by GVK, namespace, and name or
+// label selector. APIVersion and Kind follow standard k8s manifest syntax, e.g.
+// "snapshot.storage.k8s.io/v1" + "VolumeSnapshot" or
+// "groupsnapshot.storage.k8s.io/v1alpha1" + "VolumeGroupSnapshot".
+// Exactly one of Name or LabelSelector must be set.
+type K8sRef struct {
+	APIVersion    string `json:"apiVersion"`
+	Kind          string `json:"kind"`
+	Namespace     string `json:"namespace"`
 	Name          string `json:"name,omitempty"`
-	Namespace     string `json:"namespace,omitempty"`
 	LabelSelector string `json:"labelSelector,omitempty"`
-	// Group archives all matched snapshots as a single tar (one subdirectory per volume).
-	Group bool `json:"group,omitempty"`
 }
 
-// ZFSPathSource is an explicit ZFS snapshot or dataset path on the pool.
+// ZFSPathSource is an explicit ZFS snapshot or dataset on the pool.
 type ZFSPathSource struct {
-	Path string `json:"path"`
+	Name string `json:"name"`
 }
 
 // Library specifies the tape library hardware and the blank tapes to use.

@@ -77,23 +77,31 @@
         "floor"
       ]
     },
-    "K8sSnapshot": {
+    "K8sRef": {
       "properties": {
-        "name": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "kind": {
           "type": "string"
         },
         "namespace": {
           "type": "string"
         },
-        "labelSelector": {
+        "name": {
           "type": "string"
         },
-        "group": {
-          "type": "boolean"
+        "labelSelector": {
+          "type": "string"
         }
       },
       "additionalProperties": false,
-      "type": "object"
+      "type": "object",
+      "required": [
+        "apiVersion",
+        "kind",
+        "namespace"
+      ]
     },
     "Library": {
       "properties": {
@@ -144,8 +152,8 @@
         "compression": {
           "type": "boolean"
         },
-        "k8sSnapshot": {
-          "$ref": "#/$defs/K8sSnapshot"
+        "k8s": {
+          "$ref": "#/$defs/K8sRef"
         },
         "zfsPath": {
           "$ref": "#/$defs/ZFSPathSource"
@@ -156,14 +164,14 @@
     },
     "ZFSPathSource": {
       "properties": {
-        "path": {
+        "name": {
           "type": "string"
         }
       },
       "additionalProperties": false,
       "type": "object",
       "required": [
-        "path"
+        "name"
       ]
     }
   }

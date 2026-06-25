@@ -33,41 +33,53 @@ make check-schema
 
 ## Source
 
-Each element of `sources` archives exactly one item — a Kubernetes snapshot (or snapshot
-group) or a raw ZFS path. Exactly one of `k8sSnapshot` or `zfsPath` must be set.
+Each element of `sources` archives exactly one item — a Kubernetes snapshot resource or
+a raw ZFS dataset/snapshot. Exactly one of `k8s` or `zfsPath` must be set.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `compression` | `boolean` | no | Enable zstd compression before encryption. Defaults to `true` when absent. |
-| `k8sSnapshot` | `K8sSnapshot` | no* | Reference to a VolumeSnapshot or snapshot group. |
-| `zfsPath` | `ZFSPathSource` | no* | Explicit ZFS snapshot or dataset path. |
+| `k8s` | `K8sRef` | no* | Reference to a Kubernetes snapshot resource. |
+| `zfsPath` | `ZFSPathSource` | no* | Explicit ZFS dataset or snapshot name. |
 
-\* Exactly one of `k8sSnapshot` or `zfsPath` must be set.
+\* Exactly one of `k8s` or `zfsPath` must be set.
 
-### K8sSnapshot
+### K8sRef
 
-References a `VolumeSnapshot` or snapshot group. Exactly one of (`name` + `namespace`)
-or `labelSelector` must be set.
+Identifies a Kubernetes snapshot resource by GVK (GroupVersionKind), namespace, and
+name or label selector. `apiVersion` and `kind` use standard Kubernetes manifest syntax.
+Exactly one of `name` or `labelSelector` must be set.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | `string` | no* | Name of the VolumeSnapshot or snapshot group. |
-| `namespace` | `string` | no* | Kubernetes namespace for the named resource. |
-| `labelSelector` | `string` | no* | Label selector to match snapshots or groups across namespaces (e.g. `app=myapp`). |
-| `group` | `boolean` | no | When `true`, all matched snapshots are archived as a single tar stream (one subdirectory per member volume), preserving cross-volume consistency. Defaults to `false`. |
+| `apiVersion` | `string` | yes | API group and version, e.g. `snapshot.storage.k8s.io/v1` or `groupsnapshot.storage.k8s.io/v1alpha1`. |
+| `kind` | `string` | yes | Resource kind, e.g. `VolumeSnapshot` or `VolumeGroupSnapshot`. A `VolumeGroupSnapshot` is archived as a single tar stream (one subdirectory per member volume). |
+| `namespace` | `string` | yes | Kubernetes namespace containing the resource. |
+| `name` | `string` | no* | Name of a specific resource. |
+| `labelSelector` | `string` | no* | Label selector matching one or more resources within `namespace` (e.g. `app=myapp`). |
 
-\* Exactly one of (`name` + `namespace`) or `labelSelector` must be provided.
+\* Exactly one of `name` or `labelSelector` must be provided.
 
-Resolution of k8s snapshots to ZFS dataset paths happens at runtime in the resolve
-activity — this config only carries the reference.
+Resolution of k8s snapshot references to ZFS dataset paths happens at runtime in the
+resolve activity — this config only carries the reference.
+
+Example entries:
+
+```json
+{ "apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshot",
+  "namespace": "plex", "name": "plex-db-snap" }
+
+{ "apiVersion": "groupsnapshot.storage.k8s.io/v1alpha1", "kind": "VolumeGroupSnapshot",
+  "namespace": "plex", "labelSelector": "app=plex" }
+```
 
 ### ZFSPathSource
 
-An explicit ZFS snapshot or dataset path on the pool.
+An explicit ZFS dataset or snapshot by name.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `path` | `string` | yes | ZFS snapshot or dataset path, e.g. `bulk-pool-01/archive@snap-20240101` or `bulk-pool-01/media`. |
+| `name` | `string` | yes | ZFS dataset or snapshot name, e.g. `bulk-pool-01/archive@snap-20240101` or `bulk-pool-01/media`. |
 
 ---
 
