@@ -21,9 +21,9 @@ func NewChanger(device string) *Changer {
 
 // Inventory queries the changer with "mtx status" and returns the parsed result.
 func (c *Changer) Inventory(ctx context.Context) (Inventory, error) {
-	out, err := c.mtx(ctx, "status").Output()
+	out, err := c.output(ctx, "status")
 	if err != nil {
-		return Inventory{}, fmt.Errorf("mtx -f %s status: %w", c.device, err)
+		return Inventory{}, err
 	}
 
 	inv, err := parseInventory(string(out))
@@ -36,30 +36,51 @@ func (c *Changer) Inventory(ctx context.Context) (Inventory, error) {
 
 // Load moves the tape in the given storage slot into the given drive (0-indexed).
 func (c *Changer) Load(ctx context.Context, slot, drive int) error {
-	if err := c.mtx(ctx, "load", strconv.Itoa(slot), strconv.Itoa(drive)).Run(); err != nil {
-		return fmt.Errorf("mtx -f %s load %d %d: %w", c.device, slot, drive, err)
-	}
-
-	return nil
+	return c.run(ctx, "load", strconv.Itoa(slot), strconv.Itoa(drive))
 }
 
 // Unload moves the tape from the given drive (0-indexed) into the given slot.
 func (c *Changer) Unload(ctx context.Context, slot, drive int) error {
-	if err := c.mtx(ctx, "unload", strconv.Itoa(slot), strconv.Itoa(drive)).Run(); err != nil {
-		return fmt.Errorf("mtx -f %s unload %d %d: %w", c.device, slot, drive, err)
-	}
-
-	return nil
+	return c.run(ctx, "unload", strconv.Itoa(slot), strconv.Itoa(drive))
 }
 
 // Transfer moves media from srcSlot to dstSlot (both are element addresses).
 // Use this to move a tape from a drive's home slot to an I/O station slot.
 func (c *Changer) Transfer(ctx context.Context, srcSlot, dstSlot int) error {
-	if err := c.mtx(ctx, "transfer", strconv.Itoa(srcSlot), strconv.Itoa(dstSlot)).Run(); err != nil {
-		return fmt.Errorf("mtx -f %s transfer %d %d: %w", c.device, srcSlot, dstSlot, err)
+	return c.run(ctx, "transfer", strconv.Itoa(srcSlot), strconv.Itoa(dstSlot))
+}
+
+// run executes an mtx subcommand and discards its stdout. Any error is wrapped
+// by output, which reports the exact command line and captured stderr.
+func (c *Changer) run(ctx context.Context, args ...string) error {
+	_, err := c.output(ctx, args...)
+
+	return err
+}
+
+// output executes an mtx subcommand and returns its stdout. On failure the
+// returned error names the exact command that ran — including sudo and the
+// resolved binary path via cmd.String() — and appends mtx's stderr, which
+// carries the human-readable reason (e.g. "Drive 0 Full"). This is the single
+// place that turns an mtx invocation into an error, so callers never reconstruct
+// the command line by hand (which previously omitted sudo and dropped stderr).
+func (c *Changer) output(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := c.mtx(ctx, args...)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return nil, fmt.Errorf("%s: %w", cmd, err)
 	}
 
-	return nil
+	return out, nil
 }
 
 // mtx returns an exec.Cmd for "mtx -f <device> <args...>".
