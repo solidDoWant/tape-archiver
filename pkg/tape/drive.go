@@ -4,7 +4,7 @@ package tape
 //
 // A drive is addressed through two device nodes that refer to the same unit:
 //
-//   - device:   the non-rewinding st node (e.g. /dev/nst0), used for the
+//   - stDevice: the non-rewinding st node (e.g. /dev/nst0), used for the
 //     streaming data path (writes/reads of archive data).
 //   - sgDevice: the SCSI generic node (e.g. /dev/sg1), used for control
 //     commands issued directly via SG_IO — currently the blank check (see
@@ -15,7 +15,7 @@ package tape
 // and closing it never repositions the tape (SPEC.md §4.3, "Hardware and
 // Safety").
 type Drive struct {
-	device   string
+	stDevice string
 	sgDevice string
 }
 
@@ -35,7 +35,7 @@ func WithSGDevice(sgDevice string) DriveOption {
 // /dev/nst0). The paired SCSI generic node used for the blank check is resolved
 // from the tape node's SCSI address unless overridden with WithSGDevice.
 func NewDrive(device string, opts ...DriveOption) *Drive {
-	d := &Drive{device: device}
+	d := &Drive{stDevice: device}
 
 	for _, opt := range opts {
 		opt(d)

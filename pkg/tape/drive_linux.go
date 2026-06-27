@@ -49,7 +49,7 @@ var errUnexpectedSense = errors.New("unexpected SCSI sense on blank-check read")
 func (d *Drive) IsBlank(ctx context.Context) (blank bool, err error) {
 	sgDevice := d.sgDevice
 	if sgDevice == "" {
-		sgDevice, err = sgDeviceForTapeNode(d.device)
+		sgDevice, err = sgDeviceForTapeNode(d.stDevice)
 		if err != nil {
 			return false, err
 		}
