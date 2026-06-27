@@ -1,5 +1,5 @@
-  Storage Changer /dev/sch0:2 Drives, 47 Slots ( 3 Import/Export )
-Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag=TA0001L6
+  Storage Changer /dev/sch0:2 Drives, 50 Slots ( 3 Import/Export )
+Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag = TA0001L6
 Data Transfer Element 1:Empty
       Storage Element 1:Empty
       Storage Element 2:Full :VolumeTag=TA0002L6

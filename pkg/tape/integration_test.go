@@ -3,8 +3,10 @@
 package tape_test
 
 import (
+	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -109,9 +111,16 @@ func TestBlankCheck(t *testing.T) {
 	err = changer.Load(t.Context(), slot.Address, driveAddr)
 	require.NoError(t, err, "load")
 
+	// Use a context that is not cancelled by t.Skip() so cleanup completes even
+	// when SkipIfDriveNotReady skips the test before IsBlank() is called.
 	t.Cleanup(func() {
-		_ = changer.Unload(t.Context(), slot.Address, driveAddr)
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+		defer cancel()
+
+		_ = changer.Unload(ctx, slot.Address, driveAddr)
 	})
+
+	testutil.SkipIfDriveNotReady(t, testutil.Drive0Dev(t))
 
 	// A freshly loaded mhvtl tape is blank.
 	blank, err := drive.IsBlank(t.Context())

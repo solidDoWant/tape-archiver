@@ -129,6 +129,10 @@ func parseInventory(output string) (Inventory, error) {
 //
 //	Data Transfer Element 0:Empty
 //	Data Transfer Element 1:Full (Storage Element 3 Loaded):VolumeTag=TA0003L6
+//	Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag = TA0001L6
+//
+// mhvtl uses "VolumeTag = value" (spaces around =) while some real changers
+// omit the spaces; parseVolumeTag handles both.
 func parseDriveElement(line string) (DriveElement, error) {
 	// Strip prefix.
 	rest := strings.TrimPrefix(line, "Data Transfer Element ")
@@ -166,10 +170,7 @@ func parseDriveElement(line string) (DriveElement, error) {
 		}
 	}
 
-	// Extract barcode after last colon.
-	if i := strings.LastIndex(status, "VolumeTag="); i >= 0 {
-		el.Barcode = Barcode(strings.TrimSpace(status[i+len("VolumeTag="):]))
-	}
+	el.Barcode = parseVolumeTag(status)
 
 	return el, nil
 }
@@ -195,9 +196,7 @@ func parseStorageElement(line string) (StorageElement, error) {
 
 	if strings.Contains(status, "Full") {
 		el.Full = true
-		if i := strings.Index(status, "VolumeTag="); i >= 0 {
-			el.Barcode = Barcode(strings.TrimSpace(status[i+len("VolumeTag="):]))
-		}
+		el.Barcode = parseVolumeTag(status)
 	}
 
 	return el, nil
@@ -230,10 +229,26 @@ func parseIOElement(line string) (IOElement, error) {
 
 	if strings.Contains(status, "Full") {
 		el.Full = true
-		if i := strings.Index(status, "VolumeTag="); i >= 0 {
-			el.Barcode = Barcode(strings.TrimSpace(status[i+len("VolumeTag="):]))
-		}
+		el.Barcode = parseVolumeTag(status)
 	}
 
 	return el, nil
+}
+
+// parseVolumeTag extracts the barcode from a fragment containing "VolumeTag".
+// Handles both "VolumeTag=TA0001L6" and "VolumeTag = TA0001L6" (mhvtl style).
+func parseVolumeTag(s string) Barcode {
+	idx := strings.Index(s, "VolumeTag")
+	if idx < 0 {
+		return ""
+	}
+
+	after := s[idx+len("VolumeTag"):]
+	_, value, found := strings.Cut(after, "=")
+
+	if !found {
+		return ""
+	}
+
+	return Barcode(strings.TrimSpace(value))
 }

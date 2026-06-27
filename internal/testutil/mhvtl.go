@@ -6,7 +6,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -102,6 +104,32 @@ func Drive1SgDev(t *testing.T) string {
 	}
 
 	return defaultDrive1SgDev
+}
+
+// SkipIfDriveNotReady polls the tape drive device until it reports ONLINE or
+// the timeout elapses, then skips the test if it is still not ready. This is
+// needed for environments (e.g. kernel ≥ 6.18 with mhvtl 1.8.0) where the
+// kernel st driver may not immediately see a tape as ONLINE after mtx load.
+func SkipIfDriveNotReady(t *testing.T, dev string) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		out, err := exec.CommandContext(ctx, "mt", "-f", dev, "status").Output()
+
+		cancel()
+
+		if err == nil && strings.Contains(string(out), "ONLINE") {
+			return
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	t.Skipf("tape drive %s did not become ONLINE within 10s after load"+
+		" (kernel/mhvtl IPC incompatibility — set %s to override)", dev, EnvDrive0Dev)
 }
 
 // MtxCommand returns an exec.Cmd for "mtx -f <dev> <args...>".
