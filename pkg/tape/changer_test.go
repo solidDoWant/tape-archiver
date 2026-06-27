@@ -24,6 +24,55 @@ func allStorageSlots() []StorageElement {
 	return slots
 }
 
+func TestParseVolumeTag(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status string
+		want   Barcode
+	}{
+		{
+			name:   "storage form, no spaces",
+			status: "Full :VolumeTag=TA0001L6",
+			want:   "TA0001L6",
+		},
+		{
+			name:   "drive form, spaces around equals",
+			status: "Full (Storage Element 1 Loaded):VolumeTag = TA0001L6",
+			want:   "TA0001L6",
+		},
+		{
+			name:   "alternate volume tag must not bleed into barcode (storage)",
+			status: "Full :VolumeTag=TA0001L6:AlternateVolumeTag=ALT123",
+			want:   "TA0001L6",
+		},
+		{
+			name:   "alternate volume tag must not bleed into barcode (drive)",
+			status: "Full (Storage Element 1 Loaded):VolumeTag = TA0001L6:AlternateVolumeTag = ALT123",
+			want:   "TA0001L6",
+		},
+		{
+			name:   "no volume tag",
+			status: "Empty",
+			want:   "",
+		},
+		{
+			name:   "alternate tag only is ignored",
+			status: "Full :AlternateVolumeTag=ALT123",
+			want:   "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, parseVolumeTag(tc.status))
+		})
+	}
+}
+
 func TestParseInventory(t *testing.T) {
 	t.Parallel()
 

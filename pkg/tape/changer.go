@@ -252,20 +252,31 @@ func parseIOElement(line string) (IOElement, error) {
 	return el, nil
 }
 
-// parseVolumeTag extracts the barcode from a fragment containing "VolumeTag".
-// Handles both "VolumeTag=TA0001L6" and "VolumeTag = TA0001L6" (mhvtl style).
+// parseVolumeTag extracts the primary barcode from a status fragment containing
+// "VolumeTag". Handles both "VolumeTag=TA0001L6" and "VolumeTag = TA0001L6"
+// (mhvtl style).
+//
+// mtx appends each tag as its own colon-delimited field and, when the library
+// reports one, follows the primary tag with ":AlternateVolumeTag=...". The
+// fragment is therefore split on ":" and only the field that is exactly the
+// primary VolumeTag is used — an AlternateVolumeTag field starts with "A" and is
+// skipped, and bounding the value to its own field stops the alternate tag from
+// bleeding into the barcode. SCSI volume tags printed by mtx contain neither ":"
+// nor embedded spaces, so this split is lossless.
 func parseVolumeTag(s string) Barcode {
-	idx := strings.Index(s, "VolumeTag")
-	if idx < 0 {
-		return ""
+	for _, field := range strings.Split(s, ":") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(field), "VolumeTag")
+		if !ok {
+			continue
+		}
+
+		_, value, found := strings.Cut(rest, "=")
+		if !found {
+			continue
+		}
+
+		return Barcode(strings.TrimSpace(value))
 	}
 
-	after := s[idx+len("VolumeTag"):]
-	_, value, found := strings.Cut(after, "=")
-
-	if !found {
-		return ""
-	}
-
-	return Barcode(strings.TrimSpace(value))
+	return ""
 }
