@@ -36,24 +36,22 @@ func (c *Changer) Inventory(ctx context.Context) (Inventory, error) {
 
 // Load moves the tape in the given storage slot into the given drive (0-indexed).
 func (c *Changer) Load(ctx context.Context, slot, drive int) error {
-	return c.run(ctx, "load", strconv.Itoa(slot), strconv.Itoa(drive))
+	_, err := c.output(ctx, "load", strconv.Itoa(slot), strconv.Itoa(drive))
+
+	return err
 }
 
 // Unload moves the tape from the given drive (0-indexed) into the given slot.
 func (c *Changer) Unload(ctx context.Context, slot, drive int) error {
-	return c.run(ctx, "unload", strconv.Itoa(slot), strconv.Itoa(drive))
+	_, err := c.output(ctx, "unload", strconv.Itoa(slot), strconv.Itoa(drive))
+
+	return err
 }
 
 // Transfer moves media from srcSlot to dstSlot (both are element addresses).
 // Use this to move a tape from a drive's home slot to an I/O station slot.
 func (c *Changer) Transfer(ctx context.Context, srcSlot, dstSlot int) error {
-	return c.run(ctx, "transfer", strconv.Itoa(srcSlot), strconv.Itoa(dstSlot))
-}
-
-// run executes an mtx subcommand and discards its stdout. Any error is wrapped
-// by output, which reports the exact command line and captured stderr.
-func (c *Changer) run(ctx context.Context, args ...string) error {
-	_, err := c.output(ctx, args...)
+	_, err := c.output(ctx, "transfer", strconv.Itoa(srcSlot), strconv.Itoa(dstSlot))
 
 	return err
 }
