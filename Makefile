@@ -37,8 +37,13 @@ test: fmt vet ## Run unit tests with race detector.
 	go test -race -count=1 ./...
 
 .PHONY: test-integration
-test-integration: ## TODO: Run integration tests against mhvtl and dev Temporal (owned by later issue).
-	@echo "test-integration: not yet implemented" >&2; exit 1
+test-integration: fmt vet mhvtl-up ## Run integration tests against mhvtl (brings up the virtual library, tears it down after).
+	@{ \
+	  cleanup() { $(MAKE) mhvtl-down; }; \
+	  trap cleanup EXIT; \
+	  MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
+	  go test -race -count=1 -tags integration ./...; \
+	}
 
 .PHONY: test-e2e
 test-e2e: ## TODO: Run end-to-end tests (owned by later issue).
@@ -98,9 +103,9 @@ temporal-down: ## TODO: Stop local Temporal dev stack (owned by later issue).
 	@echo "temporal-down: not yet implemented" >&2; exit 1
 
 .PHONY: mhvtl-up
-mhvtl-up: ## TODO: Start virtual tape library (owned by later issue).
-	@echo "mhvtl-up: not yet implemented" >&2; exit 1
+mhvtl-up: ## Start the mhvtl virtual tape library (2 drives, 47 storage + 3 I/O slots).
+	@$(PROJECT_DIR)/scripts/mhvtl-up.sh
 
 .PHONY: mhvtl-down
-mhvtl-down: ## TODO: Stop virtual tape library (owned by later issue).
-	@echo "mhvtl-down: not yet implemented" >&2; exit 1
+mhvtl-down: ## Stop the mhvtl virtual tape library and unload the kernel module.
+	@$(PROJECT_DIR)/scripts/mhvtl-down.sh
