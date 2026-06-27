@@ -3,7 +3,6 @@ package tape
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -57,11 +56,11 @@ func (c *Changer) Transfer(ctx context.Context, srcSlot, dstSlot int) error {
 }
 
 // output executes an mtx subcommand and returns its stdout. On failure the
-// returned error names the exact command that ran — including sudo and the
-// resolved binary path via cmd.String() — and appends mtx's stderr, which
-// carries the human-readable reason (e.g. "Drive 0 Full"). This is the single
-// place that turns an mtx invocation into an error, so callers never reconstruct
-// the command line by hand (which previously omitted sudo and dropped stderr).
+// returned error names the exact command that ran — the resolved binary path
+// via cmd.String() — and appends mtx's stderr, which carries the human-readable
+// reason (e.g. "Drive 0 Full"). This is the single place that turns an mtx
+// invocation into an error, so callers never reconstruct the command line by
+// hand (which previously diverged from the real invocation and dropped stderr).
 func (c *Changer) output(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := c.mtx(ctx, args...)
 
@@ -82,17 +81,16 @@ func (c *Changer) output(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // mtx returns an exec.Cmd for "mtx -f <device> <args...>".
-// When the process is not running as root, sudo is prepended so that
-// CAP_SYS_RAWIO is available for SCSI commands.
+//
+// The command is invoked directly; the program never escalates its own
+// privilege. Issuing SCSI commands to the changer requires CAP_SYS_RAWIO plus
+// access to the device node, which the operator grants by running the worker
+// with the necessary privilege (root, or CAP_SYS_RAWIO and a device mount in
+// the data-worker container). This matches the SG_IO blank check and the
+// sg_logs path, which likewise require an already-privileged process — there is
+// no way to elevate an in-process ioctl after the fact.
 func (c *Changer) mtx(ctx context.Context, args ...string) *exec.Cmd {
-	cmdArgs := append([]string{"-f", c.device}, args...)
-
-	if os.Getuid() != 0 {
-		//nolint:gosec // sudo is intentional for SCSI access outside the data-worker container
-		return exec.CommandContext(ctx, "sudo", append([]string{"mtx"}, cmdArgs...)...)
-	}
-
-	return exec.CommandContext(ctx, "mtx", cmdArgs...)
+	return exec.CommandContext(ctx, "mtx", append([]string{"-f", c.device}, args...)...)
 }
 
 // parseInventory parses the output of "mtx -f <dev> status" into an Inventory.

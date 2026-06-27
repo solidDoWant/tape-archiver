@@ -39,10 +39,13 @@ test: fmt vet ## Run unit tests with race detector.
 .PHONY: test-integration
 test-integration: fmt vet mhvtl-up ## Run integration tests against mhvtl (brings up the virtual library, tears it down after).
 	@{ \
-	  cleanup() { $(MAKE) mhvtl-down; }; \
+	  gocache=$$(mktemp -d); \
+	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; $(MAKE) mhvtl-down; exit $$rc; }; \
 	  trap cleanup EXIT; \
-	  MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
-	  go test -race -count=1 -tags integration ./...; \
+	  sudo env \
+	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
+	    PATH="$$PATH" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
+	    go test -race -count=1 -tags integration ./...; \
 	}
 
 .PHONY: test-e2e

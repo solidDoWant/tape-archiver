@@ -32,8 +32,10 @@ const (
 // accessible.  It checks MHVTL_CHANGER_DEV first, then falls back to probing
 // /dev/sch0, and verifies that mtx can actually query the changer.
 //
-// Sending SCSI commands via mtx requires CAP_SYS_RAWIO; this helper uses
-// sudo when the current process is not already running as root.
+// Sending SCSI commands via mtx requires CAP_SYS_RAWIO plus device access; when
+// the test process lacks it the status query fails and the test is skipped
+// rather than failed. Run "make test-integration" (which elevates the test
+// binary) to exercise these tests.
 func SkipIfMhvtlUnavailable(t *testing.T) {
 	t.Helper()
 
@@ -226,15 +228,12 @@ func SkipIfDriveNotReady(t *testing.T, dev string) {
 }
 
 // MtxCommand returns an exec.Cmd for "mtx -f <dev> <args...>".
-// When the current process is not root, it prepends "sudo" so that
-// SCSI_IOCTL_SEND_COMMAND (which requires CAP_SYS_RAWIO) succeeds.
+//
+// It mirrors the production code and invokes mtx directly — the integration
+// test binary is expected to run with the privilege needed to issue SCSI
+// commands (CAP_SYS_RAWIO plus device access). "make test-integration" provides
+// this by running the test process under sudo; a non-privileged run simply
+// skips via SkipIfMhvtlUnavailable.
 func MtxCommand(ctx context.Context, dev string, args ...string) *exec.Cmd {
-	cmdArgs := append([]string{"-f", dev}, args...)
-
-	if os.Getuid() != 0 {
-		//nolint:gosec // prepending sudo is intentional in the test harness
-		return exec.CommandContext(ctx, "sudo", append([]string{"mtx"}, cmdArgs...)...)
-	}
-
-	return exec.CommandContext(ctx, "mtx", cmdArgs...)
+	return exec.CommandContext(ctx, "mtx", append([]string{"-f", dev}, args...)...)
 }
