@@ -48,6 +48,15 @@ sleep 1
 # ---------------------------------------------------------------------------
 
 echo "==> Unloading mhvtl kernel module..."
-sudo rmmod mhvtl 2>/dev/null || true
+# Do not swallow rmmod failures: a module stuck "in use" (e.g. a daemon was
+# killed abnormally and left its SCSI host registered) must fail loudly.
+# Otherwise the next `mhvtl-up` sees the module still loaded, no-ops, and the
+# tests run against a stale module.
+if ! rmmod_err=$(sudo rmmod mhvtl 2>&1); then
+  echo "error: failed to unload mhvtl module: ${rmmod_err}" >&2
+  echo "       the module may still be in use; check for lingering vtltape/" >&2
+  echo "       vtllibrary processes or a wedged SCSI host before retrying." >&2
+  exit 1
+fi
 
 echo "==> mhvtl virtual library is down."

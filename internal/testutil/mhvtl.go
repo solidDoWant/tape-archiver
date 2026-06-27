@@ -6,6 +6,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,77 +62,167 @@ func ChangerDev(t *testing.T) string {
 }
 
 // Drive0Dev returns the non-rewinding tape device path for drive 0, preferring
-// MHVTL_DRIVE0_DEV, falling back to /dev/nst0.
+// MHVTL_DRIVE0_DEV, then resolving by SCSI address, then /dev/nst0.
 func Drive0Dev(t *testing.T) string {
 	t.Helper()
 
-	if dev := os.Getenv(EnvDrive0Dev); dev != "" {
-		return dev
-	}
-
-	return defaultDrive0Dev
+	return resolveDev(t, EnvDrive0Dev, scsiTapeClass, baseTapeNodeRe, 0, defaultDrive0Dev)
 }
 
 // Drive1Dev returns the non-rewinding tape device path for drive 1, preferring
-// MHVTL_DRIVE1_DEV, falling back to /dev/nst1.
+// MHVTL_DRIVE1_DEV, then resolving by SCSI address, then /dev/nst1.
 func Drive1Dev(t *testing.T) string {
 	t.Helper()
 
-	if dev := os.Getenv(EnvDrive1Dev); dev != "" {
-		return dev
-	}
-
-	return defaultDrive1Dev
+	return resolveDev(t, EnvDrive1Dev, scsiTapeClass, baseTapeNodeRe, 1, defaultDrive1Dev)
 }
 
 // Drive0SgDev returns the SCSI generic device path for drive 0 (used by
-// sg_logs), preferring MHVTL_DRIVE0_SG_DEV, falling back to /dev/sg1.
+// sg_logs), preferring MHVTL_DRIVE0_SG_DEV, then resolving by SCSI address,
+// then /dev/sg1.
 func Drive0SgDev(t *testing.T) string {
 	t.Helper()
 
-	if dev := os.Getenv(EnvDrive0SgDev); dev != "" {
-		return dev
-	}
-
-	return defaultDrive0SgDev
+	return resolveDev(t, EnvDrive0SgDev, scsiGenericClass, baseSgNodeRe, 0, defaultDrive0SgDev)
 }
 
 // Drive1SgDev returns the SCSI generic device path for drive 1 (used by
-// sg_logs), preferring MHVTL_DRIVE1_SG_DEV, falling back to /dev/sg2.
+// sg_logs), preferring MHVTL_DRIVE1_SG_DEV, then resolving by SCSI address,
+// then /dev/sg2.
 func Drive1SgDev(t *testing.T) string {
 	t.Helper()
 
-	if dev := os.Getenv(EnvDrive1SgDev); dev != "" {
+	return resolveDev(t, EnvDrive1SgDev, scsiGenericClass, baseSgNodeRe, 1, defaultDrive1SgDev)
+}
+
+// SCSI sysfs classes and the base (non-partition) device-node name patterns.
+const (
+	scsiTapeClass    = "scsi_tape"
+	scsiGenericClass = "scsi_generic"
+)
+
+var (
+	// baseTapeNodeRe matches the base non-rewinding st node (e.g. nst0) and
+	// excludes the per-density/partition aliases (nst0a, nst0l, nst0m, st0).
+	baseTapeNodeRe = regexp.MustCompile(`^nst[0-9]+$`)
+	// baseSgNodeRe matches an sg node (e.g. sg1).
+	baseSgNodeRe = regexp.MustCompile(`^sg[0-9]+$`)
+)
+
+// resolveDev returns a device path using, in order of precedence: the env-var
+// override, deterministic resolution by SCSI address, then the static fallback.
+//
+// The kernel assigns st/sg minor numbers (nst0, sg1, …) in probe order, which
+// is not guaranteed to match mhvtl's drive numbering. mhvtl's device.conf maps
+// the changer to SCSI target 0 and drive N to target N+1 (all on channel 0,
+// LUN 0), so we resolve the node whose SCSI address matches rather than
+// trusting the minor-number ordering.
+func resolveDev(t *testing.T, env, class string, nodeRe *regexp.Regexp, driveIndex int, fallback string) string {
+	t.Helper()
+
+	if dev := os.Getenv(env); dev != "" {
 		return dev
 	}
 
-	return defaultDrive1SgDev
+	if dev, ok := resolveByTarget(class, nodeRe, driveSCSITarget(driveIndex)); ok {
+		return dev
+	}
+
+	return fallback
 }
 
-// SkipIfDriveNotReady polls the tape drive device until it reports ONLINE or
-// the timeout elapses, then skips the test if it is still not ready. This is
-// needed for environments (e.g. kernel ≥ 6.18 with mhvtl 1.8.0) where the
-// kernel st driver may not immediately see a tape as ONLINE after mtx load.
+// driveSCSITarget maps a 0-based mhvtl drive index to its SCSI target number
+// (drive 0 -> target 1, drive 1 -> target 2; the changer is target 0).
+func driveSCSITarget(driveIndex int) int {
+	return driveIndex + 1
+}
+
+// resolveByTarget scans /sys/class/<class> for a base device node whose backing
+// SCSI device is at channel 0, the given target, LUN 0, and returns its /dev
+// path. The boolean reports whether a match was found.
+func resolveByTarget(class string, nodeRe *regexp.Regexp, target int) (string, bool) {
+	classDir := filepath.Join("/sys/class", class)
+
+	entries, err := os.ReadDir(classDir)
+	if err != nil {
+		return "", false
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if !nodeRe.MatchString(name) {
+			continue
+		}
+
+		link, err := os.Readlink(filepath.Join(classDir, name, "device"))
+		if err != nil {
+			continue
+		}
+
+		channel, tgt, lun, ok := parseHCTL(filepath.Base(link))
+		if ok && channel == 0 && tgt == target && lun == 0 {
+			return filepath.Join("/dev", name), true
+		}
+	}
+
+	return "", false
+}
+
+// parseHCTL parses a "H:C:T:L" SCSI address (the final path component of a
+// sysfs device link) into its channel, target, and LUN.
+func parseHCTL(hctl string) (channel, target, lun int, ok bool) {
+	parts := strings.Split(hctl, ":")
+	if len(parts) != 4 {
+		return 0, 0, 0, false
+	}
+
+	channel, errC := strconv.Atoi(parts[1])
+	target, errT := strconv.Atoi(parts[2])
+	lun, errL := strconv.Atoi(parts[3])
+
+	if errC != nil || errT != nil || errL != nil {
+		return 0, 0, 0, false
+	}
+
+	return channel, target, lun, true
+}
+
+// SkipIfDriveNotReady waits until the drive can complete a rewind, then skips
+// the test if it never becomes ready within the timeout.
+//
+// dev must be the non-rewinding st node (e.g. /dev/nst0). A blocking
+// "mt -f <dev> rewind" sends a real command down to the drive: it returns
+// promptly once the medium is mounted, and blocks while the drive is "becoming
+// ready" (so each attempt runs under its own short timeout and is retried).
+// This is deliberately not `mt status`, which opens the node O_NONBLOCK and
+// returns the st driver's cached state without ever probing the drive.
+//
+// The skip path covers environments lacking the mhvtl ioctl fix, where a loaded
+// drive never finishes becoming ready.
 func SkipIfDriveNotReady(t *testing.T, dev string) {
 	t.Helper()
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
+
+	var lastErr error
 
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		out, err := exec.CommandContext(ctx, "mt", "-f", dev, "status").Output()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		err := exec.CommandContext(ctx, "mt", "-f", dev, "rewind").Run()
 
 		cancel()
 
-		if err == nil && strings.Contains(string(out), "ONLINE") {
+		if err == nil {
 			return
 		}
+
+		lastErr = err
 
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	t.Skipf("tape drive %s did not become ONLINE within 10s after load"+
-		" (kernel/mhvtl IPC incompatibility — set %s to override)", dev, EnvDrive0Dev)
+	t.Skipf("tape drive %s did not become ready within 30s after load"+
+		" (kernel/mhvtl ioctl incompatibility — last rewind error: %v)", dev, lastErr)
 }
 
 // MtxCommand returns an exec.Cmd for "mtx -f <dev> <args...>".

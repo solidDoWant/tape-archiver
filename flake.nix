@@ -39,6 +39,10 @@
             # Tape library / changer tools (real hardware and virtual alike)
             pkgs.mtx
             pkgs.mt-st
+            # SCSI generic tooling: sg_logs (drive log pages / TapeAlert),
+            # sg_turs (TEST UNIT READY readiness probe), etc.
+            pkgs.sg3_utils
+            pkgs.lsscsi
 
             # mhvtl virtual tape library — userspace daemons and utilities
             mhvtlUserspace

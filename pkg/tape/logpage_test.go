@@ -20,7 +20,7 @@ func TestParseTapeAlert(t *testing.T) {
 	}{
 		{
 			name:       "all flags clear",
-			fixture:    "testdata/sg_logs_tapealert_clean.txt",
+			fixture:    "testdata/sg_logs_tapealert_clean.json",
 			wantAnySet: false,
 			wantFlagSet: map[int]bool{
 				0x01: false,
@@ -31,7 +31,7 @@ func TestParseTapeAlert(t *testing.T) {
 		},
 		{
 			name:       "write warning and media flags set",
-			fixture:    "testdata/sg_logs_tapealert_flagged.txt",
+			fixture:    "testdata/sg_logs_tapealert_flagged.json",
 			wantAnySet: true,
 			wantFlagSet: map[int]bool{
 				0x01: false, // Read warning — clear

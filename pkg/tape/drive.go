@@ -1,69 +1,45 @@
 package tape
 
-import (
-	"context"
-	"fmt"
-	"io"
-	"os"
-	"os/exec"
-)
-
-// Drive wraps a tape drive device node for drive-level operations.
-// Use the non-rewinding device node (e.g. /dev/nst0).
-type Drive struct {
-	device string
-}
-
-// NewDrive returns a Drive targeting the given non-rewinding tape device
-// (e.g. /dev/nst0).
-func NewDrive(device string) *Drive {
-	return &Drive{device: device}
-}
-
-// IsBlank reports whether the loaded tape is blank (never written or fully erased).
+// Drive wraps a single physical tape drive for drive-level operations.
 //
-// It rewinds to BOT then attempts to read one block. A read returning zero bytes
-// (immediate EOD) means blank; any data means the tape has content and must not
-// be overwritten (SPEC.md §4.3 step 6).
-func (d *Drive) IsBlank(ctx context.Context) (blank bool, err error) {
-	if err = d.rewind(ctx); err != nil {
-		return false, err
-	}
-
-	f, err := os.Open(d.device)
-	if err != nil {
-		return false, fmt.Errorf("open tape device %s: %w", d.device, err)
-	}
-
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = fmt.Errorf("close tape device %s: %w", d.device, cerr)
-		}
-	}()
-
-	// 64 KiB is large enough for any fixed-block-size tape drive to return one block.
-	buf := make([]byte, 64*1024)
-
-	n, readErr := f.Read(buf)
-	if n > 0 {
-		// Data found — tape is not blank.
-		return false, nil
-	}
-
-	if readErr == io.EOF || readErr == nil {
-		// EOD immediately at BOT — tape is blank.
-		return true, nil
-	}
-
-	return false, fmt.Errorf("read tape device %s: %w", d.device, readErr)
+// A drive is addressed through two device nodes that refer to the same unit:
+//
+//   - device:   the non-rewinding st node (e.g. /dev/nst0), used for the
+//     streaming data path (writes/reads of archive data).
+//   - sgDevice: the SCSI generic node (e.g. /dev/sg1), used for control
+//     commands issued directly via SG_IO — currently the blank check (see
+//     IsBlank). When not set explicitly it is resolved from the tape node's
+//     SCSI address on first use.
+//
+// Always use the non-rewinding device node for the data path so that opening
+// and closing it never repositions the tape (SPEC.md §4.3, "Hardware and
+// Safety").
+type Drive struct {
+	device   string
+	sgDevice string
 }
 
-// rewind runs "mt -f <device> rewind" to position the tape at BOT.
-func (d *Drive) rewind(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "mt", "-f", d.device, "rewind")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("mt -f %s rewind: %w: %s", d.device, err, out)
+// DriveOption configures a Drive.
+type DriveOption func(*Drive)
+
+// WithSGDevice overrides the SCSI generic node used for control commands (the
+// blank check). By default the sg node is resolved from the tape device's SCSI
+// address (see IsBlank). Use this for non-standard device topologies or tests.
+func WithSGDevice(sgDevice string) DriveOption {
+	return func(d *Drive) {
+		d.sgDevice = sgDevice
+	}
+}
+
+// NewDrive returns a Drive for the given non-rewinding tape device (e.g.
+// /dev/nst0). The paired SCSI generic node used for the blank check is resolved
+// from the tape node's SCSI address unless overridden with WithSGDevice.
+func NewDrive(device string, opts ...DriveOption) *Drive {
+	d := &Drive{device: device}
+
+	for _, opt := range opts {
+		opt(d)
 	}
 
-	return nil
+	return d
 }

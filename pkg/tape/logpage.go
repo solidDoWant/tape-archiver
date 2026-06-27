@@ -2,11 +2,11 @@ package tape
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
-	"strings"
 )
 
 // LogPageReader reads SCSI log pages from a tape drive via sg_logs.
@@ -40,11 +40,15 @@ func (r *LogPageReader) ReadLogPages(ctx context.Context) (LogPageResult, error)
 	}, nil
 }
 
-// readTapeAlert runs "sg_logs --page=0x2e <sgDevice>" and parses the output.
+// readTapeAlert runs "sg_logs --page=0x2e --json <sgDevice>" and parses the
+// output. The JSON form is used rather than the decoded text because it is a
+// stable, structured contract (it carries a json_format_version) and exposes
+// the flag number, name, and value directly — the decoded text format omits
+// the flag number for named flags and varies across sg3-utils releases.
 func (r *LogPageReader) readTapeAlert(ctx context.Context) (TapeAlertResult, error) {
-	out, err := exec.CommandContext(ctx, "sg_logs", "--page=0x2e", r.sgDevice).Output()
+	out, err := exec.CommandContext(ctx, "sg_logs", "--page=0x2e", "--json", r.sgDevice).Output()
 	if err != nil {
-		return TapeAlertResult{}, fmt.Errorf("sg_logs --page=0x2e %s: %w", r.sgDevice, err)
+		return TapeAlertResult{}, fmt.Errorf("sg_logs --page=0x2e --json %s: %w", r.sgDevice, err)
 	}
 
 	return parseTapeAlert(string(out))
@@ -62,55 +66,36 @@ func (r *LogPageReader) readRepositions(ctx context.Context) (int64, error) {
 	return parseRepositions(string(out)), nil
 }
 
-// tapeAlertFlagRe matches lines like:
-//
-//	TapeAlert flag 01h [Read warning]:
-var tapeAlertFlagRe = regexp.MustCompile(`TapeAlert flag ([0-9a-fA-F]+)h \[([^\]]+)\]:`)
+// tapeAlertJSON models the subset of "sg_logs --page=0x2e --json" output we
+// consume: each parameter carries its code (flag number), decoded meaning, and
+// the flag value.
+type tapeAlertJSON struct {
+	Page struct {
+		Params []struct {
+			ParameterCode struct {
+				Number  int    `json:"i"`
+				Meaning string `json:"meaning"`
+			} `json:"parameter_code"`
+			Flag int `json:"flag"`
+		} `json:"tapealert_log_parameters"`
+	} `json:"tapealert_log_page"`
+}
 
-// tapeAlertValueRe matches the value line following a flag header:
-//
-//	[0x0]   or   [0x1]
-var tapeAlertValueRe = regexp.MustCompile(`\[0x([01])\]`)
-
-// parseTapeAlert parses the output of "sg_logs --page=0x2e".
-//
-// Example output:
-//
-//	TapeAlert log page (smc-3) [0x2e]:
-//	  TapeAlert flag 01h [Read warning]:
-//	    [0x0]
-//	  TapeAlert flag 02h [Write warning]:
-//	    [0x1]
+// parseTapeAlert parses the JSON output of "sg_logs --page=0x2e --json".
 func parseTapeAlert(output string) (TapeAlertResult, error) {
+	var doc tapeAlertJSON
+	if err := json.Unmarshal([]byte(output), &doc); err != nil {
+		return TapeAlertResult{}, fmt.Errorf("parse sg_logs TapeAlert JSON: %w", err)
+	}
+
 	var result TapeAlertResult
 
-	lines := strings.Split(output, "\n")
-
-	for i, line := range lines {
-		m := tapeAlertFlagRe.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-
-		flagNum, err := strconv.ParseInt(m[1], 16, 32)
-		if err != nil {
-			return TapeAlertResult{}, fmt.Errorf("parse TapeAlert flag number %q: %w", m[1], err)
-		}
-
-		flag := TapeAlertFlag{
-			Number:      int(flagNum),
-			Description: m[2],
-		}
-
-		// Look ahead for the value line within the next few lines.
-		for j := i + 1; j < len(lines) && j <= i+3; j++ {
-			if vm := tapeAlertValueRe.FindStringSubmatch(lines[j]); vm != nil {
-				flag.Set = vm[1] == "1"
-				break
-			}
-		}
-
-		result.Flags = append(result.Flags, flag)
+	for _, param := range doc.Page.Params {
+		result.Flags = append(result.Flags, TapeAlertFlag{
+			Number:      param.ParameterCode.Number,
+			Description: param.ParameterCode.Meaning,
+			Set:         param.Flag != 0,
+		})
 	}
 
 	return result, nil

@@ -96,6 +96,8 @@ func TestBlankCheck(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 
 	changer := tape.NewChanger(testutil.ChangerDev(t))
+	// Pass only the tape node; the drive resolves its paired sg node from the
+	// SCSI address, exercising the production path.
 	drive := tape.NewDrive(testutil.Drive0Dev(t))
 
 	inv, err := changer.Inventory(t.Context())
@@ -150,7 +152,12 @@ func TestTransferToIO(t *testing.T) {
 	require.NoError(t, err, "transfer to I/O slot")
 
 	t.Cleanup(func() {
-		_ = changer.Transfer(t.Context(), ioSlot.Address, srcSlot.Address)
+		// Use a context that survives the test's own cancellation so the tape
+		// is always returned to its storage slot.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+		defer cancel()
+
+		_ = changer.Transfer(ctx, ioSlot.Address, srcSlot.Address)
 	})
 
 	// Confirm the I/O slot now holds the tape and the source slot is empty.

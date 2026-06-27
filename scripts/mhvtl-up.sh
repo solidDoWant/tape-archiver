@@ -52,6 +52,9 @@ fi
 echo "==> Loading kernel modules..."
 sudo modprobe st
 sudo modprobe ch
+# sg backs the SCSI generic nodes (/dev/sg*) used by sg_logs, sg_turs, and the
+# SG_IO blank check.
+sudo modprobe sg
 sudo insmod "$MHVTL_KO"
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,9 @@ fi
 echo "==> Setting device permissions..."
 sudo chmod a+rw /dev/sch0
 sudo chmod a+rw /dev/st* /dev/nst* 2>/dev/null || true
+# SCSI generic nodes back the drives too; sg_logs / sg_turs (and the SG_IO
+# blank check) open them directly. Without this they are root:tape 0660.
+sudo chmod a+rw /dev/sg* 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Wait for daemons to be fully ready (device nodes appear before the daemon

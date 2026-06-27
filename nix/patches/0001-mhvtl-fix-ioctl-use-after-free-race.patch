@@ -1,0 +1,343 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tape-archiver <noreply@example.com>
+Date: Sat, 01 Jan 2000 00:00:00 +0000
+Subject: [PATCH] kernel: fix use-after-free race in ioctl command handling
+
+lookup_sqcp() returns a pointer without removing the entry from the
+command list, allowing the SCSI timer handler to kfree() the sqcp while
+the VTL_PUT_DATA ioctl handler still holds and writes through it.  On
+kernels >= 6.18 the resulting corruption causes TUR to fail with an
+error/timeout, so the st driver keeps the drive in DR_OPEN and the
+device never goes ONLINE after mtx load.
+
+Fix by introducing:
+
+  mhvtl_sqcp_release / mhvtl_sqcp_put   -- kref-based freeing
+  lookup_sqcp_get                        -- read-only lookup with kref,
+                                            entry stays on cmd_list
+  claim_sqcp                             -- atomic detach + state flip
+                                            to CMD_STATE_COMPLETING;
+                                            only one path (ioctl or timer)
+                                            can claim a given entry
+
+All completion paths (VTL_PUT_DATA, timer, abort, teardown) now call
+timer_delete_sync() *outside* the cmd_list spinlock, which is safe
+because the entry is detached from the list before the sync.
+
+The sdev_destroy and double-free fixes from the same upstream PR are
+intentionally omitted: those changes introduced a deadlock on daemon
+stop (mhvtl_sdev_destroy took mhvtl_hba_list_lock while
+mhvtl_driver_remove already held it via scsi_remove_host) and were
+reverted upstream in commit 2f4c6753528a.
+
+Upstream reference: commit a2bc68869e7152cf14c07e7504ea0e8c2c5823f3 (partial)
+  Reverted:         commit 2f4c6753528a ("Revert 'Fix several kernel module issues'")
+---
+ kernel/mhvtl.c | 1 file changed
+--- a/kernel/mhvtl.c	2026-06-27 06:13:55.200759190 +0000
++++ b/kernel/mhvtl.c	2026-06-27 06:18:22.893771608 +0000
+@@ -45,6 +45,7 @@
+ #include <linux/module.h>
+ 
+ #include <linux/kernel.h>
++#include <linux/kref.h>
+ #include <linux/sched.h>
+ #include <linux/errno.h>
+ #include <linux/timer.h>
+@@ -242,10 +243,12 @@
+ enum cmd_state {
+ 	CMD_STATE_FREE = 0,
+ 	CMD_STATE_QUEUED,
+-	CMD_STATE_IN_USE,
++	CMD_STATE_IN_USE,		/* daemon has pulled the header, processing */
++	CMD_STATE_COMPLETING,	/* claimed for completion; detached from list */
+ };
+ 
+ struct mhvtl_queued_cmd {
++	struct kref			refcount;
+ 	int					state;
+ 	struct timer_list	cmnd_timer;
+ 	done_funct_t		done_funct;
+@@ -566,6 +569,8 @@
+ 	/* Set flag.
+ 	 * Next ioctl() poll by user-daemon will check this state.
+ 	 */
++	kref_init(&sqcp->refcount);
++
+ 	sqcp->state = CMD_STATE_QUEUED;
+ 
+ 	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+@@ -695,14 +700,73 @@
+ }
+ #endif
+ 
+-static struct mhvtl_queued_cmd *lookup_sqcp(struct mhvtl_lu_info *lu,
+-											unsigned long		  serialNo) {
++/*
++ * kref release: called when the last reference to sqcp is dropped.
++ * By this time the entry is guaranteed to be off cmd_list.
++ */
++static void mhvtl_sqcp_release(struct kref *kref) {
++	struct mhvtl_queued_cmd *sqcp =
++		container_of(kref, struct mhvtl_queued_cmd, refcount);
++	kfree(sqcp);
++}
++
++static inline void mhvtl_sqcp_put(struct mhvtl_queued_cmd *sqcp) {
++	kref_put(&sqcp->refcount, mhvtl_sqcp_release);
++}
++
++/*
++ * Look up a queued command by serial number and take an additional
++ * reference. The sqcp stays on cmd_list. Caller must mhvtl_sqcp_put()
++ * when finished reading from the object.
++ *
++ * Returns NULL if no matching still-queued entry exists.
++ */
++static struct mhvtl_queued_cmd *lookup_sqcp_get(struct mhvtl_lu_info *lu,
++												unsigned long		  serialNo) {
+ 	unsigned long			 iflags;
+ 	struct mhvtl_queued_cmd *sqcp;
+ 
+ 	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+ 	list_for_each_entry(sqcp, &lu->cmd_list, queued_sibling) {
+-		if (sqcp->state && (sqcp->serial_number == serialNo)) {
++		if ((sqcp->state == CMD_STATE_QUEUED ||
++			 sqcp->state == CMD_STATE_IN_USE) &&
++			sqcp->serial_number == serialNo) {
++			kref_get(&sqcp->refcount);
++			spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
++			return sqcp;
++		}
++	}
++	spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
++	return NULL;
++}
++
++/*
++ * Atomically claim a queued command for completion:
++ *   - look it up by serial number,
++ *   - flip state to CMD_STATE_COMPLETING (single-claim flag),
++ *   - detach from cmd_list (list ref now transferred to the caller),
++ *   - take an additional reference for the caller itself.
++ *
++ * Only one path can successfully claim a given sqcp. Losers see NULL.
++ * The caller owns TWO references (list + own) and must drop both via
++ * mhvtl_sqcp_put().
++ *
++ * Does NOT cancel the timer — callers must timer_delete_sync() outside
++ * the list lock (to avoid deadlocks with the timer handler).
++ */
++static struct mhvtl_queued_cmd *claim_sqcp(struct mhvtl_lu_info *lu,
++										   unsigned long		  serialNo) {
++	unsigned long			 iflags;
++	struct mhvtl_queued_cmd *sqcp;
++
++	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
++	list_for_each_entry(sqcp, &lu->cmd_list, queued_sibling) {
++		if ((sqcp->state == CMD_STATE_QUEUED ||
++			 sqcp->state == CMD_STATE_IN_USE) &&
++			sqcp->serial_number == serialNo) {
++			sqcp->state = CMD_STATE_COMPLETING;
++			list_del(&sqcp->queued_sibling);
++			kref_get(&sqcp->refcount);
+ 			spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
+ 			return sqcp;
+ 		}
+@@ -759,18 +823,6 @@
+ 	return mhvtl_fill_from_dev_buffer(scp, arr, min((int)alloc_len, MHVTL_RLUN_ARR_SZ));
+ }
+ 
+-static void __mhvtl_remove_sqcp(struct mhvtl_queued_cmd *sqcp) {
+-	list_del(&sqcp->queued_sibling);
+-	kfree(sqcp);
+-}
+-
+-static void mhvtl_remove_sqcp(struct mhvtl_lu_info *lu, struct mhvtl_queued_cmd *sqcp) {
+-	unsigned long iflags;
+-	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+-	__mhvtl_remove_sqcp(sqcp);
+-	spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
+-}
+-
+ /* When timer goes off this function is called. */
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+ static void mhvtl_timer_intr_handler(struct timer_list *t) {
+@@ -789,26 +841,29 @@
+ 		return;
+ 
+ 	/* Now that the work list is split per lu, we have to check each
+-	 * lu to see if we can find the serial number in question
++	 * lu to see if we can find the serial number in question.
++	 * claim_sqcp() atomically detaches + flips state; if someone else
++	 * (ioctl / abort) already claimed this sqcp we just return.
+ 	 */
++	sqcp = NULL;
+ 	list_for_each_entry(lu, &mhvtl_hba->lu_list, lu_sibling) {
+-		sqcp = lookup_sqcp(lu, indx);
++		sqcp = claim_sqcp(lu, indx);
+ 		if (sqcp)
+ 			break;
+ 	}
+ 
+ 	if (!sqcp) {
+-		pr_err("Unexpected interrupt, indx %ld\n", (unsigned long)indx);
++		/* Already completed by another path — nothing to do. */
+ 		return;
+ 	}
+ 
+-	sqcp->state = CMD_STATE_FREE;
+ 	if (sqcp->done_funct) {
+ 		sqcp->a_cmnd->result = sqcp->scsi_result;
+ 		sqcp->done_funct(sqcp->a_cmnd); /* callback to mid level */
++		sqcp->done_funct = NULL;
+ 	}
+-	sqcp->done_funct = NULL;
+-	mhvtl_remove_sqcp(lu, sqcp);
++	mhvtl_sqcp_put(sqcp);	/* drop list ref */
++	mhvtl_sqcp_put(sqcp);	/* drop our ref -> release */
+ }
+ 
+ static int mhvtl_sdev_alloc(struct scsi_device *sdp) {
+@@ -967,23 +1022,32 @@
+ static int mhvtl_stop_queued_cmnd(struct scsi_cmnd *SCpnt) {
+ 	int						 found = 0;
+ 	unsigned long			 iflags;
+-	struct mhvtl_queued_cmd *sqcp, *n;
++	struct mhvtl_queued_cmd *sqcp, *n, *claimed = NULL;
+ 	struct mhvtl_lu_info	*lu;
+ 
+ 	lu = devInfoReg(SCpnt->device);
+ 
++	/* Claim (detach + flip state) under the list lock; finish outside. */
+ 	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+ 	list_for_each_entry_safe(sqcp, n, &lu->cmd_list, queued_sibling) {
+-		if (sqcp->state && (SCpnt == sqcp->a_cmnd)) {
+-			timer_delete_sync(&sqcp->cmnd_timer);
+-			sqcp->state	 = CMD_STATE_FREE;
+-			sqcp->a_cmnd = NULL;
+-			found		 = 1;
+-			__mhvtl_remove_sqcp(sqcp);
++		if ((sqcp->state == CMD_STATE_QUEUED ||
++			 sqcp->state == CMD_STATE_IN_USE) &&
++			SCpnt == sqcp->a_cmnd) {
++			sqcp->state = CMD_STATE_COMPLETING;
++			list_del(&sqcp->queued_sibling);
++			claimed = sqcp;
++			found	= 1;
+ 			break;
+ 		}
+ 	}
+ 	spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
++
++	if (claimed) {
++		/* Safe to sync timer outside the list lock. */
++		timer_delete_sync(&claimed->cmnd_timer);
++		claimed->a_cmnd = NULL;
++		mhvtl_sqcp_put(claimed);	/* drop list ref -> release */
++	}
+ 	return found;
+ }
+ 
+@@ -993,23 +1057,32 @@
+ 	struct mhvtl_queued_cmd *sqcp, *n;
+ 	struct mhvtl_hba_info	*mhvtl_hba;
+ 	struct mhvtl_lu_info	*lu;
++	LIST_HEAD(drain);
+ 
+ 	mhvtl_hba = mhvtl_get_hba_entry();
+ 	if (!mhvtl_hba)
+ 		return;
+ 
+ 	list_for_each_entry(lu, &mhvtl_hba->lu_list, lu_sibling) {
++		/* Move all claimed entries to a private list under the lock. */
+ 		spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+ 		list_for_each_entry_safe(sqcp, n, &lu->cmd_list,
+ 								 queued_sibling) {
+-			if (sqcp->state && sqcp->a_cmnd) {
+-				timer_delete_sync(&sqcp->cmnd_timer);
+-				sqcp->state	 = CMD_STATE_FREE;
+-				sqcp->a_cmnd = NULL;
+-				__mhvtl_remove_sqcp(sqcp);
++			if ((sqcp->state == CMD_STATE_QUEUED ||
++				 sqcp->state == CMD_STATE_IN_USE) && sqcp->a_cmnd) {
++				sqcp->state = CMD_STATE_COMPLETING;
++				list_move(&sqcp->queued_sibling, &drain);
+ 			}
+ 		}
+ 		spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
++
++		/* Drop list refs outside the lock so timer_delete_sync() is safe. */
++		list_for_each_entry_safe(sqcp, n, &drain, queued_sibling) {
++			list_del(&sqcp->queued_sibling);
++			timer_delete_sync(&sqcp->cmnd_timer);
++			sqcp->a_cmnd = NULL;
++			mhvtl_sqcp_put(sqcp);
++		}
+ 	}
+ }
+ 
+@@ -1503,13 +1576,14 @@
+ 			 ds->sam_stat, ds->sam_stat);
+ 	up	 = ds->data;
+ 	sz	 = ds->sz;
+-	sqcp = lookup_sqcp(devp[minor], ds->serialNo);
++	sqcp = lookup_sqcp_get(devp[minor], ds->serialNo);
+ 	if (!sqcp) {
+ 		ret = -ENOTTY;
+ 		goto ret_err;
+ 	}
+ 
+ 	ret = mhvtl_resp_write_to_user(sqcp->a_cmnd, up, sz);
++	mhvtl_sqcp_put(sqcp);
+ 
+ ret_err:
+ 	kmem_cache_free(dsp, ds);
+@@ -1539,14 +1613,27 @@
+ 	pr_debug(" data sz        : %d\n", ds->sz);
+ 	pr_debug(" SAM status     : %d (0x%02x)\n",
+ 			 ds->sam_stat, ds->sam_stat);
+-	sqcp = lookup_sqcp(devp[minor], ds->serialNo);
++	/*
++	 * VTL_PUT_DATA completes the command. claim_sqcp() atomically
++	 * flips state and removes the entry from the list. If the timer
++	 * raced us and won, claim_sqcp() returns NULL and we have nothing
++	 * to do — the timer already completed the SCSI command.
++	 */
++	sqcp = claim_sqcp(devp[minor], ds->serialNo);
+ 	if (!sqcp) {
+-		pr_err("Callback function not found for SCSI cmd s/no. %lld, minor: %d\n",
+-			   (unsigned long long)ds->serialNo,
+-			   minor);
+-		ret = 1; /* report busy to mid level */
++		pr_debug("sqcp already completed (timeout?) s/no. %lld, minor: %d\n",
++				 (unsigned long long)ds->serialNo, minor);
++		ret = 0;
+ 		goto give_up;
+ 	}
++
++	/*
++	 * Entry is off the list and state==COMPLETING. The timer handler's
++	 * claim_sqcp() will now see state!=QUEUED and skip this entry.
++	 * timer_delete_sync() waits out any handler currently running.
++	 */
++	timer_delete_sync(&sqcp->cmnd_timer);
++
+ 	ret = mhvtl_fill_from_user_buffer(sqcp->a_cmnd, ds->data, ds->sz);
+ 	if (ds->sam_stat) { /* Auto-sense */
+ 		sqcp->a_cmnd->result = ds->sam_stat;
+@@ -1563,12 +1650,12 @@
+ 	} else {
+ 		sqcp->a_cmnd->result = DID_OK << 16;
+ 	}
+-	timer_delete_sync(&sqcp->cmnd_timer);
+ 	if (sqcp->done_funct)
+ 		sqcp->done_funct(sqcp->a_cmnd);
+ 	else
+ 		pr_err("FATAL, line %d: SCSI done_funct callback => NULL\n", __LINE__);
+-	mhvtl_remove_sqcp(devp[minor], sqcp);
++	mhvtl_sqcp_put(sqcp);	/* drop list ref */
++	mhvtl_sqcp_put(sqcp);	/* drop our ref -> release */
+ 
+ 	ret = 0;
+ 
