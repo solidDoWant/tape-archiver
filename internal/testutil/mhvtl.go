@@ -10,13 +10,17 @@ import (
 )
 
 const (
-	EnvChangerDev = "MHVTL_CHANGER_DEV"
-	EnvDrive0Dev  = "MHVTL_DRIVE0_DEV"
-	EnvDrive1Dev  = "MHVTL_DRIVE1_DEV"
+	EnvChangerDev  = "MHVTL_CHANGER_DEV"
+	EnvDrive0Dev   = "MHVTL_DRIVE0_DEV"
+	EnvDrive1Dev   = "MHVTL_DRIVE1_DEV"
+	EnvDrive0SgDev = "MHVTL_DRIVE0_SG_DEV"
+	EnvDrive1SgDev = "MHVTL_DRIVE1_SG_DEV"
 
-	defaultChangerDev = "/dev/sch0"
-	defaultDrive0Dev  = "/dev/nst0"
-	defaultDrive1Dev  = "/dev/nst1"
+	defaultChangerDev  = "/dev/sch0"
+	defaultDrive0Dev   = "/dev/nst0"
+	defaultDrive1Dev   = "/dev/nst1"
+	defaultDrive0SgDev = "/dev/sg1"
+	defaultDrive1SgDev = "/dev/sg2"
 )
 
 // SkipIfMhvtlUnavailable skips the test if the mhvtl virtual library is not
@@ -74,6 +78,30 @@ func Drive1Dev(t *testing.T) string {
 	}
 
 	return defaultDrive1Dev
+}
+
+// Drive0SgDev returns the SCSI generic device path for drive 0 (used by
+// sg_logs), preferring MHVTL_DRIVE0_SG_DEV, falling back to /dev/sg1.
+func Drive0SgDev(t *testing.T) string {
+	t.Helper()
+
+	if dev := os.Getenv(EnvDrive0SgDev); dev != "" {
+		return dev
+	}
+
+	return defaultDrive0SgDev
+}
+
+// Drive1SgDev returns the SCSI generic device path for drive 1 (used by
+// sg_logs), preferring MHVTL_DRIVE1_SG_DEV, falling back to /dev/sg2.
+func Drive1SgDev(t *testing.T) string {
+	t.Helper()
+
+	if dev := os.Getenv(EnvDrive1SgDev); dev != "" {
+		return dev
+	}
+
+	return defaultDrive1SgDev
 }
 
 // MtxCommand returns an exec.Cmd for "mtx -f <dev> <args...>".

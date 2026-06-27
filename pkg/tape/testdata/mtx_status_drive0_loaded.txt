@@ -1,0 +1,53 @@
+  Storage Changer /dev/sch0:2 Drives, 47 Slots ( 3 Import/Export )
+Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag=TA0001L6
+Data Transfer Element 1:Empty
+      Storage Element 1:Empty
+      Storage Element 2:Full :VolumeTag=TA0002L6
+      Storage Element 3:Full :VolumeTag=TA0003L6
+      Storage Element 4:Full :VolumeTag=TA0004L6
+      Storage Element 5:Full :VolumeTag=TA0005L6
+      Storage Element 6:Full :VolumeTag=TA0006L6
+      Storage Element 7:Full :VolumeTag=TA0007L6
+      Storage Element 8:Full :VolumeTag=TA0008L6
+      Storage Element 9:Full :VolumeTag=TA0009L6
+      Storage Element 10:Full :VolumeTag=TA0010L6
+      Storage Element 11:Full :VolumeTag=TA0011L6
+      Storage Element 12:Full :VolumeTag=TA0012L6
+      Storage Element 13:Full :VolumeTag=TA0013L6
+      Storage Element 14:Full :VolumeTag=TA0014L6
+      Storage Element 15:Full :VolumeTag=TA0015L6
+      Storage Element 16:Full :VolumeTag=TA0016L6
+      Storage Element 17:Full :VolumeTag=TA0017L6
+      Storage Element 18:Full :VolumeTag=TA0018L6
+      Storage Element 19:Full :VolumeTag=TA0019L6
+      Storage Element 20:Full :VolumeTag=TA0020L6
+      Storage Element 21:Full :VolumeTag=TA0021L6
+      Storage Element 22:Full :VolumeTag=TA0022L6
+      Storage Element 23:Full :VolumeTag=TA0023L6
+      Storage Element 24:Full :VolumeTag=TA0024L6
+      Storage Element 25:Full :VolumeTag=TA0025L6
+      Storage Element 26:Full :VolumeTag=TA0026L6
+      Storage Element 27:Full :VolumeTag=TA0027L6
+      Storage Element 28:Full :VolumeTag=TA0028L6
+      Storage Element 29:Full :VolumeTag=TA0029L6
+      Storage Element 30:Full :VolumeTag=TA0030L6
+      Storage Element 31:Full :VolumeTag=TA0031L6
+      Storage Element 32:Full :VolumeTag=TA0032L6
+      Storage Element 33:Full :VolumeTag=TA0033L6
+      Storage Element 34:Full :VolumeTag=TA0034L6
+      Storage Element 35:Full :VolumeTag=TA0035L6
+      Storage Element 36:Full :VolumeTag=TA0036L6
+      Storage Element 37:Full :VolumeTag=TA0037L6
+      Storage Element 38:Full :VolumeTag=TA0038L6
+      Storage Element 39:Full :VolumeTag=TA0039L6
+      Storage Element 40:Full :VolumeTag=TA0040L6
+      Storage Element 41:Full :VolumeTag=TA0041L6
+      Storage Element 42:Full :VolumeTag=TA0042L6
+      Storage Element 43:Full :VolumeTag=TA0043L6
+      Storage Element 44:Full :VolumeTag=TA0044L6
+      Storage Element 45:Full :VolumeTag=TA0045L6
+      Storage Element 46:Full :VolumeTag=TA0046L6
+      Storage Element 47:Full :VolumeTag=TA0047L6
+      Storage Element 48 IMPORT/EXPORT:Empty
+      Storage Element 49 IMPORT/EXPORT:Empty
+      Storage Element 50 IMPORT/EXPORT:Empty

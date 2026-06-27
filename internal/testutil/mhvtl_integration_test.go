@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/solidDoWant/tape-archiver/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/solidDoWant/tape-archiver/internal/testutil"
 )
 
 // TestMhvtlChangerEnumeration verifies that the virtual tape library presents
