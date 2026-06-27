@@ -1,6 +1,6 @@
 //go:build integration
 
-package integration_test
+package testutil_test
 
 import (
 	"strings"
