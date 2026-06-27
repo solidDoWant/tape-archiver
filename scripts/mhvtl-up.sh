@@ -176,7 +176,7 @@ sudo chmod a+rw /dev/st* /dev/nst* 2>/dev/null || true
 
 echo -n "==> Waiting for library to become ready"
 for _ in $(seq 1 20); do
-  if mtx -f /dev/sch0 status > /dev/null 2>&1; then
+  if sudo mtx -f /dev/sch0 status > /dev/null 2>&1; then
     break
   fi
   echo -n "."
@@ -195,4 +195,4 @@ echo "    drive 0 : /dev/nst0  (non-rewinding)"
 echo "    drive 1 : /dev/nst1  (non-rewinding)"
 echo ""
 echo "==> Library status:"
-mtx -f /dev/sch0 status
+sudo mtx -f /dev/sch0 status
