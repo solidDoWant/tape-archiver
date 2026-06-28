@@ -147,3 +147,5 @@ alerting works even when config parsing fails.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DISCORD_FAILURE_WEBHOOK_URL` | no | Discord webhook URL for run failure alerts. When absent, failure alerting is silently disabled. |
+| `METRICS_ADDR` | no | TCP listen address for the Prometheus `/metrics` endpoint (e.g. `:9090`). When absent (and no default is supplied by the binary), the metrics endpoint is disabled entirely — no HTTP server is started and no registry is created. |
+| `METRICS_SCRAPE_WAIT_TIMEOUT` | no | Go duration bounding the end-of-run wait for a final Prometheus scrape. Defaults to `60s`; set to `0s` to disable the wait. |
