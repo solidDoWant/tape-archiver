@@ -1,4 +1,5 @@
 bin/
+result
 
 # mhvtl virtual tape media (created by make mhvtl-up, lives outside the repo)
 /opt/mhvtl/
