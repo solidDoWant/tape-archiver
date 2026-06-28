@@ -89,6 +89,12 @@
             # single monolithic package (tsh/tctl/tbot/teleport) with no
             # tsh-only derivation, so we pull in the whole thing.
             pkgs.teleport_18
+
+            # Temporal CLI — inspect and interact with the local dev stack from
+            # the host: `temporal workflow list`, `temporal operator cluster
+            # health`, etc. The version is pinned to match the server image in
+            # docker-compose.yml so the client/server wire protocol stays in sync.
+            pkgs.temporal-cli
           ];
 
           # Expose the built kernel modules so the up-scripts can load them

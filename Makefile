@@ -100,12 +100,13 @@ clean: ## Remove build artifacts.
 ##@ Local Dev
 
 .PHONY: temporal-up
-temporal-up: ## TODO: Start local Temporal dev stack (owned by later issue).
-	@echo "temporal-up: not yet implemented" >&2; exit 1
+temporal-up: ## Start the local Temporal dev stack (server + Web UI).
+	docker compose up -d --wait
+	@echo "Temporal is ready.  gRPC: localhost:7233  Web UI: http://localhost:8233  Namespace: default"
 
 .PHONY: temporal-down
-temporal-down: ## TODO: Stop local Temporal dev stack (owned by later issue).
-	@echo "temporal-down: not yet implemented" >&2; exit 1
+temporal-down: ## Stop the local Temporal dev stack and remove volumes/networks.
+	docker compose down -v --remove-orphans
 
 .PHONY: mhvtl-up
 mhvtl-up: ## Start the mhvtl virtual tape library (2 drives, 47 storage + 3 I/O slots).
