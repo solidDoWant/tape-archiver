@@ -1,0 +1,476 @@
+{
+    "json_format_version": [
+        1,
+        0
+    ],
+    "utility_invoked": {
+        "name": "sg_logs",
+        "version_date": "2.35 20230622",
+        "argv": [
+            "sg_logs",
+            "--page=0x2e",
+            "--json",
+            "/dev/sg1"
+        ]
+    },
+    "tapealert_log_page": {
+        "ds": 0,
+        "spf": 0,
+        "page_code": 46,
+        "subpage_code": 0,
+        "tapealert_log_parameters": [
+            {
+                "parameter_code": {
+                    "i": 1,
+                    "meaning": "Read warning"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 2,
+                    "meaning": "Write warning"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 3,
+                    "meaning": "Hard error"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 4,
+                    "meaning": "Media"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 5,
+                    "meaning": "Read failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 6,
+                    "meaning": "Write failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 7,
+                    "meaning": "Media life"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 8,
+                    "meaning": "Not data grade"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 9,
+                    "meaning": "Write protect"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 10,
+                    "meaning": "No removal"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 11,
+                    "meaning": "Cleaning media"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 12,
+                    "meaning": "Unsupported format"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 13,
+                    "meaning": "Recoverable mechanical cartridge failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 14,
+                    "meaning": "Unrecoverable mechanical cartridge failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 15,
+                    "meaning": "Memory chip in cartridge failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 16,
+                    "meaning": "Forced eject"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 17,
+                    "meaning": "Read only format"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 18,
+                    "meaning": "Tape directory corrupted on load"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 19,
+                    "meaning": "Nearing media life"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 20,
+                    "meaning": "Cleaning required"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 21,
+                    "meaning": "Cleaning requested"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 22,
+                    "meaning": "Expired cleaning media"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 23,
+                    "meaning": "Invalid cleaning tape"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 24,
+                    "meaning": "Retension requested"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 25,
+                    "meaning": "Dual port interface error"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 26,
+                    "meaning": "Cooling fan failing"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 27,
+                    "meaning": "Power supply failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 28,
+                    "meaning": "Power consumption"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 29,
+                    "meaning": "Drive maintenance"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 30,
+                    "meaning": "Hardware A"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 31,
+                    "meaning": "Hardware B"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 32,
+                    "meaning": "Interface"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 33,
+                    "meaning": "Eject media"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 34,
+                    "meaning": "Microcode update fail"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 35,
+                    "meaning": "Drive humidity"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 36,
+                    "meaning": "Drive temperature"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 37,
+                    "meaning": "Drive voltage"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 38,
+                    "meaning": "Predictive failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 39,
+                    "meaning": "Diagnostics required"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 40,
+                    "meaning": "Reserved (28h)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 41,
+                    "meaning": "Reserved (29h)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 42,
+                    "meaning": "Reserved (2Ah)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 43,
+                    "meaning": "Reserved (2Bh)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 44,
+                    "meaning": "Reserved (2Ch)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 45,
+                    "meaning": "Reserved (2Dh)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 46,
+                    "meaning": "Reserved (2Eh)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 47,
+                    "meaning": "External data encryption control - communications failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 48,
+                    "meaning": "External data encryption control - key manager returned error"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 49,
+                    "meaning": "Diminished native capacity"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 50,
+                    "meaning": "Lost statistics"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 51,
+                    "meaning": "Tape directory invalid at unload"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 52,
+                    "meaning": "Tape system area write failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 53,
+                    "meaning": "Tape system area read failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 54,
+                    "meaning": "No start of data"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 55,
+                    "meaning": "Loading failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 56,
+                    "meaning": "Unrecoverable unload failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 57,
+                    "meaning": "Automation interface failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 58,
+                    "meaning": "Firmware failure"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 59,
+                    "meaning": "WORM medium - integrity check failed"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 60,
+                    "meaning": "WORM medium - overwrite attempted"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 61,
+                    "meaning": "Encryption policy violation"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 62,
+                    "meaning": "Reserved (3Eh)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 63,
+                    "meaning": "Reserved (3Fh)"
+                },
+                "flag": 0
+            },
+            {
+                "parameter_code": {
+                    "i": 64,
+                    "meaning": "Reserved (40h)"
+                },
+                "flag": 0
+            }
+        ]
+    },
+    "exit_status": {
+        "i": 0,
+        "meaning": "no errors"
+    }
+}

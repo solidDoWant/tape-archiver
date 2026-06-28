@@ -2,3 +2,10 @@ bin/
 
 # mhvtl virtual tape media (created by make mhvtl-up, lives outside the repo)
 /opt/mhvtl/
+
+# Nix build output symlinks
+/result
+/result-*
+
+# Claude Code per-issue task scratch (local only, never committed)
+/.claude/tasks/

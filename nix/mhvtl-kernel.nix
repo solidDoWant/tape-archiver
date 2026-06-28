@@ -18,6 +18,12 @@ stdenv.mkDerivation (finalAttrs: {
     hash = "sha256-L6suy9PZZvPcDFyD/G/v4IGZr/+obnpqqXldzlBJHFQ=";
   };
 
+  patches = [
+    # Fix use-after-free race in the VTL_PUT_DATA ioctl path (kernel >= 6.18).
+    # Without this the st driver keeps drives in DR_OPEN after mtx load.
+    ./patches/0001-mhvtl-fix-ioctl-use-after-free-race.patch
+  ];
+
   nativeBuildInputs = kernel.moduleBuildDependencies;
 
   # mhvtl's kernel/Makefile uses KDIR to locate the kernel build tree.
