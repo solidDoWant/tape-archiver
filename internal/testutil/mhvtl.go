@@ -1,5 +1,5 @@
 // Package testutil provides shared helpers for integration tests that require
-// the mhvtl virtual tape library.
+// external resources: the mhvtl virtual tape library and a mounted ZFS pool.
 package testutil
 
 import (

@@ -316,7 +316,9 @@ build-tag-gated tiers:
 - **Unit** (default, `-race`): pure logic — planning/bin-packing, config parsing, slice
   sizing, PAR2 block-size computation, parsing of `mtx`/`mt`/`sg_logs` output.
 - **Integration** (`//go:build integration`): the full tape path against an **`mhvtl`**
-  virtual library and a dev Temporal — load, format, write, verify, eject. Skips when
+  virtual library and a dev Temporal — load, format, write, verify, eject. `pkg/zfs`
+  tests run against an ephemeral, file-backed **ZFS pool** (`make zpool-up`) rather than
+  the production pool, so they are deterministic and never touch live data. Skips when
   required env/devices are absent.
 - **Real-hardware + benchmark** (build-tag gated, env-skipped): exercises the physical
   library and, critically, **measures sustained write MB/s and scrapes drive log pages
