@@ -164,11 +164,6 @@ const (
 	senseKeyBlankCheck = 0x08 // SCSI sense key BLANK CHECK
 	senseFilemarkBit   = 0x80 // FILEMARK bit in fixed-format sense byte 2
 
-	// Default command timeouts (milliseconds). Rewind on a full cartridge can
-	// take over a minute on real hardware; a blank-check read is near-instant.
-	rewindTimeoutMs = 300_000
-	readTimeoutMs   = 60_000
-
 	// firstBlockBufSize bounds the data transfer for the probe read. Any value
 	// large enough to receive at least one byte of a recorded block suffices;
 	// we only care whether *any* data comes back, not its full contents.
@@ -226,7 +221,7 @@ func scsiRewind(ctx context.Context, f *os.File) error {
 		mxSbLen:        uint8(len(sense)),
 		cmdp:           uintptr(unsafe.Pointer(&cdb[0])),
 		sbp:            uintptr(unsafe.Pointer(&sense[0])),
-		timeout:        timeoutMs(ctx, rewindTimeoutMs),
+		timeout:        timeoutMs(ctx, rewindTimeout),
 	}
 
 	err := sgIoctl(f.Fd(), &hdr)
@@ -277,7 +272,7 @@ func scsiReadFirstBlock(ctx context.Context, f *os.File) (blankProbe, error) {
 		dxferp:         uintptr(unsafe.Pointer(&buf[0])),
 		cmdp:           uintptr(unsafe.Pointer(&cdb[0])),
 		sbp:            uintptr(unsafe.Pointer(&sense[0])),
-		timeout:        timeoutMs(ctx, readTimeoutMs),
+		timeout:        timeoutMs(ctx, readTimeout),
 	}
 
 	err := sgIoctl(f.Fd(), &hdr)
@@ -353,24 +348,32 @@ func sgIoctl(fd uintptr, hdr *sgIOHdr) error {
 	return nil
 }
 
-// timeoutMs returns the SG_IO timeout to use: the context's remaining time if
-// it has a deadline sooner than def, otherwise def. SG_IO is a blocking ioctl,
-// so this timeout — not context cancellation — bounds how long a command may
-// hang.
-func timeoutMs(ctx context.Context, def uint32) uint32 {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		return def
+// Default command timeouts. Rewind on a full cartridge can take several minutes
+// on real hardware; a blank-check read is near-instant.
+const (
+	rewindTimeout = 5 * time.Minute
+	readTimeout   = 60 * time.Second
+)
+
+// timeoutMs returns the SG_IO timeout in milliseconds: the context's remaining
+// time if it has a deadline sooner than def, otherwise def. SG_IO is a blocking
+// ioctl, so this timeout — not context cancellation — bounds how long a command
+// may hang. The returned value is the kernel's required unit (sg_io_hdr.timeout
+// is a uint32 of milliseconds); def is always small enough that the conversion
+// cannot overflow.
+func timeoutMs(ctx context.Context, def time.Duration) uint32 {
+	timeout := def
+
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < timeout {
+			timeout = remaining
+		}
 	}
 
-	remaining := time.Until(deadline).Milliseconds()
-	if remaining <= 0 {
+	ms := timeout.Milliseconds()
+	if ms <= 0 {
 		return 1
 	}
 
-	if remaining < int64(def) {
-		return uint32(remaining)
-	}
-
-	return def
+	return uint32(ms)
 }
