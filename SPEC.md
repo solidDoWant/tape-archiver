@@ -386,6 +386,13 @@ The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
 - **Sizing** — cheap `zfs logicalreferenced` feasibility pre-check; authoritative
   bin-pack on *measured* staged sizes; pipeline reordered to prepare → pack → PAR2 →
   verify so fill-to-capacity PAR2 is well-defined.
+- **LTFS implementation** — the reference open-source **LinearTape-Open `ltfs`**
+  (IBM-maintained, multi-vendor, Apache-2.0), pinned at **v2.4.8.4** and built from a Nix
+  derivation (`nix/ltfs.nix`); the worker image and recovery disc ship the same version.
+  The vendor-locked `hpe-ltfs` was rejected: it refuses non-HPE drives (so it cannot be
+  tested against the mhvtl IBM-emulated drive), and the production LTO-6 drives are IBM.
+  The reference `ltfs` drives the tape through its **`sg` backend (the `/dev/sg*` node)**,
+  not the `nst` node — both are already passed through to the data worker (§4.1).
 
 Remaining open / future work:
 
@@ -393,5 +400,4 @@ Remaining open / future work:
   canonical ID is whatever the library reads).
 - The exact `tar`/`zstd`/`age` overhead factor used in the feasibility pre-check.
 - Recovery-disc re-burn/refresh cadence as a documented maintenance task.
-- LTFS implementation/version selection and its packaging in the worker image.
 

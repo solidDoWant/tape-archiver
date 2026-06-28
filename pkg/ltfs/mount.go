@@ -1,0 +1,188 @@
+package ltfs
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// mountPollInterval is how often Mount polls for the FUSE mount to come live.
+const mountPollInterval = 100 * time.Millisecond
+
+// Mount is a live LTFS FUSE mount of a Volume. Files written under its
+// Mountpoint persist on tape. Its lifecycle is bound to a supervised foreground
+// ltfs process: Unmount releases the mount and waits for that process to exit,
+// so a nil error from Unmount means the single deferred index write actually
+// completed (see Unmount).
+type Mount struct {
+	mountpoint string
+	workDir    string
+
+	cmd    *exec.Cmd
+	stderr *bytes.Buffer
+
+	// done is closed when the supervised ltfs process exits; waitErr holds its
+	// exit error and is safe to read only after done is closed.
+	done    chan struct{}
+	waitErr error
+}
+
+// Mountpoint is the absolute path the LTFS volume is mounted at.
+func (m *Mount) Mountpoint() string {
+	return m.mountpoint
+}
+
+// Mount mounts the volume as a FUSE filesystem at mountpoint, with the index
+// sync deferred to unmount and index capture enabled (see the package doc).
+// workDir is LTFS's work directory; the captured index XML is written there at
+// unmount and read back by ReadIndex. Both directories are created if missing.
+//
+// The ltfs process is run in the foreground and supervised so that Unmount can
+// wait for it and learn whether the index write succeeded.
+func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount, error) {
+	absMount, err := filepath.Abs(mountpoint)
+	if err != nil {
+		return nil, fmt.Errorf("resolve mountpoint %q: %w", mountpoint, err)
+	}
+
+	for _, dir := range []string{absMount, workDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create directory %s: %w", dir, err)
+		}
+	}
+
+	stderr := &bytes.Buffer{}
+	cmd := exec.CommandContext(ctx, "ltfs", ltfsArgs(v.device, absMount, workDir)...)
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start ltfs: %w", err)
+	}
+
+	m := &Mount{
+		mountpoint: absMount,
+		workDir:    workDir,
+		cmd:        cmd,
+		stderr:     stderr,
+		done:       make(chan struct{}),
+	}
+
+	go func() {
+		m.waitErr = cmd.Wait()
+		close(m.done)
+	}()
+
+	if err := m.waitForMount(ctx); err != nil {
+		// The mount never came live; tear down the process so we don't leak it.
+		_ = cmd.Process.Kill()
+
+		<-m.done
+
+		return nil, err
+	}
+
+	return m, nil
+}
+
+// waitForMount blocks until the FUSE mount is live, the ltfs process exits early
+// (a mount failure), or ctx is done.
+func (m *Mount) waitForMount(ctx context.Context) error {
+	ticker := time.NewTicker(mountPollInterval)
+	defer ticker.Stop()
+
+	for {
+		mounted, err := isMountpoint(m.mountpoint)
+		if err != nil {
+			return fmt.Errorf("check mount status of %s: %w", m.mountpoint, err)
+		}
+
+		if mounted {
+			return nil
+		}
+
+		select {
+		case <-m.done:
+			return fmt.Errorf("ltfs exited before the mount became ready: %w: %s",
+				m.waitErr, strings.TrimSpace(m.stderr.String()))
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for ltfs mount at %s: %w", m.mountpoint, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// Unmount releases the FUSE mount and waits for the LTFS index to be written.
+//
+// fusermount -u returns as soon as the mount is detached; it does NOT wait for
+// LTFS to flush the index to tape (validated against mhvtl: it returned in
+// ~30ms while the daemon kept writing). So checking only fusermount's exit
+// status would report success before the index is on tape. Instead, after
+// detaching, Unmount waits for the supervised foreground ltfs process to exit —
+// the index is written exactly once, at that point (SPEC.md §14), and the
+// process exit status reflects whether the write succeeded. A non-nil return
+// therefore means the Write phase must not treat the tape as safely written.
+//
+// Lazy unmount (fusermount -uz) is deliberately not used: it detaches without
+// ensuring the flush, defeating this guarantee.
+func (m *Mount) Unmount(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "fusermount", "-u", m.mountpoint)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	select {
+	case <-m.done:
+		if m.waitErr != nil {
+			return fmt.Errorf("ltfs index write at unmount failed: %w: %s",
+				m.waitErr, strings.TrimSpace(m.stderr.String()))
+		}
+
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for ltfs to finish writing the index at unmount: %w", ctx.Err())
+	}
+}
+
+// ltfsArgs builds the ltfs mount argument list. -f keeps ltfs in the foreground
+// so the process can be supervised (see Mount/Unmount); sync_type=unmount defers
+// the index write to a single write at unmount (SPEC.md §14); capture_index
+// dumps that index to the work directory for ReadIndex.
+func ltfsArgs(device, mountpoint, workDir string) []string {
+	return []string{
+		"-f",
+		mountpoint,
+		"-o", "devname=" + device,
+		"-o", "sync_type=unmount",
+		"-o", "capture_index",
+		"-o", "work_directory=" + workDir,
+	}
+}
+
+// isMountpoint reports whether path is a mount point, by comparing its device
+// number to that of its parent: a mounted filesystem changes st_dev at the mount
+// boundary. This assumes path's parent lives on a different mount than path only
+// once path is mounted, which holds for the directories Mount creates.
+func isMountpoint(path string) (bool, error) {
+	var st, parent syscall.Stat_t
+
+	if err := syscall.Stat(path, &st); err != nil {
+		return false, err
+	}
+
+	if err := syscall.Stat(filepath.Dir(path), &parent); err != nil {
+		return false, err
+	}
+
+	return st.Dev != parent.Dev, nil
+}
