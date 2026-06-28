@@ -62,6 +62,12 @@
             pkgs.sg3_utils
             pkgs.lsscsi
 
+            # PAR2 error correction (par2cmdline-turbo) — pkg/par2 shells out to
+            # `par2` to build per-archive recovery sets and the tests verify and
+            # repair with it. The same binary ships on the recovery disc
+            # (SPEC §8, §10).
+            pkgs.par2cmdline-turbo
+
             # mhvtl virtual tape library — userspace daemons and utilities
             mhvtlUserspace
 
