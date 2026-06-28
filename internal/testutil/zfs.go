@@ -3,7 +3,6 @@ package testutil
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"testing"
 )
@@ -20,12 +19,19 @@ const (
 	// dataset/snapshot is known to hold, used to assert a meaningful value.
 	EnvTestMinBytes = "TAPE_TEST_MIN_BYTES"
 
-	defaultPoolMount = "/mnt/bulk-pool-01"
+	// Defaults target the ephemeral, file-backed pool created by "make
+	// zpool-up" (see scripts/zpool-up.sh), NOT the production pool. Tests are
+	// read-only, but defaulting to a throwaway pool keeps them deterministic and
+	// hermetic and avoids silently reaching for live data. To run against the
+	// real pool deliberately, set TAPE_POOL_MOUNT=/mnt/bulk-pool-01 (and the
+	// matching TAPE_POOL_DATASET). These mirror the zpool-up.sh defaults.
+	defaultPoolMount   = "/mnt/tape-test-pool/archive"
+	defaultPoolDataset = "tape_test/archive"
 )
 
-// PoolMount returns the ZFS pool mountpoint, preferring TAPE_POOL_MOUNT and
-// falling back to /mnt/bulk-pool-01 (the storage host's bind-mounted pool, per
-// SPEC.md §4.1). The "make zpool-up" harness sets it to the ephemeral test pool.
+// PoolMount returns the ZFS dataset mountpoint whose .zfs/snapshot directory the
+// tests read, preferring TAPE_POOL_MOUNT and falling back to the "make zpool-up"
+// test pool. "make test-integration" sets it explicitly.
 func PoolMount(t *testing.T) string {
 	t.Helper()
 
@@ -36,9 +42,9 @@ func PoolMount(t *testing.T) string {
 	return defaultPoolMount
 }
 
-// PoolDataset returns the ZFS dataset name to query in integration tests,
-// preferring TAPE_POOL_DATASET and falling back to the final path component of
-// the pool mountpoint (e.g. /mnt/bulk-pool-01 -> bulk-pool-01).
+// PoolDataset returns the ZFS dataset name to query, preferring TAPE_POOL_DATASET
+// and falling back to the "make zpool-up" test dataset. It is a full dataset path
+// (pool/dataset), not derivable from the mountpoint, so it has its own default.
 func PoolDataset(t *testing.T) string {
 	t.Helper()
 
@@ -46,7 +52,7 @@ func PoolDataset(t *testing.T) string {
 		return dataset
 	}
 
-	return filepath.Base(PoolMount(t))
+	return defaultPoolDataset
 }
 
 // TestSnapshot returns the short name of a snapshot known to exist under the
