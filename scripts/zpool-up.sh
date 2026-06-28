@@ -10,10 +10,14 @@
 # snapshot, which the integration tests read back and assert against.
 #
 # Requires:
-#   - zpool / zfs in PATH (from the devShell's pkgs.zfs)
-#   - the ZFS kernel module available to the running kernel (loaded here with
-#     `modprobe zfs`; provided by the host, not built by this repo)
-#   - sudo access (pool creation and module loading are privileged)
+#   - zpool / zfs in PATH (from the devShell's zfsUserspace)
+#   - a loadable ZFS kernel module for the running kernel. Inside 'nix develop'
+#     the flake builds a version-matched module and exports $ZFS_MODULES, which
+#     this script depmods into a temp tree and loads; otherwise (or when the
+#     flake build does not match the running kernel) it falls back to the host's
+#     own module via `modprobe zfs` (e.g. the storage host's DKMS build).
+#   - sudo access (loading a kernel module and creating a pool are privileged;
+#     this is inherent to ZFS and cannot be granted by the flake)
 #
 # Tunables (env, with defaults):
 #   ZPOOL_NAME        pool name                     (tape_test)
@@ -55,17 +59,58 @@ done
 # Kernel module
 # ---------------------------------------------------------------------------
 
-echo "==> Loading ZFS kernel module..."
-sudo modprobe zfs || {
+# load_zfs_module loads ZFS into the running kernel. It prefers the flake-built,
+# version-matched module exposed at $ZFS_MODULES (built against the kernel the
+# dev VM boots): ZFS is a multi-module dependency graph (spl, zfs, ...), so it
+# must be loaded via modprobe, which needs a modules.dep. depmod cannot write
+# into the read-only nix store, so the module tree is copied into a temp dir,
+# depmod'd there, and loaded with `modprobe -d`. When $ZFS_MODULES is unset or
+# built for a different kernel, it falls back to the host's own module.
+load_zfs_module() {
+  if lsmod | grep -q '^zfs '; then
+    echo "==> ZFS kernel module already loaded."
+    return 0
+  fi
+
+  local kver src tmp
+  kver="$(uname -r)"
+  src="${ZFS_MODULES:-}/lib/modules/${kver}"
+
+  if [ -n "${ZFS_MODULES:-}" ] && [ -d "$src" ]; then
+    echo "==> Loading flake-built ZFS module for ${kver}..."
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+    mkdir -p "$tmp/lib/modules/${kver}"
+    cp -rL "$src/." "$tmp/lib/modules/${kver}/"
+    chmod -R u+w "$tmp/lib/modules/${kver}"
+    # Seed the booted kernel's built-in module metadata so depmod does not warn
+    # about it (the zfs-kernel store path holds only the out-of-tree modules).
+    # Best-effort: the warnings are harmless and the load still succeeds without.
+    local booted="/run/booted-system/kernel-modules/lib/modules/${kver}"
+    for meta in modules.order modules.builtin modules.builtin.modinfo; do
+      [ -f "$booted/$meta" ] && cp "$booted/$meta" "$tmp/lib/modules/${kver}/$meta"
+    done
+    depmod -b "$tmp" "$kver"
+    if sudo modprobe -d "$tmp" zfs; then
+      return 0
+    fi
+    echo "==> flake module failed to load; falling back to host module..." >&2
+  fi
+
+  echo "==> Loading host ZFS module via modprobe..."
+  sudo modprobe zfs
+}
+
+load_zfs_module || {
   echo "error: failed to load the zfs kernel module." >&2
-  echo "       ZFS support must be provided by the host kernel (the storage" >&2
-  echo "       host runs ZFS; a NixOS dev VM needs" >&2
-  echo "       boot.supportedFilesystems = [ \"zfs\" ])." >&2
+  echo "       Run inside 'nix develop' (so the flake provides a matching" >&2
+  echo "       module), or ensure the host provides one (DKMS, or NixOS" >&2
+  echo "       boot.extraModulePackages = [ config.boot.kernelPackages.zfs ])." >&2
   exit 1
 }
 
 if [ ! -e /dev/zfs ]; then
-  echo "error: /dev/zfs not present after modprobe — ZFS is not usable here" >&2
+  echo "error: /dev/zfs not present after loading the module — ZFS is unusable" >&2
   exit 1
 fi
 
@@ -118,7 +163,7 @@ MIN_BYTES=$(( ${ZPOOL_PAYLOAD%M} * 1024 * 1024 * 95 / 100 ))
 
 echo ""
 echo "==> ZFS test pool is up:"
-sudo zfs list -t all -o name,used,logicalreferenced,mountpoint "$ZPOOL_NAME"
+sudo zfs list -r -t all -o name,used,logicalreferenced,mountpoint "$ZPOOL_NAME"
 echo ""
 echo "==> Integration-test environment:"
 echo "    TAPE_POOL_MOUNT=${DATASET_MOUNT}"

@@ -28,4 +28,8 @@ fi
 echo "==> Removing backing file ${ZPOOL_IMG}..."
 sudo rm -f "$ZPOOL_IMG"
 
+# Unlike mhvtl-down, the ZFS kernel module is intentionally left loaded: the
+# host may be using ZFS for other pools (the storage host's bulk pool), and
+# unloading an in-use module would fail or disrupt it. Leaving it loaded is
+# harmless on a dev VM too.
 echo "==> ZFS test pool is down."

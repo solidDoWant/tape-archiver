@@ -75,7 +75,9 @@ as the project is implemented; keep this list current):
 - `make temporal-up` / `make temporal-down` — local Temporal for integration tests.
 - `make mhvtl-up` / `make mhvtl-down` — virtual tape library for tests/dry-run.
 - `make zpool-up` / `make zpool-down` — ephemeral file-backed ZFS pool for `pkg/zfs`
-  integration tests (requires host ZFS kernel support).
+  integration tests. The flake builds a version-matched ZFS kernel module
+  (`$ZFS_MODULES`); `zpool-up` loads it at runtime (needs `sudo`), falling back to
+  the host's own module when the flake build does not match the running kernel.
 
 ## Dev Tools
 

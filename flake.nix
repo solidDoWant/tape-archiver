@@ -18,13 +18,26 @@
         # kernelPackages = pkgs.linuxPackages, so the .ko produced here
         # matches the running kernel.
         mhvtlKernel = pkgs.linuxPackages.callPackage ./nix/mhvtl-kernel.nix { };
+
+        # ZFS userspace tools (zpool, zfs, zdb) and the matching kernel module,
+        # both pinned by the same nixpkgs revision so their OpenZFS versions are
+        # identical (a userspace/module version mismatch makes zpool refuse to
+        # talk to the module). linuxPackages.zfs was removed upstream; the
+        # per-version module attribute is selected via kernelModuleAttribute
+        # (e.g. "zfs_2_4"). Like mhvtlKernel, the module is built against
+        # pkgs.linuxPackages — the kernel the dev VM boots — so it loads into the
+        # running kernel.
+        zfsUserspace = pkgs.zfs;
+        zfsKernel = pkgs.linuxPackages.${zfsUserspace.kernelModuleAttribute};
       in
       {
-        # Expose as flake packages so `nix build .#mhvtl` and
-        # `nix build .#mhvtlKernel` work outside the dev shell.
+        # Expose as flake packages so `nix build .#mhvtl`, `.#mhvtlKernel`,
+        # `.#zfs`, and `.#zfsKernel` work outside the dev shell.
         packages = {
           mhvtl = mhvtlUserspace;
           mhvtlKernel = mhvtlKernel;
+          zfs = zfsUserspace;
+          zfsKernel = zfsKernel;
           default = mhvtlUserspace;
         };
 
@@ -47,14 +60,16 @@
             # mhvtl virtual tape library — userspace daemons and utilities
             mhvtlUserspace
 
-            # ZFS userspace tools (zpool, zfs, zdb). pkg/zfs shells out to `zfs`,
+            # ZFS userspace tools (zpool, zfs, zdb). pkg/zfs shells out to `zfs`
             # and the integration-test harness creates an ephemeral file-backed
-            # pool with `zpool`. The ZFS *kernel* module is NOT built here: ZFS
-            # is the storage host's own filesystem (the data worker reaches it
-            # through the passed-through /dev/zfs), and a NixOS dev VM enables it
-            # the idiomatic way via `boot.supportedFilesystems = [ "zfs" ]`. The
-            # harness loads it with `modprobe zfs` and skips when unavailable.
-            pkgs.zfs
+            # pool with `zpool`. The matching kernel module is built above as
+            # zfsKernel and exposed via $ZFS_MODULES below; zpool-up.sh depmods
+            # it into a temp tree and loads it at runtime (no system config, no
+            # reboot), falling back to the host's own module when the flake build
+            # does not match the running kernel (e.g. the Ubuntu storage host's
+            # DKMS module). Loading still needs root — that is inherent to kernel
+            # modules, not something the flake can grant.
+            zfsUserspace
 
             pkgs.docker
             pkgs.docker-compose
@@ -65,10 +80,14 @@
             pkgs.teleport_18
           ];
 
-          # Expose the path to the built kernel module so mhvtl-up.sh can
-          # load it with `sudo insmod "$MHVTL_KO"` without re-invoking nix.
+          # Expose the built kernel modules so the up-scripts can load them
+          # without re-invoking nix: mhvtl-up.sh insmods $MHVTL_KO directly (a
+          # single dependency-free .ko); zpool-up.sh depmods the $ZFS_MODULES
+          # tree (spl, zfs, and friends) into a temp dir and modprobes from
+          # there, since ZFS is a multi-module dependency graph.
           shellHook = ''
             export MHVTL_KO="${mhvtlKernel}/lib/modules/$(ls ${mhvtlKernel}/lib/modules)/kernel/drivers/scsi/mhvtl.ko"
+            export ZFS_MODULES="${zfsKernel}"
           '';
         };
       });
