@@ -47,6 +47,15 @@
             # mhvtl virtual tape library — userspace daemons and utilities
             mhvtlUserspace
 
+            # ZFS userspace tools (zpool, zfs, zdb). pkg/zfs shells out to `zfs`,
+            # and the integration-test harness creates an ephemeral file-backed
+            # pool with `zpool`. The ZFS *kernel* module is NOT built here: ZFS
+            # is the storage host's own filesystem (the data worker reaches it
+            # through the passed-through /dev/zfs), and a NixOS dev VM enables it
+            # the idiomatic way via `boot.supportedFilesystems = [ "zfs" ]`. The
+            # harness loads it with `modprobe zfs` and skips when unavailable.
+            pkgs.zfs
+
             pkgs.docker
             pkgs.docker-compose
 

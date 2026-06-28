@@ -74,6 +74,8 @@ as the project is implemented; keep this list current):
 - `make build-images` — build worker OCI image(s) via Nix.
 - `make temporal-up` / `make temporal-down` — local Temporal for integration tests.
 - `make mhvtl-up` / `make mhvtl-down` — virtual tape library for tests/dry-run.
+- `make zpool-up` / `make zpool-down` — ephemeral file-backed ZFS pool for `pkg/zfs`
+  integration tests (requires host ZFS kernel support).
 
 ## Dev Tools
 
