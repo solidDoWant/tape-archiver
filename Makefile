@@ -37,15 +37,16 @@ test: fmt vet ## Run unit tests with race detector.
 	go test -race -count=1 ./...
 
 .PHONY: test-integration
-test-integration: fmt vet mhvtl-up zpool-up ## Run integration tests against mhvtl + an ephemeral ZFS pool (brings both up, tears them down after).
+test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests against mhvtl + ephemeral ZFS pool + local Temporal dev stack (brings all up, tears all down after).
 	@{ \
 	  gocache=$$(mktemp -d); \
-	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; $(MAKE) zpool-down; $(MAKE) mhvtl-down; exit $$rc; }; \
+	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; $(MAKE) zpool-down; $(MAKE) mhvtl-down; $(MAKE) temporal-down; exit $$rc; }; \
 	  trap cleanup EXIT; \
 	  sudo env \
 	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
 	    TAPE_POOL_MOUNT=/mnt/tape-test-pool/archive TAPE_POOL_DATASET=tape_test/archive \
 	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
+	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
 	    PATH="$$PATH" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
 	    go test -race -count=1 -tags integration ./...; \
 	}
