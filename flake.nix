@@ -49,6 +49,11 @@
             pkgs.kubernetes-helm
             pkgs.gh
 
+            # age (>= 1.3.1, native post-quantum recipients) — pkg/agewrap shells
+            # out to `age` to encrypt archives and the tests use `age-keygen -pq`.
+            # The same binary and version ship on the recovery disc (SPEC §7).
+            pkgs.age
+
             # Tape library / changer tools (real hardware and virtual alike)
             pkgs.mtx
             pkgs.mt-st
