@@ -13,6 +13,15 @@
 
         mhvtlUserspace = pkgs.callPackage ./nix/mhvtl-userspace.nix { };
 
+        # Reference open-source LTFS (mkltfs/ltfs/ltfsck) — pkg/ltfs shells out
+        # to these to format, mount, and unmount tape volumes, and the same
+        # binaries ship on the recovery disc (SPEC §6, §10). The reference
+        # LinearTape-Open implementation is used rather than the vendor-locked
+        # hpe-ltfs in nixpkgs: hpe-ltfs refuses non-HPE drives (so it cannot be
+        # tested against the mhvtl IBM-emulated drive) and the production drives
+        # are IBM (issue #12, SPEC §16).
+        ltfs = pkgs.callPackage ./nix/ltfs.nix { };
+
         # Kernel module built against the same kernel that NixOS boots by
         # default (pkgs.linuxPackages).  The VM's configuration.nix sets
         # kernelPackages = pkgs.linuxPackages, so the .ko produced here
@@ -38,6 +47,7 @@
           mhvtlKernel = mhvtlKernel;
           zfs = zfsUserspace;
           zfsKernel = zfsKernel;
+          inherit ltfs;
           default = mhvtlUserspace;
         };
 
@@ -70,6 +80,11 @@
 
             # mhvtl virtual tape library — userspace daemons and utilities
             mhvtlUserspace
+
+            # Reference LTFS (mkltfs/ltfs/ltfsck) — pkg/ltfs formats, mounts, and
+            # unmounts tape volumes through these; the integration tests exercise
+            # the full path against mhvtl. Same binaries ship on the recovery disc.
+            ltfs
 
             # ZFS userspace tools (zpool, zfs, zdb). pkg/zfs shells out to `zfs`
             # and the integration-test harness creates an ephemeral file-backed
