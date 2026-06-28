@@ -32,7 +32,7 @@ func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName st
 
 		path := filepath.Join(dir, fmt.Sprintf("%s.%03d", baseName, index))
 
-		written, err := writeSlice(path, src, sliceSize)
+		written, err := writeSlice(ctx, path, src, sliceSize)
 		if err != nil {
 			return nil, err
 		}
@@ -60,14 +60,15 @@ func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName st
 
 // writeSlice creates the file at path and copies up to sliceSize bytes into it
 // from src, returning the number of bytes written. A return below sliceSize
-// means src reached EOF.
-func writeSlice(path string, src io.Reader, sliceSize int64) (int64, error) {
+// means src reached EOF. The copy honors ctx cancellation per read buffer so a
+// single large slice does not block cancellation.
+func writeSlice(ctx context.Context, path string, src io.Reader, sliceSize int64) (int64, error) {
 	file, err := os.Create(path)
 	if err != nil {
 		return 0, fmt.Errorf("create slice %s: %w", path, err)
 	}
 
-	written, copyErr := io.CopyN(file, src, sliceSize)
+	written, copyErr := io.CopyN(file, ctxReader{ctx: ctx, r: src}, sliceSize)
 
 	closeErr := file.Close()
 

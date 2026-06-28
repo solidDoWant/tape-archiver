@@ -2,9 +2,11 @@ package archive_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -107,6 +109,64 @@ func TestSplit(t *testing.T) {
 			assert.Len(t, remaining, len(paths))
 		})
 	}
+}
+
+// TestSplitCancelledMidSlice confirms Split stops when the context is cancelled
+// partway through copying a single slice, rather than running the copy to
+// completion. The source yields one chunk, cancels, then blocks forever on any
+// further read — modeling a large or slow source. Only per-read cancellation
+// lets Split return without reaching that blocking read; without it the copy
+// would hang past the timeout.
+func TestSplitCancelledMidSlice(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	// sliceSize exceeds the first chunk, so the copy needs a second read.
+	const sliceSize = 1 << 20
+
+	src := &cancelThenBlockReader{cancel: cancel, chunk: make([]byte, 64<<10)}
+
+	type result struct {
+		paths []string
+		err   error
+	}
+
+	done := make(chan result, 1)
+
+	go func() {
+		paths, err := archive.Split(ctx, src, sliceSize, t.TempDir(), "archive")
+		done <- result{paths: paths, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		require.ErrorIs(t, got.err, context.Canceled)
+		assert.Nil(t, got.paths)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Split did not return after cancellation; per-read cancellation is not working")
+	}
+}
+
+// cancelThenBlockReader yields one chunk and cancels its context on the first
+// read, then blocks forever on every subsequent read. A reader of this shape is
+// only escaped by checking the context before each read.
+type cancelThenBlockReader struct {
+	cancel  context.CancelFunc
+	chunk   []byte
+	yielded bool
+}
+
+func (r *cancelThenBlockReader) Read(p []byte) (int, error) {
+	if !r.yielded {
+		r.yielded = true
+		n := copy(p, r.chunk)
+		r.cancel()
+
+		return n, nil
+	}
+
+	select {} // unreachable unless the context is not checked before reading
 }
 
 // pad renders a slice index as the three-digit suffix Split uses.

@@ -35,7 +35,7 @@ func Tar(ctx context.Context, w io.Writer, srcDir string) error {
 			return err
 		}
 
-		return writeTarEntry(tw, srcDir, path, entry)
+		return writeTarEntry(ctx, tw, srcDir, path, entry)
 	})
 	if walkErr != nil {
 		return fmt.Errorf("tar %s: %w", srcDir, walkErr)
@@ -51,7 +51,7 @@ func Tar(ctx context.Context, w io.Writer, srcDir string) error {
 // writeTarEntry writes a single filesystem entry to tw, with a name relative to
 // srcDir. The root directory itself is skipped so the archive holds only its
 // contents.
-func writeTarEntry(tw *tar.Writer, srcDir, path string, entry fs.DirEntry) error {
+func writeTarEntry(ctx context.Context, tw *tar.Writer, srcDir, path string, entry fs.DirEntry) error {
 	rel, err := filepath.Rel(srcDir, path)
 	if err != nil {
 		return err
@@ -94,19 +94,20 @@ func writeTarEntry(tw *tar.Writer, srcDir, path string, entry fs.DirEntry) error
 		return nil
 	}
 
-	return copyFileContents(tw, path)
+	return copyFileContents(ctx, tw, path)
 }
 
-// copyFileContents streams the contents of the file at path into tw. It closes
-// the file explicitly so a close error on the read side is not silently
-// dropped.
-func copyFileContents(tw *tar.Writer, path string) error {
+// copyFileContents streams the contents of the file at path into tw. The copy
+// honors ctx cancellation per read buffer so a single large file does not block
+// cancellation. It closes the file explicitly so a close error on the read side
+// is not silently dropped.
+func copyFileContents(ctx context.Context, tw *tar.Writer, path string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 
-	_, copyErr := io.Copy(tw, file)
+	_, copyErr := io.Copy(tw, ctxReader{ctx: ctx, r: file})
 
 	closeErr := file.Close()
 

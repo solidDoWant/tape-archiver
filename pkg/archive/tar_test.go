@@ -3,6 +3,7 @@ package archive_test
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -91,6 +92,22 @@ func TestTar(t *testing.T) {
 				"extracted tree must match the source byte-for-byte")
 		})
 	}
+}
+
+// TestTarCancelled confirms Tar honors context cancellation rather than walking
+// and copying the whole tree regardless. Mid-file cancellation is provided by
+// the same per-read wrapper covered in TestSplitCancelledMidSlice.
+func TestTarCancelled(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "file.txt"), bytes.Repeat([]byte("x"), 1<<20))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := archive.Tar(ctx, io.Discard, src)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // writeFile writes content to path, creating parent directories as needed.
