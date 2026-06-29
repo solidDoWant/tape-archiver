@@ -14,7 +14,11 @@ The report contains, at minimum:
   per-file sizes and SHA-256 checksums.
 - **Tapes** — which physical tape (by barcode/label) holds what.
 - **Build parameters** — how the tapes were built: tool version, `age`/`par2`/`ltfs`
-  versions, slice size, PAR2 redundancy, and drive/library identifiers.
+  versions, slice size, PAR2 redundancy, and the drive/library identifiers. The drive is
+  recorded as its model, the **LTO generation required to read the tape** (the fact a
+  future recoverer actually needs), and its serial; the library model is recorded as
+  provenance only. The source host's device node is deliberately omitted — it is runtime
+  state of the writing machine and is meaningless on the (different) recovery hardware.
 - **age private identity** — the decryption secret (see below).
 - **Recovery procedure** — the human-readable, step-by-step recovery text.
 

@@ -101,10 +101,20 @@ type BuildParams struct {
 	// PAR2Redundancy is the PAR2 redundancy policy as rendered (e.g. "10%" or
 	// "fill-to-capacity").
 	PAR2Redundancy string
-	// DriveIdentifier identifies the tape drive used.
-	DriveIdentifier string
-	// LibraryIdentifier identifies the tape library / changer used.
-	LibraryIdentifier string
+	// DriveModel is the tape drive product model, e.g. "IBM ULT3580-HH8".
+	DriveModel string
+	// DriveGeneration spells out the LTO generation required to read the tape —
+	// the fact a future recoverer actually needs, e.g.
+	// "LTO-8 (reads LTO-7/8; LTO-9 also reads LTO-8)". The source host's device
+	// node is deliberately omitted: it is runtime state of the writing machine
+	// and is meaningless on the (different) recovery hardware.
+	DriveGeneration string
+	// DriveSerial is the drive unit serial number, recorded as provenance.
+	DriveSerial string
+	// LibraryModel is the tape library / changer model. It is provenance only:
+	// recovery loads a single cartridge into a standalone drive and does not
+	// require the original autochanger.
+	LibraryModel string
 }
 
 // page layout constants (A4, millimetres).
@@ -114,6 +124,13 @@ const (
 	contentW    = 210.0 - 2*marginX // usable width
 	labelColW   = 46.0              // key column width in key/value rows
 	footerInset = 12.0
+
+	// minSectionBody is the height reserved after a section bar so the heading
+	// stays with the first lines of its content across a page break.
+	minSectionBody = 14.0
+	// minArchiveBlock keeps an archive name with its first metadata and table
+	// rows rather than stranding the name at a page bottom.
+	minArchiveBlock = 34.0
 
 	fontBody = "Helvetica"
 	fontMono = "Courier" // checksums, identities, device nodes
@@ -197,8 +214,26 @@ func (d *doc) title() {
 	d.pdf.Line(marginX, y, marginX+contentW, y)
 }
 
-// section renders a full-width filled heading bar.
+// ensureSpace forces a page break when fewer than h millimetres of usable height
+// remain on the current page. It is used to keep a heading on the same page as
+// the content that follows it.
+func (d *doc) ensureSpace(h float64) {
+	_, pageH := d.pdf.GetPageSize()
+	_, _, _, bottom := d.pdf.GetMargins()
+
+	if d.pdf.GetY()+h > pageH-bottom {
+		d.pdf.AddPage()
+	}
+}
+
+// section renders a full-width filled heading bar. It first reserves enough
+// vertical space for the bar plus the first lines of its content, so a heading
+// is never stranded at the bottom of a page apart from what it introduces.
 func (d *doc) section(title string) {
+	const headerHeight = 5 + 8 + 2 // top gap + bar + bottom gap
+
+	d.ensureSpace(headerHeight + minSectionBody)
+
 	d.pdf.Ln(5)
 	d.fill(colBar)
 	d.text(colInk)
@@ -258,6 +293,8 @@ func (d *doc) contentsSection(m Manifest) {
 
 // archive renders a single archive's metadata and its files table.
 func (d *doc) archive(archive Archive) {
+	d.ensureSpace(minArchiveBlock)
+
 	d.pdf.SetFont(fontBody, "B", 11)
 	d.text(colInk)
 	d.pdf.MultiCell(contentW, 6, d.tr(archive.Name), "", "L", false)
@@ -350,8 +387,10 @@ func (d *doc) buildSection(m Manifest) {
 	d.kv("ltfs version", build.LTFSVersion, false)
 	d.kv("Slice size", fmt.Sprintf("%s bytes (%s)", groupDigits(build.SliceSize), humanSize(build.SliceSize)), false)
 	d.kv("PAR2 redundancy", build.PAR2Redundancy, false)
-	d.kv("Drive", build.DriveIdentifier, true)
-	d.kv("Library", build.LibraryIdentifier, true)
+	d.kv("Drive model", build.DriveModel, false)
+	d.kv("Drive generation", build.DriveGeneration, false)
+	d.kv("Drive serial", build.DriveSerial, true)
+	d.kv("Library model", build.LibraryModel, false)
 }
 
 // identitySection renders the age private identity inside a highlighted callout,
