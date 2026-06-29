@@ -21,9 +21,10 @@ func validConfig() Config {
 		},
 		Copies: 2,
 		Library: Library{
-			Changer:    "/dev/sch0",
-			Drives:     []string{"/dev/nst0", "/dev/nst1"},
-			BlankSlots: []int{1, 2},
+			Changer:           "/dev/sch0",
+			Drives:            []string{"/dev/nst0", "/dev/nst1"},
+			BlankSlots:        []int{1, 2},
+			TapeCapacityBytes: 2_500_000_000_000,
 		},
 		Redundancy: Redundancy{
 			TargetPercentage: ptr(10.0),
@@ -202,6 +203,12 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "library.blankSlots",
 		},
 		{
+			name:        "library zero tape capacity",
+			mutate:      func(c *Config) { c.Library.TapeCapacityBytes = 0 },
+			wantErr:     require.Error,
+			errContains: "library.tapeCapacityBytes",
+		},
+		{
 			name:        "redundancy neither mode",
 			mutate:      func(c *Config) { c.Redundancy.TargetPercentage = nil },
 			wantErr:     require.Error,
@@ -244,6 +251,17 @@ func TestConfigValidate(t *testing.T) {
 			wantErr:     require.Error,
 			errContains: "encryption.recipients",
 		},
+		{
+			name:    "feasibility overhead at the floor",
+			mutate:  func(c *Config) { c.FeasibilityOverhead = ptr(1.0) },
+			wantErr: require.NoError,
+		},
+		{
+			name:        "feasibility overhead below one",
+			mutate:      func(c *Config) { c.FeasibilityOverhead = ptr(0.99) },
+			wantErr:     require.Error,
+			errContains: "feasibilityOverhead",
+		},
 	}
 
 	for _, tt := range tests {
@@ -258,6 +276,16 @@ func TestConfigValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEffectiveFeasibilityOverhead(t *testing.T) {
+	t.Parallel()
+
+	unset := Config{}
+	assert.InDelta(t, DefaultFeasibilityOverhead, unset.EffectiveFeasibilityOverhead(), 1e-9)
+
+	set := Config{FeasibilityOverhead: ptr(1.2)}
+	assert.InDelta(t, 1.2, set.EffectiveFeasibilityOverhead(), 1e-9)
 }
 
 // findModuleRoot walks up from the test working directory to find go.mod.

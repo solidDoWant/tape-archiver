@@ -6,10 +6,47 @@ package backup
 // produces without restructuring the others. Until then they are intentionally
 // sparse placeholders.
 
-// ResolvedArchive is a single config Source resolved by the Resolve phase to a
-// concrete ZFS snapshot to archive (SPEC §4.3 phase 1). Later sub-issues add the
-// resolved snapshot path, ownership cross-check, and feasibility estimate.
-type ResolvedArchive struct{}
+// ResolvedArchive is a single config Source resolved by the Resolve phase to the
+// concrete ZFS snapshot(s) that become one archive (SPEC §4.3 phase 1). A k8s
+// single-snapshot source or a raw ZFS path yields one Snapshot; a k8s
+// label-selector group yields one member per matched snapshot, all packed into
+// the same tar (SPEC §5).
+type ResolvedArchive struct {
+	// SourceIndex is the position of the originating Source in Config.Sources,
+	// preserved so the resolved work list stays aligned with the run config.
+	SourceIndex int
+	// Compression is whether the Prepare phase should zstd-compress this archive,
+	// resolved from the source's optional override (default-on, SPEC §8).
+	Compression bool
+	// Snapshots are the ZFS snapshots that make up this archive, in resolution
+	// order. A group has more than one; a single source has exactly one.
+	Snapshots []ResolvedSnapshot
+	// EstimatedBytes is the Resolve feasibility estimate: the summed
+	// logicalreferenced of Snapshots inflated by the overhead factor and PAR2 %
+	// (SPEC §4.3 phase 1). It exists only to reject an archive that cannot fit on
+	// one tape before real work; it is never used as the authoritative plan, which
+	// is the measured Prepare size.
+	EstimatedBytes int64
+}
+
+// ResolvedSnapshot is one ZFS snapshot within a ResolvedArchive, with the
+// provenance needed to verify and tar it. ZFSPath is the canonical
+// "dataset@snapshot" the Prepare phase tars and the feasibility pre-check sizes.
+type ResolvedSnapshot struct {
+	// ZFSPath is the absolute ZFS snapshot path, e.g. bulk-pool-01/archive@daily.
+	ZFSPath string
+	// Dataset is the ZFS dataset (k8s sources); empty for raw ZFS paths.
+	Dataset string
+	// SnapshotName is the ZFS snapshot short name (k8s sources); empty for raw
+	// ZFS paths. With Dataset it reconstructs the snapshot for ownership
+	// verification (k8ssnap.Verify).
+	SnapshotName string
+	// Namespace, VolumeSnapshot, and PVC carry the k8s provenance of a resolved
+	// VolumeSnapshot for the report; all empty for raw ZFS sources.
+	Namespace      string
+	VolumeSnapshot string
+	PVC            string
+}
 
 // StagedArchive is a prepared archive staged to disk by the Prepare phase
 // (SPEC §4.3 phase 2): tar → optional zstd → age → fixed-size slices, with the
@@ -57,4 +94,8 @@ type runState struct {
 	// the empty string before any phase has completed. Read by the
 	// LastCompletedPhaseQuery handler.
 	lastCompletedPhase string
+	// resolved is the concrete work list the Resolve phase produces (SPEC §4.3
+	// phase 1): every config Source expanded to its ZFS snapshot(s), verified and
+	// feasibility-checked. The Prepare phase consumes it.
+	resolved []ResolvedArchive
 }

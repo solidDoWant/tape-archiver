@@ -25,6 +25,9 @@
         },
         "delivery": {
           "$ref": "#/$defs/Delivery"
+        },
+        "feasibilityOverhead": {
+          "type": "number"
         }
       },
       "additionalProperties": false,
@@ -119,6 +122,9 @@
             "type": "integer"
           },
           "type": "array"
+        },
+        "tapeCapacityBytes": {
+          "type": "integer"
         }
       },
       "additionalProperties": false,
@@ -126,7 +132,8 @@
       "required": [
         "changer",
         "drives",
-        "blankSlots"
+        "blankSlots",
+        "tapeCapacityBytes"
       ]
     },
     "Redundancy": {

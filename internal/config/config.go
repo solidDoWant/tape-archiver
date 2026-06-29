@@ -1,13 +1,34 @@
 package config
 
+// DefaultFeasibilityOverhead is the multiplier applied to a source's
+// logicalreferenced size in the Resolve feasibility pre-check (SPEC.md §4.3
+// phase 1, §16) when Config.FeasibilityOverhead is unset. It covers tar/zstd/age
+// framing: age STREAM framing adds ~0.02% and tar headers/padding are typically
+// well under 1%, while zstd is assumed to give no reduction (the incompressible
+// worst case) so the estimate never runs low. 5% is a deliberately generous
+// margin for many-small-file datasets; it tunes only the cheap pre-check, never
+// the authoritative measured size produced by Prepare.
+const DefaultFeasibilityOverhead = 1.05
+
 // Config fully describes a backup run. It is the single source of truth for a run.
 type Config struct {
-	Sources    []Source   `json:"sources"`
-	Copies     int        `json:"copies"`
-	Library    Library    `json:"library"`
-	Redundancy Redundancy `json:"redundancy"`
-	Encryption Encryption `json:"encryption"`
-	Delivery   Delivery   `json:"delivery"`
+	Sources             []Source   `json:"sources"`
+	Copies              int        `json:"copies"`
+	Library             Library    `json:"library"`
+	Redundancy          Redundancy `json:"redundancy"`
+	Encryption          Encryption `json:"encryption"`
+	Delivery            Delivery   `json:"delivery"`
+	FeasibilityOverhead *float64   `json:"feasibilityOverhead,omitempty"`
+}
+
+// EffectiveFeasibilityOverhead returns the configured FeasibilityOverhead
+// multiplier, or DefaultFeasibilityOverhead when it is unset.
+func (c *Config) EffectiveFeasibilityOverhead() float64 {
+	if c.FeasibilityOverhead != nil {
+		return *c.FeasibilityOverhead
+	}
+
+	return DefaultFeasibilityOverhead
 }
 
 // Source is a single item to archive. Exactly one of K8s or ZFSPath must be set.
@@ -41,6 +62,12 @@ type Library struct {
 	Changer    string   `json:"changer"`
 	Drives     []string `json:"drives"`
 	BlankSlots []int    `json:"blankSlots"`
+	// TapeCapacityBytes is the native (uncompressed) capacity of one tape, in
+	// bytes (e.g. 2_500_000_000_000 for LTO-6). It is the single-tape ceiling the
+	// Resolve feasibility pre-check tests an archive's estimate against and the
+	// capacity the Pack phase bin-packs into; runs plan against native capacity
+	// with LTO hardware compression disabled (SPEC §4.3).
+	TapeCapacityBytes int64 `json:"tapeCapacityBytes"`
 }
 
 // Redundancy specifies the PAR2 redundancy policy.

@@ -35,6 +35,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("encryption.recipients: at least one recipient is required")
 	}
 
+	if c.FeasibilityOverhead != nil && *c.FeasibilityOverhead < 1 {
+		return fmt.Errorf("feasibilityOverhead: must be >= 1, got %v", *c.FeasibilityOverhead)
+	}
+
 	return nil
 }
 
@@ -95,6 +99,10 @@ func (l Library) validate() error {
 
 	if len(l.BlankSlots) == 0 {
 		return fmt.Errorf("library.blankSlots: at least one blank slot is required")
+	}
+
+	if l.TapeCapacityBytes <= 0 {
+		return fmt.Errorf("library.tapeCapacityBytes: must be > 0, got %d", l.TapeCapacityBytes)
 	}
 
 	return nil

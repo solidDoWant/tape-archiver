@@ -36,10 +36,15 @@ const defaultActivityTimeout = 24 * time.Hour
 // the activity itself. The phase table below is the single, ordered description
 // of the backup pipeline; each phase sub-issue replaces an entry's stub activity
 // (and, as needed, its queue) without disturbing the others.
+//
+// A phase that orchestrates more than one activity (e.g. Resolve runs a control
+// activity then a data activity) sets run instead of activity; when run is set it
+// is used in place of the generic single-activity execution, and activity is nil.
 type phase struct {
 	name     string
 	queue    string
 	activity any
+	run      func(workflow.Context, config.Config, *runState) error
 }
 
 // backupPhases returns the ten backup pipeline phases in execution order
@@ -49,23 +54,27 @@ type phase struct {
 // today; later sub-issues fill in each body.
 func backupPhases() []phase {
 	return []phase{
-		{PhaseResolve, TaskQueue, resolveActivity},
-		{PhasePrepare, DataTaskQueue, prepareActivity},
-		{PhasePack, TaskQueue, packActivity},
-		{PhaseGeneratePAR2, DataTaskQueue, generatePAR2Activity},
-		{PhaseVerify, DataTaskQueue, verifyActivity},
-		{PhaseLoad, DataTaskQueue, loadActivity},
-		{PhaseWrite, DataTaskQueue, writeActivity},
-		{PhaseEject, DataTaskQueue, ejectActivity},
-		{PhaseReport, TaskQueue, reportActivity},
-		{PhaseDeliver, TaskQueue, deliverActivity},
+		{PhaseResolve, TaskQueue, nil, resolvePhase},
+		{PhasePrepare, DataTaskQueue, prepareActivity, nil},
+		{PhasePack, TaskQueue, packActivity, nil},
+		{PhaseGeneratePAR2, DataTaskQueue, generatePAR2Activity, nil},
+		{PhaseVerify, DataTaskQueue, verifyActivity, nil},
+		{PhaseLoad, DataTaskQueue, loadActivity, nil},
+		{PhaseWrite, DataTaskQueue, writeActivity, nil},
+		{PhaseEject, DataTaskQueue, ejectActivity, nil},
+		{PhaseReport, TaskQueue, reportActivity, nil},
+		{PhaseDeliver, TaskQueue, deliverActivity, nil},
 	}
 }
 
-// execute runs the phase's activity on its task queue and waits for it to
-// complete. Results are discarded for now; phase sub-issues that produce
-// run-state thread it through runState.
-func (p phase) execute(ctx workflow.Context) error {
+// execute runs the phase and waits for it to complete. An implemented phase with
+// a custom orchestrator (run) is driven through it, threading cfg and runState; a
+// stub phase runs its single activity on its task queue, discarding the result.
+func (p phase) execute(ctx workflow.Context, cfg config.Config, state *runState) error {
+	if p.run != nil {
+		return p.run(ctx, cfg, state)
+	}
+
 	actx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           p.queue,
 		StartToCloseTimeout: defaultActivityTimeout,
@@ -84,8 +93,6 @@ func (p phase) execute(ctx workflow.Context) error {
 // in separate sub-issues that replace each stub. The control worker registers
 // this workflow under WorkflowType via RegisterControl.
 func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) {
-	_ = cfg // consumed by phase sub-issues; named here so the contract is stable.
-
 	state := &runState{}
 
 	if queryErr := workflow.SetQueryHandler(ctx, LastCompletedPhaseQuery, func() (string, error) {
@@ -108,7 +115,7 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 	for _, currentPhase := range backupPhases() {
 		failingPhase = currentPhase.name
 
-		if phaseErr := currentPhase.execute(ctx); phaseErr != nil {
+		if phaseErr := currentPhase.execute(ctx, cfg, state); phaseErr != nil {
 			err = fmt.Errorf("phase %s: %w", currentPhase.name, phaseErr)
 
 			return Result{}, err
@@ -125,8 +132,8 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // workflow backbone runs end-to-end. Each later sub-issue replaces one stub's
 // body (and registration) with the real activity for that phase (SPEC §4.3).
 
-// resolveActivity stubs the Resolve phase (SPEC §4.3 phase 1).
-func resolveActivity(_ context.Context) error { return nil }
+// The Resolve phase (SPEC §4.3 phase 1) is implemented in resolve.go; it
+// orchestrates a control and a data activity rather than a single stub.
 
 // prepareActivity stubs the Prepare phase (SPEC §4.3 phase 2).
 func prepareActivity(_ context.Context) error { return nil }

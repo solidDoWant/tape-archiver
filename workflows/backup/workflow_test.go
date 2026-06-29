@@ -37,10 +37,17 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(Backup)
 
+	// Stub phases register their single activity; an implemented phase (Resolve)
+	// has a nil stub activity and is registered through its activity structs
+	// below.
 	for _, phase := range backupPhases() {
-		env.RegisterActivity(phase.activity)
+		if phase.activity != nil {
+			env.RegisterActivity(phase.activity)
+		}
 	}
 
+	env.RegisterActivity(&ResolveControlActivities{})
+	env.RegisterActivity(&ResolveDataActivities{})
 	env.RegisterActivity(&FailureActivities{})
 
 	return env
@@ -84,8 +91,7 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 			env := newBackupEnv(t)
 
 			if test.failAt != "" {
-				env.OnActivity(activityFor(t, test.failAt), mock.Anything).
-					Return(errors.New("boom"))
+				failPhase(t, env, test.failAt)
 			}
 
 			env.ExecuteWorkflow(Backup, config.Config{})
@@ -103,7 +109,8 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 }
 
 // activityFor returns the stub activity for the named phase so a test can target
-// it with OnActivity.
+// it with OnActivity. It is only valid for stub phases; the implemented Resolve
+// phase has no single stub activity (use failPhase to fail it).
 func activityFor(t *testing.T, name string) any {
 	t.Helper()
 
@@ -116,4 +123,21 @@ func activityFor(t *testing.T, name string) any {
 	t.Fatalf("no phase named %q", name)
 
 	return nil
+}
+
+// failPhase mocks the named phase to fail. The Resolve phase fails through its
+// control activity (which returns a slice and an error); every other phase is a
+// single stub activity returning just an error.
+func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
+	t.Helper()
+
+	if name == PhaseResolve {
+		env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything).
+			Return(nil, errors.New("boom"))
+
+		return
+	}
+
+	env.OnActivity(activityFor(t, name), mock.Anything).
+		Return(errors.New("boom"))
 }
