@@ -111,13 +111,13 @@ func TestRequireTemporalAddress(t *testing.T) {
 	}))
 }
 
-// TestRunRunMissingTemporalAddress exercises the full run path with a valid
+// TestSubmitRunMissingTemporalAddress exercises the full run path with a valid
 // config but no TEMPORAL_ADDRESS: it must fail with a descriptive error and
 // never attempt a connection.
-func TestRunRunMissingTemporalAddress(t *testing.T) {
+func TestSubmitRunMissingTemporalAddress(t *testing.T) {
 	withGetenv(t, func(string) string { return "" })
 
-	err := runRun(context.Background(), []string{"--config", writeConfig(t, validConfigJSON)}, &bytes.Buffer{})
+	err := submitRun(context.Background(), []string{"--config", writeConfig(t, validConfigJSON)}, &bytes.Buffer{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }

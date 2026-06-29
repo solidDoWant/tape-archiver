@@ -48,9 +48,9 @@ func dispatch(ctx context.Context, args []string, out io.Writer) error {
 	command, rest := args[0], args[1:]
 	switch command {
 	case "run":
-		return runRun(ctx, rest, out)
+		return submitRun(ctx, rest, out)
 	case "status":
-		return runStatus(ctx, rest, out)
+		return showStatus(ctx, rest, out)
 	case "-h", "--help", "help":
 		_, err := fmt.Fprint(out, usage)
 

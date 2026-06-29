@@ -21,11 +21,11 @@ type runOptions struct {
 	id         string
 }
 
-// runRun implements `tapectl run`. It prepares the submission entirely
+// submitRun implements `tapectl run`. It prepares the submission entirely
 // client-side (load, validate, dry-run override, ID) so an invalid config or a
 // missing Temporal address fails before any connection is attempted, then
 // submits the backup workflow and prints its ID.
-func runRun(ctx context.Context, args []string, out io.Writer) error {
+func submitRun(ctx context.Context, args []string, out io.Writer) error {
 	options, err := parseRunArgs(args)
 	if err != nil {
 		return err

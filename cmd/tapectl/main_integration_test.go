@@ -91,7 +91,7 @@ func TestRunThenStatus(t *testing.T) {
 
 	// Submit via `tapectl run` and capture the printed workflow ID.
 	var runOut bytes.Buffer
-	require.NoError(t, runRun(ctx, []string{"--config", writeConfig(t, validConfigJSON)}, &runOut))
+	require.NoError(t, submitRun(ctx, []string{"--config", writeConfig(t, validConfigJSON)}, &runOut))
 
 	workflowID := strings.TrimSpace(runOut.String())
 	require.NotEmpty(t, workflowID, "run must print the workflow ID")
@@ -101,7 +101,7 @@ func TestRunThenStatus(t *testing.T) {
 	// the stub reports via the query.
 	require.Eventually(t, func() bool {
 		var statusOut bytes.Buffer
-		if err := runStatus(ctx, []string{workflowID}, &statusOut); err != nil {
+		if err := showStatus(ctx, []string{workflowID}, &statusOut); err != nil {
 			return false
 		}
 

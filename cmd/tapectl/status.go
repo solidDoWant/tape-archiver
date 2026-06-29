@@ -22,9 +22,9 @@ const phaseUnavailable = "unavailable"
 // has completed yet.
 const phaseNone = "none"
 
-// runStatus implements `tapectl status <workflow-id>`. It prints the workflow's
-// current execution status and the name of its last completed phase.
-func runStatus(ctx context.Context, args []string, out io.Writer) error {
+// showStatus implements `tapectl status <workflow-id>`. It prints the
+// workflow's current execution status and the name of its last completed phase.
+func showStatus(ctx context.Context, args []string, out io.Writer) error {
 	workflowID, err := parseStatusArgs(args)
 	if err != nil {
 		return err
