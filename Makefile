@@ -91,8 +91,12 @@ $(BIN_DIR)/gen-config-schema: $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/gen-config-schema
 
+$(BIN_DIR)/tapectl: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/tapectl
+
 .PHONY: build
-build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema ## Build all binaries into bin/.
+build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl ## Build all binaries into bin/.
 
 .PHONY: clean
 clean: ## Remove build artifacts.
