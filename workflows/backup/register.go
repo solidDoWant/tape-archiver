@@ -1,0 +1,49 @@
+package backup
+
+import (
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
+)
+
+// ControlConfig holds the control worker's settings that the backup workflow's
+// control-side registrations need. It is the seam through which cmd/worker
+// passes operational configuration (parsed from the environment) into the
+// workflow package.
+type ControlConfig struct {
+	// FailureWebhookURL is the Discord failure webhook (DISCORD_FAILURE_WEBHOOK_URL).
+	// Empty disables failure alerting (SPEC §11).
+	FailureWebhookURL string
+}
+
+// RegisterControl registers everything the control worker hosts: the Backup
+// workflow under WorkflowType (so clients can start it by the contract name),
+// the operational failure-alert activity wired with the configured webhook URL,
+// and the control-side phase activities. It is called from cmd/worker for the
+// control role.
+//
+// The phase activities are stubs in this scaffold; each control-side phase
+// sub-issue replaces its stub here.
+func RegisterControl(w worker.Worker, cfg ControlConfig) {
+	w.RegisterWorkflowWithOptions(Backup, workflow.RegisterOptions{Name: WorkflowType})
+
+	w.RegisterActivity(&FailureActivities{WebhookURL: cfg.FailureWebhookURL})
+
+	w.RegisterActivity(resolveActivity)
+	w.RegisterActivity(packActivity)
+	w.RegisterActivity(reportActivity)
+	w.RegisterActivity(deliverActivity)
+}
+
+// RegisterData registers the data worker's bulk-data phase activities
+// (SPEC §4.1). It is called from cmd/worker for the data role.
+//
+// The phase activities are stubs in this scaffold; each data-side phase
+// sub-issue replaces its stub here.
+func RegisterData(w worker.Worker) {
+	w.RegisterActivity(prepareActivity)
+	w.RegisterActivity(generatePAR2Activity)
+	w.RegisterActivity(verifyActivity)
+	w.RegisterActivity(loadActivity)
+	w.RegisterActivity(writeActivity)
+	w.RegisterActivity(ejectActivity)
+}

@@ -19,6 +19,12 @@ const (
 	// queue from there.
 	TaskQueue = "control"
 
+	// DataTaskQueue is the Temporal task queue the bulk-data activities run on.
+	// The data worker runs on the storage host (SPEC §4.1) where the source data
+	// lives; the control-side workflow dispatches data-phase activities here by
+	// setting it as the activity task queue.
+	DataTaskQueue = "data"
+
 	// LastCompletedPhaseQuery is the Temporal query that returns the name of the
 	// most recently completed workflow phase (SPEC §4.3), or an empty string if
 	// no phase has completed yet. The workflow registers a handler for it so
