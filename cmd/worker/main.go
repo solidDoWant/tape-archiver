@@ -15,6 +15,7 @@ import (
 
 	"go.temporal.io/sdk/worker"
 
+	"github.com/solidDoWant/tape-archiver/internal/envvar"
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
 	"github.com/solidDoWant/tape-archiver/pkg/metrics"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
@@ -53,6 +54,14 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 		return err
 	}
 
+	// Operational configuration (e.g. the failure webhook) is read from the
+	// environment separately from the worker's role config so it is available to
+	// the failure alert regardless of run config (SPEC §11).
+	env, err := envvar.Parse()
+	if err != nil {
+		return err
+	}
+
 	logging.Setup(cfg.LogLevel)
 
 	metricsProvider, metricsShutdown, err := metrics.NewFromEnv(defaultMetricsAddr)
@@ -82,7 +91,7 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	slog.Info("starting worker", "role", string(cfg.Role), "task_queue", queue)
 
 	w := worker.New(temporalClient, queue, worker.Options{})
-	registerActivities(w, cfg.Role)
+	registerActivities(w, cfg.Role, env)
 
 	// Run blocks until interruptCh delivers, then stops polling and waits for
 	// in-flight tasks to finish before returning.
