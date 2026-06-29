@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/go-pdf/fpdf v0.9.0
 	github.com/invopop/jsonschema v0.14.0
+	github.com/kdomanski/iso9660 v0.4.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
