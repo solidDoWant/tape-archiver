@@ -52,6 +52,10 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	// with a real staging root so a run with no sources stages nothing and the
 	// activity does not reject an empty staging directory.
 	env.RegisterActivity(newPrepareActivities(t.TempDir()))
+	// The Pack and Generate PAR2 phases are run-orchestrated too; with no sources
+	// their activities produce an empty plan and no recovery sets.
+	env.RegisterActivity(newPackActivities())
+	env.RegisterActivity(newGeneratePAR2Activities())
 	env.RegisterActivity(&FailureActivities{})
 
 	return env
@@ -130,8 +134,9 @@ func activityFor(t *testing.T, name string) any {
 }
 
 // failPhase mocks the named phase to fail. The run-orchestrated phases (Resolve,
-// Prepare) fail through their activities, which return a slice and an error;
-// every other phase is a single stub activity returning just an error.
+// Prepare, Pack, Generate PAR2) fail through their activities, which return a
+// value and an error; every other phase is a single stub activity returning just
+// an error.
 func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
 	t.Helper()
 
@@ -143,6 +148,16 @@ func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string
 		return
 	case PhasePrepare:
 		env.OnActivity((&PrepareActivities{}).PrepareArchives, mock.Anything, mock.Anything).
+			Return(nil, errors.New("boom"))
+
+		return
+	case PhasePack:
+		env.OnActivity((&PackActivities{}).Pack, mock.Anything, mock.Anything).
+			Return(TapePlan{}, errors.New("boom"))
+
+		return
+	case PhaseGeneratePAR2:
+		env.OnActivity((&GeneratePAR2Activities{}).GeneratePAR2, mock.Anything, mock.Anything).
 			Return(nil, errors.New("boom"))
 
 		return
