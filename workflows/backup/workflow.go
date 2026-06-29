@@ -55,7 +55,7 @@ type phase struct {
 func backupPhases() []phase {
 	return []phase{
 		{PhaseResolve, TaskQueue, nil, resolvePhase},
-		{PhasePrepare, DataTaskQueue, prepareActivity, nil},
+		{PhasePrepare, DataTaskQueue, nil, preparePhase},
 		{PhasePack, TaskQueue, packActivity, nil},
 		{PhaseGeneratePAR2, DataTaskQueue, generatePAR2Activity, nil},
 		{PhaseVerify, DataTaskQueue, verifyActivity, nil},
@@ -135,8 +135,8 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // The Resolve phase (SPEC §4.3 phase 1) is implemented in resolve.go; it
 // orchestrates a control and a data activity rather than a single stub.
 
-// prepareActivity stubs the Prepare phase (SPEC §4.3 phase 2).
-func prepareActivity(_ context.Context) error { return nil }
+// The Prepare phase (SPEC §4.3 phase 2) is implemented in prepare.go; it
+// orchestrates the data-side staging activity rather than a single stub.
 
 // packActivity stubs the Pack phase (SPEC §4.3 phase 3).
 func packActivity(_ context.Context) error { return nil }

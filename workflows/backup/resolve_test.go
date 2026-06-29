@@ -413,11 +413,11 @@ func TestResolveFailureAbortsBeforePrepare(t *testing.T) {
 		Return(nil, errors.New("VolumeSnapshot not found"))
 
 	// Prepare must never run; if it does, the test fails.
-	env.OnActivity(activityFor(t, PhasePrepare), mock.Anything).
-		Return(func(_ context.Context) error {
+	env.OnActivity((&PrepareActivities{}).PrepareArchives, mock.Anything, mock.Anything).
+		Return(func(_ context.Context, _ PrepareInput) ([]StagedArchive, error) {
 			t.Error("Prepare ran despite a Resolve failure")
 
-			return nil
+			return nil, nil
 		})
 
 	env.ExecuteWorkflow(Backup, config.Config{})

@@ -22,3 +22,19 @@ func TestParse_withoutWebhookURL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, cfg.DiscordFailureWebhookURL)
 }
+
+func TestParse_withStagingDir(t *testing.T) {
+	t.Setenv("TAPE_STAGING_DIR", "/mnt/bulk-pool-01/archive/.tape-staging")
+
+	cfg, err := Parse()
+	require.NoError(t, err)
+	assert.Equal(t, "/mnt/bulk-pool-01/archive/.tape-staging", cfg.StagingDir)
+}
+
+func TestParse_withoutStagingDir(t *testing.T) {
+	t.Setenv("TAPE_STAGING_DIR", "")
+
+	cfg, err := Parse()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.StagingDir)
+}

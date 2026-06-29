@@ -20,7 +20,7 @@ func registerActivities(w worker.Worker, role Role, env envvar.Config) {
 	case RoleControl:
 		registerControlActivities(w, env)
 	case RoleData:
-		registerDataActivities(w)
+		registerDataActivities(w, env)
 	}
 }
 
@@ -38,7 +38,10 @@ func registerControlActivities(w worker.Worker, env envvar.Config) {
 // registerDataActivities registers the data-queue activities: tar/compress/split
 // (pkg/archive), age encryption (pkg/agewrap), PAR2 generation (pkg/par2),
 // checksum verification (pkg/checksum), LTFS format/mount/write/unmount
-// (pkg/ltfs), and changer load/unload (pkg/tape).
-func registerDataActivities(w worker.Worker) {
-	backup.RegisterData(w)
+// (pkg/ltfs), and changer load/unload (pkg/tape), wired with the data worker's
+// staging directory.
+func registerDataActivities(w worker.Worker, env envvar.Config) {
+	backup.RegisterData(w, backup.DataConfig{
+		StagingDir: env.StagingDir,
+	})
 }

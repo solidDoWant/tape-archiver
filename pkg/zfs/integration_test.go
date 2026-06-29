@@ -49,6 +49,26 @@ func TestSnapshotDirIntegration(t *testing.T) {
 	assert.True(t, info.IsDir())
 }
 
+// TestMountpointIntegration verifies Mountpoint reads a dataset's filesystem
+// mountpoint via "zfs get" and that the resolved path is the directory whose
+// .zfs/snapshot tree the Prepare phase reads. A non-existent dataset must error.
+func TestMountpointIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	mount, err := zfs.Mountpoint(t.Context(), testutil.PoolDataset(t))
+	require.NoError(t, err)
+	assert.Equal(t, testutil.PoolMount(t), mount,
+		"mountpoint should match the dataset's filesystem mount")
+
+	info, err := os.Stat(mount)
+	require.NoError(t, err, "resolved mountpoint should be stat-able")
+	assert.True(t, info.IsDir())
+
+	_, err = zfs.Mountpoint(t.Context(), testutil.PoolDataset(t)+"/tape-archiver-nonexistent")
+	require.Error(t, err, "a non-existent dataset should error")
+}
+
 // TestLogicalReferencedIntegration verifies LogicalReferenced returns the
 // dataset's logicalreferenced byte count via "zfs get". When the harness
 // reports the staged payload size (TAPE_TEST_MIN_BYTES), the value must be at

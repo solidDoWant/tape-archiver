@@ -65,6 +65,40 @@ func LogicalReferenced(ctx context.Context, dataset string) (int64, error) {
 	return parseLogicalReferenced(out)
 }
 
+// Mountpoint returns the filesystem mountpoint of the given ZFS dataset (e.g.
+// /mnt/bulk-pool-01/archive for bulk-pool-01/archive), so the Prepare phase can
+// locate the dataset's .zfs/snapshot/ tree without hardcoding the pool mount.
+//
+// It runs "zfs get -Hp -o value mountpoint <dataset>": -H drops the header, -p
+// prints the raw value, and -o value selects just the value column. The dataset
+// must be the filesystem (not a snapshot) — pass "pool/dataset", not
+// "pool/dataset@snap". A dataset whose mountpoint is not a path (legacy, none) is
+// returned verbatim; callers that need a real directory (SnapshotDir) surface the
+// failure when the path cannot be read.
+func Mountpoint(ctx context.Context, dataset string) (string, error) {
+	cmd := exec.CommandContext(ctx, "zfs", "get", "-Hp", "-o", "value", "mountpoint", dataset)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return "", fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	mountpoint := strings.TrimSpace(string(out))
+	if mountpoint == "" {
+		return "", fmt.Errorf("zfs get mountpoint returned no value for %q", dataset)
+	}
+
+	return mountpoint, nil
+}
+
 // UserProperties returns the ZFS user properties set on the given dataset or
 // snapshot (e.g. bulk-pool-01/.../pvc-<uuid>@snapshot-<uuid>), keyed by the full
 // property name. User properties are the colon-namespaced properties (e.g.

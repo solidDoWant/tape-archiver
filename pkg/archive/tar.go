@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	slashpath "path"
 	"path/filepath"
 )
 
@@ -26,19 +27,8 @@ import (
 func Tar(ctx context.Context, w io.Writer, srcDir string) error {
 	tw := tar.NewWriter(w)
 
-	walkErr := filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		return writeTarEntry(ctx, tw, srcDir, path, entry)
-	})
-	if walkErr != nil {
-		return fmt.Errorf("tar %s: %w", srcDir, walkErr)
+	if err := tarTree(ctx, tw, srcDir, ""); err != nil {
+		return fmt.Errorf("tar %s: %w", srcDir, err)
 	}
 
 	if err := tw.Close(); err != nil {
@@ -48,17 +38,75 @@ func Tar(ctx context.Context, w io.Writer, srcDir string) error {
 	return nil
 }
 
+// Member is one source tree packed into a multi-member tar by TarMembers. Subdir
+// is the subdirectory the member's contents appear under in the archive; Dir is
+// the source directory whose contents are read.
+type Member struct {
+	// Subdir is the in-archive subdirectory for this member. It must be a single
+	// path element (no slashes); callers derive it from the member's identity
+	// (e.g. a PVC name).
+	Subdir string
+	// Dir is the source directory whose contents are tarred under Subdir/.
+	Dir string
+}
+
+// TarMembers writes a single tar archive to w holding every member's tree, each
+// under its own Name/ subdirectory. It is how a snapshot group is archived as one
+// tar with one subdirectory per member volume, giving cross-volume consistency
+// (SPEC §5). Each member's directory entry is emitted even when empty, so the
+// extracted layout always reproduces the member subdirectories.
+//
+// Like Tar, it streams and never stages to disk; it is the multi-member form of
+// the prepare pipeline's first stage (SPEC §4.3).
+func TarMembers(ctx context.Context, w io.Writer, members []Member) error {
+	tw := tar.NewWriter(w)
+
+	for _, member := range members {
+		if err := tarTree(ctx, tw, member.Dir, member.Subdir); err != nil {
+			return fmt.Errorf("tar member %s: %w", member.Subdir, err)
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("tar members: close: %w", err)
+	}
+
+	return nil
+}
+
+// tarTree walks srcDir and writes each entry to tw with its name relative to
+// srcDir, prefixed by prefix (the member subdirectory, empty for a single tree).
+func tarTree(ctx context.Context, tw *tar.Writer, srcDir, prefix string) error {
+	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		return writeTarEntry(ctx, tw, srcDir, prefix, path, entry)
+	})
+}
+
 // writeTarEntry writes a single filesystem entry to tw, with a name relative to
-// srcDir. The root directory itself is skipped so the archive holds only its
-// contents.
-func writeTarEntry(ctx context.Context, tw *tar.Writer, srcDir, path string, entry fs.DirEntry) error {
+// srcDir and prefixed by prefix. With no prefix the root directory itself is
+// skipped so the archive holds only its contents (Tar); with a prefix the root
+// maps to the member subdirectory entry so empty members are preserved
+// (TarMembers).
+func writeTarEntry(ctx context.Context, tw *tar.Writer, srcDir, prefix, path string, entry fs.DirEntry) error {
 	rel, err := filepath.Rel(srcDir, path)
 	if err != nil {
 		return err
 	}
 
 	if rel == "." {
-		return nil
+		if prefix == "" {
+			return nil
+		}
+
+		rel = ""
 	}
 
 	info, err := entry.Info()
@@ -80,8 +128,14 @@ func writeTarEntry(ctx context.Context, tw *tar.Writer, srcDir, path string, ent
 	}
 
 	// Use forward slashes (the tar convention) and mark directories so the
-	// extracted layout matches the source on any platform.
-	header.Name = filepath.ToSlash(rel)
+	// extracted layout matches the source on any platform. A non-empty prefix
+	// places the entry under the member subdirectory (TarMembers).
+	name := filepath.ToSlash(rel)
+	if prefix != "" {
+		name = slashpath.Join(prefix, name)
+	}
+
+	header.Name = name
 	if entry.IsDir() {
 		header.Name += "/"
 	}

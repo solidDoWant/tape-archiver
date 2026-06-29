@@ -67,14 +67,17 @@ func TestRegisterData(t *testing.T) {
 
 	rw := &recordingWorker{}
 
-	RegisterData(rw)
+	RegisterData(rw, DataConfig{StagingDir: "/mnt/bulk-pool-01/archive/.tape-staging"})
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
-	// activities: the Resolve data activity plus the six phase stubs.
+	// activities: the Resolve data activity, the Prepare activity, plus the five
+	// remaining phase stubs.
 	assert.Empty(t, rw.workflows)
 	assert.Len(t, rw.activities, 7)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
 		"the data worker must register the Resolve data activity")
+	assert.True(t, hasActivity[*PrepareActivities](rw.activities),
+		"the data worker must register the Prepare activity")
 }
 
 // hasActivity reports whether any registered activity is of type T.
