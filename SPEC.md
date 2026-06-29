@@ -62,10 +62,17 @@ it directly rather than for general portability.
   `bulk-pool-01/archive`, `bulk-pool-01/media`, and the k8s-managed
   `bulk-pool-01/k8s/democratic-csi/nfs/pvcs/pvc-*`.
 - **Kubernetes storage:** volumes are provisioned by **democratic-csi over NFS** as
-  ZFS **filesystem** datasets (not zvols). `VolumeSnapshot`s map to ZFS snapshots named
-  `@snapshot-<uuid>`. democratic-csi stamps datasets with ZFS user properties that tie
-  them back to their k8s objects (PVC name/namespace/volume handle); these properties
-  are used for discovery and for provenance in the report.
+  ZFS **filesystem** datasets (not zvols). A `VolumeSnapshot`'s bound
+  `VolumeSnapshotContent` carries a CSI `snapshotHandle` of the form
+  `pvc-<uuid>@snapshot-<uuid>`, expressed **relative to democratic-csi's
+  `datasetParentName`** (`bulk-pool-01/k8s/democratic-csi/nfs/pvcs`), which is prepended
+  to rebuild the absolute ZFS snapshot path. democratic-csi stamps datasets and
+  snapshots with `democratic-csi:` ZFS user properties — notably `managed_resource`
+  (the "owned by democratic-csi" marker) and `csi_volume_name` (the PV name
+  `pvc-<uuid>`). PVC name and namespace are **not** stamped as ZFS properties. The
+  `managed_resource` marker is the signal used to confirm a resolved snapshot is
+  democratic-csi-owned before any data is staged; provenance in the report is taken
+  from the k8s objects, not from ZFS properties.
 - **Kubernetes cluster:** hosts the Temporal control-plane worker and the source
   `VolumeSnapshot`/snapshot-group resources. The storage host is outside the cluster.
 
@@ -121,7 +128,8 @@ staged and verified on disk** — eliminating any computation during the write w
 
 1. **Resolve.** Expand the config into a concrete work list: resolve k8s
    `VolumeSnapshot`/snapshot-group references to ZFS snapshots (cross-checked against
-   democratic-csi properties), and validate raw ZFS snapshot/dataset paths. Run a cheap
+   the democratic-csi `managed_resource` property to confirm ownership before staging),
+   and validate raw ZFS snapshot/dataset paths. Run a cheap
    feasibility pre-check from `zfs` properties (`logicalreferenced`, inflated by a small
    `tar` overhead and the configured PAR2 %) purely to reject any single archive that
    cannot fit on one tape *before* doing real work. This is an estimate, not the plan.
@@ -379,8 +387,8 @@ The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
 - **Compression** — `zstd` before encryption, uniform default-on with a per-source
   override; safe because `age` + PAR2 already bound blast radius (§8).
 - **k8s resolution ownership** — control worker resolves (label selectors →
-  `snapshotHandle` → ZFS name); data worker verifies via democratic-csi properties; raw
-  ZFS sources are data-worker-only.
+  `snapshotHandle` → ZFS name); data worker verifies the resolved snapshot exists and is
+  democratic-csi-managed (`managed_resource`); raw ZFS sources are data-worker-only.
 - **Recovery disc** — M-DISC DVD, ≥2 copies, verify after burn; optical is a redundancy
   layer, not a hard dependency.
 - **Sizing** — cheap `zfs logicalreferenced` feasibility pre-check; authoritative

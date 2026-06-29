@@ -72,3 +72,29 @@ func TestLogicalReferencedIntegration(t *testing.T) {
 		assert.GreaterOrEqual(t, bytes, int64(0))
 	}
 }
+
+// TestUserPropertiesIntegration verifies UserProperties reads a dataset's ZFS
+// user properties via "zfs get" and that a non-existent dataset errors (the
+// existence check the resolve pipeline depends on). The ephemeral test pool need
+// not carry any user properties, so the positive case asserts only a non-nil map
+// and that every returned key is colon-namespaced.
+func TestUserPropertiesIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	dataset := testutil.PoolDataset(t)
+	if snapshot := testutil.TestSnapshot(t); snapshot != "" {
+		dataset += "@" + snapshot
+	}
+
+	properties, err := zfs.UserProperties(t.Context(), dataset)
+	require.NoError(t, err)
+	require.NotNil(t, properties)
+
+	for name := range properties {
+		assert.Contains(t, name, ":", "user property names are colon-namespaced")
+	}
+
+	_, err = zfs.UserProperties(t.Context(), testutil.PoolDataset(t)+"@tape-archiver-nonexistent-snapshot")
+	require.Error(t, err, "a non-existent snapshot should error")
+}

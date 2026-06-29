@@ -65,6 +65,57 @@ func TestSnapshotDir(t *testing.T) {
 	}
 }
 
+func TestParseUserProperties(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		out  string
+		want map[string]string
+	}{
+		{
+			name: "mixed native and user properties",
+			out: "used\t12345\n" +
+				"democratic-csi:managed_resource\ttrue\n" +
+				"compression\tlz4\n" +
+				"democratic-csi:csi_volume_name\tpvc-0cbef4d8\n",
+			want: map[string]string{
+				"democratic-csi:managed_resource": "true",
+				"democratic-csi:csi_volume_name":  "pvc-0cbef4d8",
+			},
+		},
+		{
+			name: "empty user property value is retained",
+			out:  "democratic-csi:csi_share_volume_context\t\n",
+			want: map[string]string{"democratic-csi:csi_share_volume_context": ""},
+		},
+		{
+			name: "value containing colon is not mistaken for a native property",
+			out:  "democratic-csi:server\t10.2.3.1:2049\n",
+			want: map[string]string{"democratic-csi:server": "10.2.3.1:2049"},
+		},
+		{
+			name: "no user properties",
+			out:  "used\t12345\ncompression\tlz4\n",
+			want: map[string]string{},
+		},
+		{
+			name: "empty output",
+			out:  "",
+			want: map[string]string{},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := parseUserProperties([]byte(test.out))
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
 func TestParseLogicalReferenced(t *testing.T) {
 	t.Parallel()
 

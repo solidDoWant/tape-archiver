@@ -65,6 +65,60 @@ func LogicalReferenced(ctx context.Context, dataset string) (int64, error) {
 	return parseLogicalReferenced(out)
 }
 
+// UserProperties returns the ZFS user properties set on the given dataset or
+// snapshot (e.g. bulk-pool-01/.../pvc-<uuid>@snapshot-<uuid>), keyed by the full
+// property name. User properties are the colon-namespaced properties (e.g.
+// democratic-csi:managed_resource) that tools stamp onto datasets; native ZFS
+// properties (used, compression, …) are excluded.
+//
+// It runs "zfs get -Hp -o property,value all <dataset>": -H drops the header and
+// emits tab-delimited fields, -p prints raw values, and -o property,value selects
+// just those two columns. A non-existent dataset or snapshot makes zfs exit
+// non-zero, so this doubles as an existence check — the backup pipeline relies on
+// that to reject a resolved snapshot that is not present on the pool (SPEC.md §4.3).
+func UserProperties(ctx context.Context, dataset string) (map[string]string, error) {
+	cmd := exec.CommandContext(ctx, "zfs", "get", "-Hp", "-o", "property,value", "all", dataset)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return nil, fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	return parseUserProperties(out), nil
+}
+
+// parseUserProperties extracts the user properties from "zfs get -H -o
+// property,value all" output. Each line is "<property>\t<value>"; a property is a
+// user property when its name contains a colon (the ZFS namespace separator).
+// Native properties have no colon and are skipped. ZFS property names contain no
+// tab, so cutting on the first tab isolates the value, which may itself be empty.
+func parseUserProperties(out []byte) map[string]string {
+	properties := make(map[string]string)
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+
+		name, value, found := strings.Cut(line, "\t")
+		if !found || !strings.Contains(name, ":") {
+			continue
+		}
+
+		properties[name] = value
+	}
+
+	return properties
+}
+
 // parseLogicalReferenced extracts the byte count from "zfs get -Hp" output.
 //
 // With -H the output is a single tab-delimited line of the form
