@@ -35,6 +35,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("encryption.recipients: at least one recipient is required")
 	}
 
+	if c.FeasibilityOverhead != nil && *c.FeasibilityOverhead < 1 {
+		return fmt.Errorf("feasibilityOverhead: must be >= 1, got %v", *c.FeasibilityOverhead)
+	}
+
 	return nil
 }
 

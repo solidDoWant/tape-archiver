@@ -55,6 +55,11 @@ func TestRegisterControl(t *testing.T) {
 	// The failure-alert activity is registered wired with the configured URL.
 	failureActivities := findFailureActivities(t, rw.activities)
 	assert.Equal(t, "https://discord.example/webhook", failureActivities.WebhookURL)
+
+	// The control-side Resolve activity is registered (k8s resolution runs on the
+	// control worker, SPEC §16).
+	assert.True(t, hasActivity[*ResolveControlActivities](rw.activities),
+		"the control worker must register the Resolve control activity")
 }
 
 func TestRegisterData(t *testing.T) {
@@ -65,9 +70,22 @@ func TestRegisterData(t *testing.T) {
 	RegisterData(rw)
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
-	// activities.
+	// activities: the Resolve data activity plus the six phase stubs.
 	assert.Empty(t, rw.workflows)
-	assert.Len(t, rw.activities, 6)
+	assert.Len(t, rw.activities, 7)
+	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
+		"the data worker must register the Resolve data activity")
+}
+
+// hasActivity reports whether any registered activity is of type T.
+func hasActivity[T any](activities []any) bool {
+	for _, activity := range activities {
+		if _, ok := activity.(T); ok {
+			return true
+		}
+	}
+
+	return false
 }
 
 // findFailureActivities returns the single *FailureActivities among the

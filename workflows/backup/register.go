@@ -13,6 +13,10 @@ type ControlConfig struct {
 	// FailureWebhookURL is the Discord failure webhook (DISCORD_FAILURE_WEBHOOK_URL).
 	// Empty disables failure alerting (SPEC §11).
 	FailureWebhookURL string
+	// K8sDatasetParent is democratic-csi's datasetParentName, used to rebuild
+	// absolute ZFS snapshot paths during k8s resolution (SPEC §3, §16). Empty
+	// treats CSI snapshotHandles as already absolute.
+	K8sDatasetParent string
 }
 
 // RegisterControl registers everything the control worker hosts: the Backup
@@ -28,7 +32,7 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 
 	w.RegisterActivity(&FailureActivities{WebhookURL: cfg.FailureWebhookURL})
 
-	w.RegisterActivity(resolveActivity)
+	w.RegisterActivity(newResolveControlActivities(cfg.K8sDatasetParent))
 	w.RegisterActivity(packActivity)
 	w.RegisterActivity(reportActivity)
 	w.RegisterActivity(deliverActivity)
@@ -40,6 +44,7 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 // The phase activities are stubs in this scaffold; each data-side phase
 // sub-issue replaces its stub here.
 func RegisterData(w worker.Worker) {
+	w.RegisterActivity(newResolveDataActivities())
 	w.RegisterActivity(prepareActivity)
 	w.RegisterActivity(generatePAR2Activity)
 	w.RegisterActivity(verifyActivity)

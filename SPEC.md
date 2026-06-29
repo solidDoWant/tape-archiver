@@ -394,6 +394,15 @@ The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
 - **Sizing** — cheap `zfs logicalreferenced` feasibility pre-check; authoritative
   bin-pack on *measured* staged sizes; pipeline reordered to prepare → pack → PAR2 →
   verify so fill-to-capacity PAR2 is well-defined.
+- **Feasibility overhead factor** — the Resolve pre-check estimates an archive's on-tape
+  size as `logicalreferenced × overhead × (1 + PAR2 fraction)` and rejects any single
+  archive exceeding one LTO-6 tape's 2.5 TB native capacity. The overhead factor covers
+  `tar` headers/padding and `age` STREAM framing; `zstd` is assumed to yield no reduction
+  (incompressible worst case) so the estimate never runs low. It defaults to **1.05** (5%,
+  a generous margin for many-small-file datasets) and is tunable per run via the
+  `feasibilityOverhead` config field. The PAR2 fraction is the target percentage, or the
+  floor in fill-to-capacity mode. This is only the pre-check estimate; the authoritative
+  size is the measured staged size from Prepare.
 - **LTFS implementation** — the reference open-source **LinearTape-Open `ltfs`**
   (IBM-maintained, multi-vendor, Apache-2.0), pinned at **v2.4.8.4** and built from a Nix
   derivation (`nix/ltfs.nix`); the worker image and recovery disc ship the same version.
@@ -406,6 +415,5 @@ Remaining open / future work:
 
 - Tape barcode *format* convention (any project prefix/sequence is cosmetic; the
   canonical ID is whatever the library reads).
-- The exact `tar`/`zstd`/`age` overhead factor used in the feasibility pre-check.
 - Recovery-disc re-burn/refresh cadence as a documented maintenance task.
 

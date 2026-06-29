@@ -31,6 +31,7 @@ func registerActivities(w worker.Worker, role Role, env envvar.Config) {
 func registerControlActivities(w worker.Worker, env envvar.Config) {
 	backup.RegisterControl(w, backup.ControlConfig{
 		FailureWebhookURL: env.DiscordFailureWebhookURL,
+		K8sDatasetParent:  env.K8sDatasetParent,
 	})
 }
 

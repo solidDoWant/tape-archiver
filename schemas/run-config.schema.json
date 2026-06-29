@@ -25,6 +25,9 @@
         },
         "delivery": {
           "$ref": "#/$defs/Delivery"
+        },
+        "feasibilityOverhead": {
+          "type": "number"
         }
       },
       "additionalProperties": false,

@@ -28,6 +28,25 @@ make check-schema
 | `redundancy` | `Redundancy` | yes | PAR2 redundancy policy. |
 | `encryption` | `Encryption` | yes | age recipient public keys. |
 | `delivery` | `Delivery` | yes | Discord webhook for run artifact delivery. |
+| `feasibilityOverhead` | `number` | no | Multiplier (≥ 1) inflating each source's estimated size in the Resolve feasibility pre-check. Defaults to `1.05` when absent. |
+
+### feasibilityOverhead
+
+The Resolve phase runs a cheap pre-check that rejects any single archive too large
+to fit on one tape *before* any data is staged (SPEC.md §4.3 phase 1). It estimates an
+archive's on-tape size as:
+
+```
+estimate = zfs logicalreferenced × feasibilityOverhead × (1 + PAR2 fraction)
+```
+
+`feasibilityOverhead` covers the framing the pipeline adds on top of the raw data —
+`tar` headers/padding and `age` STREAM chunk overhead. `zstd` compression is assumed to
+give *no* size reduction (the incompressible worst case), so the estimate never runs
+low. The default of **1.05** (5%) is a deliberately generous margin; raise it for
+datasets of very many small files, where `tar` per-file overhead is a larger fraction of
+the total. This tunes only the pre-check — the authoritative size is the measured staged
+size produced by the Prepare phase, never this estimate.
 
 ---
 
@@ -149,6 +168,7 @@ alerting works even when config parsing fails.
 | `ROLE` | yes | Selects which task queue the `worker` binary polls and which activities it registers: `control` (Kubernetes-side: snapshot resolution, report/ISO building, Discord delivery) or `data` (storage-host-side: tar/age/PAR2/checksum/LTFS/changer activities). Matching is case-insensitive. An empty or unrecognized value causes the worker to exit non-zero at startup. |
 | `LOG_LEVEL` | no | Logging verbosity for the worker: `debug`, `info`, `warn` (or `warning`), or `error`. Case-insensitive; defaults to `info`, and an unrecognized value also falls back to `info`. |
 | `DISCORD_FAILURE_WEBHOOK_URL` | no | Discord webhook URL for run failure alerts. When absent, failure alerting is silently disabled. |
+| `TAPE_K8S_DATASET_PARENT` | no | democratic-csi's `datasetParentName` (e.g. `bulk-pool-01/k8s/democratic-csi/nfs/pvcs`), prepended to a relative CSI `snapshotHandle` to rebuild the absolute ZFS snapshot path during k8s resolution on the control worker. Only needed when a run names k8s sources; when absent, handles are treated as already absolute. |
 | `METRICS_ADDR` | no | TCP listen address for the Prometheus `/metrics` endpoint (e.g. `:9090`). The `worker` binary defaults this to `:9090`; set it to an empty value to disable the endpoint entirely — no HTTP server is started and no registry is created. |
 | `METRICS_SCRAPE_WAIT_TIMEOUT` | no | Go duration bounding the end-of-run wait for a final Prometheus scrape. Defaults to `60s`; set to `0s` to disable the wait. |
 | `TEMPORAL_ADDRESS` | yes | `host:port` of the Temporal frontend gRPC endpoint (e.g. `localhost:7233`). |

@@ -244,6 +244,17 @@ func TestConfigValidate(t *testing.T) {
 			wantErr:     require.Error,
 			errContains: "encryption.recipients",
 		},
+		{
+			name:    "feasibility overhead at the floor",
+			mutate:  func(c *Config) { c.FeasibilityOverhead = ptr(1.0) },
+			wantErr: require.NoError,
+		},
+		{
+			name:        "feasibility overhead below one",
+			mutate:      func(c *Config) { c.FeasibilityOverhead = ptr(0.99) },
+			wantErr:     require.Error,
+			errContains: "feasibilityOverhead",
+		},
 	}
 
 	for _, tt := range tests {
@@ -258,6 +269,16 @@ func TestConfigValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEffectiveFeasibilityOverhead(t *testing.T) {
+	t.Parallel()
+
+	unset := Config{}
+	assert.InDelta(t, DefaultFeasibilityOverhead, unset.EffectiveFeasibilityOverhead(), 1e-9)
+
+	set := Config{FeasibilityOverhead: ptr(1.2)}
+	assert.InDelta(t, 1.2, set.EffectiveFeasibilityOverhead(), 1e-9)
 }
 
 // findModuleRoot walks up from the test working directory to find go.mod.
