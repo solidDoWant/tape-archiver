@@ -110,6 +110,45 @@ func TestTarCancelled(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+// TestTarMembers verifies a multi-member tar places each member's contents under
+// its own subdirectory, preserving an empty member directory, so a snapshot group
+// archives with one subdirectory per member volume (SPEC §5).
+func TestTarMembers(t *testing.T) {
+	t.Parallel()
+
+	dirA := t.TempDir()
+	writeFile(t, filepath.Join(dirA, "data.txt"), []byte("volume a"))
+	writeFile(t, filepath.Join(dirA, "nested", "inner.bin"), []byte("nested a"))
+
+	dirB := t.TempDir()
+	writeFile(t, filepath.Join(dirB, "data.txt"), []byte("volume b"))
+
+	// An empty member must still produce its subdirectory entry.
+	dirEmpty := t.TempDir()
+
+	members := []archive.Member{
+		{Name: "pvc-a", Dir: dirA},
+		{Name: "pvc-b", Dir: dirB},
+		{Name: "pvc-empty", Dir: dirEmpty},
+	}
+
+	var buf bytes.Buffer
+
+	require.NoError(t, archive.TarMembers(t.Context(), &buf, members))
+
+	dest := t.TempDir()
+	extractTar(t, &buf, dest)
+
+	got := snapshot(t, dest)
+
+	assert.Equal(t, []byte("volume a"), got["pvc-a/data.txt"].content)
+	assert.Equal(t, []byte("nested a"), got["pvc-a/nested/inner.bin"].content)
+	assert.Equal(t, []byte("volume b"), got["pvc-b/data.txt"].content)
+
+	require.Contains(t, got, "pvc-empty", "an empty member must still produce its subdirectory")
+	assert.True(t, got["pvc-empty"].mode.IsDir())
+}
+
 // writeFile writes content to path, creating parent directories as needed.
 func writeFile(t *testing.T, path string, content []byte) {
 	t.Helper()

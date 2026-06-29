@@ -19,6 +19,17 @@ type ControlConfig struct {
 	K8sDatasetParent string
 }
 
+// DataConfig holds the data worker's settings that the backup workflow's
+// data-side registrations need. It is the seam through which cmd/worker passes
+// operational configuration (parsed from the environment) into the workflow
+// package, mirroring ControlConfig.
+type DataConfig struct {
+	// StagingDir is the directory the Prepare phase stages prepared archives
+	// into (TAPE_STAGING_DIR), a subdirectory of an existing dataset on the
+	// storage host (SPEC §4.1). Required; the Prepare activity fails when empty.
+	StagingDir string
+}
+
 // RegisterControl registers everything the control worker hosts: the Backup
 // workflow under WorkflowType (so clients can start it by the contract name),
 // the operational failure-alert activity wired with the configured webhook URL,
@@ -39,13 +50,14 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 }
 
 // RegisterData registers the data worker's bulk-data phase activities
-// (SPEC §4.1). It is called from cmd/worker for the data role.
+// (SPEC §4.1), wired with the data worker's operational configuration. It is
+// called from cmd/worker for the data role.
 //
-// The phase activities are stubs in this scaffold; each data-side phase
-// sub-issue replaces its stub here.
-func RegisterData(w worker.Worker) {
+// The remaining phase activities are stubs in this scaffold; each data-side
+// phase sub-issue replaces its stub here.
+func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newResolveDataActivities())
-	w.RegisterActivity(prepareActivity)
+	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
 	w.RegisterActivity(generatePAR2Activity)
 	w.RegisterActivity(verifyActivity)
 	w.RegisterActivity(loadActivity)

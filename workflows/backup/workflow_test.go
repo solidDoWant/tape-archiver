@@ -48,6 +48,10 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 
 	env.RegisterActivity(&ResolveControlActivities{})
 	env.RegisterActivity(&ResolveDataActivities{})
+	// The Prepare phase is run-orchestrated like Resolve; register its activity
+	// with a real staging root so a run with no sources stages nothing and the
+	// activity does not reject an empty staging directory.
+	env.RegisterActivity(newPrepareActivities(t.TempDir()))
 	env.RegisterActivity(&FailureActivities{})
 
 	return env
@@ -125,14 +129,20 @@ func activityFor(t *testing.T, name string) any {
 	return nil
 }
 
-// failPhase mocks the named phase to fail. The Resolve phase fails through its
-// control activity (which returns a slice and an error); every other phase is a
-// single stub activity returning just an error.
+// failPhase mocks the named phase to fail. The run-orchestrated phases (Resolve,
+// Prepare) fail through their activities, which return a slice and an error;
+// every other phase is a single stub activity returning just an error.
 func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
 	t.Helper()
 
-	if name == PhaseResolve {
+	switch name {
+	case PhaseResolve:
 		env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything).
+			Return(nil, errors.New("boom"))
+
+		return
+	case PhasePrepare:
+		env.OnActivity((&PrepareActivities{}).PrepareArchives, mock.Anything, mock.Anything).
 			Return(nil, errors.New("boom"))
 
 		return

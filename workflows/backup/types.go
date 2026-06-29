@@ -50,9 +50,31 @@ type ResolvedSnapshot struct {
 
 // StagedArchive is a prepared archive staged to disk by the Prepare phase
 // (SPEC §4.3 phase 2): tar → optional zstd → age → fixed-size slices, with the
-// exact on-disk size measured and a SHA-256 checksum per slice. Later sub-issues
-// add the measured size and per-slice checksum fields.
-type StagedArchive struct{}
+// exact on-disk size measured and a SHA-256 checksum per slice. Its SizeBytes is
+// the authoritative size the Pack phase bin-packs by — the measured staged size,
+// not the Resolve estimate (SPEC §4.3 phase 3).
+type StagedArchive struct {
+	// SourceIndex ties the staged archive back to its originating Source in
+	// Config.Sources, matching the ResolvedArchive it was prepared from.
+	SourceIndex int
+	// Slices are the staged slice files in order; their concatenation
+	// reconstructs the age stream exactly. Each carries its own SHA-256 and size.
+	Slices []StagedSlice
+	// SizeBytes is the measured total on-disk size across all slices — the
+	// authoritative size for the Pack phase (SPEC §4.3 phases 2–3).
+	SizeBytes int64
+}
+
+// StagedSlice is one fixed-size slice file produced by the Prepare phase's split
+// stage, with the SHA-256 the Verify and Write phases re-check it against.
+type StagedSlice struct {
+	// Path is the absolute path of the staged slice file on disk.
+	Path string
+	// SHA256 is the lowercase hex SHA-256 digest of the slice file's contents.
+	SHA256 string
+	// SizeBytes is the slice file's size on disk in bytes.
+	SizeBytes int64
+}
 
 // TapePlan is the assignment of staged archives to tapes produced by the Pack
 // phase (SPEC §4.3 phase 3): a bin-packing of archives onto tapes by measured
@@ -98,4 +120,9 @@ type runState struct {
 	// phase 1): every config Source expanded to its ZFS snapshot(s), verified and
 	// feasibility-checked. The Prepare phase consumes it.
 	resolved []ResolvedArchive
+	// staged is the prepared work list the Prepare phase produces (SPEC §4.3
+	// phase 2): each resolved archive tarred, optionally compressed, encrypted,
+	// sliced, and checksummed on disk, with its measured size. The Pack phase
+	// consumes it.
+	staged []StagedArchive
 }
