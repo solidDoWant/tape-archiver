@@ -44,7 +44,7 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 	w.RegisterActivity(&FailureActivities{WebhookURL: cfg.FailureWebhookURL})
 
 	w.RegisterActivity(newResolveControlActivities(cfg.K8sDatasetParent))
-	w.RegisterActivity(packActivity)
+	w.RegisterActivity(newPackActivities())
 	w.RegisterActivity(reportActivity)
 	w.RegisterActivity(deliverActivity)
 }
@@ -58,7 +58,7 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newResolveDataActivities())
 	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
-	w.RegisterActivity(generatePAR2Activity)
+	w.RegisterActivity(newGeneratePAR2Activities())
 	w.RegisterActivity(verifyActivity)
 	w.RegisterActivity(loadActivity)
 	w.RegisterActivity(writeActivity)

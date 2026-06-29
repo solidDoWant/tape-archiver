@@ -60,6 +60,11 @@ func TestRegisterControl(t *testing.T) {
 	// control worker, SPEC §16).
 	assert.True(t, hasActivity[*ResolveControlActivities](rw.activities),
 		"the control worker must register the Resolve control activity")
+
+	// The Pack activity is registered: bin-packing is pure planning and runs on
+	// the control worker (SPEC §4.1, §4.3 phase 3).
+	assert.True(t, hasActivity[*PackActivities](rw.activities),
+		"the control worker must register the Pack activity")
 }
 
 func TestRegisterData(t *testing.T) {
@@ -70,14 +75,16 @@ func TestRegisterData(t *testing.T) {
 	RegisterData(rw, DataConfig{StagingDir: "/mnt/bulk-pool-01/archive/.tape-staging"})
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
-	// activities: the Resolve data activity, the Prepare activity, plus the five
-	// remaining phase stubs.
+	// activities: the Resolve data activity, the Prepare activity, the Generate
+	// PAR2 activity, plus the four remaining phase stubs.
 	assert.Empty(t, rw.workflows)
 	assert.Len(t, rw.activities, 7)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
 		"the data worker must register the Resolve data activity")
 	assert.True(t, hasActivity[*PrepareActivities](rw.activities),
 		"the data worker must register the Prepare activity")
+	assert.True(t, hasActivity[*GeneratePAR2Activities](rw.activities),
+		"the data worker must register the Generate PAR2 activity")
 }
 
 // hasActivity reports whether any registered activity is of type T.

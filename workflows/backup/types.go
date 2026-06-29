@@ -79,13 +79,91 @@ type StagedSlice struct {
 // TapePlan is the assignment of staged archives to tapes produced by the Pack
 // phase (SPEC §4.3 phase 3): a bin-packing of archives onto tapes by measured
 // size, within capacity, replicated across the configured number of copies.
-// Later sub-issues add the per-tape assignments and capacity accounting.
-type TapePlan struct{}
+type TapePlan struct {
+	// Copies is the number of identical physical copies each logical tape is
+	// written to — the configured copy count, one per drive for parallel
+	// writing (SPEC §4.3 phase 3). The copies are byte-identical, so the staged
+	// tree (slices + PAR2) is planned and generated once per logical tape and
+	// written to all copies; PAR2 sizing therefore depends on the logical plan,
+	// not the copy count.
+	Copies int
+	// Tapes are the logical tapes the archives are bin-packed onto, in plan
+	// order. Each is materialized Copies times at write time.
+	Tapes []PlannedTape
+}
+
+// PlannedTape is one logical tape in the Pack plan: the staged archives
+// bin-packed onto it and the capacity accounting that keeps its contents within
+// a single tape.
+type PlannedTape struct {
+	// Archives are the staged archives assigned to this tape, in source order.
+	// Each references its StagedArchive by SourceIndex.
+	Archives []PlannedArchive
+	// UsableBytes is the tape's native capacity less the reserved LTFS
+	// filesystem overhead — the ceiling the archives' data plus PAR2 must fit
+	// within (SPEC §4.3 phase 3). The fill-to-capacity PAR2 phase grows recovery
+	// sets into the slack between PlannedBytes and UsableBytes.
+	UsableBytes int64
+}
+
+// PlannedBytes is the tape's total reserved footprint: every assigned archive's
+// data plus its reserved PAR2. The Pack invariant is PlannedBytes ≤ UsableBytes.
+func (t PlannedTape) PlannedBytes() int64 {
+	var total int64
+	for _, archive := range t.Archives {
+		total += archive.Footprint()
+	}
+
+	return total
+}
+
+// DataBytes is the total measured archive data on the tape, excluding PAR2 — the
+// base the fill-to-capacity PAR2 percentage is computed against.
+func (t PlannedTape) DataBytes() int64 {
+	var total int64
+	for _, archive := range t.Archives {
+		total += archive.DataBytes
+	}
+
+	return total
+}
+
+// PlannedArchive is one staged archive's placement on a tape: its measured data
+// size and the PAR2 recovery bytes reserved for it during packing.
+type PlannedArchive struct {
+	// SourceIndex ties the placement back to its StagedArchive (and the
+	// originating config Source).
+	SourceIndex int
+	// DataBytes is the archive's measured staged size (StagedArchive.SizeBytes).
+	DataBytes int64
+	// PAR2ReservedBytes is the PAR2 footprint reserved for the archive during
+	// packing — the minimum recovery set size at the fixed target percentage or
+	// the fill-to-capacity floor. The Generate PAR2 phase may grow the actual set
+	// up to the tape's remaining capacity in fill mode (SPEC §4.3 phases 3–4).
+	PAR2ReservedBytes int64
+}
+
+// Footprint is the archive's total reserved size on a tape: its measured data
+// plus its reserved PAR2.
+func (p PlannedArchive) Footprint() int64 {
+	return p.DataBytes + p.PAR2ReservedBytes
+}
 
 // PAR2Set is the per-archive PAR2 recovery set generated and staged by the
-// Generate PAR2 phase (SPEC §4.3 phase 4). Later sub-issues add the recovery
-// file set, redundancy percentage, and block size.
-type PAR2Set struct{}
+// Generate PAR2 phase (SPEC §4.3 phase 4): the recovery files written alongside
+// the archive's slices, each checksummed, at the chosen redundancy percentage.
+type PAR2Set struct {
+	// SourceIndex ties the recovery set back to its StagedArchive.
+	SourceIndex int
+	// RedundancyPercent is the PAR2 redundancy percentage the set was generated
+	// at: the fixed target, or the per-tape fill-to-capacity percentage.
+	RedundancyPercent int
+	// Files are the staged PAR2 recovery files (the index plus its volume files),
+	// each with its SHA-256 and on-disk size, in sorted name order. They reuse
+	// StagedSlice — a staged, checksummed file on disk — since that is exactly
+	// their shape.
+	Files []StagedSlice
+}
 
 // VerifiedPlan is a TapePlan whose complete staged tree has passed checksum and
 // capacity verification in the Verify phase (SPEC §4.3 phase 5). A run cannot
@@ -125,4 +203,12 @@ type runState struct {
 	// sliced, and checksummed on disk, with its measured size. The Pack phase
 	// consumes it.
 	staged []StagedArchive
+	// plan is the bin-packing the Pack phase produces (SPEC §4.3 phase 3): the
+	// staged archives assigned to logical tapes within capacity, replicated
+	// across the configured copies. The Generate PAR2 and later phases consume it.
+	plan TapePlan
+	// par2 is the per-archive PAR2 recovery sets the Generate PAR2 phase produces
+	// (SPEC §4.3 phase 4), staged and checksummed alongside the slices. The
+	// Verify and Write phases consume it.
+	par2 []PAR2Set
 }
