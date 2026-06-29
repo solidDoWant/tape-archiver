@@ -61,6 +61,9 @@ func TestRunRegistersWorkerOnTaskQueue(t *testing.T) {
 			t.Setenv("ROLE", string(test.role))
 			t.Setenv("METRICS_ADDR", "")
 
+			// interruptCh stands in for worker.InterruptCh: closing it drives
+			// the same run-phase drain a SIGTERM would, without signalling the
+			// test process.
 			interruptCh := make(chan interface{})
 			runErr := make(chan error, 1)
 

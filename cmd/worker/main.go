@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"go.temporal.io/sdk/worker"
 
@@ -24,9 +26,15 @@ import (
 const defaultMetricsAddr = ":9090"
 
 func main() {
-	// main wires the OS interrupt channel to run, which blocks until SIGTERM/
-	// SIGINT and then drains the worker gracefully.
-	if err := run(context.Background(), worker.InterruptCh()); err != nil {
+	// ctx is cancelled on SIGINT/SIGTERM so the startup phase (e.g. a hanging
+	// Temporal dial) honors shutdown signals. worker.InterruptCh, watching the
+	// same signals, drives the run phase: the SDK drains the worker when it
+	// yields. Both stem from one OS signal, so a single SIGTERM stops the
+	// process whether it arrives during startup or steady state.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, worker.InterruptCh()); err != nil {
 		// logging.Setup may not have run yet (e.g. config parse failure), so
 		// write the fatal error directly to stderr rather than via slog.
 		fmt.Fprintf(os.Stderr, "worker: %v\n", err)
@@ -35,9 +43,10 @@ func main() {
 }
 
 // run parses configuration, sets up logging, metrics, and the Temporal client,
-// then starts the role's worker and blocks until interruptCh receives a value,
-// at which point the worker drains in-flight tasks before returning. The
-// interrupt channel is injected so tests can drive a controlled shutdown.
+// then starts the role's worker and blocks until interruptCh yields, at which
+// point the worker drains in-flight tasks before returning. Cancelling ctx
+// aborts startup; interruptCh is injected so tests drive the run-phase drain
+// without sending a real OS signal.
 func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	cfg, err := parseConfig()
 	if err != nil {
@@ -58,6 +67,12 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	// "SDK metrics off".
 	temporalClient, temporalShutdown, err := temporalclient.New(ctx, metricsProvider.PrometheusRegisterer())
 	if err != nil {
+		// A shutdown signal during the connect/health-check window cancels ctx
+		// and surfaces here; that is an orderly stop, not a startup failure.
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		return fmt.Errorf("connect to Temporal: %w", err)
 	}
 	defer temporalShutdown()
