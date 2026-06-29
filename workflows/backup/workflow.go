@@ -58,7 +58,7 @@ func backupPhases() []phase {
 		{PhasePrepare, DataTaskQueue, nil, preparePhase},
 		{PhasePack, TaskQueue, nil, packPhase},
 		{PhaseGeneratePAR2, DataTaskQueue, nil, generatePAR2Phase},
-		{PhaseVerify, DataTaskQueue, verifyActivity, nil},
+		{PhaseVerify, DataTaskQueue, nil, verifyPhase},
 		{PhaseLoad, DataTaskQueue, loadActivity, nil},
 		{PhaseWrite, DataTaskQueue, writeActivity, nil},
 		{PhaseEject, DataTaskQueue, ejectActivity, nil},
@@ -144,8 +144,8 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // The Generate PAR2 phase (SPEC §4.3 phase 4) is implemented in par2.go; it
 // orchestrates the data-side parity activity rather than a single stub.
 
-// verifyActivity stubs the Verify phase (SPEC §4.3 phase 5).
-func verifyActivity(_ context.Context) error { return nil }
+// The Verify phase (SPEC §4.3 phase 5) is implemented in verify.go; it
+// orchestrates the data-side re-read/checksum activity rather than a single stub.
 
 // loadActivity stubs the Load phase (SPEC §4.3 phase 6).
 func loadActivity(_ context.Context) error { return nil }

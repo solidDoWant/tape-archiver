@@ -59,7 +59,7 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newResolveDataActivities())
 	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
 	w.RegisterActivity(newGeneratePAR2Activities())
-	w.RegisterActivity(verifyActivity)
+	w.RegisterActivity(newVerifyActivities())
 	w.RegisterActivity(loadActivity)
 	w.RegisterActivity(writeActivity)
 	w.RegisterActivity(ejectActivity)
