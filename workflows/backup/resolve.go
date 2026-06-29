@@ -10,7 +10,6 @@ import (
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/k8ssnap"
-	"github.com/solidDoWant/tape-archiver/pkg/tape"
 	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 )
 
@@ -184,18 +183,14 @@ type ResolveDataInput struct {
 // ResolveDataActivities hosts the data-side Resolve activity, which runs where the
 // ZFS pool is reachable.
 type ResolveDataActivities struct {
-	pool              poolInspector
-	tapeCapacityBytes int64
+	pool poolInspector
 }
 
 // newResolveDataActivities returns the production data-side Resolve activity,
-// reading the pool through the zfs CLI and checking feasibility against one
-// LTO-6 tape's native capacity.
+// reading the pool through the zfs CLI. The tape capacity it checks feasibility
+// against comes from the run config, per source.
 func newResolveDataActivities() *ResolveDataActivities {
-	return &ResolveDataActivities{
-		pool:              zfsPool{},
-		tapeCapacityBytes: tape.LTO6NativeCapacityBytes,
-	}
+	return &ResolveDataActivities{pool: zfsPool{}}
 }
 
 // ResolveAndCheck completes the work list on the data side (SPEC §4.3 phase 1):
@@ -209,6 +204,7 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 	cfg := input.Config
 	overhead := cfg.EffectiveFeasibilityOverhead()
 	par2 := par2Fraction(cfg.Redundancy)
+	capacity := cfg.Library.TapeCapacityBytes
 
 	k8sByIndex := make(map[int]ResolvedArchive, len(input.K8sArchives))
 	for _, archive := range input.K8sArchives {
@@ -230,10 +226,10 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 
 		archive.EstimatedBytes = estimate
 
-		if estimate > a.tapeCapacityBytes {
+		if estimate > capacity {
 			return nil, fmt.Errorf(
 				"sources[%d] estimated size %d bytes exceeds one tape's capacity %d bytes",
-				index, estimate, a.tapeCapacityBytes,
+				index, estimate, capacity,
 			)
 		}
 

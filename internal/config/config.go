@@ -62,6 +62,12 @@ type Library struct {
 	Changer    string   `json:"changer"`
 	Drives     []string `json:"drives"`
 	BlankSlots []int    `json:"blankSlots"`
+	// TapeCapacityBytes is the native (uncompressed) capacity of one tape, in
+	// bytes (e.g. 2_500_000_000_000 for LTO-6). It is the single-tape ceiling the
+	// Resolve feasibility pre-check tests an archive's estimate against and the
+	// capacity the Pack phase bin-packs into; runs plan against native capacity
+	// with LTO hardware compression disabled (SPEC §4.3).
+	TapeCapacityBytes int64 `json:"tapeCapacityBytes"`
 }
 
 // Redundancy specifies the PAR2 redundancy policy.

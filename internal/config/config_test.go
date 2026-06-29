@@ -21,9 +21,10 @@ func validConfig() Config {
 		},
 		Copies: 2,
 		Library: Library{
-			Changer:    "/dev/sch0",
-			Drives:     []string{"/dev/nst0", "/dev/nst1"},
-			BlankSlots: []int{1, 2},
+			Changer:           "/dev/sch0",
+			Drives:            []string{"/dev/nst0", "/dev/nst1"},
+			BlankSlots:        []int{1, 2},
+			TapeCapacityBytes: 2_500_000_000_000,
 		},
 		Redundancy: Redundancy{
 			TargetPercentage: ptr(10.0),
@@ -200,6 +201,12 @@ func TestConfigValidate(t *testing.T) {
 			mutate:      func(c *Config) { c.Library.BlankSlots = nil },
 			wantErr:     require.Error,
 			errContains: "library.blankSlots",
+		},
+		{
+			name:        "library zero tape capacity",
+			mutate:      func(c *Config) { c.Library.TapeCapacityBytes = 0 },
+			wantErr:     require.Error,
+			errContains: "library.tapeCapacityBytes",
 		},
 		{
 			name:        "redundancy neither mode",

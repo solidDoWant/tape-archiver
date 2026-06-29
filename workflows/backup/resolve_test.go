@@ -11,8 +11,11 @@ import (
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/k8ssnap"
-	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
+
+// testTapeCapacity is a roomy tape capacity (2.5 TB native) for the size cases
+// that should comfortably fit; capacity-limit cases set their own small value.
+const testTapeCapacity = 2_500_000_000_000
 
 // fakeResolver is a snapshotResolver returning canned results keyed by the ref it
 // is called with, for testing the control activity without a cluster.
@@ -226,7 +229,7 @@ func TestResolveAndCheck(t *testing.T) {
 				sizes:      map[string]int64{"pool/raw@snap": 1000},
 			},
 			redundancy: fixedRedundancy,
-			capacity:   tape.LTO6NativeCapacityBytes,
+			capacity:   testTapeCapacity,
 			// 1000 * 1.05 * 1.10 = 1155.
 			want: []ResolvedArchive{{
 				SourceIndex:    0,
@@ -240,7 +243,7 @@ func TestResolveAndCheck(t *testing.T) {
 			sources:    []config.Source{zfsSource("pool/missing@snap")},
 			pool:       fakePool{properties: map[string]map[string]string{}},
 			redundancy: fixedRedundancy,
-			capacity:   tape.LTO6NativeCapacityBytes,
+			capacity:   testTapeCapacity,
 			assertErr:  require.Error,
 		},
 		{
@@ -252,7 +255,7 @@ func TestResolveAndCheck(t *testing.T) {
 				sizes:      map[string]int64{"pool/pvc-1@snapshot-1": 2000},
 			},
 			redundancy: fixedRedundancy,
-			capacity:   tape.LTO6NativeCapacityBytes,
+			capacity:   testTapeCapacity,
 			// 2000 * 1.05 * 1.10 = 2310.
 			want: []ResolvedArchive{{
 				SourceIndex:    0,
@@ -270,7 +273,7 @@ func TestResolveAndCheck(t *testing.T) {
 				sizes:      map[string]int64{"pool/pvc-1@snapshot-1": 2000},
 			},
 			redundancy: fixedRedundancy,
-			capacity:   tape.LTO6NativeCapacityBytes,
+			capacity:   testTapeCapacity,
 			assertErr:  require.Error,
 		},
 		{
@@ -293,7 +296,7 @@ func TestResolveAndCheck(t *testing.T) {
 				sizes:      map[string]int64{"pool/raw@snap": 1000},
 			},
 			redundancy: config.Redundancy{FillToCapacity: &config.FillConfig{Floor: 20}},
-			capacity:   tape.LTO6NativeCapacityBytes,
+			capacity:   testTapeCapacity,
 			// 1000 * 1.05 * 1.20 = 1260.
 			want: []ResolvedArchive{{
 				SourceIndex:    0,
@@ -318,7 +321,7 @@ func TestResolveAndCheck(t *testing.T) {
 				sizes:      map[string]int64{"pool/pvc-a@snap": 1000, "pool/pvc-b@snap": 500},
 			},
 			redundancy: fixedRedundancy,
-			capacity:   tape.LTO6NativeCapacityBytes,
+			capacity:   testTapeCapacity,
 			// (1000 + 500) * 1.05 * 1.10 = 1732.5 -> 1733.
 			want: []ResolvedArchive{{
 				SourceIndex: 0,
@@ -338,7 +341,7 @@ func TestResolveAndCheck(t *testing.T) {
 				sizeErr:    errors.New("zfs get failed"),
 			},
 			redundancy: fixedRedundancy,
-			capacity:   tape.LTO6NativeCapacityBytes,
+			capacity:   testTapeCapacity,
 			assertErr:  require.Error,
 		},
 	}
@@ -351,8 +354,13 @@ func TestResolveAndCheck(t *testing.T) {
 				test.assertErr = require.NoError
 			}
 
-			activities := &ResolveDataActivities{pool: test.pool, tapeCapacityBytes: test.capacity}
-			cfg := config.Config{Sources: test.sources, Redundancy: test.redundancy, FeasibilityOverhead: test.overhead}
+			activities := &ResolveDataActivities{pool: test.pool}
+			cfg := config.Config{
+				Sources:             test.sources,
+				Redundancy:          test.redundancy,
+				FeasibilityOverhead: test.overhead,
+				Library:             config.Library{TapeCapacityBytes: test.capacity},
+			}
 
 			got, err := activities.ResolveAndCheck(t.Context(), ResolveDataInput{Config: cfg, K8sArchives: test.k8sArchives})
 			test.assertErr(t, err)

@@ -3,14 +3,6 @@
 // hardware and real LTO drives.
 package tape
 
-// LTO6NativeCapacityBytes is the native (uncompressed) capacity of one LTO-6
-// tape, 2.5 TB (SPEC.md §3). Runs plan against native capacity with LTO hardware
-// compression disabled — age output is incompressible, so drive compression only
-// adds variability (SPEC.md §4.3). It is the single-tape ceiling the Resolve
-// feasibility pre-check tests an archive's estimate against, and the capacity the
-// Pack phase bin-packs into.
-const LTO6NativeCapacityBytes int64 = 2_500_000_000_000
-
 // Barcode is the canonical tape identity — the volume tag read by the library
 // changer (SPEC.md §6).
 type Barcode string

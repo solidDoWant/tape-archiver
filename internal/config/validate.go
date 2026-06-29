@@ -101,6 +101,10 @@ func (l Library) validate() error {
 		return fmt.Errorf("library.blankSlots: at least one blank slot is required")
 	}
 
+	if l.TapeCapacityBytes <= 0 {
+		return fmt.Errorf("library.tapeCapacityBytes: must be > 0, got %d", l.TapeCapacityBytes)
+	}
+
 	return nil
 }
 

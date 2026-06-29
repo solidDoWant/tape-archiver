@@ -122,6 +122,9 @@
             "type": "integer"
           },
           "type": "array"
+        },
+        "tapeCapacityBytes": {
+          "type": "integer"
         }
       },
       "additionalProperties": false,
@@ -129,7 +132,8 @@
       "required": [
         "changer",
         "drives",
-        "blankSlots"
+        "blankSlots",
+        "tapeCapacityBytes"
       ]
     },
     "Redundancy": {

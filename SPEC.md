@@ -396,7 +396,8 @@ The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
   verify so fill-to-capacity PAR2 is well-defined.
 - **Feasibility overhead factor** — the Resolve pre-check estimates an archive's on-tape
   size as `logicalreferenced × overhead × (1 + PAR2 fraction)` and rejects any single
-  archive exceeding one LTO-6 tape's 2.5 TB native capacity. The overhead factor covers
+  archive exceeding the configured tape capacity (`library.tapeCapacityBytes`, e.g. an
+  LTO-6 tape's 2.5 TB native). The overhead factor covers
   `tar` headers/padding and `age` STREAM framing; `zstd` is assumed to yield no reduction
   (incompressible worst case) so the estimate never runs low. It defaults to **1.05** (5%,
   a generous margin for many-small-file datasets) and is tunable per run via the
