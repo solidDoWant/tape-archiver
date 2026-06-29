@@ -21,6 +21,8 @@ package report
 import (
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-pdf/fpdf"
@@ -45,7 +47,8 @@ type Manifest struct {
 	// AgeIdentity is the age private identity (AGE-SECRET-KEY-PQ-1…) included
 	// for key escrow (SPEC §7). See the package doc: this is deliberate.
 	AgeIdentity string
-	// RecoveryProcedure is the human-readable, step-by-step recovery text.
+	// RecoveryProcedure is the human-readable, step-by-step recovery text. Lines
+	// are separated by newlines and rendered as individual steps.
 	RecoveryProcedure string
 }
 
@@ -106,121 +109,292 @@ type BuildParams struct {
 
 // page layout constants (A4, millimetres).
 const (
-	leftMargin   = 15.0
-	topMargin    = 15.0
-	rightMargin  = 15.0
-	contentWidth = 210.0 - leftMargin - rightMargin
+	marginX     = 16.0
+	marginY     = 16.0
+	contentW    = 210.0 - 2*marginX // usable width
+	labelColW   = 46.0              // key column width in key/value rows
+	footerInset = 12.0
 
-	fontFamily = "Helvetica"
+	fontBody = "Helvetica"
+	fontMono = "Courier" // checksums, identities, device nodes
+)
+
+// palette — muted, printer-friendly tones with strong contrast for lamination.
+var (
+	colInk    = [3]int{33, 37, 41}    // near-black body text
+	colMuted  = [3]int{108, 117, 125} // labels, captions
+	colRule   = [3]int{206, 212, 218} // hairline table rules
+	colBar    = [3]int{233, 236, 239} // section header / table header fill
+	colKeyBG  = [3]int{255, 243, 205} // key-escrow callout fill (amber)
+	colKeyBdr = [3]int{255, 193, 7}   // key-escrow callout border
 )
 
 // Build renders m into a PDF report and writes it to w. It returns a non-nil
 // error if the PDF cannot be generated or written. The output contains every
 // SPEC §9 field, including the age private identity (see the package doc).
 func Build(m Manifest, w io.Writer) error {
-	pdf := fpdf.New("P", "mm", "A4", "")
-	pdf.SetMargins(leftMargin, topMargin, rightMargin)
-	pdf.SetAutoPageBreak(true, topMargin)
-	pdf.AddPage()
+	d := newDoc()
 
-	title(pdf, "tape-archiver run report")
+	d.title()
+	d.runSection(m)
+	d.contentsSection(m)
+	d.tapesSection(m)
+	d.buildSection(m)
+	d.identitySection(m)
+	d.recoverySection(m)
 
-	section(pdf, "Run")
-	field(pdf, "Run ID", m.RunID)
-	field(pdf, "Date", m.Date.Format(time.RFC3339))
-
-	section(pdf, "Contents manifest")
-
-	for _, archive := range m.Archives {
-		archiveBlock(pdf, archive)
-	}
-
-	section(pdf, "Tapes")
-
-	for _, tape := range m.Tapes {
-		field(pdf, "Barcode", tape.Barcode)
-
-		for _, content := range tape.Contents {
-			bullet(pdf, content)
-		}
-	}
-
-	section(pdf, "Build parameters")
-	field(pdf, "Tool version", m.Build.ToolVersion)
-	field(pdf, "age version", m.Build.AgeVersion)
-	field(pdf, "par2 version", m.Build.Par2Version)
-	field(pdf, "ltfs version", m.Build.LTFSVersion)
-	field(pdf, "Slice size", fmt.Sprintf("%d bytes", m.Build.SliceSize))
-	field(pdf, "PAR2 redundancy", m.Build.PAR2Redundancy)
-	field(pdf, "Drive identifier", m.Build.DriveIdentifier)
-	field(pdf, "Library identifier", m.Build.LibraryIdentifier)
-
-	// The age private identity is included deliberately for key escrow
-	// (SPEC §7). See the package doc — this is not a leak.
-	section(pdf, "age private identity (key escrow)")
-	body(pdf, m.AgeIdentity)
-
-	section(pdf, "Recovery procedure")
-	body(pdf, m.RecoveryProcedure)
-
-	if err := pdf.Output(w); err != nil {
+	if err := d.pdf.Output(w); err != nil {
 		return fmt.Errorf("report: writing PDF: %w", err)
 	}
 
 	return nil
 }
 
-// title renders the report's top-level heading.
-func title(pdf *fpdf.Fpdf, text string) {
-	pdf.SetFont(fontFamily, "B", 18)
-	pdf.MultiCell(contentWidth, 9, text, "", "L", false)
-	pdf.Ln(2)
+// doc wraps the fpdf canvas and the cp1252 unicode translator that lets the core
+// fonts render characters such as the em dash, bullet, and section sign.
+type doc struct {
+	pdf *fpdf.Fpdf
+	tr  func(string) string
 }
 
-// section renders a section heading.
-func section(pdf *fpdf.Fpdf, text string) {
-	pdf.Ln(3)
-	pdf.SetFont(fontFamily, "B", 13)
-	pdf.MultiCell(contentWidth, 7, text, "", "L", false)
+// newDoc constructs the canvas, installs the page footer, and opens the first
+// page.
+func newDoc() *doc {
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.SetMargins(marginX, marginY, marginX)
+	pdf.SetAutoPageBreak(true, marginY)
+	pdf.AliasNbPages("")
+
+	d := &doc{pdf: pdf, tr: pdf.UnicodeTranslatorFromDescriptor("")}
+	pdf.SetFooterFunc(d.footer)
+	pdf.AddPage()
+
+	return d
 }
 
-// field renders a "label: value" line. The value wraps across lines if needed.
-func field(pdf *fpdf.Fpdf, label, value string) {
-	pdf.SetFont(fontFamily, "B", 10)
-	pdf.MultiCell(contentWidth, 5, label+":", "", "L", false)
-	pdf.SetFont(fontFamily, "", 10)
-	pdf.MultiCell(contentWidth, 5, value, "", "L", false)
+// footer prints a centered "Page X of N" line on every page.
+func (d *doc) footer() {
+	d.pdf.SetY(-footerInset)
+	d.pdf.SetFont(fontBody, "I", 8)
+	d.text(colMuted)
+	d.pdf.CellFormat(0, 6, d.tr(fmt.Sprintf("Page %d of {nb}", d.pdf.PageNo())), "", 0, "C", false, 0, "")
 }
 
-// archiveBlock renders one archive and its files.
-func archiveBlock(pdf *fpdf.Fpdf, archive Archive) {
-	pdf.Ln(1)
-	pdf.SetFont(fontFamily, "B", 11)
-	pdf.MultiCell(contentWidth, 6, "Archive: "+archive.Name, "", "L", false)
+// title renders the report heading, subtitle, and a separating rule.
+func (d *doc) title() {
+	d.pdf.SetFont(fontBody, "B", 20)
+	d.text(colInk)
+	d.pdf.MultiCell(contentW, 9, d.tr("Tape Archiver — Run Report"), "", "L", false)
 
-	field(pdf, "Member volumes", joinOrNone(archive.MemberVolumes))
-	field(pdf, "Source snapshots", joinOrNone(archive.SourceSnapshots))
+	d.pdf.SetFont(fontBody, "I", 9.5)
+	d.text(colMuted)
+	d.pdf.MultiCell(contentW, 5, d.tr("Durable offline index — print, laminate, and store with the physical tapes."), "", "L", false)
 
-	pdf.SetFont(fontFamily, "B", 10)
-	pdf.MultiCell(contentWidth, 5, "Files:", "", "L", false)
+	d.pdf.Ln(2.5)
+	d.draw(colInk)
+	d.pdf.SetLineWidth(0.4)
+	y := d.pdf.GetY()
+	d.pdf.Line(marginX, y, marginX+contentW, y)
+}
 
-	for _, file := range archive.Files {
-		bullet(pdf, fmt.Sprintf("%s — %d bytes — sha256:%s", file.Name, file.Size, file.SHA256))
+// section renders a full-width filled heading bar.
+func (d *doc) section(title string) {
+	d.pdf.Ln(5)
+	d.fill(colBar)
+	d.text(colInk)
+	d.pdf.SetFont(fontBody, "B", 12)
+	d.pdf.CellFormat(contentW, 8, d.tr("  "+title), "", 1, "L", true, 0, "")
+	d.pdf.Ln(2)
+}
+
+// kv renders a "label / value" row, wrapping the value as needed and keeping the
+// label top-aligned. When mono is true the value uses the monospace font (for
+// identifiers, device nodes, and other fixed-width data).
+func (d *doc) kv(label, value string, mono bool) {
+	x, y := d.pdf.GetX(), d.pdf.GetY()
+
+	d.pdf.SetFont(fontBody, "B", 10)
+	d.text(colMuted)
+	d.pdf.MultiCell(labelColW, 5.5, d.tr(label), "", "L", false)
+	labelEndY := d.pdf.GetY()
+
+	d.pdf.SetXY(x+labelColW, y)
+
+	if mono {
+		d.pdf.SetFont(fontMono, "", 9.5)
+	} else {
+		d.pdf.SetFont(fontBody, "", 10)
+	}
+
+	d.text(colInk)
+	d.pdf.MultiCell(contentW-labelColW, 5.5, d.tr(value), "", "L", false)
+
+	if d.pdf.GetY() < labelEndY {
+		d.pdf.SetY(labelEndY)
+	}
+
+	d.pdf.SetX(x)
+}
+
+// runSection renders the run id and date.
+func (d *doc) runSection(m Manifest) {
+	d.section("Run")
+	d.kv("Run ID", m.RunID, true)
+	d.kv("Date", m.Date.Format(time.RFC3339), false)
+}
+
+// contentsSection renders the contents manifest: one block per archive.
+func (d *doc) contentsSection(m Manifest) {
+	d.section("Contents manifest")
+
+	for i, archive := range m.Archives {
+		if i > 0 {
+			d.pdf.Ln(3)
+		}
+
+		d.archive(archive)
 	}
 }
 
-// bullet renders an indented bullet line that wraps cleanly.
-func bullet(pdf *fpdf.Fpdf, text string) {
-	pdf.SetFont(fontFamily, "", 10)
-	pdf.SetX(leftMargin + 5)
-	pdf.MultiCell(contentWidth-5, 5, "- "+text, "", "L", false)
+// archive renders a single archive's metadata and its files table.
+func (d *doc) archive(archive Archive) {
+	d.pdf.SetFont(fontBody, "B", 11)
+	d.text(colInk)
+	d.pdf.MultiCell(contentW, 6, d.tr(archive.Name), "", "L", false)
+	d.pdf.Ln(0.5)
+
+	d.kv("Member volumes", joinOrNone(archive.MemberVolumes), false)
+	d.kv("Source snapshots", joinOrNone(archive.SourceSnapshots), false)
+	d.pdf.Ln(1.5)
+
+	d.filesTable(archive.Files)
 }
 
-// body renders a free-text block (multi-line, wrapping).
-func body(pdf *fpdf.Fpdf, text string) {
-	pdf.SetFont(fontFamily, "", 10)
-	pdf.MultiCell(contentWidth, 5, text, "", "L", false)
+// filesTable renders the per-file name, size, and checksum as a table so each
+// file's SHA-256 sits on the same row as its name rather than on a separate
+// line.
+func (d *doc) filesTable(files []ArchiveFile) {
+	const (
+		nameW = 50.0
+		sizeW = 30.0
+	)
+
+	shaW := contentW - nameW - sizeW
+
+	d.draw(colRule)
+	d.pdf.SetLineWidth(0.2)
+	d.fill(colBar)
+	d.text(colMuted)
+	d.pdf.SetFont(fontBody, "B", 8.5)
+	d.pdf.CellFormat(nameW, 6, d.tr("File"), "B", 0, "L", true, 0, "")
+	d.pdf.CellFormat(sizeW, 6, d.tr("Size (bytes)"), "B", 0, "R", true, 0, "")
+	d.pdf.CellFormat(shaW, 6, d.tr("SHA-256"), "B", 1, "L", true, 0, "")
+
+	for _, file := range files {
+		d.text(colInk)
+		d.pdf.SetFont(fontBody, "", 8.5)
+		d.pdf.CellFormat(nameW, 5.5, d.tr(file.Name), "B", 0, "L", false, 0, "")
+		d.pdf.CellFormat(sizeW, 5.5, d.tr(groupDigits(file.Size)), "B", 0, "R", false, 0, "")
+		d.pdf.SetFont(fontMono, "", 7)
+		d.pdf.CellFormat(shaW, 5.5, d.tr(file.SHA256), "B", 1, "L", false, 0, "")
+	}
 }
+
+// tapesSection renders which barcode holds what, as a table.
+func (d *doc) tapesSection(m Manifest) {
+	d.section("Tapes")
+
+	const barcodeW = 46.0
+
+	holdsW := contentW - barcodeW
+
+	d.draw(colRule)
+	d.pdf.SetLineWidth(0.2)
+	d.fill(colBar)
+	d.text(colMuted)
+	d.pdf.SetFont(fontBody, "B", 8.5)
+	d.pdf.CellFormat(barcodeW, 6, d.tr("Barcode"), "B", 0, "L", true, 0, "")
+	d.pdf.CellFormat(holdsW, 6, d.tr("Holds"), "B", 1, "L", true, 0, "")
+
+	for _, tape := range m.Tapes {
+		x, y := d.pdf.GetX(), d.pdf.GetY()
+
+		d.text(colInk)
+		d.pdf.SetFont(fontMono, "", 8.5)
+		d.pdf.MultiCell(barcodeW, 5.5, d.tr(tape.Barcode), "", "L", false)
+		barcodeEndY := d.pdf.GetY()
+
+		d.pdf.SetXY(x+barcodeW, y)
+		d.pdf.SetFont(fontBody, "", 8.5)
+		d.pdf.MultiCell(holdsW, 5.5, d.tr(joinOrNone(tape.Contents)), "", "L", false)
+
+		if d.pdf.GetY() < barcodeEndY {
+			d.pdf.SetY(barcodeEndY)
+		}
+
+		rowEndY := d.pdf.GetY()
+		d.draw(colRule)
+		d.pdf.Line(x, rowEndY, x+contentW, rowEndY)
+		d.pdf.SetX(x)
+	}
+}
+
+// buildSection renders the build parameters as key/value rows.
+func (d *doc) buildSection(m Manifest) {
+	d.section("Build parameters")
+
+	build := m.Build
+	d.kv("Tool version", build.ToolVersion, false)
+	d.kv("age version", build.AgeVersion, false)
+	d.kv("par2 version", build.Par2Version, false)
+	d.kv("ltfs version", build.LTFSVersion, false)
+	d.kv("Slice size", fmt.Sprintf("%s bytes (%s)", groupDigits(build.SliceSize), humanSize(build.SliceSize)), false)
+	d.kv("PAR2 redundancy", build.PAR2Redundancy, false)
+	d.kv("Drive", build.DriveIdentifier, true)
+	d.kv("Library", build.LibraryIdentifier, true)
+}
+
+// identitySection renders the age private identity inside a highlighted callout,
+// with a note that its inclusion is deliberate (SPEC §7 key escrow).
+func (d *doc) identitySection(m Manifest) {
+	d.section("Encryption key — age private identity")
+
+	d.pdf.SetFont(fontBody, "I", 9)
+	d.text(colMuted)
+	d.pdf.MultiCell(contentW, 5,
+		d.tr("Included deliberately for key escrow (SPEC §7). Anyone holding this report can decrypt the archives — store and dispose of it accordingly."),
+		"", "L", false)
+	d.pdf.Ln(2)
+
+	d.fill(colKeyBG)
+	d.draw(colKeyBdr)
+	d.pdf.SetLineWidth(0.4)
+	d.text(colInk)
+	d.pdf.SetFont(fontMono, "", 10)
+	d.pdf.MultiCell(contentW, 7, d.tr(m.AgeIdentity), "1", "L", true)
+}
+
+// recoverySection renders the recovery procedure, one step per non-empty line.
+func (d *doc) recoverySection(m Manifest) {
+	d.section("Recovery procedure")
+	d.pdf.SetFont(fontBody, "", 10)
+	d.text(colInk)
+
+	for _, line := range strings.Split(m.RecoveryProcedure, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		d.pdf.MultiCell(contentW, 5.5, d.tr(line), "", "L", false)
+		d.pdf.Ln(1)
+	}
+}
+
+// text, fill, and draw set the current text, fill, and draw colors.
+func (d *doc) text(c [3]int) { d.pdf.SetTextColor(c[0], c[1], c[2]) }
+func (d *doc) fill(c [3]int) { d.pdf.SetFillColor(c[0], c[1], c[2]) }
+func (d *doc) draw(c [3]int) { d.pdf.SetDrawColor(c[0], c[1], c[2]) }
 
 // joinOrNone joins items with ", ", returning "(none)" for an empty slice so the
 // field always renders a value.
@@ -229,10 +403,51 @@ func joinOrNone(items []string) string {
 		return "(none)"
 	}
 
-	result := items[0]
-	for _, item := range items[1:] {
-		result += ", " + item
+	return strings.Join(items, ", ")
+}
+
+// groupDigits formats n in base 10 with thousands separators, e.g. 1073741824
+// becomes "1,073,741,824".
+func groupDigits(n int64) string {
+	digits := strconv.FormatInt(n, 10)
+
+	negative := strings.HasPrefix(digits, "-")
+	if negative {
+		digits = digits[1:]
 	}
 
-	return result
+	var builder strings.Builder
+
+	for i, digit := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			builder.WriteByte(',')
+		}
+
+		builder.WriteRune(digit)
+	}
+
+	if negative {
+		return "-" + builder.String()
+	}
+
+	return builder.String()
+}
+
+// humanSize renders a byte count in binary units (KiB, MiB, …), e.g. 268435456
+// becomes "256.00 MiB". Values below 1 KiB are rendered in bytes.
+func humanSize(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+
+	div, exp := int64(unit), 0
+	for size := n / unit; size >= unit; size /= unit {
+		div *= unit
+		exp++
+	}
+
+	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+
+	return fmt.Sprintf("%.2f %s", float64(n)/float64(div), units[exp])
 }
