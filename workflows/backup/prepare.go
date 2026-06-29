@@ -186,7 +186,7 @@ func (a *PrepareActivities) resolveMembers(ctx context.Context, resolvedArchive 
 			return nil, fmt.Errorf("locate snapshot %q: %w", snapshot.ZFSPath, err)
 		}
 
-		members = append(members, archive.Member{Name: memberName(snapshot), Dir: dir})
+		members = append(members, archive.Member{Subdir: memberName(snapshot), Dir: dir})
 	}
 
 	return members, nil

@@ -127,9 +127,9 @@ func TestTarMembers(t *testing.T) {
 	dirEmpty := t.TempDir()
 
 	members := []archive.Member{
-		{Name: "pvc-a", Dir: dirA},
-		{Name: "pvc-b", Dir: dirB},
-		{Name: "pvc-empty", Dir: dirEmpty},
+		{Subdir: "pvc-a", Dir: dirA},
+		{Subdir: "pvc-b", Dir: dirB},
+		{Subdir: "pvc-empty", Dir: dirEmpty},
 	}
 
 	var buf bytes.Buffer

@@ -38,15 +38,15 @@ func Tar(ctx context.Context, w io.Writer, srcDir string) error {
 	return nil
 }
 
-// Member is one source tree packed into a multi-member tar by TarMembers. Name
+// Member is one source tree packed into a multi-member tar by TarMembers. Subdir
 // is the subdirectory the member's contents appear under in the archive; Dir is
 // the source directory whose contents are read.
 type Member struct {
-	// Name is the in-archive subdirectory for this member. It must be a single
+	// Subdir is the in-archive subdirectory for this member. It must be a single
 	// path element (no slashes); callers derive it from the member's identity
 	// (e.g. a PVC name).
-	Name string
-	// Dir is the source directory whose contents are tarred under Name/.
+	Subdir string
+	// Dir is the source directory whose contents are tarred under Subdir/.
 	Dir string
 }
 
@@ -62,8 +62,8 @@ func TarMembers(ctx context.Context, w io.Writer, members []Member) error {
 	tw := tar.NewWriter(w)
 
 	for _, member := range members {
-		if err := tarTree(ctx, tw, member.Dir, member.Name); err != nil {
-			return fmt.Errorf("tar member %s: %w", member.Name, err)
+		if err := tarTree(ctx, tw, member.Dir, member.Subdir); err != nil {
+			return fmt.Errorf("tar member %s: %w", member.Subdir, err)
 		}
 	}
 
