@@ -211,4 +211,8 @@ type runState struct {
 	// (SPEC §4.3 phase 4), staged and checksummed alongside the slices. The
 	// Verify and Write phases consume it.
 	par2 []PAR2Set
+	// verified is the plan the Verify phase produces (SPEC §4.3 phase 5): the
+	// Pack plan once its complete staged tree has passed checksum and capacity
+	// verification on disk. The Load phase requires it before any tape is touched.
+	verified VerifiedPlan
 }

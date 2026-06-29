@@ -56,6 +56,9 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	// their activities produce an empty plan and no recovery sets.
 	env.RegisterActivity(newPackActivities())
 	env.RegisterActivity(newGeneratePAR2Activities())
+	// The Verify phase is run-orchestrated as well; with an empty plan it verifies
+	// nothing and produces a VerifiedPlan.
+	env.RegisterActivity(newVerifyActivities())
 	env.RegisterActivity(&FailureActivities{})
 
 	return env
@@ -134,9 +137,9 @@ func activityFor(t *testing.T, name string) any {
 }
 
 // failPhase mocks the named phase to fail. The run-orchestrated phases (Resolve,
-// Prepare, Pack, Generate PAR2) fail through their activities, which return a
-// value and an error; every other phase is a single stub activity returning just
-// an error.
+// Prepare, Pack, Generate PAR2, Verify) fail through their activities, which
+// return a value and an error; every other phase is a single stub activity
+// returning just an error.
 func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
 	t.Helper()
 
@@ -159,6 +162,11 @@ func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string
 	case PhaseGeneratePAR2:
 		env.OnActivity((&GeneratePAR2Activities{}).GeneratePAR2, mock.Anything, mock.Anything).
 			Return(nil, errors.New("boom"))
+
+		return
+	case PhaseVerify:
+		env.OnActivity((&VerifyActivities{}).Verify, mock.Anything, mock.Anything).
+			Return(VerifiedPlan{}, errors.New("boom"))
 
 		return
 	}
