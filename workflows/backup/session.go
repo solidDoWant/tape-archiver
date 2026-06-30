@@ -249,7 +249,17 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 
 	mount, ok := a.registry.Get(input.Device)
 	if !ok {
-		return nil, fmt.Errorf("finalize %s: no live mount in registry (was WriteTree skipped?)", input.Device)
+		// A missing mount is terminal, not transient: the only way it is absent
+		// here (after WriteTree parked it in the same process) is a data-worker
+		// restart that wiped the in-memory registry. No retry can recreate it —
+		// that tape is re-written on the next run (SPEC §14). Mark the error
+		// non-retryable so the Write phase fails fast instead of retrying the
+		// unrecoverable state until the session timeout.
+		return nil, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("finalize %s: no live mount in registry (data-worker restarted between write and finalize?)", input.Device),
+			"mount-lost",
+			nil,
+		)
 	}
 
 	if err := mount.Unmount(ctx); err != nil {
@@ -380,12 +390,20 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 				return
 			}
 
+			archives, err := archivesForTape(state, lt.TapeIndex)
+			if err != nil {
+				res.err = fmt.Errorf("drive %d: assemble archives: %w", lt.DriveIndex, err)
+				ch.Send(gctx, res)
+
+				return
+			}
+
 			if err := workflow.ExecuteActivity(noRetryCtx, acts.WriteTree, WriteTreeInput{
 				Device:    lt.SGDevice,
 				Barcode:   lt.Barcode,
 				TapeIndex: lt.TapeIndex,
 				CopyIndex: lt.CopyIndex,
-				Archives:  archivesForTape(state, lt.TapeIndex),
+				Archives:  archives,
 			}).Get(noRetryCtx, nil); err != nil {
 				res.err = fmt.Errorf("drive %d: write tree: %w", lt.DriveIndex, err)
 				ch.Send(gctx, res)

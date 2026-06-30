@@ -84,6 +84,11 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 		return nil, fmt.Errorf("inventory for load: %w", err)
 	}
 
+	if totalPhysical > len(inv.Drives) {
+		return nil, fmt.Errorf("plan requires %d physical tapes but the library reports only %d drives",
+			totalPhysical, len(inv.Drives))
+	}
+
 	loaded := make([]LoadedTape, totalPhysical)
 
 	for i := 0; i < totalPhysical; i++ {
@@ -332,18 +337,14 @@ func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, w
 		}
 	}
 
-	driveAddr := -1
-
+	// Unload from drive to source slot if the drive still holds this tape.
 	if wt.DriveIndex < len(inv.Drives) {
-		driveAddr = inv.Drives[wt.DriveIndex].Address
-	}
-
-	// Unload from drive to source slot if the drive still holds the tape.
-	if driveAddr >= 0 && wt.DriveIndex < len(inv.Drives) && inv.Drives[wt.DriveIndex].Loaded &&
-		inv.Drives[wt.DriveIndex].Barcode == wt.Barcode {
-		if err := changer.Unload(ctx, wt.SourceSlot, driveAddr); err != nil {
-			return fmt.Errorf("unload tape %s from drive %d to slot %d: %w",
-				wt.Barcode, wt.DriveIndex, wt.SourceSlot, err)
+		drive := inv.Drives[wt.DriveIndex]
+		if drive.Loaded && drive.Barcode == wt.Barcode {
+			if err := changer.Unload(ctx, wt.SourceSlot, drive.Address); err != nil {
+				return fmt.Errorf("unload tape %s from drive %d to slot %d: %w",
+					wt.Barcode, wt.DriveIndex, wt.SourceSlot, err)
+			}
 		}
 	}
 

@@ -135,9 +135,9 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 
 // activityFor returns the stub activity for the named phase so a test can target
 // it with OnActivity. It is only valid for stub phases that expose a single
-// activity function; implemented phases (Resolve, Prepare, Pack, Generate PAR2,
-// Verify, Write) have phase.activity == nil and must be handled in failPhase's
-// switch instead.
+// activity function; run-orchestrated phases (Resolve, Prepare, Pack, Generate
+// PAR2, Verify, Load, Write, Eject) have phase.activity == nil and must be
+// handled in failPhase's switch instead.
 func activityFor(t *testing.T, name string) any {
 	t.Helper()
 
@@ -157,9 +157,9 @@ func activityFor(t *testing.T, name string) any {
 }
 
 // failPhase mocks the named phase to fail. The run-orchestrated phases (Resolve,
-// Prepare, Pack, Generate PAR2, Verify) fail through their activities, which
-// return a value and an error; every other phase is a single stub activity
-// returning just an error.
+// Prepare, Pack, Generate PAR2, Verify, Load, Write, Eject) fail through their
+// activities; every other phase is a single stub activity returning just an
+// error.
 func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
 	t.Helper()
 

@@ -246,6 +246,7 @@ func TestArchivesForTape(t *testing.T) {
 		tapeIndex int
 		wantLen   int
 		wantSI    []int
+		wantErr   require.ErrorAssertionFunc
 	}{
 		{
 			name:      "tape 0 gets archives 0 and 1",
@@ -260,9 +261,10 @@ func TestArchivesForTape(t *testing.T) {
 			wantSI:    []int{2},
 		},
 		{
-			name:      "out-of-range tape index returns nil",
+			name:      "out-of-range tape index errors",
 			tapeIndex: 99,
 			wantLen:   0,
+			wantErr:   require.Error,
 		},
 	}
 
@@ -270,7 +272,13 @@ func TestArchivesForTape(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := archivesForTape(state, test.tapeIndex)
+			wantErr := test.wantErr
+			if wantErr == nil {
+				wantErr = require.NoError
+			}
+
+			got, err := archivesForTape(state, test.tapeIndex)
+			wantErr(t, err)
 			require.Len(t, got, test.wantLen)
 
 			for i, si := range test.wantSI {
@@ -296,17 +304,43 @@ func TestArchivesForTapeMissingStaged(t *testing.T) {
 			},
 		},
 		staged: []StagedArchive{
-			// SourceIndex 1 is missing — its placement is silently omitted.
+			// SourceIndex 1 is missing its staged slices.
 			{SourceIndex: 0, Slices: []StagedSlice{{Path: "/staging/a0.000"}}},
 		},
 		par2: []PAR2Set{
 			{SourceIndex: 0, Files: []StagedSlice{{Path: "/staging/a0.par2"}}},
-			// SourceIndex 1 is also missing from par2.
+			{SourceIndex: 1, Files: []StagedSlice{{Path: "/staging/a1.par2"}}},
 		},
 	}
 
-	got := archivesForTape(state, 0)
-	// Only archive 0 has both staged and PAR2 entries; archive 1 is omitted.
-	require.Len(t, got, 1)
-	assert.Equal(t, 0, got[0].SourceIndex)
+	// A planned archive with no staged slices must fail loudly rather than be
+	// omitted: writing manifest.json (the completeness signal) for a tape that
+	// is missing a planned archive would be undetectable data loss.
+	got, err := archivesForTape(state, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "source index 1")
+	assert.Nil(t, got)
+}
+
+func TestArchivesForTapeMissingPAR2(t *testing.T) {
+	t.Parallel()
+
+	state := &runState{
+		plan: TapePlan{
+			Copies: 1,
+			Tapes: []PlannedTape{
+				{Archives: []PlannedArchive{{SourceIndex: 0}}},
+			},
+		},
+		staged: []StagedArchive{
+			{SourceIndex: 0, Slices: []StagedSlice{{Path: "/staging/a0.000"}}},
+		},
+		// No PAR2 set for source index 0.
+		par2: nil,
+	}
+
+	got, err := archivesForTape(state, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAR2")
+	assert.Nil(t, got)
 }

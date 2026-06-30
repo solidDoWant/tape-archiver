@@ -210,11 +210,14 @@ func writeManifest(mountpoint string, manifest TapeManifest) error {
 
 // archivesForTape builds the TapeWriteArchive list for the given logical tape
 // index, pulling archive slices and PAR2 files from the run state. The Verify
-// phase guarantees all referenced archives are present; missing entries are
-// omitted here (they would have failed Verify).
-func archivesForTape(state *runState, tapeIndex int) []TapeWriteArchive {
+// phase guarantees all referenced archives are present; a missing staged slice
+// or PAR2 set is therefore a programming/state error and is reported as one
+// rather than silently omitted — writing a tape that is missing a planned
+// archive but still carries a "complete" manifest.json would be undetectable
+// data loss (project principle 3, SPEC §2).
+func archivesForTape(state *runState, tapeIndex int) ([]TapeWriteArchive, error) {
 	if tapeIndex >= len(state.plan.Tapes) {
-		return nil
+		return nil, fmt.Errorf("tape index %d out of range (plan has %d tapes)", tapeIndex, len(state.plan.Tapes))
 	}
 
 	planned := state.plan.Tapes[tapeIndex]
@@ -234,12 +237,14 @@ func archivesForTape(state *runState, tapeIndex int) []TapeWriteArchive {
 	for _, placement := range planned.Archives {
 		staged, ok := slicesByIndex[placement.SourceIndex]
 		if !ok {
-			continue
+			return nil, fmt.Errorf("tape %d: planned archive (source index %d) has no staged slices",
+				tapeIndex, placement.SourceIndex)
 		}
 
 		par2, ok := par2ByIndex[placement.SourceIndex]
 		if !ok {
-			continue
+			return nil, fmt.Errorf("tape %d: planned archive (source index %d) has no PAR2 recovery set",
+				tapeIndex, placement.SourceIndex)
 		}
 
 		archives = append(archives, TapeWriteArchive{
@@ -249,5 +254,5 @@ func archivesForTape(state *runState, tapeIndex int) []TapeWriteArchive {
 		})
 	}
 
-	return archives
+	return archives, nil
 }
