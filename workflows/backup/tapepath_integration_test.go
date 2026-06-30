@@ -5,6 +5,7 @@ package backup
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -35,20 +36,27 @@ func TestTapePath(t *testing.T) {
 	require.NotEmpty(t, inv.IOSlots, "at least 1 I/O slot required")
 
 	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
-	require.True(t, inv.Slots[0].Full, "slot 0 must have a blank tape")
+	// Use slot index 1 (the second slot) so this test does not conflict with
+	// TestSessionSplitWriteWithFinalizeRetry, which uses slot index 0 and formats
+	// the tape there — leaving it non-blank for any subsequent test.
+	require.GreaterOrEqual(t, len(inv.Slots), 2, "at least 2 storage slots required")
+	require.True(t, inv.Slots[1].Full, "slot 1 must have a tape")
 
 	stDev := testutil.Drive0Dev(t)
 	sgDev := testutil.Drive0SgDev(t)
-	slotAddr := inv.Slots[0].Address
+	slotAddr := inv.Slots[1].Address
 	driveAddr := inv.Drives[0].Address
-	expectedBarcode := inv.Slots[0].Barcode
-	require.NotEmpty(t, expectedBarcode, "slot 0 tape must have a barcode")
+	expectedBarcode := inv.Slots[1].Barcode
+	require.NotEmpty(t, expectedBarcode, "slot 1 tape must have a barcode")
 
-	// Ensure the tape is unloaded and back in its source slot when the test ends,
-	// regardless of which step failed. If the tape is still in the drive (e.g.
-	// FinalizeTape left it mounted), try to unmount first, then unload.
+	// Ensure the library is in a clean state when the test ends: the tape must be
+	// back in its storage slot AND blank so that consecutive test runs start from
+	// the same state. The vtltape daemon caches tape content in memory; after
+	// mkltfs formats a tape the daemon reports it as non-blank even if mktape
+	// recreates the disk files. A short SCSI ERASE (LONG=0, sent via sg_raw)
+	// resets the daemon's in-memory state to blank without a long physical erase.
 	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 90*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
 		defer cancel()
 
 		cleanupInv, invErr := changer.Inventory(cleanupCtx)
@@ -56,16 +64,35 @@ func TestTapePath(t *testing.T) {
 			return
 		}
 
-		if len(cleanupInv.Drives) > 0 && cleanupInv.Drives[0].Loaded {
-			_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
+		tapeInDrive := len(cleanupInv.Drives) > 0 &&
+			cleanupInv.Drives[0].Loaded &&
+			cleanupInv.Drives[0].Barcode == expectedBarcode
+
+		if !tapeInDrive {
+			// If tape is in an I/O slot (normal after Eject), move it to storage first.
+			for _, io := range cleanupInv.IOSlots {
+				if io.Full && io.Barcode == expectedBarcode {
+					_ = changer.Transfer(cleanupCtx, io.Address, slotAddr)
+					break
+				}
+			}
+			// Load from storage slot into drive for the erase step.
+			if err := changer.Load(cleanupCtx, slotAddr, driveAddr); err != nil {
+				return
+			}
 		}
+
+		// Short SCSI ERASE (CDB 0x19, LONG=0) rewinds and truncates at BOT,
+		// resetting the vtltape daemon's in-memory state to blank.
+		_ = exec.CommandContext(cleanupCtx, "mt", "-f", stDev, "rewind").Run()
+		_ = exec.CommandContext(cleanupCtx, "sg_raw", sgDev,
+			"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
+		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
 	})
 
 	// --- Phase: Load ----------------------------------------------------------
 	// Call the Load activity directly to exercise the reconciliation, blank
 	// check, and SGDevice resolution without a running Temporal worker.
-	testutil.SkipIfDriveNotReady(t, stDev) // ensure drive ready before blank check
-
 	loadActs := newLoadActivities()
 	plan := TapePlan{
 		Copies: 1,
@@ -83,7 +110,7 @@ func TestTapePath(t *testing.T) {
 	require.Len(t, loadedTapes, 1, "Load must return one LoadedTape per drive")
 
 	lt := loadedTapes[0]
-	assert.Equal(t, expectedBarcode, lt.Barcode, "barcode must match slot 0")
+	assert.Equal(t, expectedBarcode, lt.Barcode, "barcode must match slot 1")
 	assert.Equal(t, 0, lt.DriveIndex)
 	assert.Equal(t, 0, lt.TapeIndex)
 	assert.Equal(t, 0, lt.CopyIndex)
