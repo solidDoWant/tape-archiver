@@ -164,9 +164,17 @@ func (m *Mount) Unmount(ctx context.Context) error {
 // (e.g. the workflow was cancelled before Finalize completed). Unlike Unmount,
 // Kill does not guarantee the LTFS index was written — the tape must be
 // re-written on the next run (SPEC §14).
-func (m *Mount) Kill() {
-	_ = m.cmd.Process.Kill()
+//
+// Kill returns the error from os.Process.Kill. The caller may see
+// os.ErrProcessDone when the process has already exited on its own, which is
+// harmless — <-m.done returns immediately from the already-closed channel
+// regardless. Any other non-nil error means the signal could not be delivered,
+// and <-m.done may block until the process exits by other means.
+func (m *Mount) Kill() error {
+	err := m.cmd.Process.Kill()
 	<-m.done
+
+	return err
 }
 
 // ltfsArgs builds the ltfs mount argument list. -f keeps ltfs in the foreground

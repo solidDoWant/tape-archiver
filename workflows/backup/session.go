@@ -86,7 +86,11 @@ func (r *MountRegistry) Teardown(ctx context.Context) {
 
 	for device, mount := range r.mounts {
 		if err := mount.Unmount(ctx); err != nil {
-			mount.Kill()
+			// Unmount failed (e.g. already unmounted, or ctx cancelled);
+			// forcibly kill the ltfs process so it does not linger. Kill
+			// returns os.ErrProcessDone if the process already exited, which
+			// is harmless — either way the entry is removed below.
+			_ = mount.Kill()
 		}
 
 		delete(r.mounts, device)
