@@ -43,3 +43,8 @@ func NewDrive(device string, opts ...DriveOption) *Drive {
 
 	return d
 }
+
+// STDevice returns the non-rewinding tape device node (e.g. /dev/nst0).
+func (d *Drive) STDevice() string {
+	return d.stDevice
+}

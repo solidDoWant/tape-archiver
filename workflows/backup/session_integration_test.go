@@ -63,8 +63,9 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 	testutil.SkipIfDriveNotReady(t, testutil.Drive0Dev(t))
 
 	sgDev := testutil.Drive0SgDev(t)
+	stagingDir := t.TempDir()
 	registry := newMountRegistry()
-	acts := newWriteActivities(registry)
+	acts := newWriteActivities(registry, stagingDir)
 
 	// --- FormatTape (AC: tape formatted, LTFS volume name = barcode) ----------
 	require.NoError(t, acts.FormatTape(t.Context(), FormatInput{
@@ -73,13 +74,11 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 	}), "FormatTape")
 
 	// --- WriteTree (AC: mount live; mount parked in registry) -----------------
-	mountDir := t.TempDir()
-	workDir := t.TempDir()
-
+	// Pass an empty archive list so WriteTree only mounts and writes an empty
+	// manifest; the sentinel file is written directly through the live mount.
 	require.NoError(t, acts.WriteTree(t.Context(), WriteTreeInput{
-		Device:   sgDev,
-		MountDir: mountDir,
-		WorkDir:  workDir,
+		Device:  sgDev,
+		Barcode: barcode,
 	}), "WriteTree")
 
 	mount, ok := registry.Get(sgDev)
@@ -120,13 +119,12 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 		"index must name the volume by barcode")
 
 	// --- Re-mount (AC: tree not re-copied; sentinel survives the retry cycle) -
-	remountDir := t.TempDir()
-	remountWorkDir := t.TempDir()
-
+	// WriteTree re-uses the same mount and work dirs under stagingDir. The prior
+	// work dir contents (captured index) are left in place; LTFS may add new
+	// generation-suffixed index files on the second unmount.
 	require.NoError(t, acts.WriteTree(t.Context(), WriteTreeInput{
-		Device:   sgDev,
-		MountDir: remountDir,
-		WorkDir:  remountWorkDir,
+		Device:  sgDev,
+		Barcode: barcode,
 	}), "re-mount WriteTree must succeed")
 
 	remountMount, remountOK := registry.Get(sgDev)

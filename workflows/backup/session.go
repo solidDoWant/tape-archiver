@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,6 +29,10 @@ const (
 	// teardownTimeout bounds TeardownSession: it only needs to unmount/kill
 	// any live mounts, which should complete in well under a minute.
 	teardownTimeout = 5 * time.Minute
+	// writeTapeTimeout bounds a single tape's Format → WriteTree → FinalizeTape
+	// chain. Streaming terabytes to LTO tape takes many hours; 24 h per tape is
+	// a generous but realistic ceiling.
+	writeTapeTimeout = 24 * time.Hour
 )
 
 // MountRegistry is a concurrency-safe, process-global registry of live LTFS
@@ -123,11 +128,17 @@ type FormatInput struct {
 type WriteTreeInput struct {
 	// Device is the SCSI generic node for the drive holding the formatted tape.
 	Device string
-	// MountDir is the directory the LTFS FUSE volume is mounted under.
-	MountDir string
-	// WorkDir is LTFS's work directory; the captured index XML is written here
-	// at unmount by FinalizeTape.
-	WorkDir string
+	// Barcode is the tape's barcode; it names the LTFS volume and is used to
+	// derive the per-tape mount and work directories under the staging root.
+	Barcode tape.Barcode
+	// TapeIndex is the 0-based logical tape index within plan.Tapes; it selects
+	// which archives to copy to this tape.
+	TapeIndex int
+	// CopyIndex is the 0-based copy number among the copies of this logical tape.
+	CopyIndex int
+	// Archives holds the staged slice and PAR2 files for each archive on this
+	// tape, in plan order.
+	Archives []TapeWriteArchive
 }
 
 // FinalizeInput is the payload for the FinalizeTape activity.
@@ -145,12 +156,15 @@ type TeardownInput struct{}
 // both activities run on the same data-worker process, keeping the in-process
 // registry bridge valid.
 type WriteActivities struct {
-	registry *MountRegistry
+	registry   *MountRegistry
+	stagingDir string
 }
 
 // newWriteActivities returns WriteActivities backed by the given registry.
-func newWriteActivities(registry *MountRegistry) *WriteActivities {
-	return &WriteActivities{registry: registry}
+// stagingDir is the data worker's staging root (TAPE_STAGING_DIR); per-tape
+// mount and work directories are created under it.
+func newWriteActivities(registry *MountRegistry, stagingDir string) *WriteActivities {
+	return &WriteActivities{registry: registry, stagingDir: stagingDir}
 }
 
 // FormatTape formats the loaded tape with mkltfs, setting its LTFS volume name
@@ -163,28 +177,51 @@ func (a *WriteActivities) FormatTape(ctx context.Context, input FormatInput) err
 	return ltfs.NewVolume(input.Device).Format(ctx, input.Barcode)
 }
 
-// WriteTree mounts the LTFS volume on the formatted tape and parks the live
-// mount in the registry so FinalizeTape can retrieve it. Files written under
-// the mountpoint persist on tape once FinalizeTape unmounts and flushes the
-// index.
+// WriteTree mounts the LTFS volume on the formatted tape, copies the staged
+// archive tree to the mountpoint (archives/NNN/ per archive, SPEC §6), writes
+// the per-tape manifest last, and parks the live mount in the registry so
+// FinalizeTape can retrieve it.
+//
+// Per-tape mount and work directories are derived from the staging root and the
+// tape's barcode; they persist across activity boundaries (the session pins all
+// activities to the same worker process).
 //
 // MaximumAttempts is 1: mounting a formatted tape is non-idempotent (a second
 // mount would fail or produce a stale registry entry). A failure here fails
 // the Write phase without retry.
 //
-// Note: the actual tree copy (staging archive slices → mountpoint) is
-// implemented by #54. WriteTree in this issue establishes the session model
-// and the registry bridge; the copy loop is a TODO for the next sub-issue.
+// The copy is a pure disk→tape stream — no checksumming in the write window
+// (SPEC §14). The precomputed SHA-256s from Prepare/GeneratePAR2 populate the
+// manifest so a future recoverer can verify files without re-reading every byte.
+//
+// Independent readers per drive: each drive's WriteTree reads staged files
+// independently. The ZFS ARC and sequential read-ahead transparently coalesce
+// in-lockstep streams from multiple drives into near-1× physical disk reads, and
+// allow a lagging drive to re-read from its own page-cache window when it drifts
+// past the coalesced read. This adaptive kernel behaviour eliminates the need for
+// a hand-rolled shared cursor or fan-out buffer, which would couple drives and
+// risk thrash. If a hardware benchmark ever shows a per-drive shortfall below the
+// LTO speed-matching floor, revisit with a static fan-out or application-level
+// buffer (SPEC §14); until then the kernel ARC is the right tool.
 func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) error {
-	mount, err := ltfs.NewVolume(input.Device).Mount(ctx, input.MountDir, input.WorkDir)
+	mountDir := filepath.Join(a.stagingDir, "mounts", string(input.Barcode))
+	workDir := filepath.Join(a.stagingDir, "work", string(input.Barcode))
+
+	mount, err := ltfs.NewVolume(input.Device).Mount(ctx, mountDir, workDir)
 	if err != nil {
 		return fmt.Errorf("mount LTFS volume on %s: %w", input.Device, err)
 	}
 
 	a.registry.Put(input.Device, mount)
 
-	// TODO (#54): copy staged archive slices and PAR2 recovery files into
-	// mount.Mountpoint() here.
+	if err := copyTape(ctx, mount.Mountpoint(), input.Archives); err != nil {
+		return fmt.Errorf("copy staged tree to tape %s: %w", input.Barcode, err)
+	}
+
+	manifest := buildManifest(input.Barcode, input.TapeIndex, input.CopyIndex, input.Archives)
+	if err := writeManifest(mount.Mountpoint(), manifest); err != nil {
+		return fmt.Errorf("write manifest to tape %s: %w", input.Barcode, err)
+	}
 
 	return nil
 }
@@ -212,7 +249,17 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 
 	mount, ok := a.registry.Get(input.Device)
 	if !ok {
-		return nil, fmt.Errorf("finalize %s: no live mount in registry (was WriteTree skipped?)", input.Device)
+		// A missing mount is terminal, not transient: the only way it is absent
+		// here (after WriteTree parked it in the same process) is a data-worker
+		// restart that wiped the in-memory registry. No retry can recreate it —
+		// that tape is re-written on the next run (SPEC §14). Mark the error
+		// non-retryable so the Write phase fails fast instead of retrying the
+		// unrecoverable state until the session timeout.
+		return nil, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("finalize %s: no live mount in registry (data-worker restarted between write and finalize?)", input.Device),
+			"mount-lost",
+			nil,
+		)
 	}
 
 	if err := mount.Unmount(ctx); err != nil {
@@ -265,13 +312,14 @@ func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInpu
 // data-worker process, keeping the in-process MountRegistry valid across the
 // Format → WriteTree → FinalizeTape activity boundary.
 //
+// All loaded tapes write in parallel — one Temporal coroutine per drive, each
+// sequencing Format → WriteTree → Finalize independently. This keeps drives
+// decoupled: a slow drive does not gate a fast one, and the ZFS ARC provides
+// adaptive read coalescing for byte-identical copies without a hand-rolled buffer.
+//
 // The deferred TeardownSession activity runs on the same worker (within the
 // session) so it can unmount any live mount the session still owns on exit.
-//
-// The plan iteration and the FormatTape → WriteTree → FinalizeTape calls per
-// tape copy are implemented in #54. This scaffold establishes the session model
-// and cleanup guarantee that #54 builds on.
-func writePhase(ctx workflow.Context, _ config.Config, _ *runState) error {
+func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 	sessionCtx, err := workflow.CreateSession(ctx, &workflow.SessionOptions{
 		CreationTimeout:  sessionCreationTimeout,
 		ExecutionTimeout: sessionExecutionTimeout,
@@ -294,10 +342,119 @@ func writePhase(ctx workflow.Context, _ config.Config, _ *runState) error {
 		workflow.CompleteSession(sessionCtx)
 	}()
 
-	// TODO (#54): iterate state.plan.Tapes × state.plan.Copies; for each copy:
-	//   1. Dispatch FormatTape within the session.
-	//   2. Dispatch WriteTree within the session (parks mount in registry).
-	//   3. Dispatch FinalizeTape within the session (retriable; uses registry).
+	if len(state.loaded) == 0 {
+		return nil
+	}
+
+	// Activity options for Format and WriteTree: MaximumAttempts=1 because
+	// both are non-idempotent (mkltfs is destructive; mounting a second time
+	// produces a stale registry entry).
+	noRetryOpts := workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: writeTapeTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+	}
+	// FinalizeTape uses the default retry policy: its ctx.Err() guard makes
+	// it safe to retry without re-running WriteTree.
+	retryOpts := workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: writeTapeTimeout,
+	}
+
+	type driveResult struct {
+		loadedIdx int
+		indexXML  []byte
+		err       error
+	}
+
+	ch := workflow.NewBufferedChannel(sessionCtx, len(state.loaded))
+
+	for i, lt := range state.loaded {
+		i, lt := i, lt
+
+		workflow.Go(sessionCtx, func(gctx workflow.Context) {
+			res := driveResult{loadedIdx: i}
+
+			noRetryCtx := workflow.WithActivityOptions(gctx, noRetryOpts)
+			retryCtx := workflow.WithActivityOptions(gctx, retryOpts)
+
+			var acts *WriteActivities
+
+			if err := workflow.ExecuteActivity(noRetryCtx, acts.FormatTape, FormatInput{
+				Device:  lt.SGDevice,
+				Barcode: lt.Barcode,
+			}).Get(noRetryCtx, nil); err != nil {
+				res.err = fmt.Errorf("drive %d: format: %w", lt.DriveIndex, err)
+				ch.Send(gctx, res)
+
+				return
+			}
+
+			archives, err := archivesForTape(state, lt.TapeIndex)
+			if err != nil {
+				res.err = fmt.Errorf("drive %d: assemble archives: %w", lt.DriveIndex, err)
+				ch.Send(gctx, res)
+
+				return
+			}
+
+			if err := workflow.ExecuteActivity(noRetryCtx, acts.WriteTree, WriteTreeInput{
+				Device:    lt.SGDevice,
+				Barcode:   lt.Barcode,
+				TapeIndex: lt.TapeIndex,
+				CopyIndex: lt.CopyIndex,
+				Archives:  archives,
+			}).Get(noRetryCtx, nil); err != nil {
+				res.err = fmt.Errorf("drive %d: write tree: %w", lt.DriveIndex, err)
+				ch.Send(gctx, res)
+
+				return
+			}
+
+			var indexXML []byte
+			if err := workflow.ExecuteActivity(retryCtx, acts.FinalizeTape, FinalizeInput{
+				Device: lt.SGDevice,
+			}).Get(retryCtx, &indexXML); err != nil {
+				res.err = fmt.Errorf("drive %d: finalize: %w", lt.DriveIndex, err)
+				ch.Send(gctx, res)
+
+				return
+			}
+
+			res.indexXML = indexXML
+			ch.Send(gctx, res)
+		})
+	}
+
+	// Collect results from all drives.
+	var written []WrittenTape
+
+	var errs []error
+
+	for range state.loaded {
+		var res driveResult
+		ch.Receive(sessionCtx, &res)
+
+		if res.err != nil {
+			errs = append(errs, res.err)
+		} else {
+			lt := state.loaded[res.loadedIdx]
+			written = append(written, WrittenTape{
+				Barcode:    lt.Barcode,
+				DriveIndex: lt.DriveIndex,
+				TapeIndex:  lt.TapeIndex,
+				CopyIndex:  lt.CopyIndex,
+				SourceSlot: lt.SourceSlot,
+				IndexXML:   res.indexXML,
+			})
+		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+
+	state.written = written
 
 	return nil
 }

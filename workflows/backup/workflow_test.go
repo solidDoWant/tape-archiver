@@ -38,9 +38,9 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(Backup)
 
-	// Stub phases register their single activity; an implemented phase (Resolve)
-	// has a nil stub activity and is registered through its activity structs
-	// below.
+	// Stub phases register their single activity. All tape-path phases (Load,
+	// Write, Eject) are now run-orchestrated, so no stub activity is registered
+	// from the phase table. Only Report and Deliver still use single stubs.
 	for _, phase := range backupPhases() {
 		if phase.activity != nil {
 			env.RegisterActivity(phase.activity)
@@ -60,6 +60,10 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	// The Verify phase is run-orchestrated as well; with an empty plan it verifies
 	// nothing and produces a VerifiedPlan.
 	env.RegisterActivity(newVerifyActivities())
+	// The Load and Eject phases are now run-orchestrated; register their
+	// activities so the test env can dispatch them.
+	env.RegisterActivity(newLoadActivities())
+	env.RegisterActivity(newEjectActivities())
 	// The Write phase creates a Temporal session. Enable the session worker so
 	// the testsuite registers the internal session creation/completion
 	// activities and the session scaffold in writePhase succeeds.
@@ -67,7 +71,7 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	// Register both Write and Teardown activities so the test env can dispatch
 	// them; TeardownSession is deferred from writePhase even in the scaffold.
 	registry := newMountRegistry()
-	env.RegisterActivity(newWriteActivities(registry))
+	env.RegisterActivity(newWriteActivities(registry, t.TempDir()))
 	env.RegisterActivity(newTeardownActivities(registry))
 	env.RegisterActivity(&FailureActivities{})
 
@@ -131,9 +135,9 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 
 // activityFor returns the stub activity for the named phase so a test can target
 // it with OnActivity. It is only valid for stub phases that expose a single
-// activity function; implemented phases (Resolve, Prepare, Pack, Generate PAR2,
-// Verify, Write) have phase.activity == nil and must be handled in failPhase's
-// switch instead.
+// activity function; run-orchestrated phases (Resolve, Prepare, Pack, Generate
+// PAR2, Verify, Load, Write, Eject) have phase.activity == nil and must be
+// handled in failPhase's switch instead.
 func activityFor(t *testing.T, name string) any {
 	t.Helper()
 
@@ -153,15 +157,15 @@ func activityFor(t *testing.T, name string) any {
 }
 
 // failPhase mocks the named phase to fail. The run-orchestrated phases (Resolve,
-// Prepare, Pack, Generate PAR2, Verify) fail through their activities, which
-// return a value and an error; every other phase is a single stub activity
-// returning just an error.
+// Prepare, Pack, Generate PAR2, Verify, Load, Write, Eject) fail through their
+// activities; every other phase is a single stub activity returning just an
+// error.
 func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
 	t.Helper()
 
 	switch name {
 	case PhaseResolve:
-		env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything).
+		env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
 			Return(nil, errors.New("boom"))
 
 		return
@@ -185,12 +189,18 @@ func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string
 			Return(VerifiedPlan{}, errors.New("boom"))
 
 		return
+	case PhaseLoad:
+		env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).
+			Return(nil, errors.New("boom"))
+
+		return
 	case PhaseWrite:
-		// writePhase's scaffold does not yet dispatch any activities (#54 adds
-		// the tape-copy loop that calls FormatTape). Mock FormatTape so that
-		// once #54 wires in the call, failPhase starts working for PhaseWrite
-		// without further test changes. Until then this mock is a no-op.
 		env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).
+			Return(errors.New("boom"))
+
+		return
+	case PhaseEject:
+		env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).
 			Return(errors.New("boom"))
 
 		return
