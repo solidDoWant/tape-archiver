@@ -43,6 +43,17 @@ func main() {
 	}
 }
 
+// workerOptions returns the Temporal worker options for the given role. The
+// data worker enables session support so its write-phase activities can be
+// pinned to a single process via workflow.CreateSession (SPEC §4.3 phase 7).
+func workerOptions(role Role) worker.Options {
+	if role == RoleData {
+		return worker.Options{EnableSessionWorker: true}
+	}
+
+	return worker.Options{}
+}
+
 // run parses configuration, sets up logging, metrics, and the Temporal client,
 // then starts the role's worker and blocks until interruptCh yields, at which
 // point the worker drains in-flight tasks before returning. Cancelling ctx
@@ -90,7 +101,7 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 
 	slog.Info("starting worker", "role", string(cfg.Role), "task_queue", queue)
 
-	w := worker.New(temporalClient, queue, worker.Options{})
+	w := worker.New(temporalClient, queue, workerOptions(cfg.Role))
 	registerActivities(w, cfg.Role, env)
 
 	// Run blocks until interruptCh delivers, then stops polling and waits for

@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/worker"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 )
@@ -59,6 +60,15 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	// The Verify phase is run-orchestrated as well; with an empty plan it verifies
 	// nothing and produces a VerifiedPlan.
 	env.RegisterActivity(newVerifyActivities())
+	// The Write phase creates a Temporal session. Enable the session worker so
+	// the testsuite registers the internal session creation/completion
+	// activities and the session scaffold in writePhase succeeds.
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	// Register both Write and Teardown activities so the test env can dispatch
+	// them; TeardownSession is deferred from writePhase even in the scaffold.
+	registry := newMountRegistry()
+	env.RegisterActivity(newWriteActivities(registry))
+	env.RegisterActivity(newTeardownActivities(registry))
 	env.RegisterActivity(&FailureActivities{})
 
 	return env
@@ -120,13 +130,19 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 }
 
 // activityFor returns the stub activity for the named phase so a test can target
-// it with OnActivity. It is only valid for stub phases; the implemented Resolve
-// phase has no single stub activity (use failPhase to fail it).
+// it with OnActivity. It is only valid for stub phases that expose a single
+// activity function; implemented phases (Resolve, Prepare, Pack, Generate PAR2,
+// Verify, Write) have phase.activity == nil and must be handled in failPhase's
+// switch instead.
 func activityFor(t *testing.T, name string) any {
 	t.Helper()
 
 	for _, phase := range backupPhases() {
 		if phase.name == name {
+			if phase.activity == nil {
+				t.Fatalf("phase %q has no single stub activity; add it to failPhase's switch", name)
+			}
+
 			return phase.activity
 		}
 	}
@@ -167,6 +183,15 @@ func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string
 	case PhaseVerify:
 		env.OnActivity((&VerifyActivities{}).Verify, mock.Anything, mock.Anything).
 			Return(VerifiedPlan{}, errors.New("boom"))
+
+		return
+	case PhaseWrite:
+		// writePhase's scaffold does not yet dispatch any activities (#54 adds
+		// the tape-copy loop that calls FormatTape). Mock FormatTape so that
+		// once #54 wires in the call, failPhase starts working for PhaseWrite
+		// without further test changes. Until then this mock is a no-op.
+		env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).
+			Return(errors.New("boom"))
 
 		return
 	}

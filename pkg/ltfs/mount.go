@@ -16,10 +16,12 @@ import (
 const mountPollInterval = 100 * time.Millisecond
 
 // Mount is a live LTFS FUSE mount of a Volume. Files written under its
-// Mountpoint persist on tape. Its lifecycle is bound to a supervised foreground
-// ltfs process: Unmount releases the mount and waits for that process to exit,
-// so a nil error from Unmount means the single deferred index write actually
-// completed (see Unmount).
+// Mountpoint persist on tape. Its lifecycle is managed explicitly: Unmount
+// releases the mount and waits for the ltfs process to exit (confirming the
+// single deferred index write completed), and Kill forcibly terminates it.
+// The ltfs process is NOT bound to the context passed to Volume.Mount — that
+// context only controls the mount wait. This allows the mount to be parked in
+// a registry and finalized by a later activity (see pkg workflows/backup).
 type Mount struct {
 	mountpoint string
 	workDir    string
@@ -58,7 +60,10 @@ func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount,
 	}
 
 	stderr := &bytes.Buffer{}
-	cmd := exec.CommandContext(ctx, "ltfs", ltfsArgs(v.device, absMount, workDir)...)
+	// exec.Command (not CommandContext) so the ltfs process is NOT killed when
+	// ctx is cancelled — the process must survive past the launching activity's
+	// context so a later activity can finalize it via Unmount or Kill.
+	cmd := exec.Command("ltfs", ltfsArgs(v.device, absMount, workDir)...)
 	cmd.Stderr = stderr
 
 	if err := cmd.Start(); err != nil {
@@ -152,6 +157,16 @@ func (m *Mount) Unmount(ctx context.Context) error {
 	case <-ctx.Done():
 		return fmt.Errorf("waiting for ltfs to finish writing the index at unmount: %w", ctx.Err())
 	}
+}
+
+// Kill forcibly terminates the supervised ltfs process and waits for it to
+// exit. It is called by the mount registry teardown when Unmount cannot run
+// (e.g. the workflow was cancelled before Finalize completed). Unlike Unmount,
+// Kill does not guarantee the LTFS index was written — the tape must be
+// re-written on the next run (SPEC §14).
+func (m *Mount) Kill() {
+	_ = m.cmd.Process.Kill()
+	<-m.done
 }
 
 // ltfsArgs builds the ltfs mount argument list. -f keeps ltfs in the foreground

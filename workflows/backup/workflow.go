@@ -60,7 +60,7 @@ func backupPhases() []phase {
 		{PhaseGeneratePAR2, DataTaskQueue, nil, generatePAR2Phase},
 		{PhaseVerify, DataTaskQueue, nil, verifyPhase},
 		{PhaseLoad, DataTaskQueue, loadActivity, nil},
-		{PhaseWrite, DataTaskQueue, writeActivity, nil},
+		{PhaseWrite, DataTaskQueue, nil, writePhase},
 		{PhaseEject, DataTaskQueue, ejectActivity, nil},
 		{PhaseReport, TaskQueue, reportActivity, nil},
 		{PhaseDeliver, TaskQueue, deliverActivity, nil},
@@ -150,8 +150,9 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // loadActivity stubs the Load phase (SPEC §4.3 phase 6).
 func loadActivity(_ context.Context) error { return nil }
 
-// writeActivity stubs the Write phase (SPEC §4.3 phase 7).
-func writeActivity(_ context.Context) error { return nil }
+// The Write phase (SPEC §4.3 phase 7) is implemented in session.go; it
+// orchestrates a session-pinned sequence of LTFS activities rather than a
+// single stub.
 
 // ejectActivity stubs the Eject phase (SPEC §4.3 phase 8).
 func ejectActivity(_ context.Context) error { return nil }
