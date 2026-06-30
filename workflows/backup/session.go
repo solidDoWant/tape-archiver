@@ -2,7 +2,9 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -75,26 +77,37 @@ func (r *MountRegistry) Delete(device string) {
 }
 
 // Teardown unmounts every live mount in the registry and clears it. If
-// Unmount returns an error (e.g. the mount is already gone), it falls back to
-// Kill so the ltfs process does not linger. Teardown is best-effort: it
-// continues past individual errors so all mounts are attempted. A data-worker
+// Unmount returns an error (e.g. the mount is already gone or ctx was
+// cancelled), it falls back to Kill so the ltfs process does not linger.
+// Teardown continues past individual failures so all mounts are attempted;
+// errors from all entries are joined and returned so the caller can surface
+// them (e.g. in the Temporal event history via TeardownSession). A data-worker
 // restart loses in-memory mounts entirely; that window is documented in
 // SPEC §14.
-func (r *MountRegistry) Teardown(ctx context.Context) {
+func (r *MountRegistry) Teardown(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var errs []error
+
 	for device, mount := range r.mounts {
 		if err := mount.Unmount(ctx); err != nil {
-			// Unmount failed (e.g. already unmounted, or ctx cancelled);
-			// forcibly kill the ltfs process so it does not linger. Kill
-			// returns os.ErrProcessDone if the process already exited, which
-			// is harmless — either way the entry is removed below.
-			_ = mount.Kill()
+			// Unmount failed; forcibly kill the ltfs process so it does not
+			// linger. os.ErrProcessDone means the process already exited on
+			// its own (harmless — the FUSE kernel driver auto-cleans the
+			// mount when its server process dies); any other Kill error is
+			// included in the returned error.
+			if killErr := mount.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w; kill: %v", device, err, killErr))
+			} else {
+				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w", device, err))
+			}
 		}
 
 		delete(r.mounts, device)
 	}
+
+	return errors.Join(errs...)
 }
 
 // FormatInput is the payload for the FormatTape activity.
@@ -244,9 +257,7 @@ func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInpu
 	// need to unmount. Use context.WithoutCancel so the teardown runs to
 	// completion regardless of the parent cancellation, bounded by the
 	// teardownTimeout the workflow configured on the activity options.
-	a.registry.Teardown(context.WithoutCancel(ctx))
-
-	return nil
+	return a.registry.Teardown(context.WithoutCancel(ctx))
 }
 
 // writePhase orchestrates the Write phase (SPEC §4.3 phase 7) inside a
