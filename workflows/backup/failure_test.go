@@ -78,7 +78,10 @@ func TestWorkflowFailureSendsAlert(t *testing.T) {
 
 	env := newBackupEnv(t)
 
-	env.OnActivity(activityFor(t, PhaseWrite), mock.Anything).
+	// Use PhaseLoad (a stub activity) to trigger the failure: PhaseWrite uses a
+	// session-based orchestrator whose scaffold returns nil, so it cannot be
+	// failed via activity mocking until #54 adds the tape-copy loop.
+	env.OnActivity(activityFor(t, PhaseLoad), mock.Anything).
 		Return(errors.New("boom"))
 
 	var captured FailureInput
@@ -96,12 +99,12 @@ func TestWorkflowFailureSendsAlert(t *testing.T) {
 
 	// The original failure surfaces unmasked: the workflow error names the
 	// failing phase and carries the underlying error.
-	require.ErrorContains(t, env.GetWorkflowError(), "phase Write")
+	require.ErrorContains(t, env.GetWorkflowError(), "phase Load")
 	require.ErrorContains(t, env.GetWorkflowError(), "boom")
 
 	// The alert carries the run id, the failing phase, and the error summary.
 	assert.NotEmpty(t, captured.RunID)
-	assert.Equal(t, PhaseWrite, captured.Phase)
+	assert.Equal(t, PhaseLoad, captured.Phase)
 	assert.Contains(t, captured.ErrorSummary, "boom")
 }
 
@@ -113,7 +116,9 @@ func TestFailureAlertErrorDoesNotMask(t *testing.T) {
 
 	env := newBackupEnv(t)
 
-	env.OnActivity(activityFor(t, PhaseWrite), mock.Anything).
+	// Use PhaseLoad (a stub activity) to trigger the failure — same rationale
+	// as TestWorkflowFailureSendsAlert above.
+	env.OnActivity(activityFor(t, PhaseLoad), mock.Anything).
 		Return(errors.New("boom"))
 
 	env.OnActivity((&FailureActivities{}).NotifyFailure, mock.Anything, mock.Anything).
@@ -124,7 +129,7 @@ func TestFailureAlertErrorDoesNotMask(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 
 	workflowErr := env.GetWorkflowError()
-	require.ErrorContains(t, workflowErr, "phase Write")
+	require.ErrorContains(t, workflowErr, "phase Load")
 	require.ErrorContains(t, workflowErr, "boom")
 	assert.NotContains(t, workflowErr.Error(), "alert delivery failed")
 }

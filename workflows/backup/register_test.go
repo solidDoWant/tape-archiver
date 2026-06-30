@@ -76,15 +76,20 @@ func TestRegisterData(t *testing.T) {
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
 	// activities: the Resolve data activity, the Prepare activity, the Generate
-	// PAR2 activity, plus the four remaining phase stubs.
+	// PAR2 activity, the Write phase activities (WriteActivities +
+	// TeardownActivities sharing a registry), plus the remaining phase stubs.
 	assert.Empty(t, rw.workflows)
-	assert.Len(t, rw.activities, 7)
+	assert.Len(t, rw.activities, 8)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
 		"the data worker must register the Resolve data activity")
 	assert.True(t, hasActivity[*PrepareActivities](rw.activities),
 		"the data worker must register the Prepare activity")
 	assert.True(t, hasActivity[*GeneratePAR2Activities](rw.activities),
 		"the data worker must register the Generate PAR2 activity")
+	assert.True(t, hasActivity[*WriteActivities](rw.activities),
+		"the data worker must register the Write activities (FormatTape, WriteTree, FinalizeTape)")
+	assert.True(t, hasActivity[*TeardownActivities](rw.activities),
+		"the data worker must register the TeardownSession activity")
 }
 
 // hasActivity reports whether any registered activity is of type T.

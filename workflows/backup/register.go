@@ -61,6 +61,13 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newGeneratePAR2Activities())
 	w.RegisterActivity(newVerifyActivities())
 	w.RegisterActivity(loadActivity)
-	w.RegisterActivity(writeActivity)
+
+	// FormatTape, WriteTree, and FinalizeTape share a registry so a live
+	// mount parked by WriteTree survives into FinalizeTape across the activity
+	// boundary (sessions pin both to the same process).
+	registry := newMountRegistry()
+	w.RegisterActivity(newWriteActivities(registry))
+	w.RegisterActivity(newTeardownActivities(registry))
+
 	w.RegisterActivity(ejectActivity)
 }
