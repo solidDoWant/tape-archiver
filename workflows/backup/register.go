@@ -52,22 +52,19 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 // RegisterData registers the data worker's bulk-data phase activities
 // (SPEC §4.1), wired with the data worker's operational configuration. It is
 // called from cmd/worker for the data role.
-//
-// The remaining phase activities are stubs in this scaffold; each data-side
-// phase sub-issue replaces its stub here.
 func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newResolveDataActivities())
 	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
 	w.RegisterActivity(newGeneratePAR2Activities())
 	w.RegisterActivity(newVerifyActivities())
-	w.RegisterActivity(loadActivity)
+	w.RegisterActivity(newLoadActivities())
 
 	// FormatTape, WriteTree, and FinalizeTape share a registry so a live
 	// mount parked by WriteTree survives into FinalizeTape across the activity
 	// boundary (sessions pin both to the same process).
 	registry := newMountRegistry()
-	w.RegisterActivity(newWriteActivities(registry))
+	w.RegisterActivity(newWriteActivities(registry, cfg.StagingDir))
 	w.RegisterActivity(newTeardownActivities(registry))
 
-	w.RegisterActivity(ejectActivity)
+	w.RegisterActivity(newEjectActivities())
 }

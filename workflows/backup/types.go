@@ -1,5 +1,7 @@
 package backup
 
+import "github.com/solidDoWant/tape-archiver/pkg/tape"
+
 // This file holds the run-state types that flow between the backup workflow's
 // phases (SPEC §4.3). They are defined here as the scaffold so that each phase
 // sub-issue is purely additive: a sub-issue fills in the fields its phase
@@ -170,10 +172,53 @@ type PAR2Set struct {
 // proceed to write without one. Later sub-issues add the verification results.
 type VerifiedPlan struct{}
 
-// WrittenTape records a tape written during the Write phase (SPEC §4.3 phase 7),
-// including any state that needs manual handling if the run later fails. Later
-// sub-issues add the barcode, drive, captured LTFS index, and manifest.
-type WrittenTape struct{}
+// LoadedTape is one physical tape loaded into a drive by the Load phase
+// (SPEC §4.3 phase 6). It carries the device and slot provenance the Write and
+// Eject phases need to format, mount, and return the tape.
+type LoadedTape struct {
+	// Barcode is the tape's library barcode (volume tag from mtx), used as the
+	// LTFS volume name and as the manifest and report identity (SPEC §6).
+	Barcode tape.Barcode
+	// DriveIndex is the 0-based position of the drive in cfg.Library.Drives,
+	// tying the tape to its physical drive for Write and Eject.
+	DriveIndex int
+	// TapeIndex is the 0-based index of the logical tape this physical tape
+	// carries (an index into plan.Tapes). All copies of the same logical tape
+	// share the same TapeIndex.
+	TapeIndex int
+	// CopyIndex is the 0-based copy number (0..plan.Copies-1) among the
+	// copies of this logical tape.
+	CopyIndex int
+	// SourceSlot is the storage slot address the blank tape was loaded from.
+	// The Eject phase unloads the tape back to this slot before transferring
+	// it to an I/O station.
+	SourceSlot int
+	// STDevice is the non-rewinding tape device node (e.g. /dev/nst0).
+	STDevice string
+	// SGDevice is the SCSI generic device node (e.g. /dev/sg1) used by LTFS
+	// and the FormatTape activity (the reference LTFS sg backend).
+	SGDevice string
+}
+
+// WrittenTape records a tape written during the Write phase (SPEC §4.3 phase 7).
+// It carries all state needed by the Eject phase and the run report.
+type WrittenTape struct {
+	// Barcode is the tape's library barcode, its canonical identity (SPEC §6).
+	Barcode tape.Barcode
+	// DriveIndex is the 0-based drive index within cfg.Library.Drives.
+	DriveIndex int
+	// TapeIndex is the 0-based logical-tape index within plan.Tapes.
+	TapeIndex int
+	// CopyIndex is the 0-based copy number among the copies of this logical tape.
+	CopyIndex int
+	// SourceSlot is the storage slot the blank tape was loaded from; the Eject
+	// phase unloads the tape to this slot before transferring it to I/O.
+	SourceSlot int
+	// IndexXML is the captured LTFS index returned by FinalizeTape, byte-identical
+	// to the index LTFS wrote to the tape's index partition at unmount (SPEC §6,
+	// §10). It is included in the recovery ISO.
+	IndexXML []byte
+}
 
 // Result is the backup workflow's success return value. For now it reports the
 // phases that ran to completion, in order; later sub-issues enrich it with a
@@ -215,4 +260,14 @@ type runState struct {
 	// Pack plan once its complete staged tree has passed checksum and capacity
 	// verification on disk. The Load phase requires it before any tape is touched.
 	verified VerifiedPlan
+	// loaded is the list of tapes the Load phase loaded into drives (SPEC §4.3
+	// phase 6), one per physical tape (len(plan.Tapes) × plan.Copies). The Write
+	// phase consumes it to dispatch FormatTape → WriteTree → FinalizeTape per
+	// tape. The Eject phase uses the SourceSlot and DriveIndex for unload.
+	loaded []LoadedTape
+	// written is the list of tapes written by the Write phase (SPEC §4.3 phase 7),
+	// one per LoadedTape. The Eject phase uses SourceSlot and DriveIndex to
+	// transfer each tape to an I/O station; the Report phase uses IndexXML for the
+	// recovery ISO.
+	written []WrittenTape
 }

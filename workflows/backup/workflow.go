@@ -59,9 +59,9 @@ func backupPhases() []phase {
 		{PhasePack, TaskQueue, nil, packPhase},
 		{PhaseGeneratePAR2, DataTaskQueue, nil, generatePAR2Phase},
 		{PhaseVerify, DataTaskQueue, nil, verifyPhase},
-		{PhaseLoad, DataTaskQueue, loadActivity, nil},
+		{PhaseLoad, DataTaskQueue, nil, loadPhase},
 		{PhaseWrite, DataTaskQueue, nil, writePhase},
-		{PhaseEject, DataTaskQueue, ejectActivity, nil},
+		{PhaseEject, DataTaskQueue, nil, ejectPhase},
 		{PhaseReport, TaskQueue, reportActivity, nil},
 		{PhaseDeliver, TaskQueue, deliverActivity, nil},
 	}
@@ -147,15 +147,15 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // The Verify phase (SPEC §4.3 phase 5) is implemented in verify.go; it
 // orchestrates the data-side re-read/checksum activity rather than a single stub.
 
-// loadActivity stubs the Load phase (SPEC §4.3 phase 6).
-func loadActivity(_ context.Context) error { return nil }
+// The Load phase (SPEC §4.3 phase 6) is implemented in library.go; it
+// orchestrates the data-side load activity (blank-tape gate + mtx moves).
 
 // The Write phase (SPEC §4.3 phase 7) is implemented in session.go; it
 // orchestrates a session-pinned sequence of LTFS activities rather than a
 // single stub.
 
-// ejectActivity stubs the Eject phase (SPEC §4.3 phase 8).
-func ejectActivity(_ context.Context) error { return nil }
+// The Eject phase (SPEC §4.3 phase 8) is implemented in library.go; it
+// orchestrates the data-side eject activity (unload + transfer to I/O station).
 
 // reportActivity stubs the Report phase (SPEC §4.3 phase 9).
 func reportActivity(_ context.Context) error { return nil }

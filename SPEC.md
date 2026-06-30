@@ -202,13 +202,25 @@ All formats are open and widely implemented, for 20-year recoverability.
   canonical physical ID**. `mkltfs` sets the LTFS volume name to the barcode; the
   per-tape manifest and the report reference tapes by barcode. (Production tapes are
   barcode-labeled and read by the library.)
+- **Directory layout within LTFS:**
+  - `archives/NNN/` — one directory per archive, where `NNN` is the zero-padded source
+    index (e.g. `archives/000/`, `archives/001/`). Each contains: the fixed-size
+    `age`-encrypted, optionally `zstd`-compressed `tar` slice files; and the PAR2
+    recovery set covering those slices.
+  - `manifest.json` — top-level checksum manifest at the LTFS root, written **last**
+    (after all archive directories are fully written). Its presence signals that the tape
+    was completely written; a tape without `manifest.json` was not finished by the run and
+    must be discarded.
+- **`manifest.json` contents:** barcode, tape index, copy index, and for each archive: its
+  source index, slice file paths (relative to the LTFS root), SHA-256 checksums, and PAR2
+  file paths with checksums. Checksums come from the Prepare/GeneratePAR2 phases — no
+  hashing occurs during the write window (SPEC §14).
 - **Per archive (group or volume), the on-tape files are:**
   - encrypted, sliced data: fixed-size slices of the `age`-encrypted, optionally
     `zstd`-compressed `tar` stream;
-  - a PAR2 recovery set covering those slices;
-  - SHA-256 checksums for every file.
-- **Per tape:** a top-level checksum/manifest file covering all files on the tape, and
-  human-readable provenance (run id, date, archive list, barcode).
+  - a PAR2 recovery set covering those slices.
+- **Per tape:** the top-level `manifest.json` covering all files on the tape, plus the
+  LTFS index (captured by `FinalizeTape` at unmount and also on the tape itself).
 - **Source format:** `tar` of the snapshot's `.zfs/snapshot/<snap>/` contents.
   Filesystem-level `tar` (not `zfs send`) is chosen deliberately: it is the most
   portable, longest-lived, application-agnostic representation, restorable file by file

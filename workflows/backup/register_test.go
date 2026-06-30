@@ -75,9 +75,8 @@ func TestRegisterData(t *testing.T) {
 	RegisterData(rw, DataConfig{StagingDir: "/mnt/bulk-pool-01/archive/.tape-staging"})
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
-	// activities: the Resolve data activity, the Prepare activity, the Generate
-	// PAR2 activity, the Write phase activities (WriteActivities +
-	// TeardownActivities sharing a registry), plus the remaining phase stubs.
+	// activities: Resolve data, Prepare, Generate PAR2, Verify, Load, Write
+	// (WriteActivities + TeardownActivities sharing a registry), and Eject.
 	assert.Empty(t, rw.workflows)
 	assert.Len(t, rw.activities, 8)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
@@ -86,10 +85,16 @@ func TestRegisterData(t *testing.T) {
 		"the data worker must register the Prepare activity")
 	assert.True(t, hasActivity[*GeneratePAR2Activities](rw.activities),
 		"the data worker must register the Generate PAR2 activity")
+	assert.True(t, hasActivity[*VerifyActivities](rw.activities),
+		"the data worker must register the Verify activity")
+	assert.True(t, hasActivity[*LoadActivities](rw.activities),
+		"the data worker must register the Load activity")
 	assert.True(t, hasActivity[*WriteActivities](rw.activities),
 		"the data worker must register the Write activities (FormatTape, WriteTree, FinalizeTape)")
 	assert.True(t, hasActivity[*TeardownActivities](rw.activities),
 		"the data worker must register the TeardownSession activity")
+	assert.True(t, hasActivity[*EjectActivities](rw.activities),
+		"the data worker must register the Eject activity")
 }
 
 // hasActivity reports whether any registered activity is of type T.

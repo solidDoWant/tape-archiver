@@ -19,6 +19,18 @@ import (
 // genuine drive/media error. IsBlank never reports such a tape as blank.
 var errUnexpectedSense = errors.New("unexpected SCSI sense on blank-check read")
 
+// SGDevice returns the SCSI generic device node (e.g. /dev/sg1) paired with
+// this drive's tape node. When the node was not set explicitly with
+// WithSGDevice it is resolved from the tape device's SCSI address. This is the
+// node that LTFS and FormatTape use (the reference LTFS sg backend).
+func (d *Drive) SGDevice() (string, error) {
+	if d.sgDevice != "" {
+		return d.sgDevice, nil
+	}
+
+	return sgDeviceForTapeNode(d.stDevice)
+}
+
 // IsBlank reports whether the loaded tape is blank (never written or fully
 // erased). SPEC.md §4.3 step 6 uses this as the guard that a run never
 // silently overwrites existing data ("Never write to a non-blank tape").
