@@ -40,7 +40,15 @@ for cmd in vtllibrary vtltape vtlcmd make_vtl_media mktape mtx; do
   }
 done
 
-if lsmod | grep -q '^mhvtl '; then
+# Probe sysfs rather than `lsmod | grep -q`: under `set -o pipefail`, grep -q
+# closes the pipe on its first match, so lsmod (still writing its remaining
+# output) is killed by SIGPIPE and the pipeline reports 141 — failure — even
+# though the module IS loaded. That intermittent false negative made mhvtl-up
+# skip this no-op and fall through to insmod, which fails with "File exists"
+# and (under set -e) aborts the whole `make test-integration` run before any
+# test starts. /sys/module/mhvtl exists iff the module is loaded; no pipe, no
+# race.
+if [ -d /sys/module/mhvtl ]; then
   echo "mhvtl module already loaded; mhvtl-up is a no-op"
   exit 0
 fi

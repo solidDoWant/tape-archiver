@@ -409,7 +409,7 @@ func TestResolveFailureAbortsBeforePrepare(t *testing.T) {
 
 	env := newBackupEnv(t)
 
-	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything).
+	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
 		Return(nil, errors.New("VolumeSnapshot not found"))
 
 	// Prepare must never run; if it does, the test fails.

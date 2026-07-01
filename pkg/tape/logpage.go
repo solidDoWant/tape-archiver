@@ -7,7 +7,42 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"time"
 )
+
+const (
+	// sgLogsAttempts / sgLogsRetryDelay bound the retry that absorbs a transient
+	// UNIT ATTENTION. Just after the drive powers on or is reset, its first SCSI
+	// command draws a UNIT ATTENTION check condition (sg_logs exits non-zero);
+	// the condition is cleared once reported, so a retry succeeds. A persistent
+	// failure still surfaces after the attempts are exhausted.
+	sgLogsAttempts   = 5
+	sgLogsRetryDelay = 500 * time.Millisecond
+)
+
+// runSgLogs invokes sg_logs, retrying to ride out a transient UNIT ATTENTION
+// (see sgLogsAttempts). It returns the last attempt's output and error.
+func runSgLogs(ctx context.Context, args ...string) ([]byte, error) {
+	var (
+		out []byte
+		err error
+	)
+
+	for attempt := 0; attempt < sgLogsAttempts; attempt++ {
+		out, err = exec.CommandContext(ctx, "sg_logs", args...).Output()
+		if err == nil {
+			return out, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return out, err
+		case <-time.After(sgLogsRetryDelay):
+		}
+	}
+
+	return out, err
+}
 
 // LogPageReader reads SCSI log pages from a tape drive via sg_logs.
 // It targets the SCSI generic device node (e.g. /dev/sg1).
@@ -46,7 +81,7 @@ func (r *LogPageReader) ReadLogPages(ctx context.Context) (LogPageResult, error)
 // the flag number, name, and value directly — the decoded text format omits
 // the flag number for named flags and varies across sg3-utils releases.
 func (r *LogPageReader) readTapeAlert(ctx context.Context) (TapeAlertResult, error) {
-	out, err := exec.CommandContext(ctx, "sg_logs", "--page=0x2e", "--json", r.sgDevice).Output()
+	out, err := runSgLogs(ctx, "--page=0x2e", "--json", r.sgDevice)
 	if err != nil {
 		return TapeAlertResult{}, fmt.Errorf("sg_logs --page=0x2e --json %s: %w", r.sgDevice, err)
 	}
@@ -57,7 +92,7 @@ func (r *LogPageReader) readTapeAlert(ctx context.Context) (TapeAlertResult, err
 // readRepositions runs "sg_logs --page=0x24 <sgDevice>" and extracts the
 // reposition/back-hitch count. Returns 0 when the page is not supported.
 func (r *LogPageReader) readRepositions(ctx context.Context) (int64, error) {
-	out, err := exec.CommandContext(ctx, "sg_logs", "--page=0x24", r.sgDevice).Output()
+	out, err := runSgLogs(ctx, "--page=0x24", r.sgDevice)
 	if err != nil {
 		// Some drives do not support this page; treat as zero rather than failing.
 		return 0, nil

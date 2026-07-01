@@ -83,12 +83,26 @@ func TestTapePath(t *testing.T) {
 		}
 
 		// Short SCSI ERASE (CDB 0x19, LONG=0) rewinds and truncates at BOT,
-		// resetting the vtltape daemon's in-memory state to blank.
-		_ = exec.CommandContext(cleanupCtx, "mt", "-f", stDev, "rewind").Run()
+		// resetting the vtltape daemon's in-memory state to blank. Bound the
+		// rewind: on a drive that is stuck "not ready" the st-node rewind blocks
+		// until the medium becomes ready, which would otherwise hang cleanup for
+		// the full 120s budget.
+		rewindCtx, rewindCancel := context.WithTimeout(cleanupCtx, 10*time.Second)
+		_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
+		rewindCancel()
 		_ = exec.CommandContext(cleanupCtx, "sg_raw", sgDev,
 			"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
 		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
 	})
+
+	// Probe drive readiness up front. On some kernels mhvtl leaves a freshly
+	// loaded drive stuck "not ready"; the Load activity's blank check would then
+	// fail rather than skip. Load the target tape and wait for the drive to become
+	// ready — skipping cleanly if it never does, like the other mhvtl tests — then
+	// unload so the Load activity below still exercises a load from scratch.
+	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load for readiness probe")
+	testutil.SkipIfDriveNotReady(t, stDev)
+	require.NoError(t, changer.Unload(t.Context(), slotAddr, driveAddr), "unload after readiness probe")
 
 	// --- Phase: Load ----------------------------------------------------------
 	// Call the Load activity directly to exercise the reconciliation, blank

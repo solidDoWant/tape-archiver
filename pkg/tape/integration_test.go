@@ -103,11 +103,22 @@ func TestBlankCheck(t *testing.T) {
 	inv, err := changer.Inventory(t.Context())
 	require.NoError(t, err, "inventory")
 	require.GreaterOrEqual(t, len(inv.Drives), 1)
-	require.NotEmpty(t, inv.Slots, "no storage slots")
 	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
-	require.True(t, inv.Slots[0].Full, "slot 1 must have a tape")
 
-	slot := inv.Slots[0]
+	// Use a dedicated slot that no other integration test ever writes, so the
+	// tape is guaranteed blank. Slot index 0 is formatted by pkg/ltfs and the
+	// backup session test, and slot index 1 by the backup tape-path test; both
+	// leave their tape non-blank. mkltfs content is sticky (the vtltape daemon
+	// caches it), so a contaminated tape stays non-blank for the rest of the run
+	// and this assertion would fail spuriously. Slot index 2 is touched only by
+	// this test (load/unload, never written), so make_vtl_media's fresh blank
+	// media survives.
+	const blankSlotIndex = 2
+	require.GreaterOrEqual(t, len(inv.Slots), blankSlotIndex+1,
+		"need at least %d storage slots", blankSlotIndex+1)
+	require.True(t, inv.Slots[blankSlotIndex].Full, "slot %d must have a tape", blankSlotIndex)
+
+	slot := inv.Slots[blankSlotIndex]
 	driveAddr := inv.Drives[0].Address
 
 	err = changer.Load(t.Context(), slot.Address, driveAddr)

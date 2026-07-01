@@ -42,13 +42,17 @@ test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests
 	  gocache=$$(mktemp -d); \
 	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; $(MAKE) zpool-down; $(MAKE) mhvtl-down; $(MAKE) temporal-down; exit $$rc; }; \
 	  trap cleanup EXIT; \
+	  : "-p 1 serializes package test binaries: they share one physical mhvtl"; \
+	  : "library (2 drives, 47 tapes), so running them concurrently races on"; \
+	  : "the drive and contaminates shared tapes. Do not remove without"; \
+	  : "giving each package its own drive/tape."; \
 	  sudo env \
 	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
 	    TAPE_POOL_MOUNT=/mnt/tape-test-pool/archive TAPE_POOL_DATASET=tape_test/archive \
 	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
 	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
 	    PATH="$$PATH" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
-	    go test -race -count=1 -tags integration ./...; \
+	    go test -race -count=1 -p 1 -tags integration ./...; \
 	}
 
 .PHONY: test-e2e

@@ -108,7 +108,7 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 			return nil, fmt.Errorf("drive %d: resolve SCSI generic node for %s: %w", i, stDev, err)
 		}
 
-		blank, err := drive.IsBlank(ctx)
+		blank, err := blankCheckWhenReady(ctx, drive)
 		if err != nil {
 			return nil, fmt.Errorf("drive %d: blank check for tape %s: %w", i, barcode, err)
 		}
@@ -130,6 +130,43 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 	}
 
 	return loaded, nil
+}
+
+const (
+	// driveReadyTimeout bounds how long the blank check waits for a freshly
+	// loaded drive to become ready. A MOVE MEDIUM completes before the drive has
+	// threaded and calibrated the tape; real LTO drives then report NOT READY /
+	// BECOMING READY for tens of seconds. This is well under loadTimeout.
+	driveReadyTimeout = 3 * time.Minute
+	// driveReadyPoll is the interval between blank-check retries while waiting.
+	driveReadyPoll = 1 * time.Second
+)
+
+// blankCheckWhenReady runs the blank check, retrying while a freshly loaded
+// drive is still becoming ready. After a load the drive is not ready instantly,
+// so the blank-check rewind can transiently fail with NOT READY; polling until
+// the drive answers keeps a slow-loading drive from aborting the run. The wait
+// is bounded by driveReadyTimeout and honours ctx cancellation; a genuine media
+// or hardware fault persists and surfaces as the final error.
+func blankCheckWhenReady(ctx context.Context, drive *tape.Drive) (bool, error) {
+	deadline := time.Now().Add(driveReadyTimeout)
+
+	for {
+		blank, err := drive.IsBlank(ctx)
+		if err == nil {
+			return blank, nil
+		}
+
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			return false, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return false, err
+		case <-time.After(driveReadyPoll):
+		}
+	}
 }
 
 // reconcileLoad ensures the drive at driveAddr (which corresponds to the i-th

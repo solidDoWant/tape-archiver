@@ -67,7 +67,11 @@ done
 # depmod'd there, and loaded with `modprobe -d`. When $ZFS_MODULES is unset or
 # built for a different kernel, it falls back to the host's own module.
 load_zfs_module() {
-  if lsmod | grep -q '^zfs '; then
+  # Probe sysfs, not `lsmod | grep -q`: under `set -o pipefail` that pipeline
+  # can die of SIGPIPE (grep -q exits on first match, lsmod is killed mid-write)
+  # and falsely report the module as absent, causing a redundant modprobe. See
+  # the longer note in mhvtl-up.sh. /sys/module/zfs exists iff zfs is loaded.
+  if [ -d /sys/module/zfs ]; then
     echo "==> ZFS kernel module already loaded."
     return 0
   fi

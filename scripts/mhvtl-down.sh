@@ -12,7 +12,11 @@ LIBRARY_ID=10
 DRIVE0_ID=11
 DRIVE1_ID=12
 
-if ! lsmod | grep -q '^mhvtl '; then
+# Probe sysfs, not `lsmod | grep -q`: under `set -o pipefail` that pipeline can
+# die of SIGPIPE (grep -q exits on first match, lsmod is killed mid-write) and
+# falsely report the module as absent, making mhvtl-down no-op and leave a
+# stale module + daemons behind. /sys/module/mhvtl exists iff it is loaded.
+if [ ! -d /sys/module/mhvtl ]; then
   echo "mhvtl module not loaded; mhvtl-down is a no-op"
   exit 0
 fi
