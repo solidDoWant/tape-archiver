@@ -320,7 +320,19 @@ func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInpu
 // The deferred TeardownSession activity runs on the same worker (within the
 // session) so it can unmount any live mount the session still owns on exit.
 func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
-	sessionCtx, err := workflow.CreateSession(ctx, &workflow.SessionOptions{
+	// CreateSession pins the session to the task queue in the context's activity
+	// options, falling back to the workflow's own queue (control) when none is
+	// set. The session must run on the data worker — that is where the tape
+	// hardware, the session worker, and the live MountRegistry live — so set the
+	// data task queue before creating it. Without this the session is created on
+	// the control queue, whose worker has no session support, and the internal
+	// session-creation activity is never picked up (the run stalls).
+	sessionBaseCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: writeTapeTimeout,
+	})
+
+	sessionCtx, err := workflow.CreateSession(sessionBaseCtx, &workflow.SessionOptions{
 		CreationTimeout:  sessionCreationTimeout,
 		ExecutionTimeout: sessionExecutionTimeout,
 	})

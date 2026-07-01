@@ -67,8 +67,9 @@ func notifyFailure(ctx workflow.Context, failingPhase string, runErr error) {
 	disconnected, cancel := workflow.NewDisconnectedContext(ctx)
 	defer cancel()
 
-	// The alert is delivered by the control worker (Discord delivery is
-	// control-side, SPEC §4.1), so it runs on the control task queue.
+	// The operational failure alert is delivered by the control worker (it uses
+	// the env-configured failure webhook, distinct from the data-side success
+	// delivery), so it runs on the control task queue.
 	actx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
 		TaskQueue:           TaskQueue,
 		StartToCloseTimeout: failureAlertTimeout,

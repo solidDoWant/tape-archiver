@@ -70,6 +70,14 @@ func TestBackupEndToEnd(t *testing.T) {
 	slotAddr := slot.Address
 	barcode := slot.Barcode
 
+	// Register drive cleanup BEFORE touching the drive so that even an early exit
+	// (a require failure or a SkipIfDriveNotReady skip after the pre-load) leaves
+	// the library as the sibling integration tests expect: drive 0 empty (they
+	// assert it starts empty) and the tape back in its storage slot. returnTapeToSlot
+	// handles both the run's normal end state (tape parked in an I/O slot by Eject)
+	// and an interrupted state (tape still in drive 0).
+	t.Cleanup(func() { returnTapeToSlot(changer, slotAddr, driveAddr, barcode) })
+
 	// The run must load a blank tape. Load the chosen tape, confirm the drive is
 	// ready (skip if mhvtl left it stuck "not ready"), erase it to blank, and
 	// unload — leaving a genuinely blank tape in slot 2 for the run to load.
@@ -78,16 +86,15 @@ func TestBackupEndToEnd(t *testing.T) {
 	eraseLoadedTape(t.Context(), stDev, sgDev)
 	require.NoError(t, changer.Unload(t.Context(), slotAddr, driveAddr), "unload after blanking")
 
-	// Return the tape to slot 2 and blank it again after the run so consecutive
-	// runs start from the same clean state (the run leaves it in an I/O slot,
-	// formatted). Mirrors the tape-path test's cleanup.
-	t.Cleanup(func() { returnAndBlank(changer, stDev, sgDev, slotAddr, driveAddr, barcode) })
-
 	temporalClient := dialTemporal(t)
 
 	stagingDir := t.TempDir()
 	binariesDir := testutil.RecoveryBinariesDir(t)
 
+	// Mirror the production worker options (cmd/worker.workerOptions): session
+	// support on the data worker, defaults on the control worker. Eager activity
+	// execution is suppressed at the source via ActivityOptions.DisableEagerExecution
+	// on the control-side phases, not via a worker option.
 	controlWorker := worker.New(temporalClient, TaskQueue, worker.Options{})
 	RegisterControl(controlWorker, ControlConfig{})
 	require.NoError(t, controlWorker.Start(), "start control worker")
@@ -126,7 +133,9 @@ func TestBackupEndToEnd(t *testing.T) {
 	}
 	require.NoError(t, cfg.Validate(), "run config must be valid")
 
-	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
+	// Bound the run below `go test`'s default 10m timeout so a genuine stall fails
+	// this test with a clear deadline error rather than panicking the whole package.
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 6*time.Minute)
 	defer cancel()
 
 	options := client.StartWorkflowOptions{
@@ -198,10 +207,13 @@ func eraseLoadedTape(ctx context.Context, stDev, sgDev string) {
 		"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
 }
 
-// returnAndBlank returns the run's tape to its storage slot and blanks it so
-// consecutive test runs start from the same clean state. The run leaves the tape
-// in an I/O slot (after Eject), formatted; this moves it back and erases it.
-func returnAndBlank(changer *tape.Changer, stDev, sgDev string, slotAddr, driveAddr int, barcode tape.Barcode) {
+// returnTapeToSlot restores the library to the state the sibling integration
+// tests expect after the run: drive 0 empty and the tape back in its storage
+// slot. It never loads the drive — the run's Eject already emptied drive 0, and
+// leaving a tape loaded would fail the next test's "drive 0 must start empty"
+// precondition. It is best-effort: failures are ignored so cleanup never fails a
+// passing test.
+func returnTapeToSlot(changer *tape.Changer, slotAddr, driveAddr int, barcode tape.Barcode) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -210,22 +222,21 @@ func returnAndBlank(changer *tape.Changer, stDev, sgDev string, slotAddr, driveA
 		return
 	}
 
-	loaded := len(inv.Drives) > 0 && inv.Drives[0].Loaded && inv.Drives[0].Barcode == barcode
+	// If a tape is still in drive 0 (e.g. the run failed before Eject), unload it
+	// to the storage slot so the drive ends empty.
+	if len(inv.Drives) > 0 && inv.Drives[0].Loaded {
+		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
 
-	if !loaded {
-		for _, io := range inv.IOSlots {
-			if io.Full && io.Barcode == barcode {
-				_ = changer.Transfer(cleanupCtx, io.Address, slotAddr)
+		return
+	}
 
-				break
-			}
-		}
+	// Otherwise the tape is parked in an I/O slot after Eject; move it back to its
+	// storage slot so a repeat run finds slot populated.
+	for _, io := range inv.IOSlots {
+		if io.Full && io.Barcode == barcode {
+			_ = changer.Transfer(cleanupCtx, io.Address, slotAddr)
 
-		if err := changer.Load(cleanupCtx, slotAddr, driveAddr); err != nil {
 			return
 		}
 	}
-
-	eraseLoadedTape(cleanupCtx, stDev, sgDev)
-	_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
 }
