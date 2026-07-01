@@ -89,7 +89,9 @@ func TestTapePath(t *testing.T) {
 		// the full 120s budget.
 		rewindCtx, rewindCancel := context.WithTimeout(cleanupCtx, 10*time.Second)
 		_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
+
 		rewindCancel()
+
 		_ = exec.CommandContext(cleanupCtx, "sg_raw", sgDev,
 			"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
 		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)

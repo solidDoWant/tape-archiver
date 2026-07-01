@@ -142,10 +142,14 @@ Configuration for fill-to-capacity mode.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `recipients` | `[]string` | yes | One or more age public keys (`age1pq1…` for post-quantum recipients, generated with `age-keygen -pq`). Archives are encrypted to all recipients. |
+| `identity` | `string` | yes | The age private identity (`AGE-SECRET-KEY-PQ-1…`) escrowed into the report and recovery ISO. **Never used to encrypt** — encryption uses `recipients` only. The Report phase fails the run if it is empty or if its derived public key is not among `recipients`. |
 
-The age private identity corresponding to each recipient must be stored securely. It is
-included in the printed report and recovery ISO so the holder can decrypt the tapes
-without any online service — see SPEC.md §7.
+The `identity` is included in the printed report and recovery ISO so the holder can
+decrypt the tapes without any online service (SPEC.md §7 key-escrow decision). Because
+those artifacts therefore carry the decryption secret and are delivered to Discord on
+success, store and dispose of them accordingly. `identity` must be one of the private
+identities matching a configured `recipient`; the run refuses to build a report that
+escrows a key that cannot decrypt the archives.
 
 ---
 
@@ -166,11 +170,12 @@ alerting works even when config parsing fails.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `ROLE` | yes | Selects which task queue the `worker` binary polls and which activities it registers: `control` (Kubernetes-side: snapshot resolution, report/ISO building, Discord delivery) or `data` (storage-host-side: tar/age/PAR2/checksum/LTFS/changer activities). Matching is case-insensitive. An empty or unrecognized value causes the worker to exit non-zero at startup. |
+| `ROLE` | yes | Selects which task queue the `worker` binary polls and which activities it registers: `control` (Kubernetes-side: snapshot resolution and bin-packing) or `data` (storage-host-side: tar/age/PAR2/checksum/LTFS/changer activities, plus report/ISO building and Discord delivery — these run on the data worker because the recovery binaries, pinned tools, staged files, and captured LTFS indexes all live there). Matching is case-insensitive. An empty or unrecognized value causes the worker to exit non-zero at startup. |
 | `LOG_LEVEL` | no | Logging verbosity for the worker: `debug`, `info`, `warn` (or `warning`), or `error`. Case-insensitive; defaults to `info`, and an unrecognized value also falls back to `info`. |
 | `DISCORD_FAILURE_WEBHOOK_URL` | no | Discord webhook URL for run failure alerts. When absent, failure alerting is silently disabled. |
 | `TAPE_K8S_DATASET_PARENT` | no | democratic-csi's `datasetParentName` (e.g. `bulk-pool-01/k8s/democratic-csi/nfs/pvcs`), prepended to a relative CSI `snapshotHandle` to rebuild the absolute ZFS snapshot path during k8s resolution on the control worker. Only needed when a run names k8s sources; when absent, handles are treated as already absolute. |
 | `TAPE_STAGING_DIR` | yes (data worker) | Directory the Prepare phase stages prepared archives into — a plain subdirectory of an existing dataset on the storage host (e.g. `/mnt/bulk-pool-01/archive/.tape-staging`), bind-mounted into the data worker container. Each run isolates its output in a subdirectory keyed by run id. Required on the data worker; the Prepare activity fails when it is empty. Ignored by the control worker. |
+| `TAPE_RECOVERY_BINARIES_DIR` | yes (data worker) | Directory holding the statically linked recovery binaries (`age`, `par2`, `zstd`, `tar`) staged into the recovery ISO's `/bin` (SPEC §10). Every top-level regular file must be a statically linked native executable; the Report phase fails the run otherwise. Populated in the data worker image to match the pinned recovery-disc tool versions. Ignored by the control worker. |
 | `METRICS_ADDR` | no | TCP listen address for the Prometheus `/metrics` endpoint (e.g. `:9090`). The `worker` binary defaults this to `:9090`; set it to an empty value to disable the endpoint entirely — no HTTP server is started and no registry is created. |
 | `METRICS_SCRAPE_WAIT_TIMEOUT` | no | Go duration bounding the end-of-run wait for a final Prometheus scrape. Defaults to `60s`; set to `0s` to disable the wait. |
 | `TEMPORAL_ADDRESS` | yes | `host:port` of the Temporal frontend gRPC endpoint (e.g. `localhost:7233`). |

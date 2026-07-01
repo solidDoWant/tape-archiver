@@ -78,11 +78,11 @@ func TestWorkflowFailureSendsAlert(t *testing.T) {
 
 	env := newBackupEnv(t)
 
-	// Use PhaseReport (a stub) to trigger the failure: it always dispatches its
-	// activity regardless of the plan content, making it reliable for testing the
-	// deferred failure-alert handler with a zero-value config.
-	env.OnActivity(activityFor(t, PhaseReport), mock.Anything).
-		Return(errors.New("boom"))
+	// Fail at the Report phase: it always dispatches its activity regardless of
+	// the plan content, making it reliable for testing the deferred failure-alert
+	// handler with a zero-value config.
+	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
+		Return(ReportOutput{}, errors.New("boom"))
 
 	var captured FailureInput
 
@@ -116,10 +116,9 @@ func TestFailureAlertErrorDoesNotMask(t *testing.T) {
 
 	env := newBackupEnv(t)
 
-	// Use PhaseReport (a stub) to trigger the failure — same rationale as
-	// TestWorkflowFailureSendsAlert above.
-	env.OnActivity(activityFor(t, PhaseReport), mock.Anything).
-		Return(errors.New("boom"))
+	// Fail at the Report phase — same rationale as TestWorkflowFailureSendsAlert.
+	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
+		Return(ReportOutput{}, errors.New("boom"))
 
 	env.OnActivity((&FailureActivities{}).NotifyFailure, mock.Anything, mock.Anything).
 		Return(errors.New("alert delivery failed"))

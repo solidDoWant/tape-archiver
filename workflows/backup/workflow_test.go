@@ -28,7 +28,7 @@ var orderedPhases = []string{
 }
 
 // newBackupEnv returns a test workflow environment with the Backup workflow and
-// every phase stub plus the failure-alert activity registered, so a test only
+// every phase activity plus the failure-alert activity registered, so a test only
 // overrides the behavior it cares about with OnActivity.
 func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
@@ -38,14 +38,9 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(Backup)
 
-	// Stub phases register their single activity. All tape-path phases (Load,
-	// Write, Eject) are now run-orchestrated, so no stub activity is registered
-	// from the phase table. Only Report and Deliver still use single stubs.
-	for _, phase := range backupPhases() {
-		if phase.activity != nil {
-			env.RegisterActivity(phase.activity)
-		}
-	}
+	// Every phase is run-orchestrated, so nothing is registered from the phase
+	// table's activity field (all nil); each phase's activities are registered
+	// explicitly below.
 
 	env.RegisterActivity(&ResolveControlActivities{})
 	env.RegisterActivity(&ResolveDataActivities{})
@@ -73,15 +68,34 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	registry := newMountRegistry()
 	env.RegisterActivity(newWriteActivities(registry, t.TempDir()))
 	env.RegisterActivity(newTeardownActivities(registry))
+	// The Report and Deliver phases are run-orchestrated. Unlike the earlier
+	// phases they cannot no-op on an empty config (Report requires an escrow
+	// identity and at least one written tape), so a test that runs them to
+	// completion mocks them via expectReportDeliverSuccess; failure tests either
+	// target an earlier phase or fail Report explicitly.
+	env.RegisterActivity(newReportActivities(t.TempDir(), t.TempDir()))
+	env.RegisterActivity(newDeliverActivities())
 	env.RegisterActivity(&FailureActivities{})
 
 	return env
+}
+
+// expectReportDeliverSuccess mocks the Report and Deliver activities to succeed,
+// for tests that drive the pipeline to completion. Their real bodies need staged
+// files, recovery binaries, and a live webhook, which the workflow-orchestration
+// tests deliberately do not set up — they assert sequencing, not artifact content.
+func expectReportDeliverSuccess(env *testsuite.TestWorkflowEnvironment) {
+	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
+		Return(ReportOutput{}, nil)
+	env.OnActivity((&DeliverActivities{}).Deliver, mock.Anything, mock.Anything).
+		Return(nil)
 }
 
 func TestBackupRunsAllPhasesInOrder(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
+	expectReportDeliverSuccess(env)
 
 	env.ExecuteWorkflow(Backup, config.Config{})
 
@@ -117,6 +131,8 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 
 			if test.failAt != "" {
 				failPhase(t, env, test.failAt)
+			} else {
+				expectReportDeliverSuccess(env)
 			}
 
 			env.ExecuteWorkflow(Backup, config.Config{})
@@ -133,33 +149,10 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 	}
 }
 
-// activityFor returns the stub activity for the named phase so a test can target
-// it with OnActivity. It is only valid for stub phases that expose a single
-// activity function; run-orchestrated phases (Resolve, Prepare, Pack, Generate
-// PAR2, Verify, Load, Write, Eject) have phase.activity == nil and must be
-// handled in failPhase's switch instead.
-func activityFor(t *testing.T, name string) any {
-	t.Helper()
-
-	for _, phase := range backupPhases() {
-		if phase.name == name {
-			if phase.activity == nil {
-				t.Fatalf("phase %q has no single stub activity; add it to failPhase's switch", name)
-			}
-
-			return phase.activity
-		}
-	}
-
-	t.Fatalf("no phase named %q", name)
-
-	return nil
-}
-
-// failPhase mocks the named phase to fail. The run-orchestrated phases (Resolve,
-// Prepare, Pack, Generate PAR2, Verify, Load, Write, Eject) fail through their
-// activities; every other phase is a single stub activity returning just an
-// error.
+// failPhase mocks the named phase to fail through its activity. Every phase is
+// run-orchestrated, so each fails via the activity it dispatches. The failure
+// tests target phases up to Eject; Report and Deliver are mocked to succeed in
+// newBackupEnv, so they are not handled here.
 func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
 	t.Helper()
 
@@ -206,6 +199,5 @@ func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string
 		return
 	}
 
-	env.OnActivity(activityFor(t, name), mock.Anything).
-		Return(errors.New("boom"))
+	t.Fatalf("failPhase does not support phase %q (Report and Deliver are mocked to succeed)", name)
 }

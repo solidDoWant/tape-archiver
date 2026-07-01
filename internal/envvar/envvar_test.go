@@ -38,3 +38,19 @@ func TestParse_withoutStagingDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, cfg.StagingDir)
 }
+
+func TestParse_withRecoveryBinariesDir(t *testing.T) {
+	t.Setenv("TAPE_RECOVERY_BINARIES_DIR", "/opt/recovery-bin")
+
+	cfg, err := Parse()
+	require.NoError(t, err)
+	assert.Equal(t, "/opt/recovery-bin", cfg.RecoveryBinariesDir)
+}
+
+func TestParse_withoutRecoveryBinariesDir(t *testing.T) {
+	t.Setenv("TAPE_RECOVERY_BINARIES_DIR", "")
+
+	cfg, err := Parse()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.RecoveryBinariesDir)
+}

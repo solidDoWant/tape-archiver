@@ -32,6 +32,7 @@ func validConfig() Config {
 		},
 		Encryption: Encryption{
 			Recipients: []string{"age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"},
+			Identity:   "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREALIDENTITY000000000000000000000000000000000",
 		},
 		Delivery: Delivery{
 			WebhookURL: "https://discord.com/api/webhooks/123/abc",
@@ -250,6 +251,18 @@ func TestConfigValidate(t *testing.T) {
 			mutate:      func(c *Config) { c.Encryption.Recipients = nil },
 			wantErr:     require.Error,
 			errContains: "encryption.recipients",
+		},
+		{
+			name:        "no encryption identity",
+			mutate:      func(c *Config) { c.Encryption.Identity = "" },
+			wantErr:     require.Error,
+			errContains: "encryption.identity",
+		},
+		{
+			name:        "blank encryption identity",
+			mutate:      func(c *Config) { c.Encryption.Identity = "   " },
+			wantErr:     require.Error,
+			errContains: "encryption.identity",
 		},
 		{
 			name:    "feasibility overhead at the floor",

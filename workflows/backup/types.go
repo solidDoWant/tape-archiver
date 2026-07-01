@@ -270,4 +270,9 @@ type runState struct {
 	// transfer each tape to an I/O station; the Report phase uses IndexXML for the
 	// recovery ISO.
 	written []WrittenTape
+	// reportPath and isoPath are the on-disk paths of the artifacts the Report
+	// phase builds (SPEC §4.3 phase 9): the PDF report and the compressed recovery
+	// ISO, staged on the data worker. The Deliver phase uploads them.
+	reportPath string
+	isoPath    string
 }

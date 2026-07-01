@@ -34,6 +34,12 @@ carry it) contain the decryption secret and **must be handled accordingly**. Und
 project's personal cold-storage threat model that trade-off is accepted. A finding of the
 private identity in the report is expected behavior, not a leak.
 
+The identity comes from the run config (`encryption.identity`) and is **never used to
+encrypt** — encryption uses `encryption.recipients` only. Before embedding it, the
+Report phase derives its public key and confirms it is one of the configured recipients,
+failing the run otherwise; the report can never escrow a key that cannot decrypt the
+archives.
+
 ## Implementation notes
 
 - Rendering uses the pure-Go [`github.com/go-pdf/fpdf`](https://github.com/go-pdf/fpdf)

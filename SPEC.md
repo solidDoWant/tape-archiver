@@ -85,11 +85,15 @@ where the data lives:
 
 - **Control worker (`control` queue) — runs in Kubernetes.** Lightweight, no bulk data.
   Resolves the run config against the k8s API (snapshot discovery/validation), drives
-  the workflow, builds the PDF report and the recovery ISO, and delivers to Discord.
+  the workflow, and bin-packs the plan.
 - **Data worker (`data` queue) — runs as a container on `ubuntu-storage-host-01`.**
   Performs all bulk-data activities where the bytes already are, so they never cross
   the network: `tar`, `age`, PAR2 slicing, checksums, LTFS format/mount/write, and
-  library moves.
+  library moves. It also builds the PDF report and the recovery ISO and delivers them
+  to Discord: the report/ISO inputs — the staged files, the recovery binaries staged
+  into the ISO, the pinned tool versions, and the captured LTFS indexes — all live
+  here, and delivering from here keeps the tens-of-MB ISO off the Temporal payload
+  path and out of the control image.
 
 The data worker is a **Nix-built OCI image** (`streamLayeredImage`, per media-processor)
 run by systemd-managed Docker on the host. The image bundles pinned tooling — `ltfs`,
@@ -238,7 +242,11 @@ All formats are open and widely implemented, for 20-year recoverability.
   printed report and on the recovery ISO, so the holder of those artifacts can always
   decrypt. Consequence to document plainly: the report and ISO delivered to Discord
   therefore contain the decryption secret and must be handled accordingly. (Treated as
-  acceptable for this personal cold-storage threat model.)
+  acceptable for this personal cold-storage threat model.) The identity is supplied in
+  the run config (`encryption.identity`); it is **never used to encrypt** (that uses
+  `encryption.recipients` only), and the Report phase fails the run if it is absent or
+  if its derived public key is not one of the configured recipients — so the escrowed
+  key is always one that can actually decrypt the archives.
 
 ## 8. Redundancy model
 
@@ -269,7 +277,9 @@ the reason compression is enabled by default, and an argument for sizing PAR2 ge
 
 ## 9. Report (PDF)
 
-Produced by the control worker. Contains, at minimum: run id and date; full contents
+Produced by the data worker (§4.1: its inputs — staged files, pinned tool versions,
+recovery binaries, captured LTFS indexes — all live there). Contains, at minimum: run
+id and date; full contents
 manifest (archives, member volumes, source snapshots, sizes, SHA-256 checksums);
 which physical tape(s) (by barcode/label) hold what; how the tapes were built (tool
 version, `age`/`par2`/`ltfs` versions, slice size, PAR2 redundancy, drive/library
@@ -299,8 +309,9 @@ operator step; periodic re-burn/refresh is a documented maintenance task.
 There are two distinct Discord notification paths:
 
 **Success delivery (per-run, configured in the run config).** At the end of a
-successful run the control worker delivers the report and the (compressed) ISO to the
-Discord webhook named in the run config (§5 Delivery). Assumption: the compressed ISO
+successful run the data worker delivers the report and the (compressed) ISO to the
+Discord webhook named in the run config (§5 Delivery) — from the data worker, where
+both artifacts were built (§4.1). Assumption: the compressed ISO
 fits the webhook upload limit (~25 MB); if a future run exceeds it, revisit (e.g. post
 the report plus a checksum and fetch the ISO from the pool). Out of scope for now.
 

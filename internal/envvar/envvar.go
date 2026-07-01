@@ -19,6 +19,11 @@ type Config struct {
 	// keyed by run id. Required on the data worker; the Prepare activity fails
 	// when it is empty.
 	StagingDir string
+	// RecoveryBinariesDir is the directory on the data worker holding the
+	// statically linked recovery binaries (age, par2, zstd, tar) the Report phase
+	// stages into the recovery ISO (SPEC.md §10). Required on the data worker; the
+	// Report activity fails when it is empty or a binary is not static.
+	RecoveryBinariesDir string
 }
 
 // Parse reads operational configuration from environment variables.
@@ -27,5 +32,6 @@ func Parse() (Config, error) {
 		DiscordFailureWebhookURL: os.Getenv("DISCORD_FAILURE_WEBHOOK_URL"),
 		K8sDatasetParent:         os.Getenv("TAPE_K8S_DATASET_PARENT"),
 		StagingDir:               os.Getenv("TAPE_STAGING_DIR"),
+		RecoveryBinariesDir:      os.Getenv("TAPE_RECOVERY_BINARIES_DIR"),
 	}, nil
 }
