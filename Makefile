@@ -83,6 +83,12 @@ generate-versions: ## Regenerate committed external-tool versions for the report
 update-dependencies: ## TODO: Update Go deps, go mod tidy, refresh Nix vendor hashes (owned by later issue).
 	@echo "update-dependencies: not yet implemented" >&2; exit 1
 
+##@ Recovery Disc
+
+.PHONY: recovery-binaries
+recovery-binaries: ## Build the static recovery-binary set (age, par2, zstd, tar) + source into result/.
+	nix build .#recoveryBinaries
+
 ##@ Container Images
 
 .PHONY: build-images
