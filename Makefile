@@ -73,6 +73,10 @@ generate-schema: ## Regenerate committed config JSON schema.
 check-schema: ## Verify committed schema matches generated output (CI check fails on diff).
 	go run ./cmd/gen-config-schema | diff schemas/run-config.schema.json -
 
+.PHONY: generate-versions
+generate-versions: ## Regenerate committed external-tool versions for the report (needs the pinned tools on PATH).
+	go generate ./internal/buildinfo
+
 ##@ Dependencies
 
 .PHONY: update-dependencies

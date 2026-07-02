@@ -68,5 +68,6 @@ accordingly**. See [report.md](report.md) for the full rationale.
 - Contents are verified in tests by reading the built image back with the same pure-Go
   reader and asserting every artifact is present at its expected path with its exact
   bytes, so the test exercises the real image rather than trusting the writer.
-- Delivery-time compression of the `.iso` (SPEC §11) is handled by the webhook delivery
-  path, not by `pkg/recoverykit`.
+- Compression of the `.iso` (SPEC §11) is handled by the Report phase, which zstd-
+  compresses the image as it is built and hands the compressed artifact to the Deliver
+  phase; `pkg/recoverykit` itself emits an uncompressed image.

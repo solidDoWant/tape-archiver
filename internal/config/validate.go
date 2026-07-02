@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Validate checks all Config fields for correctness. It returns the first
 // error found, with a message that names the offending field.
@@ -33,6 +36,14 @@ func (c *Config) Validate() error {
 
 	if len(c.Encryption.Recipients) == 0 {
 		return fmt.Errorf("encryption.recipients: at least one recipient is required")
+	}
+
+	// The identity is escrowed into the report and ISO for every run (SPEC §7);
+	// require it here so a run that would only fail at the Report phase — after
+	// hours of staging and writing — is rejected up front. The Report phase
+	// additionally verifies it matches a configured recipient.
+	if strings.TrimSpace(c.Encryption.Identity) == "" {
+		return fmt.Errorf("encryption.identity: the age private identity is required (escrowed into the report and recovery ISO, SPEC §7)")
 	}
 
 	if c.FeasibilityOverhead != nil && *c.FeasibilityOverhead < 1 {

@@ -1,7 +1,6 @@
 package backup
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -62,8 +61,8 @@ func backupPhases() []phase {
 		{PhaseLoad, DataTaskQueue, nil, loadPhase},
 		{PhaseWrite, DataTaskQueue, nil, writePhase},
 		{PhaseEject, DataTaskQueue, nil, ejectPhase},
-		{PhaseReport, TaskQueue, reportActivity, nil},
-		{PhaseDeliver, TaskQueue, deliverActivity, nil},
+		{PhaseReport, DataTaskQueue, nil, reportPhase},
+		{PhaseDeliver, DataTaskQueue, nil, deliverPhase},
 	}
 }
 
@@ -128,9 +127,8 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 	return result, nil
 }
 
-// The phase activities below are stubs: each is a no-op that returns nil so the
-// workflow backbone runs end-to-end. Each later sub-issue replaces one stub's
-// body (and registration) with the real activity for that phase (SPEC §4.3).
+// Each phase is implemented in its own file, orchestrated by a run func in the
+// phase table above (SPEC §4.3).
 
 // The Resolve phase (SPEC §4.3 phase 1) is implemented in resolve.go; it
 // orchestrates a control and a data activity rather than a single stub.
@@ -157,8 +155,8 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // The Eject phase (SPEC §4.3 phase 8) is implemented in library.go; it
 // orchestrates the data-side eject activity (unload + transfer to I/O station).
 
-// reportActivity stubs the Report phase (SPEC §4.3 phase 9).
-func reportActivity(_ context.Context) error { return nil }
+// The Report phase (SPEC §4.3 phase 9) is implemented in report.go; it
+// orchestrates the data-side report/ISO build activity.
 
-// deliverActivity stubs the Deliver phase (SPEC §4.3 phase 10).
-func deliverActivity(_ context.Context) error { return nil }
+// The Deliver phase (SPEC §4.3 phase 10) is implemented in deliver.go; it
+// orchestrates the data-side Discord delivery activity.

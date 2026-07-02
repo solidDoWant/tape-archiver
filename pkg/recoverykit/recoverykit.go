@@ -23,8 +23,9 @@
 //
 // The image is written with the pure-Go github.com/kdomanski/iso9660 writer so
 // the build and its tests stay hermetic, with no runtime CLI dependency —
-// consistent with pkg/report's pure-Go choice. Delivery-time compression of the
-// .iso (SPEC §11) is the webhook's concern, not this package's.
+// consistent with pkg/report's pure-Go choice. This package emits an uncompressed
+// image; compression of the .iso for delivery (SPEC §11) is the Report phase's
+// concern, not this package's.
 package recoverykit
 
 import (

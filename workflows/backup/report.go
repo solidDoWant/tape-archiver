@@ -1,0 +1,611 @@
+package backup
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
+	"time"
+
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/workflow"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/solidDoWant/tape-archiver/internal/buildinfo"
+	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/agewrap"
+	"github.com/solidDoWant/tape-archiver/pkg/archive"
+	"github.com/solidDoWant/tape-archiver/pkg/recoverykit"
+	"github.com/solidDoWant/tape-archiver/pkg/report"
+)
+
+// The Report phase (SPEC §4.3 phase 9) builds the two durable recovery artifacts:
+// the PDF report (§9) and the compressed recovery ISO (§10). It runs on the data
+// worker (SPEC §4.1) — not the control worker — because everything it consumes
+// lives there: the staged slice/PAR2 files, the pinned recovery binaries staged
+// into the ISO, the external tools whose versions the report records, and the zstd
+// compressor. The LTFS indexes travel in run state from the Write phase. Building
+// here also keeps the tens-of-MB ISO off the Temporal payload path and out of the
+// control image (which would otherwise have to duplicate the recovery binaries).
+//
+// Before building anything it enforces the key-escrow contract (SPEC §7): the run
+// config's private identity must be present and must be the identity for one of
+// the configured recipients, so the report and ISO escrow a key that can actually
+// decrypt the archives. A mismatch fails the phase.
+//
+// The Report phase does no tape or device I/O beyond a best-effort SCSI INQUIRY
+// for drive/library provenance; it is pure assembly over already-staged, already-
+// verified inputs.
+
+const (
+	// reportTimeout bounds the Report activity: rendering the PDF, assembling the
+	// ISO 9660 image, and zstd-compressing it, all over tens of MB. An hour is far
+	// more than enough while still bounding a hang.
+	reportTimeout = 1 * time.Hour
+
+	// reportFileName, isoFileName, and compressedISOFileName are the staged
+	// artifact names under the run's staging directory. Only the PDF and the
+	// compressed ISO are delivered; the uncompressed ISO is an intermediate.
+	reportFileName        = "report.pdf"
+	compressedISOFileName = "recovery.iso.zst"
+
+	// unknownIdentity is the placeholder for a drive/library identifier that could
+	// not be read, so the report never renders a blank provenance field.
+	unknownIdentity = "unknown"
+)
+
+// recoveryProcedure is the written, step-by-step recovery text embedded in both
+// the PDF report (SPEC §9) and the recovery ISO (SPEC §10). It refers only to the
+// tools staged on the disc under bin/ and the artifacts beside it, so it is
+// self-contained for a recoverer who has nothing but the disc and the tapes.
+const recoveryProcedure = `Tape Archiver — recovery procedure
+
+You need only this disc and the physical tapes. All tools referenced below ship
+statically linked under bin/ on this disc; the age private identity is printed in
+report.pdf (and in the "Encryption key" section of this text's PDF).
+
+1.  Load a tape into a standalone LTO drive of the generation named in the report's
+    build parameters (a newer generation that can read it also works).
+2.  Mount the tape's LTFS volume read-only:  ltfs -o ro <mountpoint>
+    If the on-tape LTFS index is damaged, restore it from this disc's
+    ltfs-index/<barcode>.schema backup before mounting (see the LTFS docs on this
+    disc), or read the tape with the index rollback options.
+3.  Copy the tape's files to disk. Each archive lives under archives/NNN/; the
+    per-tape manifest.json lists every file and its SHA-256.
+4.  Verify integrity against this disc's manifest.sha256:
+        bin/... (use a sha256 tool) — compare each file's digest.
+    If any archive slice or its PAR2 files are corrupt, repair with:
+        bin/par2 repair archives/NNN/archive.par2
+5.  Concatenate an archive's slices in order to reconstruct its age stream:
+        cat archives/NNN/archive.000 archives/NNN/archive.001 ... > archive.age
+6.  Decrypt with the escrowed identity (save it to identity.txt first):
+        bin/age -d -i identity.txt -o archive.tar.zst archive.age
+7.  If the archive was compressed, decompress it:
+        bin/zstd -d archive.tar.zst -o archive.tar
+    (An archive stored uncompressed is already a tar after step 6.)
+8.  Unpack the tar:
+        bin/tar -xf archive.tar
+    A snapshot group unpacks to one subdirectory per member volume.
+9.  Repeat for every archive on every tape listed in the report.`
+
+// ReportActivities hosts the data-side Report activity. stagingRoot is where the
+// run's artifacts are written (beside its staged tree); binariesDir holds the
+// static recovery binaries staged into the ISO (SPEC §10).
+type ReportActivities struct {
+	stagingRoot string
+	binariesDir string
+}
+
+// newReportActivities returns the production data-side Report activity.
+func newReportActivities(stagingRoot, binariesDir string) *ReportActivities {
+	return &ReportActivities{stagingRoot: stagingRoot, binariesDir: binariesDir}
+}
+
+// ReportInput is the payload for the Report activity: the run config and the full
+// run state the report and ISO are assembled from. RunID and Date come from the
+// workflow (deterministic) so the artifact is stamped identically on any retry.
+type ReportInput struct {
+	Config   config.Config
+	RunID    string
+	Date     time.Time
+	Resolved []ResolvedArchive
+	Staged   []StagedArchive
+	PAR2     []PAR2Set
+	Plan     TapePlan
+	Written  []WrittenTape
+}
+
+// ReportOutput is the Report activity's result: the on-disk paths of the two
+// delivered artifacts, which the Deliver phase uploads.
+type ReportOutput struct {
+	// ReportPath is the staged PDF report (SPEC §9).
+	ReportPath string
+	// ISOPath is the staged, zstd-compressed recovery ISO (SPEC §10, §11).
+	ISOPath string
+}
+
+// BuildReport builds the PDF report and compressed recovery ISO for the run
+// (SPEC §4.3 phase 9), staging both beside the run's prepared tree and returning
+// their paths. It fails if the escrow identity is missing or does not match a
+// configured recipient.
+func (a *ReportActivities) BuildReport(ctx context.Context, input ReportInput) (ReportOutput, error) {
+	if a.stagingRoot == "" {
+		return ReportOutput{}, fmt.Errorf("staging directory is not configured (set TAPE_STAGING_DIR on the data worker)")
+	}
+
+	if a.binariesDir == "" {
+		return ReportOutput{}, fmt.Errorf("recovery binaries directory is not configured (set TAPE_RECOVERY_BINARIES_DIR on the data worker)")
+	}
+
+	outDir := filepath.Join(a.stagingRoot, activity.GetInfo(ctx).WorkflowExecution.RunID)
+
+	return a.buildReport(ctx, outDir, input)
+}
+
+// buildReport is the body of the Report activity, split out so it can be exercised
+// against a real directory without an activity context.
+func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input ReportInput) (ReportOutput, error) {
+	if err := verifyEscrowIdentity(ctx, input.Config.Encryption); err != nil {
+		return ReportOutput{}, err
+	}
+
+	if len(input.Written) == 0 {
+		return ReportOutput{}, fmt.Errorf("no tapes were written; cannot build a recovery ISO")
+	}
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return ReportOutput{}, fmt.Errorf("create report output directory %q: %w", outDir, err)
+	}
+
+	// Render the PDF to memory so the same bytes are both written to disk and
+	// embedded in the ISO (SPEC §10) — no round-trip through the filesystem.
+	manifest := buildReportManifest(input, queryDeviceIdentity(ctx, input.Config.Library))
+
+	var pdf bytes.Buffer
+	if err := report.Build(manifest, &pdf); err != nil {
+		return ReportOutput{}, fmt.Errorf("build PDF report: %w", err)
+	}
+
+	reportPath := filepath.Join(outDir, reportFileName)
+	if err := os.WriteFile(reportPath, pdf.Bytes(), 0o644); err != nil {
+		return ReportOutput{}, fmt.Errorf("write PDF report to %q: %w", reportPath, err)
+	}
+
+	sha256Manifest, err := buildSHA256Manifest(input)
+	if err != nil {
+		return ReportOutput{}, fmt.Errorf("build SHA-256 manifest: %w", err)
+	}
+
+	isoPath := filepath.Join(outDir, compressedISOFileName)
+
+	isoInput := recoverykit.Input{
+		Report:            pdf.Bytes(),
+		Manifest:          sha256Manifest,
+		TapeIndexes:       tapeIndexes(input.Written),
+		BinariesDir:       a.binariesDir,
+		RecoveryProcedure: recoveryProcedure,
+	}
+
+	if err := buildCompressedISO(ctx, isoInput, isoPath); err != nil {
+		return ReportOutput{}, err
+	}
+
+	slog.Info("report: built recovery artifacts", "report", reportPath, "iso", isoPath)
+
+	return ReportOutput{ReportPath: reportPath, ISOPath: isoPath}, nil
+}
+
+// verifyEscrowIdentity enforces the key-escrow contract (SPEC §7): the private
+// identity must be present and must derive to one of the configured recipients, so
+// the escrowed key can decrypt what the recipients encrypted. It shells out to
+// age-keygen (present on the data worker) to derive the recipient.
+func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) error {
+	if strings.TrimSpace(encryption.Identity) == "" {
+		return fmt.Errorf("encryption.identity is empty; the age private identity must be provided to escrow into the report and ISO (SPEC §7)")
+	}
+
+	derived, err := agewrap.RecipientFromIdentity(ctx, encryption.Identity)
+	if err != nil {
+		return fmt.Errorf("derive recipient from the escrowed identity: %w", err)
+	}
+
+	if !slices.Contains(encryption.Recipients, derived) {
+		return fmt.Errorf("the escrowed identity's public key (%s) is not among the configured encryption.recipients; it could not decrypt the archives", derived)
+	}
+
+	return nil
+}
+
+// buildCompressedISO assembles the recovery ISO and zstd-compresses it in one
+// pass, writing the compressed image to isoPath. The ISO writer's output is piped
+// straight into the compressor so the uncompressed image is never staged to disk.
+func buildCompressedISO(ctx context.Context, isoInput recoverykit.Input, isoPath string) error {
+	out, err := os.Create(isoPath)
+	if err != nil {
+		return fmt.Errorf("create compressed ISO %q: %w", isoPath, err)
+	}
+
+	defer func() { _ = out.Close() }()
+
+	group, groupCtx := errgroup.WithContext(ctx)
+
+	reader, writer := io.Pipe()
+
+	group.Go(func() error {
+		buildErr := recoverykit.Build(groupCtx, isoInput, writer)
+		_ = writer.CloseWithError(buildErr)
+
+		return buildErr
+	})
+
+	compressErr := archive.Compress(groupCtx, out, reader)
+	_ = reader.CloseWithError(compressErr)
+
+	if waitErr := group.Wait(); waitErr != nil {
+		return fmt.Errorf("build recovery ISO: %w", waitErr)
+	}
+
+	if compressErr != nil {
+		return fmt.Errorf("compress recovery ISO: %w", compressErr)
+	}
+
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close compressed ISO %q: %w", isoPath, err)
+	}
+
+	return nil
+}
+
+// tapeIndexes maps each written physical tape to its LTFS index backup for the
+// recovery ISO (SPEC §10), keyed by barcode — the canonical physical ID (SPEC §6).
+func tapeIndexes(written []WrittenTape) []recoverykit.TapeIndex {
+	indexes := make([]recoverykit.TapeIndex, 0, len(written))
+
+	for _, tape := range written {
+		indexes = append(indexes, recoverykit.TapeIndex{
+			Barcode: string(tape.Barcode),
+			Index:   tape.IndexXML,
+		})
+	}
+
+	return indexes
+}
+
+// buildReportManifest assembles the report.Manifest from the run state (SPEC §9).
+// It is pure — device identifiers are passed in — so it is unit-testable without
+// any tooling or hardware.
+func buildReportManifest(input ReportInput, device deviceIdentity) report.Manifest {
+	resolvedByIndex := make(map[int]ResolvedArchive, len(input.Resolved))
+	for _, resolved := range input.Resolved {
+		resolvedByIndex[resolved.SourceIndex] = resolved
+	}
+
+	par2ByIndex := make(map[int]PAR2Set, len(input.PAR2))
+	for _, set := range input.PAR2 {
+		par2ByIndex[set.SourceIndex] = set
+	}
+
+	nameByIndex := make(map[int]string, len(input.Staged))
+
+	archives := make([]report.Archive, 0, len(input.Staged))
+
+	for _, staged := range input.Staged {
+		name := archiveName(input.Config, staged.SourceIndex)
+		nameByIndex[staged.SourceIndex] = name
+
+		resolved := resolvedByIndex[staged.SourceIndex]
+
+		archives = append(archives, report.Archive{
+			Name:            name,
+			MemberVolumes:   memberVolumes(resolved),
+			SourceSnapshots: sourceSnapshots(resolved),
+			Files:           archiveFiles(staged, par2ByIndex[staged.SourceIndex]),
+		})
+	}
+
+	return report.Manifest{
+		RunID:             input.RunID,
+		Date:              input.Date,
+		Archives:          archives,
+		Tapes:             reportTapes(input, nameByIndex),
+		Build:             buildParams(input.Config, device),
+		AgeIdentity:       input.Config.Encryption.Identity,
+		RecoveryProcedure: recoveryProcedure,
+	}
+}
+
+// archiveName is the display name of the archive for source index, taken from the
+// originating config Source: the ZFS path, the namespaced k8s resource name, or
+// the namespaced label selector. It falls back to a positional name if the index
+// is somehow out of range.
+func archiveName(cfg config.Config, sourceIndex int) string {
+	if sourceIndex < 0 || sourceIndex >= len(cfg.Sources) {
+		return fmt.Sprintf("sources[%d]", sourceIndex)
+	}
+
+	source := cfg.Sources[sourceIndex]
+
+	switch {
+	case source.ZFSPath != nil:
+		return source.ZFSPath.Name
+	case source.K8s != nil && source.K8s.Name != "":
+		return fmt.Sprintf("%s/%s", source.K8s.Namespace, source.K8s.Name)
+	case source.K8s != nil:
+		return fmt.Sprintf("%s [%s]", source.K8s.Namespace, source.K8s.LabelSelector)
+	default:
+		return fmt.Sprintf("sources[%d]", sourceIndex)
+	}
+}
+
+// memberVolumes lists the volume identity of each snapshot in the archive, in
+// resolution order — the per-member subdirectory name for a group, the volume for
+// a single source.
+func memberVolumes(resolved ResolvedArchive) []string {
+	volumes := make([]string, 0, len(resolved.Snapshots))
+	for _, snapshot := range resolved.Snapshots {
+		volumes = append(volumes, memberName(snapshot))
+	}
+
+	return volumes
+}
+
+// sourceSnapshots lists the ZFS snapshot path of each snapshot in the archive.
+func sourceSnapshots(resolved ResolvedArchive) []string {
+	snapshots := make([]string, 0, len(resolved.Snapshots))
+	for _, snapshot := range resolved.Snapshots {
+		snapshots = append(snapshots, snapshot.ZFSPath)
+	}
+
+	return snapshots
+}
+
+// archiveFiles lists the on-tape files for an archive — its slices then its PAR2
+// recovery files — each with its size and precomputed SHA-256, by base name (the
+// name the file has on tape).
+func archiveFiles(staged StagedArchive, par2 PAR2Set) []report.ArchiveFile {
+	files := make([]report.ArchiveFile, 0, len(staged.Slices)+len(par2.Files))
+
+	for _, file := range append(append([]StagedSlice{}, staged.Slices...), par2.Files...) {
+		files = append(files, report.ArchiveFile{
+			Name:   filepath.Base(file.Path),
+			Size:   file.SizeBytes,
+			SHA256: file.SHA256,
+		})
+	}
+
+	return files
+}
+
+// reportTapes maps each written physical tape (by barcode) to the archive names
+// it holds (SPEC §9), derived from the logical tape's placement in the Pack plan.
+func reportTapes(input ReportInput, nameByIndex map[int]string) []report.Tape {
+	tapes := make([]report.Tape, 0, len(input.Written))
+
+	for _, written := range input.Written {
+		var contents []string
+
+		if written.TapeIndex >= 0 && written.TapeIndex < len(input.Plan.Tapes) {
+			planned := input.Plan.Tapes[written.TapeIndex]
+			contents = make([]string, 0, len(planned.Archives))
+
+			for _, placement := range planned.Archives {
+				name, ok := nameByIndex[placement.SourceIndex]
+				if !ok {
+					name = archiveName(input.Config, placement.SourceIndex)
+				}
+
+				contents = append(contents, name)
+			}
+		}
+
+		tapes = append(tapes, report.Tape{Barcode: string(written.Barcode), Contents: contents})
+	}
+
+	return tapes
+}
+
+// buildParams records how the tapes were built (SPEC §9): tool and external tool
+// versions from the committed build info, slice size and PAR2 policy from the run
+// config, and the best-effort drive/library identifiers.
+func buildParams(cfg config.Config, device deviceIdentity) report.BuildParams {
+	return report.BuildParams{
+		ToolVersion:     buildinfo.ToolVersion(),
+		AgeVersion:      buildinfo.AgeVersion(),
+		Par2Version:     buildinfo.Par2Version(),
+		LTFSVersion:     buildinfo.LTFSVersion(),
+		SliceSize:       cfg.Redundancy.SliceSizeBytes,
+		PAR2Redundancy:  redundancyPolicy(cfg.Redundancy),
+		DriveModel:      device.driveModel,
+		DriveGeneration: device.driveGeneration,
+		DriveSerial:     device.driveSerial,
+		LibraryModel:    device.libraryModel,
+	}
+}
+
+// redundancyPolicy renders the run's PAR2 policy for the report: the fixed target
+// percentage, or fill-to-capacity with its floor (SPEC §8).
+func redundancyPolicy(redundancy config.Redundancy) string {
+	switch {
+	case redundancy.TargetPercentage != nil:
+		return fmt.Sprintf("%g%%", *redundancy.TargetPercentage)
+	case redundancy.FillToCapacity != nil:
+		return fmt.Sprintf("fill-to-capacity (floor %g%%)", redundancy.FillToCapacity.Floor)
+	default:
+		return "none"
+	}
+}
+
+// buildSHA256Manifest builds the full SHA-256 manifest for the recovery ISO
+// (SPEC §10): one sha256sum-format line per on-tape file across every physical
+// tape, prefixed by the tape's barcode so a recoverer can verify files copied off
+// any tape. Lines are sorted for a deterministic, diff-stable manifest. It reads
+// no files — every digest is the precomputed one from Prepare/GeneratePAR2.
+func buildSHA256Manifest(input ReportInput) ([]byte, error) {
+	state := &runState{staged: input.Staged, par2: input.PAR2, plan: input.Plan, written: input.Written}
+
+	var lines []string
+
+	for _, written := range input.Written {
+		archives, err := archivesForTape(state, written.TapeIndex)
+		if err != nil {
+			return nil, err
+		}
+
+		manifest := buildManifest(written.Barcode, written.TapeIndex, written.CopyIndex, archives)
+
+		for _, archiveManifest := range manifest.Archives {
+			for _, file := range append(append([]ManifestFile{}, archiveManifest.Files...), archiveManifest.PAR2Files...) {
+				lines = append(lines, fmt.Sprintf("%s  %s/%s", file.SHA256, written.Barcode, file.TapePath))
+			}
+		}
+	}
+
+	sort.Strings(lines)
+
+	return []byte(strings.Join(lines, "\n") + "\n"), nil
+}
+
+// deviceIdentity carries the drive and library provenance rendered in the report's
+// build parameters. The generation is derived from the configured tape capacity;
+// the model and serial are read from the hardware by a best-effort SCSI INQUIRY.
+type deviceIdentity struct {
+	driveModel      string
+	driveSerial     string
+	driveGeneration string
+	libraryModel    string
+}
+
+// queryDeviceIdentity assembles the drive/library provenance for the report. The
+// LTO generation is derived from the configured native capacity; the model and
+// serial come from a best-effort SCSI INQUIRY on the first drive and the changer.
+// INQUIRY is provenance only, so any failure degrades to "unknown" and is logged
+// rather than failing the run.
+func queryDeviceIdentity(ctx context.Context, library config.Library) deviceIdentity {
+	identity := deviceIdentity{
+		driveModel:      unknownIdentity,
+		driveSerial:     unknownIdentity,
+		driveGeneration: ltoGeneration(library.TapeCapacityBytes),
+		libraryModel:    unknownIdentity,
+	}
+
+	if len(library.Drives) > 0 {
+		if model, serial, err := inquireDevice(ctx, library.Drives[0]); err != nil {
+			slog.Warn("report: could not read drive identity", "device", library.Drives[0], "error", err)
+		} else {
+			if model != "" {
+				identity.driveModel = model
+			}
+
+			if serial != "" {
+				identity.driveSerial = serial
+			}
+		}
+	}
+
+	if library.Changer != "" {
+		if model, _, err := inquireDevice(ctx, library.Changer); err != nil {
+			slog.Warn("report: could not read library identity", "device", library.Changer, "error", err)
+		} else if model != "" {
+			identity.libraryModel = model
+		}
+	}
+
+	return identity
+}
+
+// inquireDevice runs a SCSI INQUIRY on a device node with sg_inq (sg3-utils, a
+// data-worker dependency) and returns the parsed model and serial.
+func inquireDevice(ctx context.Context, node string) (model, serial string, err error) {
+	out, err := exec.CommandContext(ctx, "sg_inq", node).CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("sg_inq %s: %w: %s", node, err, strings.TrimSpace(string(out)))
+	}
+
+	model, serial = parseInquiry(string(out))
+
+	return model, serial, nil
+}
+
+// parseInquiry extracts the drive model (vendor + product) and unit serial number
+// from sg_inq's standard-INQUIRY output. Missing fields yield empty strings, which
+// the caller degrades to "unknown".
+func parseInquiry(output string) (model, serial string) {
+	var vendor, product string
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+
+		switch {
+		case strings.HasPrefix(line, "Vendor identification:"):
+			vendor = strings.TrimSpace(strings.TrimPrefix(line, "Vendor identification:"))
+		case strings.HasPrefix(line, "Product identification:"):
+			product = strings.TrimSpace(strings.TrimPrefix(line, "Product identification:"))
+		case strings.HasPrefix(line, "Unit serial number:"):
+			serial = strings.TrimSpace(strings.TrimPrefix(line, "Unit serial number:"))
+		}
+	}
+
+	return strings.TrimSpace(vendor + " " + product), serial
+}
+
+// ltoGeneration maps a tape's native capacity (SPEC §5 library.tapeCapacityBytes)
+// to the LTO generation required to read it — the fact a future recoverer needs.
+// Thresholds are the generations' native capacities; a capacity below LTO-5's or
+// non-positive yields an explicit "unknown" carrying the raw value.
+func ltoGeneration(capacityBytes int64) string {
+	switch {
+	case capacityBytes >= 16_000_000_000_000:
+		return "LTO-9"
+	case capacityBytes >= 10_000_000_000_000:
+		return "LTO-8"
+	case capacityBytes >= 5_000_000_000_000:
+		return "LTO-7"
+	case capacityBytes >= 2_000_000_000_000:
+		return "LTO-6"
+	case capacityBytes >= 1_200_000_000_000:
+		return "LTO-5"
+	default:
+		return fmt.Sprintf("%s (native capacity %d bytes)", unknownIdentity, capacityBytes)
+	}
+}
+
+// reportPhase orchestrates the Report phase (SPEC §4.3 phase 9): it runs the
+// data-side BuildReport activity over the run state and records the artifact paths
+// in runState for the Deliver phase. RunID and Date are taken from the workflow so
+// the artifact is stamped deterministically across retries.
+func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
+	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: reportTimeout,
+	})
+
+	var activities *ReportActivities
+
+	input := ReportInput{
+		Config:   cfg,
+		RunID:    workflow.GetInfo(ctx).WorkflowExecution.ID,
+		Date:     workflow.Now(ctx),
+		Resolved: state.resolved,
+		Staged:   state.staged,
+		PAR2:     state.par2,
+		Plan:     state.plan,
+		Written:  state.written,
+	}
+
+	var output ReportOutput
+	if err := workflow.ExecuteActivity(dataCtx, activities.BuildReport, input).Get(dataCtx, &output); err != nil {
+		return err
+	}
+
+	state.reportPath = output.ReportPath
+	state.isoPath = output.ISOPath
+
+	return nil
+}

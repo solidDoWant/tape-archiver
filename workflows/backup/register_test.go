@@ -72,13 +72,17 @@ func TestRegisterData(t *testing.T) {
 
 	rw := &recordingWorker{}
 
-	RegisterData(rw, DataConfig{StagingDir: "/mnt/bulk-pool-01/archive/.tape-staging"})
+	RegisterData(rw, DataConfig{
+		StagingDir:          "/mnt/bulk-pool-01/archive/.tape-staging",
+		RecoveryBinariesDir: "/opt/recovery-bin",
+	})
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
 	// activities: Resolve data, Prepare, Generate PAR2, Verify, Load, Write
-	// (WriteActivities + TeardownActivities sharing a registry), and Eject.
+	// (WriteActivities + TeardownActivities sharing a registry), Eject, Report,
+	// and Deliver.
 	assert.Empty(t, rw.workflows)
-	assert.Len(t, rw.activities, 8)
+	assert.Len(t, rw.activities, 10)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
 		"the data worker must register the Resolve data activity")
 	assert.True(t, hasActivity[*PrepareActivities](rw.activities),
@@ -95,6 +99,10 @@ func TestRegisterData(t *testing.T) {
 		"the data worker must register the TeardownSession activity")
 	assert.True(t, hasActivity[*EjectActivities](rw.activities),
 		"the data worker must register the Eject activity")
+	assert.True(t, hasActivity[*ReportActivities](rw.activities),
+		"the data worker must register the Report activity (report/ISO build)")
+	assert.True(t, hasActivity[*DeliverActivities](rw.activities),
+		"the data worker must register the Deliver activity (Discord delivery)")
 }
 
 // hasActivity reports whether any registered activity is of type T.

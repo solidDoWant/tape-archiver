@@ -28,16 +28,19 @@ type DataConfig struct {
 	// into (TAPE_STAGING_DIR), a subdirectory of an existing dataset on the
 	// storage host (SPEC §4.1). Required; the Prepare activity fails when empty.
 	StagingDir string
+	// RecoveryBinariesDir is the directory holding the statically linked recovery
+	// binaries (age, par2, zstd, tar) the Report phase stages into the recovery
+	// ISO (TAPE_RECOVERY_BINARIES_DIR, SPEC §10). Required; the Report activity
+	// fails when empty or when a binary is not statically linked.
+	RecoveryBinariesDir string
 }
 
 // RegisterControl registers everything the control worker hosts: the Backup
 // workflow under WorkflowType (so clients can start it by the contract name),
 // the operational failure-alert activity wired with the configured webhook URL,
-// and the control-side phase activities. It is called from cmd/worker for the
-// control role.
-//
-// The phase activities are stubs in this scaffold; each control-side phase
-// sub-issue replaces its stub here.
+// and the control-side planning activities (snapshot resolution, bin-packing).
+// It is called from cmd/worker for the control role. The bulk-data phases —
+// including report/ISO building and delivery — run on the data worker.
 func RegisterControl(w worker.Worker, cfg ControlConfig) {
 	w.RegisterWorkflowWithOptions(Backup, workflow.RegisterOptions{Name: WorkflowType})
 
@@ -45,8 +48,6 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 
 	w.RegisterActivity(newResolveControlActivities(cfg.K8sDatasetParent))
 	w.RegisterActivity(newPackActivities())
-	w.RegisterActivity(reportActivity)
-	w.RegisterActivity(deliverActivity)
 }
 
 // RegisterData registers the data worker's bulk-data phase activities
@@ -67,4 +68,11 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newTeardownActivities(registry))
 
 	w.RegisterActivity(newEjectActivities())
+
+	// Report and Deliver run on the data worker: the report/ISO build needs the
+	// staged files, recovery binaries, and pinned tools that live here, and
+	// delivering from here keeps the tens-of-MB ISO off the Temporal payload path
+	// (SPEC §4.3 phases 9–10, §9–§11).
+	w.RegisterActivity(newReportActivities(cfg.StagingDir, cfg.RecoveryBinariesDir))
+	w.RegisterActivity(newDeliverActivities())
 }

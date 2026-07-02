@@ -84,9 +84,19 @@ type FillConfig struct {
 	Floor float64 `json:"floor"`
 }
 
-// Encryption specifies the age recipients to encrypt archives to.
+// Encryption specifies the age recipients to encrypt archives to, and the
+// matching private identity escrowed into the run's report and recovery ISO.
 type Encryption struct {
 	Recipients []string `json:"recipients"`
+	// Identity is the age private identity (AGE-SECRET-KEY-PQ-1…) escrowed into
+	// the PDF report and recovery ISO so the holder of those artifacts can always
+	// decrypt (SPEC §7 key-escrow decision). It is NEVER used to encrypt —
+	// encryption uses Recipients only — so archives are protected regardless of
+	// where this identity is held. The Report phase verifies its derived public
+	// recipient is among Recipients before embedding it. Because the report and
+	// ISO therefore carry the decryption secret, deliver and store them
+	// accordingly. Required.
+	Identity string `json:"identity"`
 }
 
 // Delivery specifies how run artifacts are delivered on success.
