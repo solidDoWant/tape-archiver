@@ -28,6 +28,8 @@
   mtx,
   sg3_utils,
   lsscsi,
+  zfs,
+  fuse,
   coreutils,
   util-linux,
   bashInteractive,
@@ -69,6 +71,13 @@ let
     mtx # media-changer moves (SPEC §3)
     sg3_utils # sg_logs (TapeAlert / log pages), sg_turs (readiness) (SPEC §3)
     lsscsi # enumerate SCSI tape/changer devices
+    zfs # `zfs get` — the data-side Resolve/Verify/Prepare activities read
+    # dataset properties (logicalreferenced, mountpoint, user properties) and
+    # locate the .zfs/snapshot/ tree through the zfs CLI (pkg/zfs). It needs
+    # /dev/zfs passed through at run time (read-only ioctls; no `zfs create`).
+    fuse # `fusermount` — reference LTFS is FUSE-based; pkg/ltfs unmounts a
+    # written volume with `fusermount -u` (mount uses libfuse directly). Same
+    # fuse (v2) that `ltfs` links against, so the userspace helper matches.
     coreutils # basic file utilities the activities and LTFS scripts rely on
     util-linux # mount/umount and friends for the FUSE LTFS path
     bashInteractive # a shell for ltfs/mtx helper invocations
