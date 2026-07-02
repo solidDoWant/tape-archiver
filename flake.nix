@@ -62,6 +62,17 @@
           inherit (pkgs) pkgsStatic;
           nixpkgsRev = nixpkgs.shortRev or "dirty";
         };
+
+        # Reproducible OCI image for the control worker (SPEC §4.1): the same
+        # shared `worker` binary as the data-worker image above, plus TLS roots
+        # only — no tape/bulk-data tooling. The control worker orchestrates runs
+        # in Kubernetes on the `control` queue (issue #77). streamLayeredImage
+        # emits a script that streams the tarball into `docker load` (see `make
+        # build-images`).
+        controlWorkerImage = pkgs.callPackage ./nix/control-worker-image.nix {
+          inherit worker;
+          nixpkgsRev = nixpkgs.shortRev or "dirty";
+        };
       in
       {
         # Expose as flake packages so `nix build .#mhvtl`, `.#mhvtlKernel`,
@@ -75,6 +86,7 @@
           inherit recoveryBinaries;
           inherit worker;
           inherit dataWorkerImage;
+          inherit controlWorkerImage;
           default = mhvtlUserspace;
         };
 

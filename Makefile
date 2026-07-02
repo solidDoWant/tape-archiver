@@ -91,13 +91,13 @@ recovery-binaries: ## Build the static recovery-binary set (age, par2, zstd, tar
 
 ##@ Container Images
 
-# Registry, version, and push toggle for the data-worker OCI image, following
-# the media-processor pattern. VERSION defaults to a git-derived tag; override
-# for a release (`make build-images VERSION=v1.2.3`). PUSH_ALL=true additionally
-# tags `:latest` and pushes every tag to the registry; the default (false) only
-# builds the image and loads it into the local Docker daemon — no publish.
-# Registry auth is assumed to be present in the Docker daemon (no `docker login`
-# step here), matching media-processor.
+# Registry, version, and push toggle for the OCI worker images, following the
+# media-processor pattern. VERSION defaults to a git-derived tag; override for a
+# release (`make build-images VERSION=v1.2.3`). PUSH_ALL=true additionally tags
+# `:latest` and pushes every tag to the registry; the default (false) only builds
+# the images and loads them into the local Docker daemon — no publish. Registry
+# auth is assumed to be present in the Docker daemon (no `docker login` step
+# here), matching media-processor.
 CONTAINER_REGISTRY ?= ghcr.io/soliddowant
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 PUSH_ALL ?= false
@@ -105,21 +105,31 @@ PUSH_ALL ?= false
 DATA_WORKER_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/data-worker
 DATA_WORKER_IMAGE_TAGS := $(DATA_WORKER_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(DATA_WORKER_IMAGE):latest)
 
-.PHONY: build-images
-build-images: ## Build the data-worker OCI image, load it into the local Docker daemon, and tag it (PUSH_ALL=true also tags :latest and pushes).
-	@image_ref="$$(nix eval --raw .#dataWorkerImage.imageName):$$(nix eval --raw .#dataWorkerImage.imageTag)"; \
-	"$$(nix build --print-out-paths --no-link .#dataWorkerImage)" | docker load; \
-	for tag in $(DATA_WORKER_IMAGE_TAGS); do \
+CONTROL_WORKER_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/control-worker
+CONTROL_WORKER_IMAGE_TAGS := $(CONTROL_WORKER_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(CONTROL_WORKER_IMAGE):latest)
+
+# Build a streamed OCI image, load it into the local Docker daemon, tag it, and
+# (when PUSH_ALL=true) push every tag. $(1)=flake attr, $(2)=tag list.
+define build-load-image
+	image_ref="$$(nix eval --raw .#$(1).imageName):$$(nix eval --raw .#$(1).imageTag)"; \
+	"$$(nix build --print-out-paths --no-link .#$(1))" | docker load; \
+	for tag in $(2); do \
 	  echo "tagging $$image_ref -> $$tag"; \
 	  docker tag "$$image_ref" "$$tag"; \
 	done; \
 	if [ "$(PUSH_ALL)" = "true" ]; then \
-	  for tag in $(DATA_WORKER_IMAGE_TAGS); do \
+	  for tag in $(2); do \
 	    echo "pushing $$tag"; docker push "$$tag"; \
 	  done; \
 	else \
-	  echo "Skipping registry push (set PUSH_ALL=true to push: $(DATA_WORKER_IMAGE_TAGS))"; \
+	  echo "Skipping registry push (set PUSH_ALL=true to push: $(2))"; \
 	fi
+endef
+
+.PHONY: build-images
+build-images: ## Build the data- and control-worker OCI images, load them into the local Docker daemon, and tag them (PUSH_ALL=true also tags :latest and pushes).
+	@$(call build-load-image,dataWorkerImage,$(DATA_WORKER_IMAGE_TAGS))
+	@$(call build-load-image,controlWorkerImage,$(CONTROL_WORKER_IMAGE_TAGS))
 
 ##@ Build
 
