@@ -1,0 +1,11 @@
+---
+apiVersion: v2
+name: tape-archiver-control-worker
+description: Helm chart for the tape-archiver control worker (Kubernetes-side Temporal orchestration)
+type: application
+version: 0.0.1-dev
+appVersion: 0.0.1-dev
+dependencies:
+  - name: common
+    repository: https://bjw-s-labs.github.io/helm-charts
+    version: 5.0.0

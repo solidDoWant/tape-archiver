@@ -1,0 +1,123 @@
+---
+config:
+  # temporal selects the Temporal frontend the control worker connects to. address is required
+  # and helm template fails when empty; namespace has a sensible default.
+  #
+  # Non-secret fields (address, namespace, tls.*, grpcMeta) are rendered into a temporal.toml
+  # ConfigMap consumed by the Temporal Go SDK envconfig package (via TEMPORAL_CONFIG_FILE).
+  # Secret material (apiKey, TLS cert/key/CA bytes) comes from k8s Secrets, surfaced as either
+  # env vars or mounted files. The task queue is NOT configurable here: the worker derives it
+  # from ROLE=control (SPEC §4.1), which the chart sets unconditionally.
+  temporal:
+    # address is the Temporal frontend host:port (no scheme). Written to address in the rendered
+    # temporal.toml. Example: "temporal-frontend.temporal.svc.cluster.local:7233".
+    address: ""
+    # namespace is the Temporal namespace the workflows execute in. Written to namespace in the
+    # rendered temporal.toml. Defaults to Temporal's built-in "default" namespace.
+    namespace: "default"
+    # apiKey is the Temporal Cloud / authenticated frontend API key. Sets TEMPORAL_API_KEY on
+    # the control worker. Use secretKeyRef in production; value is intended for dev only.
+    # Setting both is rejected. When both name and key under secretKeyRef are empty, no API key
+    # env var is set.
+    #
+    # File-mounted keys: a value of the form "file:///absolute/path" tells the binary to read
+    # the API key from disk on every Temporal RPC, picking up external rotators (Vault Agent,
+    # external-secrets refresh, etc.) without a process restart. To use this, mount the backing
+    # Secret yourself via resources.controllers.main.persistence and set apiKey.value to the
+    # resulting in-container path with the file:// prefix. The path must be absolute.
+    apiKey:
+      value: ""
+      secretKeyRef:
+        name: ""
+        key: ""
+    # tls configures transport security to the Temporal frontend. enabled: false uses plaintext
+    # gRPC; this holds even when apiKey is set, so a dev frontend that accepts a token over
+    # plaintext keeps working. enabled: true turns on server-side TLS; mTLS and a custom CA are
+    # optional, configured via the cert references below. Each reference points at an existing
+    # k8s Secret (e.g. one produced by cert-manager). References that share a Secret name share
+    # one volume mount.
+    tls:
+      enabled: false
+      # serverName overrides the SNI / cert-verification hostname (TEMPORAL_TLS_SERVER_NAME).
+      # Useful when address is an IP or a service name that doesn't match the cert's SAN.
+      serverName: ""
+      # disableHostVerification skips server certificate hostname verification. Should only be
+      # used in development against self-signed certs.
+      disableHostVerification: false
+      # clientCertificate enables mTLS by pointing at a kubernetes.io/tls Secret containing the
+      # client cert and private key. The Secret must have the standard "tls.crt" and "tls.key"
+      # keys (cert-manager and `kubectl create secret tls` produce these by default). Leave
+      # secretName empty to skip mTLS.
+      clientCertificate:
+        secretName: ""
+      # caCert overrides the trusted CA pool. Unlike clientCertificate this is a free-form
+      # secretKeyRef because CA bundles aren't standardised on a single Secret layout, but key
+      # defaults to "ca.crt" (the convention used by cert-manager and most k8s tooling) so
+      # usually only secretKeyRef.name needs to be set. Leave name empty to use the system roots.
+      caCert:
+        secretKeyRef:
+          name: ""
+          key: "ca.crt"
+    # grpcMeta is a map of gRPC metadata headers added to every Temporal RPC. Keys are passed
+    # through verbatim (the Temporal SDK lowercases and hyphenates them at load time). Rendered
+    # under [profile.default.grpc_meta] in temporal.toml.
+    grpcMeta: {}
+
+  controlWorker:
+    # logLevel is passed verbatim to the worker's logging setup via LOG_LEVEL (empty → info).
+    logLevel: info
+    # discordFailureWebhookUrl is the Discord webhook the control worker posts run-failure
+    # alerts to (SPEC §11), surfaced as DISCORD_FAILURE_WEBHOOK_URL. Leave empty to disable
+    # failure alerting (the worker raises no error on absence). Use secretKeyRef to source the
+    # URL from a k8s Secret; value is intended for dev only. Setting both is rejected.
+    discordFailureWebhookUrl:
+      value: ""
+      secretKeyRef:
+        name: ""
+        key: ""
+    # k8sDatasetParent is democratic-csi's datasetParentName, prepended to a relative CSI
+    # snapshotHandle to rebuild the absolute ZFS snapshot path during k8s resolution
+    # (SPEC §3). Surfaced as TAPE_K8S_DATASET_PARENT. Only needed when a run names k8s
+    # sources; leave empty to treat handles as already absolute.
+    k8sDatasetParent: ""
+    # The worker always exposes /metrics on port 9090 regardless of this value. The toggle
+    # controls whether a PodMonitor is created for cluster-side scraping. Leave false when
+    # running without prometheus-operator CRDs installed.
+    metrics:
+      enabled: false
+
+# resources follows the bjw-s app-template schema. Values here are deep-merged over the
+# chart-computed controller, env vars, persistence, and podMonitor; user-supplied values take
+# precedence.
+#
+# The chart generates a single Deployment controller named "main" (image, named metrics port
+# 9090, hardened securityContext, TCP-socket probes on the metrics port, and a
+# terminationGracePeriodSeconds covering the worker's SIGTERM drain). Override it by adding
+# resources.controllers.main with the standard bjw-s controller schema (replicas, pod,
+# containers.main, etc.).
+resources:
+  defaultPodOptions:
+    # The control worker discovers ZFS snapshots by reading VolumeSnapshot resources
+    # from the Kubernetes API via an in-cluster client (pkg/k8ssnap uses
+    # rest.InClusterConfig), so its ServiceAccount token must be mounted. bjw-s
+    # defaults this to false; snapshot discovery would fail without it. Binding the
+    # RBAC the token needs (a Role/ClusterRole for VolumeSnapshots) is the operator's
+    # responsibility — see docs/control-worker-helm.md.
+    automountServiceAccountToken: true
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1000
+      runAsGroup: 1000
+      seccompProfile:
+        type: RuntimeDefault
+  controllers:
+    # Override the chart-generated Deployment here. For example, to pin an image
+    # tag or scale replicas:
+    #   main:
+    #     replicas: 2
+    #     containers:
+    #       main:
+    #         image:
+    #           repository: ghcr.io/soliddowant/tape-archiver/control-worker
+    #           tag: v1.2.3
+    main: {}

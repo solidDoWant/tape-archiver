@@ -131,6 +131,19 @@ build-images: ## Build the data- and control-worker OCI images, load them into t
 	@$(call build-load-image,dataWorkerImage,$(DATA_WORKER_IMAGE_TAGS))
 	@$(call build-load-image,controlWorkerImage,$(CONTROL_WORKER_IMAGE_TAGS))
 
+##@ Deploy
+
+CONTROL_WORKER_CHART := deploy/charts/tape-archiver-control-worker
+# A Temporal address is required to render the chart; this placeholder only
+# satisfies the lint/template checks and is not baked into any release artifact.
+CHART_LINT_ADDRESS ?= temporal-frontend.temporal.svc.cluster.local:7233
+
+.PHONY: chart-lint
+chart-lint: ## Fetch chart deps, lint, and render the control-worker Helm chart (no cluster needed).
+	helm dependency update $(CONTROL_WORKER_CHART)
+	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS)
+	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) >/dev/null
+
 ##@ Build
 
 $(BIN_DIR)/worker: $(GO_SOURCE_FILES)
