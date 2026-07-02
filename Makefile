@@ -91,9 +91,35 @@ recovery-binaries: ## Build the static recovery-binary set (age, par2, zstd, tar
 
 ##@ Container Images
 
+# Registry, version, and push toggle for the data-worker OCI image, following
+# the media-processor pattern. VERSION defaults to a git-derived tag; override
+# for a release (`make build-images VERSION=v1.2.3`). PUSH_ALL=true additionally
+# tags `:latest` and pushes every tag to the registry; the default (false) only
+# builds the image and loads it into the local Docker daemon — no publish.
+# Registry auth is assumed to be present in the Docker daemon (no `docker login`
+# step here), matching media-processor.
+CONTAINER_REGISTRY ?= ghcr.io/soliddowant
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+PUSH_ALL ?= false
+
+DATA_WORKER_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/data-worker
+DATA_WORKER_IMAGE_TAGS := $(DATA_WORKER_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(DATA_WORKER_IMAGE):latest)
+
 .PHONY: build-images
-build-images: ## TODO: Build worker OCI image(s) via Nix (owned by later issue).
-	@echo "build-images: not yet implemented" >&2; exit 1
+build-images: ## Build the data-worker OCI image, load it into the local Docker daemon, and tag it (PUSH_ALL=true also tags :latest and pushes).
+	@image_ref="$$(nix eval --raw .#dataWorkerImage.imageName):$$(nix eval --raw .#dataWorkerImage.imageTag)"; \
+	"$$(nix build --print-out-paths --no-link .#dataWorkerImage)" | docker load; \
+	for tag in $(DATA_WORKER_IMAGE_TAGS); do \
+	  echo "tagging $$image_ref -> $$tag"; \
+	  docker tag "$$image_ref" "$$tag"; \
+	done; \
+	if [ "$(PUSH_ALL)" = "true" ]; then \
+	  for tag in $(DATA_WORKER_IMAGE_TAGS); do \
+	    echo "pushing $$tag"; docker push "$$tag"; \
+	  done; \
+	else \
+	  echo "Skipping registry push (set PUSH_ALL=true to push: $(DATA_WORKER_IMAGE_TAGS))"; \
+	fi
 
 ##@ Build
 

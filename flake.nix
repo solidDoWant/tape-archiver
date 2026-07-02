@@ -46,6 +46,22 @@
         # recovery disc", SPEC §2/§4.1/§10). recoverykit.Build consumes the
         # bin/ subdirectory as its BinariesDir.
         recoveryBinaries = pkgs.callPackage ./nix/recovery-binaries.nix { };
+
+        # The Temporal worker binary (control/data — the role is a run-time env
+        # var, SPEC §4.1). Built once here and bundled into the data-worker OCI
+        # image below.
+        worker = pkgs.callPackage ./nix/worker.nix { };
+
+        # Reproducible OCI image for the data worker (SPEC §4.1): the worker
+        # binary plus its external tooling, all from this same pinned nixpkgs and
+        # therefore the identical versions the recovery-binary set stages onto
+        # the disc (issue #73, SPEC §2/§10). streamLayeredImage emits a script
+        # that streams the tarball into `docker load` (see `make build-images`).
+        dataWorkerImage = pkgs.callPackage ./nix/data-worker-image.nix {
+          inherit worker ltfs;
+          inherit (pkgs) pkgsStatic;
+          nixpkgsRev = nixpkgs.shortRev or "dirty";
+        };
       in
       {
         # Expose as flake packages so `nix build .#mhvtl`, `.#mhvtlKernel`,
@@ -57,6 +73,8 @@
           zfsKernel = zfsKernel;
           inherit ltfs;
           inherit recoveryBinaries;
+          inherit worker;
+          inherit dataWorkerImage;
           default = mhvtlUserspace;
         };
 
