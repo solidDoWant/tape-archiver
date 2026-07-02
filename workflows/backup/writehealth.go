@@ -22,16 +22,38 @@ import (
 // via pkg/tape.LogPageReader, and computes sustained write throughput as the tape's
 // staged bytes divided by the write-window elapsed time measured by the workflow.
 
-// lto6SpeedMatchingFloorMBps is the LTO-6 native speed-matching floor (~50 MB/s,
-// SPEC §14). A sustained throughput below it means the drive could not stream and
-// likely shoe-shined. It is used only to compute the below-floor flag, never to gate
-// the run, and is deliberately not configurable or derived per LTO generation (issue
-// #70 non-goals).
-const lto6SpeedMatchingFloorMBps = 50.0
-
 // bytesPerMB is the decimal megabyte (1e6 bytes) used for throughput, matching how
 // drive/tape rates are conventionally quoted (MB/s, not MiB/s).
 const bytesPerMB = 1_000_000.0
+
+// speedMatchingFloorsMBps maps an LTO generation to its speed-matching floor: the
+// lowest native data rate the drive can dynamically slow to before it must stop and
+// back-hitch. A sustained throughput below the floor means the drive could not stream
+// and likely shoe-shined (SPEC §2 principle 2, §14). The floor is generation-specific
+// — higher generations stream much faster, so a single hard-coded value would badly
+// mis-flag other drives.
+//
+// Sources: LTO-6 ~50 MB/s (SPEC §2/§14); LTO-8 112 MB/s and LTO-9 180 MB/s (published
+// IBM LTO drive speed-matching specifications). A generation whose floor is not listed
+// here is treated as unknown by writeHealthFloor rather than assigned a guessed value,
+// so the below-floor verdict is never asserted against a number we cannot defend. Add
+// a generation here once its published minimum speed-matching rate is confirmed.
+var speedMatchingFloorsMBps = map[string]float64{
+	"LTO-6": 50,
+	"LTO-8": 112,
+	"LTO-9": 180,
+}
+
+// writeHealthFloor returns the speed-matching floor for the tape generation implied by
+// the configured native capacity (SPEC §5 library.tapeCapacityBytes), reusing the same
+// capacity→generation classification as the report (ltoGeneration). known is false when
+// the generation has no sourced floor, in which case the below-floor verdict is not
+// evaluated (writeHealthFloor never invents a floor).
+func writeHealthFloor(capacityBytes int64) (floorMBps float64, known bool) {
+	floor, ok := speedMatchingFloorsMBps[ltoGeneration(capacityBytes)]
+
+	return floor, ok
+}
 
 // WriteHealth is the per-tape write-health measurement carried on WrittenTape and
 // rendered into the run report and Prometheus metrics. It is observational only.
@@ -42,9 +64,15 @@ type WriteHealth struct {
 	// ThroughputMBps is the sustained write throughput over the tape's write
 	// window: staged bytes / elapsed seconds, in MB/s (decimal, 1 MB = 1e6 B).
 	ThroughputMBps float64
-	// FloorMBps is the speed-matching floor ThroughputMBps was compared against.
+	// FloorMBps is the speed-matching floor ThroughputMBps was compared against,
+	// derived from the tape generation. Zero and meaningless when FloorKnown is false.
 	FloorMBps float64
-	// BelowFloor is true when a throughput was measured and it fell below FloorMBps.
+	// FloorKnown is true when a speed-matching floor is known for the tape's
+	// generation. When false the throughput is still reported but no below-floor
+	// verdict is made (no floor is guessed).
+	FloorKnown bool
+	// BelowFloor is true when a throughput was measured against a known floor and
+	// fell below it.
 	BelowFloor bool
 	// Repositions is the drive's back-hitch count from log page 0x24; zero when the
 	// drive does not support the page (pkg/tape.LogPageReader behaviour).
@@ -53,10 +81,12 @@ type WriteHealth struct {
 	TapeAlertFlags []string
 }
 
-// Healthy reports whether the tape streamed cleanly: measured, at or above the floor,
-// with no repositions and no active TapeAlert flags.
+// Healthy reports whether the tape streamed cleanly: measured against a known floor,
+// at or above it, with no repositions and no active TapeAlert flags. A tape whose
+// generation has no known floor is never reported healthy — its streaming could not be
+// judged.
 func (h WriteHealth) Healthy() bool {
-	return h.Measured && !h.BelowFloor && h.Repositions == 0 && len(h.TapeAlertFlags) == 0
+	return h.Measured && h.FloorKnown && !h.BelowFloor && h.Repositions == 0 && len(h.TapeAlertFlags) == 0
 }
 
 // evaluateWriteHealth computes the write-health verdict from the tape's staged size,
@@ -64,10 +94,11 @@ func (h WriteHealth) Healthy() bool {
 // logic is unit-testable without hardware. Throughput is only meaningful for a
 // positive elapsed time; a non-positive elapsed yields a zero throughput that is not
 // flagged below-floor (the rate could not be measured, not that it was slow).
-func evaluateWriteHealth(stagedBytes int64, elapsed time.Duration, logs tape.LogPageResult) WriteHealth {
+func evaluateWriteHealth(stagedBytes int64, elapsed time.Duration, logs tape.LogPageResult, floorMBps float64, floorKnown bool) WriteHealth {
 	health := WriteHealth{
 		Measured:    true,
-		FloorMBps:   lto6SpeedMatchingFloorMBps,
+		FloorMBps:   floorMBps,
+		FloorKnown:  floorKnown,
 		Repositions: logs.Repositions,
 	}
 
@@ -80,7 +111,9 @@ func evaluateWriteHealth(stagedBytes int64, elapsed time.Duration, logs tape.Log
 	seconds := elapsed.Seconds()
 	if seconds > 0 {
 		health.ThroughputMBps = float64(stagedBytes) / bytesPerMB / seconds
-		health.BelowFloor = health.ThroughputMBps < health.FloorMBps
+		if floorKnown {
+			health.BelowFloor = health.ThroughputMBps < floorMBps
+		}
 	}
 
 	return health
@@ -138,7 +171,7 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "below_floor",
-			Help:      "1 when the measured throughput was below the LTO-6 speed-matching floor, else 0.",
+			Help:      "1 when the measured throughput was below the tape generation's speed-matching floor, else 0. Unset when the generation has no known floor.",
 		}, []string{"barcode"}),
 	}
 
@@ -164,7 +197,13 @@ func (m *writeHealthMetrics) record(barcode string, health WriteHealth) {
 	m.throughput.With(labels).Set(health.ThroughputMBps)
 	m.repositions.With(labels).Set(float64(health.Repositions))
 	m.tapeAlerts.With(labels).Set(float64(len(health.TapeAlertFlags)))
-	m.belowFloor.With(labels).Set(boolToFloat(health.BelowFloor))
+
+	// Only export the below-floor gauge when a floor is known; leaving it unset for
+	// an unknown generation avoids implying "not below floor" when the floor could
+	// not be evaluated.
+	if health.FloorKnown {
+		m.belowFloor.With(labels).Set(boolToFloat(health.BelowFloor))
+	}
 }
 
 // boolToFloat maps a bool to the Prometheus 1/0 convention for a boolean gauge.
@@ -210,6 +249,13 @@ type MeasureWriteHealthInput struct {
 	// Elapsed is the write-window wall-clock the workflow measured around the
 	// WriteTree → FinalizeTape span — the denominator of the throughput.
 	Elapsed time.Duration
+	// FloorMBps is the speed-matching floor for the tape generation being written,
+	// derived by the workflow from the configured native capacity. Meaningful only
+	// when FloorKnown is true.
+	FloorMBps float64
+	// FloorKnown is true when a floor is known for the tape generation. When false
+	// no below-floor verdict is made.
+	FloorKnown bool
 }
 
 // MeasureWriteHealth scrapes the drive's log pages after the write window closed and
@@ -228,7 +274,7 @@ func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input Me
 		logs = tape.LogPageResult{}
 	}
 
-	health := evaluateWriteHealth(input.StagedBytes, input.Elapsed, logs)
+	health := evaluateWriteHealth(input.StagedBytes, input.Elapsed, logs, input.FloorMBps, input.FloorKnown)
 
 	a.metrics.record(string(input.Barcode), health)
 

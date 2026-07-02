@@ -426,6 +426,7 @@ func reportWriteHealth(health WriteHealth) *report.WriteHealth {
 	return &report.WriteHealth{
 		ThroughputMBps: health.ThroughputMBps,
 		FloorMBps:      health.FloorMBps,
+		FloorKnown:     health.FloorKnown,
 		BelowFloor:     health.BelowFloor,
 		Repositions:    health.Repositions,
 		TapeAlertFlags: health.TapeAlertFlags,

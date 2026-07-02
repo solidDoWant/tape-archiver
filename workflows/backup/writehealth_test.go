@@ -26,11 +26,15 @@ func alertFlags(descriptions ...string) tape.TapeAlertResult {
 func TestEvaluateWriteHealth(t *testing.T) {
 	t.Parallel()
 
+	const floor = 50.0
+
 	tests := []struct {
 		name            string
 		stagedBytes     int64
 		elapsed         time.Duration
 		logs            tape.LogPageResult
+		floorMBps       float64
+		floorKnown      bool
 		wantThroughput  float64
 		wantBelowFloor  bool
 		wantRepositions int64
@@ -43,15 +47,19 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			stagedBytes:    6_000_000_000,
 			elapsed:        60 * time.Second,
 			logs:           tape.LogPageResult{Repositions: 0},
+			floorMBps:      floor,
+			floorKnown:     true,
 			wantThroughput: 100,
 			wantHealthy:    true,
 		},
 		{
-			// 2.4 GB in 60 s = 40 MB/s: below the ~50 MB/s LTO-6 floor.
+			// 2.4 GB in 60 s = 40 MB/s: below a 50 MB/s floor.
 			name:           "below floor",
 			stagedBytes:    2_400_000_000,
 			elapsed:        60 * time.Second,
 			logs:           tape.LogPageResult{Repositions: 0},
+			floorMBps:      floor,
+			floorKnown:     true,
 			wantThroughput: 40,
 			wantBelowFloor: true,
 		},
@@ -60,6 +68,8 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			stagedBytes:     6_000_000_000,
 			elapsed:         60 * time.Second,
 			logs:            tape.LogPageResult{Repositions: 5},
+			floorMBps:       floor,
+			floorKnown:      true,
 			wantThroughput:  100,
 			wantRepositions: 5,
 		},
@@ -68,6 +78,8 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			stagedBytes:    6_000_000_000,
 			elapsed:        60 * time.Second,
 			logs:           tape.LogPageResult{TapeAlert: alertFlags("Cleaning required")},
+			floorMBps:      floor,
+			floorKnown:     true,
 			wantThroughput: 100,
 			wantAlertCount: 1,
 		},
@@ -78,8 +90,23 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			stagedBytes:    6_000_000_000,
 			elapsed:        60 * time.Second,
 			logs:           tape.LogPageResult{Repositions: 0},
+			floorMBps:      floor,
+			floorKnown:     true,
 			wantThroughput: 100,
 			wantHealthy:    true,
+		},
+		{
+			// A generation with no known floor: throughput is reported but no
+			// below-floor verdict is made and the tape is not "healthy".
+			name:           "unknown floor is not judged",
+			stagedBytes:    2_400_000_000,
+			elapsed:        60 * time.Second,
+			logs:           tape.LogPageResult{Repositions: 0},
+			floorMBps:      0,
+			floorKnown:     false,
+			wantThroughput: 40,
+			wantBelowFloor: false,
+			wantHealthy:    false,
 		},
 	}
 
@@ -87,15 +114,50 @@ func TestEvaluateWriteHealth(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			health := evaluateWriteHealth(test.stagedBytes, test.elapsed, test.logs)
+			health := evaluateWriteHealth(test.stagedBytes, test.elapsed, test.logs, test.floorMBps, test.floorKnown)
 
 			assert.True(t, health.Measured)
 			assert.InDelta(t, test.wantThroughput, health.ThroughputMBps, 0.001)
-			assert.InDelta(t, lto6SpeedMatchingFloorMBps, health.FloorMBps, 0.001)
+			assert.Equal(t, test.floorKnown, health.FloorKnown)
+			assert.InDelta(t, test.floorMBps, health.FloorMBps, 0.001)
 			assert.Equal(t, test.wantBelowFloor, health.BelowFloor)
 			assert.Equal(t, test.wantRepositions, health.Repositions)
 			assert.Len(t, health.TapeAlertFlags, test.wantAlertCount)
 			assert.Equal(t, test.wantHealthy, health.Healthy())
+		})
+	}
+}
+
+// TestWriteHealthFloor asserts the floor is derived per LTO generation from the
+// configured native capacity, and that generations without a sourced floor report
+// unknown rather than a guessed value.
+func TestWriteHealthFloor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		capacityBytes int64
+		wantFloor     float64
+		wantKnown     bool
+	}{
+		{name: "LTO-6", capacityBytes: 2_500_000_000_000, wantFloor: 50, wantKnown: true},
+		{name: "LTO-8", capacityBytes: 12_000_000_000_000, wantFloor: 112, wantKnown: true},
+		{name: "LTO-9", capacityBytes: 18_000_000_000_000, wantFloor: 180, wantKnown: true},
+		{name: "LTO-7 has no sourced floor", capacityBytes: 6_000_000_000_000, wantKnown: false},
+		{name: "LTO-5 has no sourced floor", capacityBytes: 1_500_000_000_000, wantKnown: false},
+		{name: "unrecognized capacity", capacityBytes: 100, wantKnown: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			floor, known := writeHealthFloor(test.capacityBytes)
+			assert.Equal(t, test.wantKnown, known)
+
+			if test.wantKnown {
+				assert.InDelta(t, test.wantFloor, floor, 0.001)
+			}
 		})
 	}
 }
@@ -110,7 +172,7 @@ func TestEvaluateWriteHealthLabelsTapeAlertFlags(t *testing.T) {
 		{Number: 3, Description: "Not set", Set: false},
 	}}}
 
-	health := evaluateWriteHealth(6_000_000_000, 60*time.Second, logs)
+	health := evaluateWriteHealth(6_000_000_000, 60*time.Second, logs, 50, true)
 
 	require.Len(t, health.TapeAlertFlags, 1, "only active flags are recorded")
 	assert.Equal(t, "8: Cleaning required", health.TapeAlertFlags[0])
@@ -134,6 +196,8 @@ func TestMeasureWriteHealthReportsThroughputWhenScrapeFails(t *testing.T) {
 		Barcode:     "TAPE0001L6",
 		StagedBytes: 6_000_000_000,
 		Elapsed:     60 * time.Second,
+		FloorMBps:   50,
+		FloorKnown:  true,
 	})
 
 	require.NoError(t, err, "a scrape failure must not fail the run")
@@ -156,12 +220,14 @@ func TestMeasureWriteHealthRecordsMetrics(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	// 2.4 GB in 60 s = 40 MB/s: below the floor.
+	// 2.4 GB in 60 s = 40 MB/s: below a 50 MB/s floor.
 	_, err := activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
 		Device:      "/dev/does-not-exist",
 		Barcode:     "TAPE0002L6",
 		StagedBytes: 2_400_000_000,
 		Elapsed:     60 * time.Second,
+		FloorMBps:   50,
+		FloorKnown:  true,
 	})
 	require.NoError(t, err)
 
@@ -194,7 +260,8 @@ func TestReportWriteHealthMapping(t *testing.T) {
 	mapped := reportWriteHealth(WriteHealth{
 		Measured:       true,
 		ThroughputMBps: 100,
-		FloorMBps:      lto6SpeedMatchingFloorMBps,
+		FloorMBps:      50,
+		FloorKnown:     true,
 		BelowFloor:     false,
 		Repositions:    2,
 		TapeAlertFlags: []string{"8: Cleaning required"},
@@ -202,7 +269,8 @@ func TestReportWriteHealthMapping(t *testing.T) {
 
 	require.NotNil(t, mapped)
 	assert.InDelta(t, 100.0, mapped.ThroughputMBps, 0.001)
-	assert.InDelta(t, lto6SpeedMatchingFloorMBps, mapped.FloorMBps, 0.001)
+	assert.InDelta(t, 50.0, mapped.FloorMBps, 0.001)
+	assert.True(t, mapped.FloorKnown)
 	assert.Equal(t, int64(2), mapped.Repositions)
 	assert.Equal(t, []string{"8: Cleaning required"}, mapped.TapeAlertFlags)
 	assert.False(t, mapped.Healthy, "repositions make the tape unhealthy")

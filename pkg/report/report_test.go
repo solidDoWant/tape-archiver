@@ -57,6 +57,7 @@ func completeManifest() report.Manifest {
 				WriteHealth: &report.WriteHealth{
 					ThroughputMBps: 152.5,
 					FloorMBps:      50,
+					FloorKnown:     true,
 					BelowFloor:     false,
 					Repositions:    0,
 					Healthy:        true,
@@ -68,6 +69,7 @@ func completeManifest() report.Manifest {
 				WriteHealth: &report.WriteHealth{
 					ThroughputMBps: 41.3,
 					FloorMBps:      50,
+					FloorKnown:     true,
 					BelowFloor:     true,
 					Repositions:    7,
 					TapeAlertFlags: []string{"8: Cleaning required"},
@@ -192,23 +194,28 @@ func TestBuildWriteHealthSection(t *testing.T) {
 	}{
 		{
 			name:     "healthy",
-			health:   &report.WriteHealth{ThroughputMBps: 160.0, FloorMBps: 50, Healthy: true},
+			health:   &report.WriteHealth{ThroughputMBps: 160.0, FloorMBps: 50, FloorKnown: true, Healthy: true},
 			contains: []string{"160.0", "healthy"},
 		},
 		{
 			name:     "below floor",
-			health:   &report.WriteHealth{ThroughputMBps: 42.0, FloorMBps: 50, BelowFloor: true},
+			health:   &report.WriteHealth{ThroughputMBps: 42.0, FloorMBps: 50, FloorKnown: true, BelowFloor: true},
 			contains: []string{"42.0", "below floor"},
 		},
 		{
 			name:     "repositions",
-			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, Repositions: 12},
+			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, Repositions: 12},
 			contains: []string{"12 repositions"},
 		},
 		{
 			name:     "tape alert",
-			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, TapeAlertFlags: []string{"20: Clean now"}},
+			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, TapeAlertFlags: []string{"20: Clean now"}},
 			contains: []string{"TapeAlert", "Clean now"},
+		},
+		{
+			name:     "floor unknown",
+			health:   &report.WriteHealth{ThroughputMBps: 90.0, FloorKnown: false},
+			contains: []string{"90.0", "floor unknown"},
 		},
 		{
 			name:     "not measured",

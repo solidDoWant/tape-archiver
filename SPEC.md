@@ -370,9 +370,13 @@ modified to pass — the code is fixed instead.
   closes, the run records that tape's sustained write throughput (staged bytes ÷
   write-window elapsed), its reposition/back-hitch count (SCSI log page `0x24`), and any
   TapeAlert flags (log page `0x2e`) in the PDF report (§9) and as Prometheus gauges, and
-  flags any tape that streamed below the floor or back-hitched. This is **observational
-  only** — it never fails or gates a run — so principle 2 can be evaluated against the
-  real workload before any gating is considered.
+  flags any tape that streamed below the floor or back-hitched. The floor is the tape
+  **generation's** speed-matching floor (the write format governs the drive's
+  speed-matching range), derived from the configured native capacity — LTO-6 ~50 MB/s,
+  LTO-8 112 MB/s, LTO-9 180 MB/s; a generation with no recorded floor reports throughput
+  without a below-floor verdict rather than judging against a guessed value. This is
+  **observational only** — it never fails or gates a run — so principle 2 can be
+  evaluated against the real workload before any gating is considered.
 - The prepare phase (`tar`/`age`/PAR2) must, in aggregate, keep ahead of the planned
   write throughput; PAR2 uses the multithreaded par2cmdline-turbo. Because prepare and
   write are decoupled by staging, prepare throughput affects total run time but never

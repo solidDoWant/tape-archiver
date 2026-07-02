@@ -323,7 +323,7 @@ func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInpu
 //
 // The deferred TeardownSession activity runs on the same worker (within the
 // session) so it can unmount any live mount the session still owns on exit.
-func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
+func writePhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	// CreateSession pins the session to the task queue in the context's activity
 	// options, falling back to the workflow's own queue (control) when none is
 	// set. The session must run on the data worker — that is where the tape
@@ -383,6 +383,10 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 		health    WriteHealth
 		err       error
 	}
+
+	// The speed-matching floor is a property of the tape generation being written,
+	// derived once from the configured native capacity (see measureWriteHealth).
+	floorMBps, floorKnown := writeHealthFloor(cfg.Library.TapeCapacityBytes)
 
 	ch := workflow.NewBufferedChannel(sessionCtx, len(state.loaded))
 
@@ -449,7 +453,7 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 			// deferred index sync have settled). This is observational only
 			// (SPEC §2 principle 2): a measurement failure is logged and the tape
 			// is still recorded as written — it never fails the run.
-			res.health = measureWriteHealth(gctx, lt, archives, workflow.Now(gctx).Sub(writeStart))
+			res.health = measureWriteHealth(gctx, lt, archives, workflow.Now(gctx).Sub(writeStart), floorMBps, floorKnown)
 
 			ch.Send(gctx, res)
 		})
@@ -495,7 +499,7 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 // where its SCSI generic node lives. Because write-health never gates a run (SPEC §2
 // principle 2, §14), a measurement failure is logged and reported as unmeasured
 // rather than propagated.
-func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWriteArchive, elapsed time.Duration) WriteHealth {
+func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWriteArchive, elapsed time.Duration, floorMBps float64, floorKnown bool) WriteHealth {
 	healthCtx := workflow.WithActivityOptions(gctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: writeHealthTimeout,
@@ -509,6 +513,8 @@ func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWri
 		Barcode:     lt.Barcode,
 		StagedBytes: stagedBytes(archives),
 		Elapsed:     elapsed,
+		FloorMBps:   floorMBps,
+		FloorKnown:  floorKnown,
 	}).Get(healthCtx, &health); err != nil {
 		workflow.GetLogger(gctx).Warn("write-health measurement failed; tape recorded without it",
 			"drive", lt.DriveIndex, "barcode", lt.Barcode, "error", err)

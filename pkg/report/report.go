@@ -96,9 +96,13 @@ type WriteHealth struct {
 	// ThroughputMBps is the sustained write throughput over the tape's write window,
 	// in MB/s (staged bytes / elapsed).
 	ThroughputMBps float64
-	// FloorMBps is the speed-matching floor the throughput was compared against.
+	// FloorMBps is the speed-matching floor the throughput was compared against,
+	// derived from the tape generation. Meaningful only when FloorKnown is true.
 	FloorMBps float64
-	// BelowFloor is true when the throughput fell below FloorMBps.
+	// FloorKnown is true when a speed-matching floor is known for the tape's
+	// generation. When false the throughput is reported but not judged against a floor.
+	FloorKnown bool
+	// BelowFloor is true when the throughput fell below a known FloorMBps.
 	BelowFloor bool
 	// Repositions is the drive's back-hitch count (SCSI log page 0x24).
 	Repositions int64
@@ -453,8 +457,13 @@ func (d *doc) writeHealthSection(m Manifest) {
 			d.pdf.CellFormat(floorW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
 			d.pdf.CellFormat(reposW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
 		} else {
+			floor := "n/a"
+			if health.FloorKnown {
+				floor = fmt.Sprintf("%.0f", health.FloorMBps)
+			}
+
 			d.pdf.CellFormat(thrW, 5.5, d.tr(fmt.Sprintf("%.1f", health.ThroughputMBps)), "", 0, "R", false, 0, "")
-			d.pdf.CellFormat(floorW, 5.5, d.tr(fmt.Sprintf("%.0f", health.FloorMBps)), "", 0, "R", false, 0, "")
+			d.pdf.CellFormat(floorW, 5.5, d.tr(floor), "", 0, "R", false, 0, "")
 			d.pdf.CellFormat(reposW, 5.5, d.tr(strconv.FormatInt(health.Repositions, 10)), "", 0, "R", false, 0, "")
 		}
 
@@ -487,7 +496,10 @@ func writeHealthStatus(health *WriteHealth) string {
 
 	var flags []string
 
-	if health.BelowFloor {
+	switch {
+	case !health.FloorKnown:
+		flags = append(flags, "floor unknown for this LTO generation")
+	case health.BelowFloor:
 		flags = append(flags, fmt.Sprintf("below floor (%.1f < %.0f MB/s)", health.ThroughputMBps, health.FloorMBps))
 	}
 

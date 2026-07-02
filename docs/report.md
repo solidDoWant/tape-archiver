@@ -38,13 +38,19 @@ Each tape row records:
 - **Throughput (MB/s)** — sustained write throughput over the write window, computed as
   the tape's staged size (the archive data, in decimal MB) divided by the write-window
   elapsed time.
-- **Floor** — the LTO-6 speed-matching floor (~50 MB/s, SPEC §14) the throughput is
-  compared against.
+- **Floor** — the speed-matching floor the throughput is compared against. It is a
+  property of the **tape generation being written** (the write format determines the
+  drive's speed-matching range), derived from the configured native capacity
+  (`library.tapeCapacityBytes`, SPEC §5/§14): LTO-6 ~50 MB/s, LTO-8 112 MB/s, LTO-9
+  180 MB/s. Generations whose published floor is not yet recorded (currently LTO-5 and
+  LTO-7) render the floor as `n/a` — the throughput is still reported, but no below-floor
+  verdict is made rather than judging against a guessed number.
 - **Repositions** — the drive's back-hitch count from SCSI log page `0x24`. A drive that
   does not support the page reports zero.
-- **Status** — `healthy` when the tape streamed at or above the floor with zero
+- **Status** — `healthy` when the tape streamed at or above a known floor with zero
   repositions and no TapeAlert flags; otherwise the specific flags: `below floor`,
-  `N repositions`, and/or the active `TapeAlert` flag descriptions from log page `0x2e`.
+  `N repositions`, the active `TapeAlert` flag descriptions from log page `0x2e`, and/or
+  `floor unknown for this LTO generation` when no floor is recorded for the generation.
 
 A tape that carries no measurement (e.g. a virtual/dry-run tape, which does not reflect
 real throughput) renders as `not measured`.
