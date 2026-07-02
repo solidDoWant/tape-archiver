@@ -43,10 +43,39 @@ interpreter (`PT_INTERP`) or any shared-library dependency (`DT_NEEDED`) is reje
 misconfigured run can never silently produce a useless recovery disc (SPEC §2:
 20-year recoverability; everything is tested).
 
-The binaries themselves are produced and pinned elsewhere (the worker OCI image), at the
-**same versions** shipped on the recovery disc and used to write the tapes. `recoverykit`
-only stages whatever is in the configured source directory and proves it is static — it
-performs no network fetch at build or run time.
+`recoverykit` itself only stages whatever is in the configured source directory and
+proves it is static — it performs no network fetch at build or run time. The binaries
+are produced separately, at the **same versions** shipped on the recovery disc and used
+to write the tapes (see below).
+
+## Producing the static binaries
+
+The static set is a Nix derivation (`nix/recovery-binaries.nix`, exposed as the flake
+output `recoveryBinaries`), built with:
+
+```
+make recovery-binaries      # nix build .#recoveryBinaries
+```
+
+It emits one disc-staging directory:
+
+- `bin/{age,par2,zstd,tar}` — the statically linked binaries. This is the directory a
+  run points `recoverykit.Build` at (`BinariesDir`, wired from the data worker's
+  `TAPE_RECOVERY_BINARIES_DIR`); `recoverykit` stages its top-level regular files into
+  the ISO's `bin/`.
+- `src/<tool>-<version>.*` — each tool's upstream source archive (SPEC §10 "…plus their
+  source"), staged for later inclusion on the disc. It lives in a subdirectory, which
+  `recoverykit` skips, so it never trips the ELF-only linkage check on `bin/`.
+
+`par2cmdline-turbo`, `zstd`, and `gnutar` are built with Nix `pkgsStatic` (musl); `age`
+is Go and links static with CGO disabled. All four are drawn from the **same pinned
+nixpkgs** as the rest of the project — the single shared source of truth — so the
+data-worker OCI image, which bundles the same tools for the write path, ships identical
+versions ("must match the recovery disc", SPEC §2/§4.1/§10). The derivation's install
+check re-proves, at build time, the same predicate `recoverykit.Build` enforces at run
+time (no `PT_INTERP`, no `DT_NEEDED`) and that each binary runs standalone at its pinned
+version — including `age`'s native post-quantum (`age1pq1…`, hybrid ML-KEM-768)
+support, which needs no separate plugin binary.
 
 ## Key escrow
 

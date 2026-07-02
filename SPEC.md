@@ -294,6 +294,9 @@ PDF report; the full SHA-256 manifest; a backup copy of each tape's LTFS index; 
 **recovery tooling** — static `age`/`par2`/`zstd`/`tar` (and LTFS read instructions)
 plus their source and a written, step-by-step recovery procedure — so the tapes can be
 read, repaired, decrypted, decompressed, and unpacked with only the disc and the tapes.
+The static tooling and its source are produced by `nix/recovery-binaries.nix` (flake
+output `recoveryBinaries`) from the same pinned nixpkgs the data-worker image uses, so
+the disc and the write path run identical tool versions (§2, §4.1).
 
 **Target media: M-DISC DVD.** Its inorganic recording layer is ISO/IEC 10995-tested and
 NIST-listed for 100+ year archival life, and — unlike recordable Blu-ray, whose media
@@ -412,6 +415,9 @@ refinement as issues are implemented.
   `report.go`, `deliver.go`) with co-located tests.
 - `schemas/` — generated config schema. `deploy/charts/` — Helm chart for the control
   worker. `docs/` — operator docs. `e2e/` — end-to-end tests.
+- `nix/` — build derivations: `ltfs.nix`, the `mhvtl` userspace/kernel modules, and
+  `recovery-binaries.nix` (the static `age`/`par2`/`zstd`/`tar` set plus source staged
+  for the recovery disc, exposed as the flake output `recoveryBinaries`; §10).
 
 ## 16. Resolved decisions and remaining open items
 

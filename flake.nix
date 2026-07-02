@@ -38,6 +38,14 @@
         # running kernel.
         zfsUserspace = pkgs.zfs;
         zfsKernel = pkgs.linuxPackages.${zfsUserspace.kernelModuleAttribute};
+
+        # Static recovery-binary set for the optical recovery disc (SPEC §10):
+        # statically linked age/par2/zstd/tar plus their source, staged into one
+        # directory. Built from the same pinned nixpkgs as everything else, so
+        # the data-worker image bundles identical versions ("must match the
+        # recovery disc", SPEC §2/§4.1/§10). recoverykit.Build consumes the
+        # bin/ subdirectory as its BinariesDir.
+        recoveryBinaries = pkgs.callPackage ./nix/recovery-binaries.nix { };
       in
       {
         # Expose as flake packages so `nix build .#mhvtl`, `.#mhvtlKernel`,
@@ -48,6 +56,7 @@
           zfs = zfsUserspace;
           zfsKernel = zfsKernel;
           inherit ltfs;
+          inherit recoveryBinaries;
           default = mhvtlUserspace;
         };
 
