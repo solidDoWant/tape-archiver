@@ -51,8 +51,29 @@ func completeManifest() report.Manifest {
 			},
 		},
 		Tapes: []report.Tape{
-			{Barcode: "TAPE0001L8", Contents: []string{"k8s-group-photos", "zfs-media"}},
-			{Barcode: "TAPE0002L8", Contents: []string{"k8s-group-photos", "zfs-media"}},
+			{
+				Barcode:  "TAPE0001L8",
+				Contents: []string{"k8s-group-photos", "zfs-media"},
+				WriteHealth: &report.WriteHealth{
+					ThroughputMBps: 152.5,
+					FloorMBps:      50,
+					BelowFloor:     false,
+					Repositions:    0,
+					Healthy:        true,
+				},
+			},
+			{
+				Barcode:  "TAPE0002L8",
+				Contents: []string{"k8s-group-photos", "zfs-media"},
+				WriteHealth: &report.WriteHealth{
+					ThroughputMBps: 41.3,
+					FloorMBps:      50,
+					BelowFloor:     true,
+					Repositions:    7,
+					TapeAlertFlags: []string{"8: Cleaning required"},
+					Healthy:        false,
+				},
+			},
 		},
 		Build: report.BuildParams{
 			ToolVersion:     "tape-archiver v1.2.3",
@@ -134,6 +155,12 @@ func TestBuildContainsEverySpec9Field(t *testing.T) {
 		{name: "library model", value: "Quantum Scalar i3"},
 		{name: "age private identity", value: manifest.AgeIdentity},
 		{name: "recovery procedure", value: "decrypt with the age identity above"},
+		{name: "write-health throughput", value: "152.5"},
+		{name: "write-health floor", value: "50"},
+		{name: "write-health healthy status", value: "healthy"},
+		{name: "write-health below-floor status", value: "below floor"},
+		{name: "write-health reposition count", value: "7"},
+		{name: "write-health TapeAlert flag", value: "Cleaning required"},
 	}
 
 	for _, test := range tests {
@@ -141,6 +168,65 @@ func TestBuildContainsEverySpec9Field(t *testing.T) {
 			t.Parallel()
 			assert.Contains(t, extracted, stripWhitespace(test.value),
 				"extracted PDF text is missing the %s field", test.name)
+		})
+	}
+}
+
+// TestBuildWriteHealthSection asserts the report renders each write-health state
+// distinctly (SPEC §14): healthy, below-floor, repositions, TapeAlert, and the
+// "not measured" fallback when a tape carries no measurement.
+func TestBuildWriteHealthSection(t *testing.T) {
+	t.Parallel()
+
+	manifest := func(health *report.WriteHealth) report.Manifest {
+		m := completeManifest()
+		m.Tapes = []report.Tape{{Barcode: "TAPE9999L6", Contents: []string{"zfs-media"}, WriteHealth: health}}
+
+		return m
+	}
+
+	tests := []struct {
+		name     string
+		health   *report.WriteHealth
+		contains []string
+	}{
+		{
+			name:     "healthy",
+			health:   &report.WriteHealth{ThroughputMBps: 160.0, FloorMBps: 50, Healthy: true},
+			contains: []string{"160.0", "healthy"},
+		},
+		{
+			name:     "below floor",
+			health:   &report.WriteHealth{ThroughputMBps: 42.0, FloorMBps: 50, BelowFloor: true},
+			contains: []string{"42.0", "below floor"},
+		},
+		{
+			name:     "repositions",
+			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, Repositions: 12},
+			contains: []string{"12 repositions"},
+		},
+		{
+			name:     "tape alert",
+			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, TapeAlertFlags: []string{"20: Clean now"}},
+			contains: []string{"TapeAlert", "Clean now"},
+		},
+		{
+			name:     "not measured",
+			health:   nil,
+			contains: []string{"not measured"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			extracted := stripWhitespace(extractText(t, manifest(test.health)))
+
+			for _, want := range test.contains {
+				assert.Contains(t, extracted, stripWhitespace(want),
+					"write-health %q state should render %q", test.name, want)
+			}
 		})
 	}
 }

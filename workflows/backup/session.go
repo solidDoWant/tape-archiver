@@ -33,6 +33,10 @@ const (
 	// chain. Streaming terabytes to LTO tape takes many hours; 24 h per tape is
 	// a generous but realistic ceiling.
 	writeTapeTimeout = 24 * time.Hour
+	// writeHealthTimeout bounds the post-write MeasureWriteHealth activity. It only
+	// scrapes two SCSI log pages via sg_logs, which completes in seconds; a few
+	// minutes is a generous ceiling that still bounds a hang.
+	writeHealthTimeout = 5 * time.Minute
 )
 
 // MountRegistry is a concurrency-safe, process-global registry of live LTFS
@@ -376,6 +380,7 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 	type driveResult struct {
 		loadedIdx int
 		indexXML  []byte
+		health    WriteHealth
 		err       error
 	}
 
@@ -410,6 +415,12 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 				return
 			}
 
+			// Start the write-window clock before the copy and stop it after the
+			// finalize/unmount so the measured span is exactly WriteTree →
+			// FinalizeTape (SPEC §14). workflow.Now is the replay-safe workflow
+			// clock, so the elapsed time is deterministic across retries.
+			writeStart := workflow.Now(gctx)
+
 			if err := workflow.ExecuteActivity(noRetryCtx, acts.WriteTree, WriteTreeInput{
 				Device:    lt.SGDevice,
 				Barcode:   lt.Barcode,
@@ -434,6 +445,12 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 			}
 
 			res.indexXML = indexXML
+			// Measure write-health after the window closed (unmount and the
+			// deferred index sync have settled). This is observational only
+			// (SPEC §2 principle 2): a measurement failure is logged and the tape
+			// is still recorded as written — it never fails the run.
+			res.health = measureWriteHealth(gctx, lt, archives, workflow.Now(gctx).Sub(writeStart))
+
 			ch.Send(gctx, res)
 		})
 	}
@@ -452,12 +469,13 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 		} else {
 			lt := state.loaded[res.loadedIdx]
 			written = append(written, WrittenTape{
-				Barcode:    lt.Barcode,
-				DriveIndex: lt.DriveIndex,
-				TapeIndex:  lt.TapeIndex,
-				CopyIndex:  lt.CopyIndex,
-				SourceSlot: lt.SourceSlot,
-				IndexXML:   res.indexXML,
+				Barcode:     lt.Barcode,
+				DriveIndex:  lt.DriveIndex,
+				TapeIndex:   lt.TapeIndex,
+				CopyIndex:   lt.CopyIndex,
+				SourceSlot:  lt.SourceSlot,
+				IndexXML:    res.indexXML,
+				WriteHealth: res.health,
 			})
 		}
 	}
@@ -469,4 +487,49 @@ func writePhase(ctx workflow.Context, _ config.Config, state *runState) error {
 	state.written = written
 
 	return nil
+}
+
+// measureWriteHealth runs the observational MeasureWriteHealth activity for one tape
+// after its write window closed, returning the verdict. The activity runs in the
+// session context so it lands on the same data worker (and host) that wrote the tape,
+// where its SCSI generic node lives. Because write-health never gates a run (SPEC §2
+// principle 2, §14), a measurement failure is logged and reported as unmeasured
+// rather than propagated.
+func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWriteArchive, elapsed time.Duration) WriteHealth {
+	healthCtx := workflow.WithActivityOptions(gctx, workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: writeHealthTimeout,
+	})
+
+	var acts *WriteHealthActivities
+
+	var health WriteHealth
+	if err := workflow.ExecuteActivity(healthCtx, acts.MeasureWriteHealth, MeasureWriteHealthInput{
+		Device:      lt.SGDevice,
+		Barcode:     lt.Barcode,
+		StagedBytes: stagedBytes(archives),
+		Elapsed:     elapsed,
+	}).Get(healthCtx, &health); err != nil {
+		workflow.GetLogger(gctx).Warn("write-health measurement failed; tape recorded without it",
+			"drive", lt.DriveIndex, "barcode", lt.Barcode, "error", err)
+
+		return WriteHealth{}
+	}
+
+	return health
+}
+
+// stagedBytes sums the staged archive data on a tape — the slice bytes only, which is
+// exactly StagedArchive.SizeBytes (PAR2 recovery bytes are excluded, per issue #70).
+// It is the numerator of the sustained write throughput.
+func stagedBytes(archives []TapeWriteArchive) int64 {
+	var total int64
+
+	for _, archive := range archives {
+		for _, slice := range archive.Slices {
+			total += slice.SizeBytes
+		}
+	}
+
+	return total
 }

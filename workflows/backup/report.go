@@ -405,10 +405,32 @@ func reportTapes(input ReportInput, nameByIndex map[int]string) []report.Tape {
 			}
 		}
 
-		tapes = append(tapes, report.Tape{Barcode: string(written.Barcode), Contents: contents})
+		tapes = append(tapes, report.Tape{
+			Barcode:     string(written.Barcode),
+			Contents:    contents,
+			WriteHealth: reportWriteHealth(written.WriteHealth),
+		})
 	}
 
 	return tapes
+}
+
+// reportWriteHealth maps a tape's observational write-health measurement to the
+// report shape, returning nil when the measurement was not taken so the report can
+// render "not measured" rather than a misleading zeroed row (SPEC §14).
+func reportWriteHealth(health WriteHealth) *report.WriteHealth {
+	if !health.Measured {
+		return nil
+	}
+
+	return &report.WriteHealth{
+		ThroughputMBps: health.ThroughputMBps,
+		FloorMBps:      health.FloorMBps,
+		BelowFloor:     health.BelowFloor,
+		Repositions:    health.Repositions,
+		TapeAlertFlags: health.TapeAlertFlags,
+		Healthy:        health.Healthy(),
+	}
 }
 
 // buildParams records how the tapes were built (SPEC §9): tool and external tool

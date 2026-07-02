@@ -102,7 +102,7 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	slog.Info("starting worker", "role", string(cfg.Role), "task_queue", queue)
 
 	w := worker.New(temporalClient, queue, workerOptions(cfg.Role))
-	registerActivities(w, cfg.Role, env)
+	registerActivities(w, cfg.Role, env, metricsProvider.PrometheusRegisterer())
 
 	// Run blocks until interruptCh delivers, then stops polling and waits for
 	// in-flight tasks to finish before returning.

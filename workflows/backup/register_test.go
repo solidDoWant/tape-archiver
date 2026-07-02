@@ -79,10 +79,10 @@ func TestRegisterData(t *testing.T) {
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
 	// activities: Resolve data, Prepare, Generate PAR2, Verify, Load, Write
-	// (WriteActivities + TeardownActivities sharing a registry), Eject, Report,
-	// and Deliver.
+	// (WriteActivities + TeardownActivities sharing a registry), WriteHealth,
+	// Eject, Report, and Deliver.
 	assert.Empty(t, rw.workflows)
-	assert.Len(t, rw.activities, 10)
+	assert.Len(t, rw.activities, 11)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
 		"the data worker must register the Resolve data activity")
 	assert.True(t, hasActivity[*PrepareActivities](rw.activities),
@@ -97,6 +97,8 @@ func TestRegisterData(t *testing.T) {
 		"the data worker must register the Write activities (FormatTape, WriteTree, FinalizeTape)")
 	assert.True(t, hasActivity[*TeardownActivities](rw.activities),
 		"the data worker must register the TeardownSession activity")
+	assert.True(t, hasActivity[*WriteHealthActivities](rw.activities),
+		"the data worker must register the WriteHealth activity (MeasureWriteHealth)")
 	assert.True(t, hasActivity[*EjectActivities](rw.activities),
 		"the data worker must register the Eject activity")
 	assert.True(t, hasActivity[*ReportActivities](rw.activities),

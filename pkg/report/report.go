@@ -83,6 +83,30 @@ type Tape struct {
 	Barcode string
 	// Contents lists what this tape holds (archive or file names).
 	Contents []string
+	// WriteHealth is the tape's observational write-health measurement (SPEC §14):
+	// sustained throughput, repositions, and TapeAlert flags. It is nil when
+	// write-health was not measured for the tape.
+	WriteHealth *WriteHealth
+}
+
+// WriteHealth is a tape's observational write-health measurement rendered in the
+// report (SPEC §2 principle 2, §14). It never reflects run success — a tape flagged
+// below-floor, with repositions, or with TapeAlert flags was still written.
+type WriteHealth struct {
+	// ThroughputMBps is the sustained write throughput over the tape's write window,
+	// in MB/s (staged bytes / elapsed).
+	ThroughputMBps float64
+	// FloorMBps is the speed-matching floor the throughput was compared against.
+	FloorMBps float64
+	// BelowFloor is true when the throughput fell below FloorMBps.
+	BelowFloor bool
+	// Repositions is the drive's back-hitch count (SCSI log page 0x24).
+	Repositions int64
+	// TapeAlertFlags are the active TapeAlert flags (SCSI log page 0x2e), if any.
+	TapeAlertFlags []string
+	// Healthy is true when the tape streamed cleanly: at or above the floor, with no
+	// repositions and no active TapeAlert flags.
+	Healthy bool
 }
 
 // BuildParams records how the tapes were built — the versions and settings a
@@ -156,6 +180,7 @@ func Build(m Manifest, w io.Writer) error {
 	d.runSection(m)
 	d.contentsSection(m)
 	d.tapesSection(m)
+	d.writeHealthSection(m)
 	d.buildSection(m)
 	d.identitySection(m)
 	d.recoverySection(m)
@@ -374,6 +399,113 @@ func (d *doc) tapesSection(m Manifest) {
 		d.pdf.Line(x, rowEndY, x+contentW, rowEndY)
 		d.pdf.SetX(x)
 	}
+}
+
+// writeHealthSection renders the per-tape write-health measurement (SPEC §14):
+// sustained throughput against the speed-matching floor, reposition count, and any
+// TapeAlert flags, with a status that flags below-floor / repositions / TapeAlert.
+// It is observational — a flagged tape was still written successfully.
+func (d *doc) writeHealthSection(m Manifest) {
+	d.section("Write health")
+
+	d.pdf.SetFont(fontBody, "I", 9)
+	d.text(colMuted)
+	d.pdf.MultiCell(contentW, 5,
+		d.tr("Observational only (SPEC §2 principle 2): sustained throughput vs. the speed-matching floor, drive repositions, and TapeAlert flags. A flagged tape was still written successfully."),
+		"", "L", false)
+	d.pdf.Ln(1.5)
+
+	const (
+		barcodeW = 40.0
+		thrW     = 26.0
+		floorW   = 22.0
+		reposW   = 22.0
+	)
+
+	statusW := contentW - barcodeW - thrW - floorW - reposW
+
+	d.draw(colRule)
+	d.pdf.SetLineWidth(0.2)
+	d.fill(colBar)
+	d.text(colMuted)
+	d.pdf.SetFont(fontBody, "B", 8.5)
+	d.pdf.CellFormat(barcodeW, 6, d.tr("Barcode"), "B", 0, "L", true, 0, "")
+	d.pdf.CellFormat(thrW, 6, d.tr("MB/s"), "B", 0, "R", true, 0, "")
+	d.pdf.CellFormat(floorW, 6, d.tr("Floor"), "B", 0, "R", true, 0, "")
+	d.pdf.CellFormat(reposW, 6, d.tr("Repos"), "B", 0, "R", true, 0, "")
+	d.pdf.CellFormat(statusW, 6, d.tr("Status"), "B", 1, "L", true, 0, "")
+
+	for _, tape := range m.Tapes {
+		x, y := d.pdf.GetX(), d.pdf.GetY()
+
+		health := tape.WriteHealth
+
+		d.text(colInk)
+		d.pdf.SetFont(fontMono, "", 8.5)
+		d.pdf.MultiCell(barcodeW, 5.5, d.tr(tape.Barcode), "", "L", false)
+		barcodeEndY := d.pdf.GetY()
+
+		d.pdf.SetXY(x+barcodeW, y)
+		d.pdf.SetFont(fontBody, "", 8.5)
+
+		if health == nil {
+			d.pdf.CellFormat(thrW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
+			d.pdf.CellFormat(floorW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
+			d.pdf.CellFormat(reposW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
+		} else {
+			d.pdf.CellFormat(thrW, 5.5, d.tr(fmt.Sprintf("%.1f", health.ThroughputMBps)), "", 0, "R", false, 0, "")
+			d.pdf.CellFormat(floorW, 5.5, d.tr(fmt.Sprintf("%.0f", health.FloorMBps)), "", 0, "R", false, 0, "")
+			d.pdf.CellFormat(reposW, 5.5, d.tr(strconv.FormatInt(health.Repositions, 10)), "", 0, "R", false, 0, "")
+		}
+
+		statusX := x + barcodeW + thrW + floorW + reposW
+		d.pdf.SetXY(statusX, y)
+		d.pdf.MultiCell(statusW, 5.5, d.tr(writeHealthStatus(health)), "", "L", false)
+
+		rowEndY := d.pdf.GetY()
+		if barcodeEndY > rowEndY {
+			rowEndY = barcodeEndY
+		}
+
+		d.draw(colRule)
+		d.pdf.Line(x, rowEndY, x+contentW, rowEndY)
+		d.pdf.SetXY(x, rowEndY)
+	}
+}
+
+// writeHealthStatus renders the human-readable status for a tape's write health:
+// "not measured" when absent, "healthy" when it streamed cleanly, or the joined set
+// of flags (below floor / repositions / TapeAlert descriptions) otherwise.
+func writeHealthStatus(health *WriteHealth) string {
+	if health == nil {
+		return "not measured"
+	}
+
+	if health.Healthy {
+		return "healthy"
+	}
+
+	var flags []string
+
+	if health.BelowFloor {
+		flags = append(flags, fmt.Sprintf("below floor (%.1f < %.0f MB/s)", health.ThroughputMBps, health.FloorMBps))
+	}
+
+	if health.Repositions > 0 {
+		flags = append(flags, fmt.Sprintf("%d repositions", health.Repositions))
+	}
+
+	if len(health.TapeAlertFlags) > 0 {
+		flags = append(flags, "TapeAlert: "+strings.Join(health.TapeAlertFlags, "; "))
+	}
+
+	if len(flags) == 0 {
+		// Not healthy but no specific flag set (e.g. throughput not measurable):
+		// avoid rendering an empty status cell.
+		return "measured"
+	}
+
+	return strings.Join(flags, "; ")
 }
 
 // buildSection renders the build parameters as key/value rows.

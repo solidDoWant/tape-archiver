@@ -281,7 +281,8 @@ Produced by the data worker (§4.1: its inputs — staged files, pinned tool ver
 recovery binaries, captured LTFS indexes — all live there). Contains, at minimum: run
 id and date; full contents
 manifest (archives, member volumes, source snapshots, sizes, SHA-256 checksums);
-which physical tape(s) (by barcode/label) hold what; how the tapes were built (tool
+which physical tape(s) (by barcode/label) hold what; per-tape **write health** (§14);
+how the tapes were built (tool
 version, `age`/`par2`/`ltfs` versions, slice size, PAR2 redundancy, drive/library
 identifiers); the **age private identity**; and the recovery procedure. Intended to be
 printed and laminated as the durable offline index for the run.
@@ -365,7 +366,13 @@ modified to pass — the code is fixed instead.
 
 - The write phase must feed each drive above its **speed-matching floor (~50 MB/s for
   LTO-6)** continuously, with no back-hitch. This is enforced by design (everything is
-  staged before writing) and **verified by benchmark** against real hardware.
+  staged before writing) and **measured on every run**: after each tape's write window
+  closes, the run records that tape's sustained write throughput (staged bytes ÷
+  write-window elapsed), its reposition/back-hitch count (SCSI log page `0x24`), and any
+  TapeAlert flags (log page `0x2e`) in the PDF report (§9) and as Prometheus gauges, and
+  flags any tape that streamed below the floor or back-hitched. This is **observational
+  only** — it never fails or gates a run — so principle 2 can be evaluated against the
+  real workload before any gating is considered.
 - The prepare phase (`tar`/`age`/PAR2) must, in aggregate, keep ahead of the planned
   write throughput; PAR2 uses the multithreaded par2cmdline-turbo. Because prepare and
   write are decoupled by staging, prepare throughput affects total run time but never
