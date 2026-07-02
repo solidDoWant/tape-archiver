@@ -72,6 +72,8 @@ as the project is implemented; keep this list current):
 - `make generate-schema` — regenerate the committed config JSON schema.
 - `make update-dependencies` — update deps, `go mod tidy`, refresh Nix vendor hashes.
 - `make build-images` — build worker OCI image(s) via Nix.
+- `make chart-lint` — fetch deps, lint, and render the control-worker Helm chart
+  (`deploy/charts/`); no cluster required.
 - `make temporal-up` / `make temporal-down` — local Temporal for integration tests.
 - `make mhvtl-up` / `make mhvtl-down` — virtual tape library for tests/dry-run.
 - `make zpool-up` / `make zpool-down` — ephemeral file-backed ZFS pool for `pkg/zfs`

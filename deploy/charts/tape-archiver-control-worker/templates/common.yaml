@@ -1,0 +1,332 @@
+---
+{{/* ============================================================ */}}
+{{/* Hard-coded chart internals (not exposed in values)           */}}
+{{/* ============================================================ */}}
+{{- $temporalConfigDir  := "/etc/temporal" -}}
+{{- $temporalTLSRoot    := "/etc/temporal-tls" -}}
+{{- $temporalConfigFile := printf "%s/temporal.toml" $temporalConfigDir -}}
+
+{{/* The single controller and its container are both named "main" so operator
+   overrides have a stable path (resources.controllers.main.containers.main.*). */}}
+{{- $controllerName := "main" -}}
+{{- $containerName  := "main" -}}
+
+{{/* The default control-worker image. Repository is the Makefile's published
+   image name (ghcr.io/soliddowant/tape-archiver/control-worker); tag defaults to
+   the chart appVersion and is re-resolved post-merge so a user override wins. */}}
+{{- $defaultImageRepository := "ghcr.io/soliddowant/tape-archiver/control-worker" -}}
+
+{{/* ============================================================ */}}
+{{/* Temporal connection values                                    */}}
+{{/* ============================================================ */}}
+{{- $temporalAddress   := .Values.config.temporal.address   | default "" -}}
+{{- $temporalNamespace := .Values.config.temporal.namespace | default "" -}}
+{{- if not $temporalAddress -}}
+  {{- fail "config.temporal.address is required (host:port of the Temporal frontend)" -}}
+{{- end -}}
+{{- if not $temporalNamespace -}}
+  {{- fail "config.temporal.namespace must not be empty (chart default is \"default\")" -}}
+{{- end -}}
+
+{{/* ============================================================ */}}
+{{/* Credential secretKeyRef validation                           */}}
+{{/* ============================================================ */}}
+{{- $temporalAPIKeyValue      := .Values.config.temporal.apiKey.value             | default "" -}}
+{{- $temporalAPIKeySecretName := .Values.config.temporal.apiKey.secretKeyRef.name | default "" -}}
+{{- $temporalAPIKeySecretKey  := .Values.config.temporal.apiKey.secretKeyRef.key  | default "" -}}
+{{- if or (and $temporalAPIKeySecretName (not $temporalAPIKeySecretKey)) (and $temporalAPIKeySecretKey (not $temporalAPIKeySecretName)) -}}
+  {{- fail "config.temporal.apiKey.secretKeyRef.name and config.temporal.apiKey.secretKeyRef.key must both be set when using secretKeyRef" -}}
+{{- end -}}
+{{- if and $temporalAPIKeyValue $temporalAPIKeySecretName -}}
+  {{- fail "config.temporal.apiKey.value and config.temporal.apiKey.secretKeyRef are mutually exclusive — set only one" -}}
+{{- end -}}
+
+{{- $webhookValue     := .Values.config.controlWorker.discordFailureWebhookUrl.value             | default "" -}}
+{{- $webhookSecretName := .Values.config.controlWorker.discordFailureWebhookUrl.secretKeyRef.name | default "" -}}
+{{- $webhookSecretKey  := .Values.config.controlWorker.discordFailureWebhookUrl.secretKeyRef.key  | default "" -}}
+{{- if or (and $webhookSecretName (not $webhookSecretKey)) (and $webhookSecretKey (not $webhookSecretName)) -}}
+  {{- fail "config.controlWorker.discordFailureWebhookUrl.secretKeyRef.name and .key must both be set when using secretKeyRef" -}}
+{{- end -}}
+{{- if and $webhookValue $webhookSecretName -}}
+  {{- fail "config.controlWorker.discordFailureWebhookUrl.value and .secretKeyRef are mutually exclusive — set only one" -}}
+{{- end -}}
+
+{{/* ============================================================ */}}
+{{/* Temporal TLS cert reference resolution                       */}}
+{{/* ============================================================ */}}
+{{/*
+For each present cert reference, compute the file path the chart will mount it at
+(<tls-root>/<secret>/<key>) and track unique Secret names so the chart can dedupe
+volume mounts. References are only honoured when tls.enabled=true; setting one
+otherwise is a config error so a forgotten enabled flag doesn't silently disable
+mTLS or CA verification.
+*/}}
+{{- $temporalTLSEnabled := .Values.config.temporal.tls.enabled -}}
+{{- $tlsResolvedPaths := dict -}}
+{{- $tlsSecretMounts  := dict -}}
+
+{{- $clientCertSecretName := .Values.config.temporal.tls.clientCertificate.secretName | default "" -}}
+{{- if $clientCertSecretName -}}
+  {{- if not $temporalTLSEnabled -}}
+    {{- fail "config.temporal.tls.clientCertificate.secretName is set but config.temporal.tls.enabled is false — enable TLS or remove the reference" -}}
+  {{- end -}}
+  {{- $mountDir := printf "%s/%s" $temporalTLSRoot $clientCertSecretName -}}
+  {{- $_ := set $tlsResolvedPaths "clientCert" (printf "%s/tls.crt" $mountDir) -}}
+  {{- $_ := set $tlsResolvedPaths "clientKey" (printf "%s/tls.key" $mountDir) -}}
+  {{- $_ := set $tlsSecretMounts $clientCertSecretName $mountDir -}}
+{{- end -}}
+
+{{- $caCertRef := .Values.config.temporal.tls.caCert.secretKeyRef | default dict -}}
+{{- $caCertSecretName := $caCertRef.name | default "" -}}
+{{- $caCertSecretKey  := $caCertRef.key  | default "" -}}
+{{- if $caCertSecretName -}}
+  {{- if not $caCertSecretKey -}}
+    {{- fail "config.temporal.tls.caCert.secretKeyRef.key must not be empty when name is set (chart default is \"ca.crt\")" -}}
+  {{- end -}}
+  {{- if not $temporalTLSEnabled -}}
+    {{- fail "config.temporal.tls.caCert.secretKeyRef is set but config.temporal.tls.enabled is false — enable TLS or remove the reference" -}}
+  {{- end -}}
+  {{- $mountDir := printf "%s/%s" $temporalTLSRoot $caCertSecretName -}}
+  {{- $_ := set $tlsResolvedPaths "caCert" (printf "%s/%s" $mountDir $caCertSecretKey) -}}
+  {{- $_ := set $tlsSecretMounts $caCertSecretName $mountDir -}}
+{{- end -}}
+
+{{/* ============================================================ */}}
+{{/* Control-worker env vars                                       */}}
+{{/* ============================================================ */}}
+{{- $env := dict -}}
+
+{{/* ROLE selects the `control` task queue and activity set in cmd/worker
+   (SPEC §4.1). It is fixed by this chart — a data worker is not deployed to
+   Kubernetes. */}}
+{{- $_ := set $env "ROLE" "control" -}}
+
+{{/* Address, namespace, TLS, and grpc_meta come from the rendered temporal.toml
+   pointed to by TEMPORAL_CONFIG_FILE. */}}
+{{- $_ := set $env "TEMPORAL_CONFIG_FILE" $temporalConfigFile -}}
+
+{{/* LOG_LEVEL */}}
+{{- if .Values.config.controlWorker.logLevel -}}
+  {{- $_ := set $env "LOG_LEVEL" .Values.config.controlWorker.logLevel -}}
+{{- end -}}
+
+{{/* TEMPORAL_API_KEY: env var (not TOML) so the SDK's env-over-file precedence
+   keeps the secret out of the ConfigMap. */}}
+{{- if $temporalAPIKeySecretName -}}
+  {{- $_ := set $env "TEMPORAL_API_KEY" (dict "valueFrom" (dict "secretKeyRef" (dict "name" $temporalAPIKeySecretName "key" $temporalAPIKeySecretKey))) -}}
+{{- else if $temporalAPIKeyValue -}}
+  {{- $_ := set $env "TEMPORAL_API_KEY" $temporalAPIKeyValue -}}
+{{- end -}}
+
+{{/* DISCORD_FAILURE_WEBHOOK_URL (SPEC §11): value or Secret. */}}
+{{- if $webhookSecretName -}}
+  {{- $_ := set $env "DISCORD_FAILURE_WEBHOOK_URL" (dict "valueFrom" (dict "secretKeyRef" (dict "name" $webhookSecretName "key" $webhookSecretKey))) -}}
+{{- else if $webhookValue -}}
+  {{- $_ := set $env "DISCORD_FAILURE_WEBHOOK_URL" $webhookValue -}}
+{{- end -}}
+
+{{/* TAPE_K8S_DATASET_PARENT: only set when configured (SPEC §3). */}}
+{{- if .Values.config.controlWorker.k8sDatasetParent -}}
+  {{- $_ := set $env "TAPE_K8S_DATASET_PARENT" .Values.config.controlWorker.k8sDatasetParent -}}
+{{- end -}}
+
+{{/* ============================================================ */}}
+{{/* Temporal client config: temporal.toml ConfigMap + TLS mounts */}}
+{{/* ============================================================ */}}
+{{/* Build the profile dict in camelCase, then snake-case its keys via the helper.
+   Pruned: apiKey (sensitive — env var instead) and the Helm-only secretKeyRef
+   wiring (replaced with resolved file paths). */}}
+{{- $temporalProfile := dict
+  "address"   $temporalAddress
+  "namespace" $temporalNamespace
+-}}
+{{/* The [tls] table is always emitted. When enabled is false we set disabled=true
+   explicitly, because the SDK auto-enables TLS when an API key is set and the TLS
+   config is absent. Without the explicit disabled=true, `tls.enabled: false` +
+   apiKey would silently speak TLS to a plaintext frontend. */}}
+{{- $tls := dict -}}
+{{- if $temporalTLSEnabled -}}
+  {{- if .Values.config.temporal.tls.serverName -}}
+    {{- $_ := set $tls "serverName" .Values.config.temporal.tls.serverName -}}
+  {{- end -}}
+  {{- if .Values.config.temporal.tls.disableHostVerification -}}
+    {{- $_ := set $tls "disableHostVerification" true -}}
+  {{- end -}}
+  {{- if hasKey $tlsResolvedPaths "clientCert" -}}
+    {{- $_ := set $tls "clientCertPath" (index $tlsResolvedPaths "clientCert") -}}
+  {{- end -}}
+  {{- if hasKey $tlsResolvedPaths "clientKey" -}}
+    {{- $_ := set $tls "clientKeyPath" (index $tlsResolvedPaths "clientKey") -}}
+  {{- end -}}
+  {{- if hasKey $tlsResolvedPaths "caCert" -}}
+    {{- $_ := set $tls "serverCaCertPath" (index $tlsResolvedPaths "caCert") -}}
+  {{- end -}}
+{{- else -}}
+  {{- $_ := set $tls "disabled" true -}}
+{{- end -}}
+{{- $_ := set $temporalProfile "tls" $tls -}}
+
+{{- $snakedProfile := include "tape-archiver-control-worker.snakeKeys" $temporalProfile | fromYaml -}}
+
+{{/* Attach grpc_meta after recursion so user-supplied header keys are not snake-cased
+   (the SDK normalises them on load). */}}
+{{- $grpcMeta := .Values.config.temporal.grpcMeta | default dict -}}
+{{- if $grpcMeta -}}
+  {{- $_ := set $snakedProfile "grpc_meta" $grpcMeta -}}
+{{- end -}}
+
+{{- $temporalToml := dict "profile" (dict "default" $snakedProfile) | toToml -}}
+
+{{- $computedConfigMaps := dict -}}
+{{- $computedPersistence := dict -}}
+
+{{- $_ := set $computedConfigMaps "temporal-config" (dict "data" (dict "temporal.toml" $temporalToml)) -}}
+{{- $temporalConfigMount := dict "path" $temporalConfigDir "readOnly" true -}}
+{{- $_ := set $computedPersistence "temporal-config" (dict
+  "type" "configMap"
+  "identifier" "temporal-config"
+  "advancedMounts" (dict $controllerName (dict $containerName (list $temporalConfigMount)))
+) -}}
+
+{{/* TLS Secret mounts (one per unique Secret name), mounted RO on the worker.
+   Each mount projects the entire Secret as a directory under <tls-root>/<secret>/;
+   the TOML references individual keys by full file path. */}}
+{{- range $secretName, $mountDir := $tlsSecretMounts -}}
+  {{- $persistenceKey := printf "temporal-tls-%s" $secretName -}}
+  {{- $tlsMount := dict "path" $mountDir "readOnly" true -}}
+  {{- $_ := set $computedPersistence $persistenceKey (dict
+    "type" "secret"
+    "name" $secretName
+    "advancedMounts" (dict $controllerName (dict $containerName (list $tlsMount)))
+  ) -}}
+{{- end -}}
+
+{{/* ============================================================ */}}
+{{/* Controller default (single "main" Deployment)                */}}
+{{/* ============================================================ */}}
+{{/* The worker exposes only /metrics on :9090 — no HTTP health endpoint — so the
+   probes are TCP-socket checks against the named metrics port. The worker exits
+   non-zero if the Temporal dial/health-check fails at startup, so a pod that
+   stays up implies a live Temporal connection (SPEC §4.1). */}}
+{{- $userControllers := index .Values.resources "controllers" | default dict -}}
+{{- $userMain := index $userControllers $controllerName | default dict -}}
+{{- $replicas := index $userMain "replicas" | default 1 -}}
+{{- $probeSpec := dict
+  "tcpSocket" (dict "port" "metrics")
+  "initialDelaySeconds" 0
+  "periodSeconds" 10
+  "failureThreshold" 3
+-}}
+{{- $controller := dict
+  "strategy" "RollingUpdate"
+  "containers" (dict $containerName (dict
+    "image" (dict
+      "repository" $defaultImageRepository
+      "tag" $.Chart.AppVersion
+    )
+    "ports" (list (dict
+      "name" "metrics"
+      "containerPort" 9090
+      "protocol" "TCP"
+    ))
+    "probes" (dict
+      "liveness" (dict "enabled" true "custom" true "spec" $probeSpec)
+      "readiness" (dict "enabled" true "custom" true "spec" $probeSpec)
+    )
+    "securityContext" (dict
+      "allowPrivilegeEscalation" false
+      "capabilities" (dict "drop" (list "ALL"))
+      "readOnlyRootFilesystem" true
+      "runAsNonRoot" true
+      "runAsUser" 1000
+      "runAsGroup" 1000
+    )
+    "env" $env
+  ))
+  "pod" (dict
+    "terminationGracePeriodSeconds" 60
+  )
+  "podDisruptionBudget" (dict "enabled" (gt ($replicas | int) 1) "minAvailable" 1)
+-}}
+
+{{/* ============================================================ */}}
+{{/* PodMonitor (conditional)                                     */}}
+{{/* ============================================================ */}}
+{{/* The worker always exposes /metrics on :9090. config.controlWorker.metrics.enabled
+   toggles whether a PodMonitor is emitted (requires prometheus-operator CRDs). */}}
+{{- $computedPodMonitors := dict -}}
+{{- $metricsEnabledTpl := printf "{{ .Values.config.controlWorker.metrics.enabled }}" -}}
+{{- $_ := set $computedPodMonitors $controllerName (dict
+  "enabled" $metricsEnabledTpl
+  "suffix" $controllerName
+  "selector" (dict
+    "matchLabels" (dict
+      "app.kubernetes.io/name" (printf "{{ include \"bjw-s.common.lib.chart.names.name\" $ }}")
+      "app.kubernetes.io/instance" "{{ .Release.Name }}"
+      "app.kubernetes.io/controller" $controllerName
+    )
+  )
+  "podMetricsEndpoints" (list (dict
+    "port" "metrics"
+    "interval" "1m"
+    "scrapeTimeout" "10s"
+  ))
+) -}}
+
+{{/* ============================================================ */}}
+{{/* Assemble computed additions + deep-merge user resources       */}}
+{{/* ============================================================ */}}
+{{- $computedAdditions := dict
+  "controllers"  (dict $controllerName $controller)
+  "persistence"  $computedPersistence
+  "configMaps"   $computedConfigMaps
+  "podMonitor"   $computedPodMonitors
+-}}
+{{- $mergedResources := mustMergeOverwrite $computedAdditions (mustDeepCopy .Values.resources) -}}
+
+{{/* Resolve the image tag tpl string post-merge so a user override of
+   containers.main.image.tag (which may reference {{ .Chart.AppVersion }}) wins. */}}
+{{- $ctrl := index $mergedResources "controllers" $controllerName -}}
+{{- $cnt := index (index $ctrl "containers" | default dict) $containerName -}}
+{{- if $cnt -}}
+  {{- $img := index $cnt "image" | default dict -}}
+  {{- $rawTag := index $img "tag" | default "" | toString -}}
+  {{- $_ := set $img "tag" (tpl $rawTag $ | default $.Chart.AppVersion) -}}
+  {{- $_ := set $cnt "image" $img -}}
+{{- end -}}
+
+{{/* podDisruptionBudget: strip the enabled key when true (bjw-s renders it live),
+   drop the whole block when false. */}}
+{{- $pdb := index $ctrl "podDisruptionBudget" -}}
+{{- if and $pdb (hasKey $pdb "enabled") -}}
+  {{- if index $pdb "enabled" -}}
+    {{- $_ := unset $pdb "enabled" -}}
+  {{- else -}}
+    {{- $_ := unset $ctrl "podDisruptionBudget" -}}
+  {{- end -}}
+{{- end -}}
+
+{{/* podMonitor: convert the enabled tpl string to a bool for bjw-s. */}}
+{{- range $obj := values (index $mergedResources "podMonitor" | default dict) -}}
+  {{- if and (kindIs "map" $obj) (hasKey $obj "enabled") -}}
+    {{- $_ := set $obj "enabled" (eq (tpl (get $obj "enabled" | toString) $) "true") -}}
+  {{- end -}}
+{{- end -}}
+
+{{/* ============================================================ */}}
+{{/* Inject into .Values; strip chart-specific keys               */}}
+{{/* ============================================================ */}}
+{{- $mergedValues := mustDeepCopy .Values -}}
+{{- $mergedValues = omit $mergedValues "config" "resources" -}}
+{{- $mergedValues = mustMergeOverwrite $mergedValues $mergedResources -}}
+{{- $_ := set . "Values" $mergedValues -}}
+
+{{/* Default global.nameOverride to the release name, matching upstream bjw-s
+   app-template so the auto-created ServiceAccount name and the pod's SA reference
+   agree for arbitrary release names. */}}
+{{- if not (dig "global" "nameOverride" "" .Values) -}}
+  {{- $existingGlobal := index .Values "global" | default dict -}}
+  {{- $_ := set .Values "global" (mustMergeOverwrite (dict "nameOverride" .Release.Name) $existingGlobal) -}}
+{{- end -}}
+
+{{- include "bjw-s.common.loader.all" . }}
