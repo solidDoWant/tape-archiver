@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"github.com/prometheus/client_golang/prometheus"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 )
@@ -33,6 +34,11 @@ type DataConfig struct {
 	// ISO (TAPE_RECOVERY_BINARIES_DIR, SPEC §10). Required; the Report activity
 	// fails when empty or when a binary is not statically linked.
 	RecoveryBinariesDir string
+	// MetricsRegisterer is the Prometheus registry the data worker's write-health
+	// gauges register against (SPEC §14). It is the same registry that backs the
+	// worker's /metrics endpoint; nil when metrics are disabled, in which case
+	// write-health metrics are simply not exported (the report still records them).
+	MetricsRegisterer prometheus.Registerer
 }
 
 // RegisterControl registers everything the control worker hosts: the Backup
@@ -66,6 +72,10 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	registry := newMountRegistry()
 	w.RegisterActivity(newWriteActivities(registry, cfg.StagingDir))
 	w.RegisterActivity(newTeardownActivities(registry))
+
+	// Write-health measurement (SPEC §14) runs after each tape's write window and
+	// exports its gauges against the worker's Prometheus registry.
+	w.RegisterActivity(newWriteHealthActivities(cfg.MetricsRegisterer))
 
 	w.RegisterActivity(newEjectActivities())
 

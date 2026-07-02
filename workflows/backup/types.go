@@ -218,6 +218,10 @@ type WrittenTape struct {
 	// to the index LTFS wrote to the tape's index partition at unmount (SPEC §6,
 	// §10). It is included in the recovery ISO.
 	IndexXML []byte
+	// WriteHealth is the observational write-health measurement for this tape
+	// (sustained throughput, repositions, TapeAlert flags), taken after the write
+	// window closed. It never affects run success (SPEC §2 principle 2, §14).
+	WriteHealth WriteHealth
 }
 
 // Result is the backup workflow's success return value. For now it reports the
