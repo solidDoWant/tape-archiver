@@ -33,13 +33,23 @@ const bytesPerMB = 1_000_000.0
 // — higher generations stream much faster, so a single hard-coded value would badly
 // mis-flag other drives.
 //
-// Sources: LTO-6 ~50 MB/s (SPEC §2/§14); LTO-8 112 MB/s and LTO-9 180 MB/s (published
-// IBM LTO drive speed-matching specifications). A generation whose floor is not listed
-// here is treated as unknown by writeHealthFloor rather than assigned a guessed value,
-// so the below-floor verdict is never asserted against a number we cannot defend. Add
-// a generation here once its published minimum speed-matching rate is confirmed.
+// Values are the published minimum native speed-matching (data-rate-matching) rates,
+// nominal and slightly vendor-dependent (IBM vs HPE drives differ by a few MB/s); the
+// conservative figure is used so the below-floor flag under- rather than over-reports:
+//
+//	LTO-5  40 MB/s  (IBM: 14 speeds, 40–140; HP drives ~47)
+//	LTO-6  50 MB/s  (SPEC §2/§14; within IBM ~32–160 / HPE ~53.5–160)
+//	LTO-7 100 MB/s  (IBM and HPE data-rate-matching range 100/101–300)
+//	LTO-8 112 MB/s  (IBM drive specifications, range 112–360)
+//	LTO-9 180 MB/s  (IBM drive specifications, range 180–400)
+//
+// A capacity that maps to no known generation (below LTO-5 or unrecognized) is treated
+// as unknown by writeHealthFloor rather than assigned a guessed value, so the
+// below-floor verdict is never asserted against a number we cannot defend.
 var speedMatchingFloorsMBps = map[string]float64{
+	"LTO-5": 40,
 	"LTO-6": 50,
+	"LTO-7": 100,
 	"LTO-8": 112,
 	"LTO-9": 180,
 }

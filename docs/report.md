@@ -41,10 +41,11 @@ Each tape row records:
 - **Floor** — the speed-matching floor the throughput is compared against. It is a
   property of the **tape generation being written** (the write format determines the
   drive's speed-matching range), derived from the configured native capacity
-  (`library.tapeCapacityBytes`, SPEC §5/§14): LTO-6 ~50 MB/s, LTO-8 112 MB/s, LTO-9
-  180 MB/s. Generations whose published floor is not yet recorded (currently LTO-5 and
-  LTO-7) render the floor as `n/a` — the throughput is still reported, but no below-floor
-  verdict is made rather than judging against a guessed number.
+  (`library.tapeCapacityBytes`, SPEC §5/§14): LTO-5 40, LTO-6 50, LTO-7 100, LTO-8 112,
+  LTO-9 180 MB/s (nominal published minimum speed-matching rates; slightly
+  vendor-dependent). A capacity that maps to no known generation renders the floor as
+  `n/a` — the throughput is still reported, but no below-floor verdict is made rather
+  than judging against a guessed number.
 - **Repositions** — the drive's back-hitch count from SCSI log page `0x24`. A drive that
   does not support the page reports zero.
 - **Status** — `healthy` when the tape streamed at or above a known floor with zero

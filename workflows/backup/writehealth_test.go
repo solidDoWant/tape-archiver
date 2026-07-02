@@ -140,12 +140,12 @@ func TestWriteHealthFloor(t *testing.T) {
 		wantFloor     float64
 		wantKnown     bool
 	}{
+		{name: "LTO-5", capacityBytes: 1_500_000_000_000, wantFloor: 40, wantKnown: true},
 		{name: "LTO-6", capacityBytes: 2_500_000_000_000, wantFloor: 50, wantKnown: true},
+		{name: "LTO-7", capacityBytes: 6_000_000_000_000, wantFloor: 100, wantKnown: true},
 		{name: "LTO-8", capacityBytes: 12_000_000_000_000, wantFloor: 112, wantKnown: true},
 		{name: "LTO-9", capacityBytes: 18_000_000_000_000, wantFloor: 180, wantKnown: true},
-		{name: "LTO-7 has no sourced floor", capacityBytes: 6_000_000_000_000, wantKnown: false},
-		{name: "LTO-5 has no sourced floor", capacityBytes: 1_500_000_000_000, wantKnown: false},
-		{name: "unrecognized capacity", capacityBytes: 100, wantKnown: false},
+		{name: "unrecognized capacity below LTO-5", capacityBytes: 100, wantKnown: false},
 	}
 
 	for _, test := range tests {
