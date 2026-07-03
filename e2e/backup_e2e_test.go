@@ -20,7 +20,6 @@ import (
 	"github.com/ledongthuc/pdf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.temporal.io/sdk/client"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
@@ -61,14 +60,12 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
 	defer cancel()
 
-	run, err := temporalClient.ExecuteWorkflow(runCtx,
-		client.StartWorkflowOptions{ID: runID, TaskQueue: backup.TaskQueue},
-		backup.WorkflowType, cfg)
-	require.NoError(t, err, "start workflow")
+	h.submitRun(t, cfg, runID)
 	terminateOnCleanup(t, temporalClient, runID)
 
 	var result backup.Result
-	require.NoError(t, run.Get(runCtx, &result), "workflow must complete successfully")
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+		"workflow must complete successfully")
 
 	// AC1: every phase ran to completion, in order.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")

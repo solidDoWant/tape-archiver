@@ -16,7 +16,6 @@ import (
 	versioned "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.temporal.io/sdk/client"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
@@ -78,14 +77,12 @@ func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
 	defer cancel()
 
-	run, err := temporalClient.ExecuteWorkflow(runCtx,
-		client.StartWorkflowOptions{ID: runID, TaskQueue: backup.TaskQueue},
-		backup.WorkflowType, cfg)
-	require.NoError(t, err, "start workflow")
+	h.submitRun(t, cfg, runID)
 	terminateOnCleanup(t, temporalClient, runID)
 
 	var result backup.Result
-	require.NoError(t, run.Get(runCtx, &result), "k8s VolumeSnapshot run must complete successfully")
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+		"k8s VolumeSnapshot run must complete successfully")
 
 	// A completed run means the k8s source resolved (VolumeSnapshot + Content read
 	// under the granted RBAC, handle mapped) and the snapshot verified + backed up.

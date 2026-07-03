@@ -48,6 +48,7 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 
+	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
@@ -121,6 +122,7 @@ var (
 type e2eHarness struct {
 	repoRoot       string
 	kubeconfig     string
+	tapectlPath    string // built tapectl binary used to submit runs (the operator path)
 	recoveryBinDir string // host path to the static recovery binaries (…/bin)
 	stagingHostDir string // host staging dir bind-mounted into the data container
 	temporalCID    string
@@ -216,6 +218,7 @@ func setupHarness() (*e2eHarness, error) {
 		fn   func() error
 	}{
 		{"build-images", h.buildImages},
+		{"build-tapectl", h.buildTapectl},
 		{"recovery-binaries", h.buildRecoveryBinaries},
 		{"kind-cluster", h.createCluster},
 		{"load-control-image", h.loadControlImage},
@@ -251,6 +254,21 @@ func (h *e2eHarness) buildImages() error {
 	_, err := execOut(h.repoRoot, nil, "make", "build-images", "VERSION="+imageVersion)
 
 	return err
+}
+
+// buildTapectl builds the tapectl CLI once; the tests submit runs through it (the
+// real operator path) rather than calling the Temporal API directly.
+func (h *e2eHarness) buildTapectl() error {
+	h.tapectlPath = filepath.Join(os.TempDir(), "tape-archiver-e2e-tapectl")
+
+	_, err := execOut(h.repoRoot, nil, "go", "build", "-o", h.tapectlPath, "./cmd/tapectl")
+	if err != nil {
+		return err
+	}
+
+	h.push(func() { _ = os.Remove(h.tapectlPath) })
+
+	return nil
 }
 
 func (h *e2eHarness) buildRecoveryBinaries() error {
@@ -738,6 +756,42 @@ func generateTestKeypair(t *testing.T) (identity, recipient string) {
 	require.NotEmpty(t, recipient, "recipient not found in identity file")
 
 	return string(contents), recipient
+}
+
+// submitRun submits a backup run through the tapectl CLI — the operator path — by
+// writing the config as JSON and invoking `tapectl run --config <file> --id
+// <runID>`. It inherits the process env (TEMPORAL_ADDRESS + the dialTemporal
+// isolation), and asserts the CLI echoes back the submitted workflow ID. The run
+// is then awaited via the Temporal client (tapectl only submits).
+func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config, runID string) {
+	t.Helper()
+
+	data, err := json.Marshal(cfg)
+	require.NoError(t, err, "marshal run config")
+
+	configPath := filepath.Join(t.TempDir(), "run-config.json")
+	require.NoError(t, os.WriteFile(configPath, data, 0o600))
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, h.tapectlPath, "run", "--config", configPath, "--id", runID).CombinedOutput()
+	require.NoErrorf(t, err, "tapectl run: %s", out)
+	require.Equal(t, runID, strings.TrimSpace(string(out)), "tapectl must echo the submitted workflow ID")
+}
+
+// temporalRunID returns the Temporal RunID of a submitted workflow (its first
+// run). The staging directory is keyed by this, not the workflow ID.
+func temporalRunID(t *testing.T, c client.Client, workflowID string) string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	description, err := c.DescribeWorkflowExecution(ctx, workflowID, "")
+	require.NoError(t, err, "describe workflow %s", workflowID)
+
+	return description.GetWorkflowExecutionInfo().GetExecution().GetRunId()
 }
 
 func ptrFloat(f float64) *float64 { return &f }

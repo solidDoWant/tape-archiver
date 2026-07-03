@@ -51,20 +51,17 @@ func TestBackupVerifyFault_NoTapeTouched(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 8*time.Minute)
 	defer cancel()
 
-	run, err := temporalClient.ExecuteWorkflow(runCtx,
-		client.StartWorkflowOptions{ID: runID, TaskQueue: backup.TaskQueue},
-		backup.WorkflowType, cfg)
-	require.NoError(t, err, "start workflow")
+	h.submitRun(t, cfg, runID)
 	terminateOnCleanup(t, temporalClient, runID)
 
 	// Wait until Prepare has completed (its slices + recorded checksums exist on
 	// disk), then corrupt one slice before Verify recomputes it. Prepare keys the
 	// per-run staging subdirectory by the Temporal RunID (not the workflow ID).
 	waitForPhase(t, temporalClient, runID, backup.PhasePrepare, 4*time.Minute)
-	corruptStagedSlice(t, filepath.Join(h.stagingHostDir, run.GetRunID()))
+	corruptStagedSlice(t, filepath.Join(h.stagingHostDir, temporalRunID(t, temporalClient, runID)))
 
 	// The run must fail, and the failure must be attributed to the Verify phase.
-	err = run.Get(runCtx, new(backup.Result))
+	err := temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, new(backup.Result))
 	require.Error(t, err, "run must fail after the injected checksum fault")
 	assert.Contains(t, err.Error(), backup.PhaseVerify, "failure must be attributed to the Verify phase")
 
