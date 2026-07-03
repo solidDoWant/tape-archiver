@@ -191,7 +191,7 @@ staged and verified on disk** — eliminating any computation during the write w
    import/export ACCESS bit (once the station is cleared and closed), or on the explicit
    `operatorEjectCleared` signal (`tapectl resume <run-id>`) otherwise, then exports the
    remaining tapes into the freed slots. If the operator does not respond within
-   `library.ioWaitTimeoutSeconds` (default 4h), the run fails in that defined state and is
+   `library.ioWaitTimeoutSeconds` (default 12h), the run fails in that defined state and is
    reported.
 9. **Report.** Build the PDF report (§9) and the recovery ISO (§10).
 10. **Deliver.** Send the report and ISO to Discord via webhook (§11).

@@ -115,5 +115,5 @@ inventory and exports the remaining tapes into the freed slots.
 Libraries that report the import/export access bit resume **automatically** once the
 station is cleared and closed, without this command; `resume` is the fallback for
 libraries that do not. Sending it to a run that is not paused has no effect. If no one
-responds within `library.ioWaitTimeoutSeconds` (default 4 hours), the run fails with
+responds within `library.ioWaitTimeoutSeconds` (default 12 hours), the run fails with
 every written tape left in an I/O or storage slot.

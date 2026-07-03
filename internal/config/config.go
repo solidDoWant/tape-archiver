@@ -7,7 +7,7 @@ import "time"
 // 8), when Library.IOWaitTimeoutSeconds is unset. It bounds the operator-in-the-
 // loop pause so an unattended run always reaches a defined end state rather than
 // waiting indefinitely.
-const DefaultIOWaitTimeout = 4 * time.Hour
+const DefaultIOWaitTimeout = 12 * time.Hour
 
 // DefaultFeasibilityOverhead is the multiplier applied to a source's
 // logicalreferenced size in the Resolve feasibility pre-check (SPEC.md §4.3
