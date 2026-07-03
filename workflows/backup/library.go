@@ -37,20 +37,17 @@ const (
 	ejectTimeout = 10 * time.Minute
 )
 
-// LoadInput is the payload for the Load activity.
+// LoadInput is the payload for the Load activity. It describes one drive-set: at
+// most len(inv.Drives) physical tapes to load and blank-check in parallel
+// (SPEC §4.3 phase 6). A run spanning more physical tapes than the library has
+// drives is written as a sequence of drive-sets, each a separate Load call.
 type LoadInput struct {
 	// Changer is the changer device node (e.g. /dev/sch0).
 	Changer string
-	// Drives are the non-rewinding tape device nodes (e.g. /dev/nst0, /dev/nst1),
-	// one per physical tape to write (len = len(Plan.Tapes) × Plan.Copies).
-	// Drives[i] is loaded with BlankSlots[i].
-	Drives []string
-	// BlankSlots are the storage slot addresses holding blank tapes, one per
-	// physical tape to write. BlankSlots[i] is loaded into Drives[i].
-	BlankSlots []int
-	// Plan is the Pack plan; its Copies and Tapes fields derive the
-	// TapeIndex/CopyIndex assignment for each loaded tape.
-	Plan TapePlan
+	// Tapes are the physical tapes in this drive-set, one per drive. Tapes[i] is
+	// loaded into the i-th library drive; its Drive, BlankSlot, and
+	// TapeIndex/CopyIndex assignment come straight from the drive-set plan.
+	Tapes []TapeAssignment
 }
 
 // LoadActivities hosts the Load activity, which moves blank tapes into drives and
@@ -60,21 +57,15 @@ type LoadActivities struct{}
 // newLoadActivities returns the Load activities.
 func newLoadActivities() *LoadActivities { return &LoadActivities{} }
 
-// Load moves blank tapes into the drives, reconciling live changer state with
-// the desired state, and performs a blank check on each loaded tape. It returns
-// a LoadedTape per drive in the same order as input.Drives.
+// Load moves this drive-set's blank tapes into the drives, reconciling live
+// changer state with the desired state, and performs a blank check on each loaded
+// tape. It returns a LoadedTape per tape in the same order as input.Tapes.
 //
 // MaximumAttempts is 1: tape moves are physical and non-idempotent.
 func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTape, error) {
-	totalPhysical := len(input.Plan.Tapes) * input.Plan.Copies
-	if len(input.Drives) != totalPhysical {
-		return nil, fmt.Errorf("plan requires %d physical tapes but %d drives provided",
-			totalPhysical, len(input.Drives))
-	}
-
-	if len(input.BlankSlots) < totalPhysical {
-		return nil, fmt.Errorf("plan requires %d blank tapes but only %d blank slots provided",
-			totalPhysical, len(input.BlankSlots))
+	setSize := len(input.Tapes)
+	if setSize == 0 {
+		return nil, nil
 	}
 
 	changer := tape.NewChanger(input.Changer)
@@ -84,16 +75,16 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 		return nil, fmt.Errorf("inventory for load: %w", err)
 	}
 
-	if totalPhysical > len(inv.Drives) {
-		return nil, fmt.Errorf("plan requires %d physical tapes but the library reports only %d drives",
-			totalPhysical, len(inv.Drives))
+	if setSize > len(inv.Drives) {
+		return nil, fmt.Errorf("drive-set has %d tapes but the library reports only %d drives",
+			setSize, len(inv.Drives))
 	}
 
-	loaded := make([]LoadedTape, totalPhysical)
+	loaded := make([]LoadedTape, setSize)
 
-	for i := 0; i < totalPhysical; i++ {
-		stDev := input.Drives[i]
-		targetSlot := input.BlankSlots[i]
+	for i, assignment := range input.Tapes {
+		stDev := assignment.Drive
+		targetSlot := assignment.BlankSlot
 		driveAddr := inv.Drives[i].Address
 
 		barcode, err := reconcileLoad(ctx, changer, inv, i, driveAddr, targetSlot)
@@ -121,8 +112,8 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 		loaded[i] = LoadedTape{
 			Barcode:    barcode,
 			DriveIndex: i,
-			TapeIndex:  i / input.Plan.Copies,
-			CopyIndex:  i % input.Plan.Copies,
+			TapeIndex:  assignment.TapeIndex,
+			CopyIndex:  assignment.CopyIndex,
 			SourceSlot: targetSlot,
 			STDevice:   stDev,
 			SGDevice:   sgDev,
@@ -266,24 +257,72 @@ func slotBarcode(inv tape.Inventory, addr int) (tape.Barcode, bool) {
 	return "", false
 }
 
-// loadPhase orchestrates the Load phase (SPEC §4.3 phase 6): it dispatches the
-// Load activity on the data worker and stores the loaded tapes in runState for the
-// Write and Eject phases.
-func loadPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
-	totalPhysical := len(state.plan.Tapes) * state.plan.Copies
-
-	if totalPhysical == 0 {
-		return nil
+// planDriveSets partitions every (logical tape, copy) pair in the plan into
+// drive-sets of at most len(drives) physical tapes (SPEC §4.3 phases 6–8). Pairs
+// are flattened in (tape, copy) order and chunked, so copies of one logical tape
+// stay adjacent and tend to share a set — a set then reads a single staged tree
+// (byte-identical copies), which the ZFS ARC coalesces to near-1× disk reads
+// (SPEC §14). Drives are reused across sets (drive j holds set 0's tape j, then
+// set 1's after eject); each physical tape consumes its own blank slot, so the run
+// needs one blank slot per (tape × copy).
+//
+// It returns an error when the plan cannot be written with the configured drives
+// and blank slots. An empty plan yields no sets (and no error).
+func planDriveSets(plan TapePlan, drives []string, blankSlots []int) ([]driveSet, error) {
+	total := len(plan.Tapes) * plan.Copies
+	if total == 0 {
+		return nil, nil
 	}
 
-	if totalPhysical > len(cfg.Library.Drives) {
-		return fmt.Errorf("plan requires %d physical tapes but only %d drives are configured",
-			totalPhysical, len(cfg.Library.Drives))
+	if plan.Copies < 1 {
+		return nil, fmt.Errorf("plan has %d copies; must be at least 1", plan.Copies)
 	}
 
-	if totalPhysical > len(cfg.Library.BlankSlots) {
-		return fmt.Errorf("plan requires %d blank tapes but only %d blank slots are configured",
-			totalPhysical, len(cfg.Library.BlankSlots))
+	if len(drives) == 0 {
+		return nil, fmt.Errorf("no drives configured; cannot write %d physical tapes", total)
+	}
+
+	if total > len(blankSlots) {
+		return nil, fmt.Errorf("plan requires %d physical tapes but only %d blank slots are configured",
+			total, len(blankSlots))
+	}
+
+	var (
+		sets    []driveSet
+		current driveSet
+		slot    int
+	)
+
+	for tapeIndex := range plan.Tapes {
+		for copyIndex := 0; copyIndex < plan.Copies; copyIndex++ {
+			current = append(current, TapeAssignment{
+				Drive:     drives[len(current)],
+				BlankSlot: blankSlots[slot],
+				TapeIndex: tapeIndex,
+				CopyIndex: copyIndex,
+			})
+			slot++
+
+			if len(current) == len(drives) {
+				sets = append(sets, current)
+				current = nil
+			}
+		}
+	}
+
+	if len(current) > 0 {
+		sets = append(sets, current)
+	}
+
+	return sets, nil
+}
+
+// loadPhase orchestrates the Load phase (SPEC §4.3 phase 6) for one drive-set: it
+// dispatches the Load activity on the data worker and returns the loaded tapes for
+// the Write and Eject phases. runTapePath calls it once per drive-set.
+func loadPhase(ctx workflow.Context, cfg config.Config, set driveSet) ([]LoadedTape, error) {
+	if len(set) == 0 {
+		return nil, nil
 	}
 
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -293,22 +332,18 @@ func loadPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	})
 
 	input := LoadInput{
-		Changer:    cfg.Library.Changer,
-		Drives:     cfg.Library.Drives[:totalPhysical],
-		BlankSlots: cfg.Library.BlankSlots[:totalPhysical],
-		Plan:       state.plan,
+		Changer: cfg.Library.Changer,
+		Tapes:   set,
 	}
 
 	var acts *LoadActivities
 
 	var loaded []LoadedTape
 	if err := workflow.ExecuteActivity(dataCtx, acts.Load, input).Get(dataCtx, &loaded); err != nil {
-		return err
+		return nil, err
 	}
 
-	state.loaded = loaded
-
-	return nil
+	return loaded, nil
 }
 
 // EjectInput is the payload for the Eject activity.
@@ -399,11 +434,12 @@ func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, w
 	return nil
 }
 
-// ejectPhase orchestrates the Eject phase (SPEC §4.3 phase 8): it dispatches the
-// Eject activity on the data worker to transfer each written tape from its drive
-// to an I/O station slot for physical removal.
-func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
-	if len(state.written) == 0 {
+// ejectPhase orchestrates the Eject phase (SPEC §4.3 phase 8) for one drive-set:
+// it dispatches the Eject activity on the data worker to transfer this set's
+// written tapes from their drives to I/O station slots for physical removal. This
+// also frees the drives for the next drive-set. runTapePath calls it once per set.
+func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) error {
+	if len(written) == 0 {
 		return nil
 	}
 
@@ -415,7 +451,7 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState) error 
 
 	input := EjectInput{
 		Changer:      cfg.Library.Changer,
-		WrittenTapes: state.written,
+		WrittenTapes: written,
 	}
 
 	var acts *EjectActivities

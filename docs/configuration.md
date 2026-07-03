@@ -23,7 +23,7 @@ make check-schema
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `sources` | `[]Source` | yes | Items to archive. At least one required. |
-| `copies` | `integer` | yes | Number of identical tape copies to produce. Must be ≥ 1 and ≤ number of drives. Default production value is 2 (one per LTO-6 drive). |
+| `copies` | `integer` | yes | Number of identical tape copies to produce. Must be ≥ 1. May exceed the number of drives — copies beyond the drive count are written across successive drive-sets. The library must hold one blank tape per physical tape written (logical tapes × copies). Default production value is 2 (one per LTO-6 drive). |
 | `library` | `Library` | yes | Tape library hardware and blank tape locations. |
 | `redundancy` | `Redundancy` | yes | PAR2 redundancy policy. |
 | `encryption` | `Encryption` | yes | age recipient public keys. |

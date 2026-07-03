@@ -311,19 +311,22 @@ func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInpu
 	return a.registry.Teardown(context.WithoutCancel(ctx))
 }
 
-// writePhase orchestrates the Write phase (SPEC §4.3 phase 7) inside a
-// Temporal session. The session pins all data activities to a single
+// writePhase orchestrates the Write phase (SPEC §4.3 phase 7) for one drive-set
+// inside a Temporal session. The session pins all data activities to a single
 // data-worker process, keeping the in-process MountRegistry valid across the
 // Format → WriteTree → FinalizeTape activity boundary.
 //
-// All loaded tapes write in parallel — one Temporal coroutine per drive, each
-// sequencing Format → WriteTree → Finalize independently. This keeps drives
-// decoupled: a slow drive does not gate a fast one, and the ZFS ARC provides
-// adaptive read coalescing for byte-identical copies without a hand-rolled buffer.
+// All tapes in the set write in parallel — one Temporal coroutine per drive, each
+// sequencing Format → WriteTree → Finalize independently, so the set holds at most
+// len(Drives) tapes in flight at once (concurrent disk reads bounded by the drive
+// count, SPEC §14). This keeps drives decoupled: a slow drive does not gate a fast
+// one, and the ZFS ARC provides adaptive read coalescing for byte-identical copies
+// without a hand-rolled buffer. runTapePath calls it once per set with that set's
+// loaded tapes and appends the returned WrittenTapes to the run's cumulative list.
 //
 // The deferred TeardownSession activity runs on the same worker (within the
 // session) so it can unmount any live mount the session still owns on exit.
-func writePhase(ctx workflow.Context, cfg config.Config, state *runState) error {
+func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded []LoadedTape) ([]WrittenTape, error) {
 	// CreateSession pins the session to the task queue in the context's activity
 	// options, falling back to the workflow's own queue (control) when none is
 	// set. The session must run on the data worker — that is where the tape
@@ -341,7 +344,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState) error 
 		ExecutionTimeout: sessionExecutionTimeout,
 	})
 	if err != nil {
-		return fmt.Errorf("create Write phase session: %w", err)
+		return nil, fmt.Errorf("create Write phase session: %w", err)
 	}
 
 	defer func() {
@@ -358,8 +361,8 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState) error 
 		workflow.CompleteSession(sessionCtx)
 	}()
 
-	if len(state.loaded) == 0 {
-		return nil
+	if len(loaded) == 0 {
+		return nil, nil
 	}
 
 	// Activity options for Format and WriteTree: MaximumAttempts=1 because
@@ -388,9 +391,9 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState) error 
 	// derived once from the configured native capacity (see measureWriteHealth).
 	floorMBps, floorKnown := writeHealthFloor(cfg.Library.TapeCapacityBytes)
 
-	ch := workflow.NewBufferedChannel(sessionCtx, len(state.loaded))
+	ch := workflow.NewBufferedChannel(sessionCtx, len(loaded))
 
-	for i, lt := range state.loaded {
+	for i, lt := range loaded {
 		i, lt := i, lt
 
 		workflow.Go(sessionCtx, func(gctx workflow.Context) {
@@ -464,14 +467,14 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState) error 
 
 	var errs []error
 
-	for range state.loaded {
+	for range loaded {
 		var res driveResult
 		ch.Receive(sessionCtx, &res)
 
 		if res.err != nil {
 			errs = append(errs, res.err)
 		} else {
-			lt := state.loaded[res.loadedIdx]
+			lt := loaded[res.loadedIdx]
 			written = append(written, WrittenTape{
 				Barcode:     lt.Barcode,
 				DriveIndex:  lt.DriveIndex,
@@ -485,12 +488,10 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState) error 
 	}
 
 	if err := errors.Join(errs...); err != nil {
-		return err
+		return nil, err
 	}
 
-	state.written = written
-
-	return nil
+	return written, nil
 }
 
 // measureWriteHealth runs the observational MeasureWriteHealth activity for one tape

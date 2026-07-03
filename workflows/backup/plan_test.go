@@ -119,16 +119,18 @@ func TestPackRejectsOversizedArchive(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeds one tape's usable capacity")
 }
 
-// TestPackRejectsCopiesExceedingDrives verifies the copy count cannot exceed the
-// number of drives available for parallel writing (AC1).
-func TestPackRejectsCopiesExceedingDrives(t *testing.T) {
+// TestPackAllowsCopiesExceedingDrives verifies the copy count may exceed the drive
+// count: the tape path writes the copies of each logical tape in successive
+// drive-sets, so the plan is not bounded by the number of drives (issue #66).
+func TestPackAllowsCopiesExceedingDrives(t *testing.T) {
 	t.Parallel()
 
 	cfg := packConfig(1_000_000, 3, 2, targetRedundancy(10))
 
-	_, err := pack(cfg, []StagedArchive{stagedArchive(0, 100_000)})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "copies (3) exceeds the number of drives (2)")
+	plan, err := pack(cfg, []StagedArchive{stagedArchive(0, 100_000)})
+	require.NoError(t, err)
+	assert.Equal(t, 3, plan.Copies, "the plan records the requested copy count even though it exceeds the drives")
+	assert.NotEmpty(t, plan.Tapes)
 }
 
 // TestPackEmpty verifies a run with nothing staged yields an empty plan that

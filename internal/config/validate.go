@@ -26,9 +26,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if c.Copies > len(c.Library.Drives) {
-		return fmt.Errorf("copies (%d) exceeds number of library.drives (%d)", c.Copies, len(c.Library.Drives))
-	}
+	// Copies is intentionally not bounded by the drive count: a run writes the
+	// copies of each logical tape in successive drive-sets of at most len(Drives)
+	// at a time (SPEC §4.3 phases 6–8). The tape path checks at run time that the
+	// plan's physical tapes fit the configured drives and blank slots.
 
 	if err := c.Redundancy.validate(); err != nil {
 		return err

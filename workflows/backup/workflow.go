@@ -39,11 +39,20 @@ const defaultActivityTimeout = 24 * time.Hour
 // A phase that orchestrates more than one activity (e.g. Resolve runs a control
 // activity then a data activity) sets run instead of activity; when run is set it
 // is used in place of the generic single-activity execution, and activity is nil.
+//
+// The tape path (Load → Write → Eject) is a single table entry with tapePath set:
+// it cannot be three independent phases because a run may need more physical tapes
+// than the library has drives, so those phases interleave per drive-set (load,
+// write, eject a set to free the drives, then the next set). The workflow drives it
+// via runTapePath and records the phase names in completes so operators still see
+// Load, Write, and Eject complete in order (SPEC §4.3 phases 6–8).
 type phase struct {
-	name     string
-	queue    string
-	activity any
-	run      func(workflow.Context, config.Config, *runState) error
+	name      string
+	queue     string
+	activity  any
+	run       func(workflow.Context, config.Config, *runState) error
+	tapePath  bool
+	completes []string
 }
 
 // backupPhases returns the ten backup pipeline phases in execution order
@@ -53,16 +62,15 @@ type phase struct {
 // today; later sub-issues fill in each body.
 func backupPhases() []phase {
 	return []phase{
-		{PhaseResolve, TaskQueue, nil, resolvePhase},
-		{PhasePrepare, DataTaskQueue, nil, preparePhase},
-		{PhasePack, TaskQueue, nil, packPhase},
-		{PhaseGeneratePAR2, DataTaskQueue, nil, generatePAR2Phase},
-		{PhaseVerify, DataTaskQueue, nil, verifyPhase},
-		{PhaseLoad, DataTaskQueue, nil, loadPhase},
-		{PhaseWrite, DataTaskQueue, nil, writePhase},
-		{PhaseEject, DataTaskQueue, nil, ejectPhase},
-		{PhaseReport, DataTaskQueue, nil, reportPhase},
-		{PhaseDeliver, DataTaskQueue, nil, deliverPhase},
+		{name: PhaseResolve, queue: TaskQueue, run: resolvePhase},
+		{name: PhasePrepare, queue: DataTaskQueue, run: preparePhase},
+		{name: PhasePack, queue: TaskQueue, run: packPhase},
+		{name: PhaseGeneratePAR2, queue: DataTaskQueue, run: generatePAR2Phase},
+		{name: PhaseVerify, queue: DataTaskQueue, run: verifyPhase},
+		// The Load → Write → Eject drive-set loop (SPEC §4.3 phases 6–8).
+		{name: PhaseWrite, queue: DataTaskQueue, tapePath: true, completes: []string{PhaseLoad, PhaseWrite, PhaseEject}},
+		{name: PhaseReport, queue: DataTaskQueue, run: reportPhase},
+		{name: PhaseDeliver, queue: DataTaskQueue, run: deliverPhase},
 	}
 }
 
@@ -114,6 +122,24 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 	for _, currentPhase := range backupPhases() {
 		failingPhase = currentPhase.name
 
+		if currentPhase.tapePath {
+			// The tape path interleaves Load/Write/Eject per drive-set; it reports
+			// which sub-phase failed through failingPhase (for the failure alert)
+			// and, on success, records Load/Write/Eject as completed in order.
+			if phaseErr := runTapePath(ctx, cfg, state, &failingPhase); phaseErr != nil {
+				err = fmt.Errorf("phase %s: %w", failingPhase, phaseErr)
+
+				return Result{}, err
+			}
+
+			for _, name := range currentPhase.completes {
+				state.lastCompletedPhase = name
+				result.CompletedPhases = append(result.CompletedPhases, name)
+			}
+
+			continue
+		}
+
 		if phaseErr := currentPhase.execute(ctx, cfg, state); phaseErr != nil {
 			err = fmt.Errorf("phase %s: %w", currentPhase.name, phaseErr)
 
@@ -125,6 +151,58 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 	}
 
 	return result, nil
+}
+
+// runTapePath drives the interleaved Load → Write → Eject drive-set loop (SPEC
+// §4.3 phases 6–8). It partitions the plan into drive-sets of at most len(Drives)
+// physical tapes, then loads, writes, and ejects each set in turn — ejecting a set
+// frees the drives for the next. Processing sets sequentially bounds the tapes
+// loaded and read concurrently to the drive count, protecting the write-rate floor
+// (SPEC §14). An empty plan yields no sets and is a no-op.
+//
+// On the first set's failure it returns immediately, so no later set is loaded. It
+// updates *failingPhase to the sub-phase in flight so the caller's failure alert
+// names where the run failed, and advances state.lastCompletedPhase as each
+// sub-phase of a set completes so the progress query reflects the live phase.
+func runTapePath(ctx workflow.Context, cfg config.Config, state *runState, failingPhase *string) error {
+	*failingPhase = PhaseLoad
+
+	sets, err := planDriveSets(state.plan, cfg.Library.Drives, cfg.Library.BlankSlots)
+	if err != nil {
+		return err
+	}
+
+	for _, set := range sets {
+		*failingPhase = PhaseLoad
+
+		loaded, err := loadPhase(ctx, cfg, set)
+		if err != nil {
+			return err
+		}
+
+		state.loaded = loaded
+		state.lastCompletedPhase = PhaseLoad
+
+		*failingPhase = PhaseWrite
+
+		written, err := writePhase(ctx, cfg, state, loaded)
+		if err != nil {
+			return err
+		}
+
+		state.written = append(state.written, written...)
+		state.lastCompletedPhase = PhaseWrite
+
+		*failingPhase = PhaseEject
+
+		if err := ejectPhase(ctx, cfg, written); err != nil {
+			return err
+		}
+
+		state.lastCompletedPhase = PhaseEject
+	}
+
+	return nil
 }
 
 // Each phase is implemented in its own file, orchestrated by a run func in the
@@ -145,15 +223,12 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // The Verify phase (SPEC §4.3 phase 5) is implemented in verify.go; it
 // orchestrates the data-side re-read/checksum activity rather than a single stub.
 
-// The Load phase (SPEC §4.3 phase 6) is implemented in library.go; it
-// orchestrates the data-side load activity (blank-tape gate + mtx moves).
-
-// The Write phase (SPEC §4.3 phase 7) is implemented in session.go; it
-// orchestrates a session-pinned sequence of LTFS activities rather than a
-// single stub.
-
-// The Eject phase (SPEC §4.3 phase 8) is implemented in library.go; it
-// orchestrates the data-side eject activity (unload + transfer to I/O station).
+// The Load, Write, and Eject phases (SPEC §4.3 phases 6–8) form the tape path,
+// driven per drive-set by runTapePath above. loadPhase (library.go: blank-tape
+// gate + mtx moves) and ejectPhase (library.go: unload + transfer to I/O station)
+// bracket writePhase (session.go: a session-pinned FormatTape → WriteTree →
+// FinalizeTape sequence). They interleave per set rather than running once each
+// so a run can span more physical tapes than the library has drives.
 
 // The Report phase (SPEC §4.3 phase 9) is implemented in report.go; it
 // orchestrates the data-side report/ISO build activity.
