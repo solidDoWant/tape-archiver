@@ -90,11 +90,11 @@ config:
 # chart-computed controller, env vars, persistence, and podMonitor; user-supplied values take
 # precedence.
 #
-# The chart generates a single Deployment controller named "main" (image, named metrics port
-# 9090, hardened securityContext, TCP-socket probes on the metrics port, and a
-# terminationGracePeriodSeconds covering the worker's SIGTERM drain). Override it by adding
-# resources.controllers.main with the standard bjw-s controller schema (replicas, pod,
-# containers.main, etc.).
+# The chart generates a single Deployment controller named "main" (image, named health port
+# 8080 and metrics port 9090, hardened securityContext, httpGet liveness (/healthz) and
+# readiness (/readyz) probes on the health port, and a terminationGracePeriodSeconds covering
+# the worker's SIGTERM drain). Override it by adding resources.controllers.main with the
+# standard bjw-s controller schema (replicas, pod, containers.main, etc.).
 resources:
   defaultPodOptions:
     # The control worker discovers ZFS snapshots by reading VolumeSnapshot resources

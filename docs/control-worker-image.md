@@ -72,3 +72,12 @@ control plane and the Discord webhook over the network, using the bundled TLS ro
 The entrypoint is `/bin/worker`; run configuration is supplied via the environment
 (including `DISCORD_FAILURE_WEBHOOK_URL`, SPEC §4.1, §11) and the Temporal workflow
 payload (SPEC §4.1, §5).
+
+## Health check
+
+The image declares a `HEALTHCHECK` (`docker inspect --format '{{json .Config.Healthcheck}}'`)
+that runs the worker's own `healthcheck` self-probe — the image ships no `curl`/`wget`, so
+the binary probes its local `/readyz` endpoint and exits `0`/non-zero. Container health thus
+reflects **readiness**: a worker that has lost its Temporal connection reports unhealthy. The
+probe targets `HEALTH_ADDR` (default `:8080`); see [`docs/configuration.md`](configuration.md)
+for the endpoints.

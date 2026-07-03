@@ -187,7 +187,27 @@ alerting works even when config parsing fails.
 | `TAPE_RECOVERY_BINARIES_DIR` | yes (data worker) | Directory holding the statically linked recovery binaries (`age`, `par2`, `zstd`, `tar`) staged into the recovery ISO's `/bin` (SPEC §10). Every top-level regular file must be a statically linked native executable; the Report phase fails the run otherwise. Populated in the data worker image to match the pinned recovery-disc tool versions. Ignored by the control worker. |
 | `METRICS_ADDR` | no | TCP listen address for the Prometheus `/metrics` endpoint (e.g. `:9090`). The `worker` binary defaults this to `:9090`; set it to an empty value to disable the endpoint entirely — no HTTP server is started and no registry is created. |
 | `METRICS_SCRAPE_WAIT_TIMEOUT` | no | Go duration bounding the end-of-run wait for a final Prometheus scrape. Defaults to `60s`; set to `0s` to disable the wait. |
+| `HEALTH_ADDR` | no | TCP listen address for the HTTP health endpoints `/healthz` (liveness) and `/readyz` (readiness) — see below. The `worker` binary defaults this to `:8080`; set it to an empty value to disable the endpoints entirely (no port is opened). This is a dedicated always-on port, independent of `METRICS_ADDR`, so health stays available even when `/metrics` is disabled. |
 | `TEMPORAL_ADDRESS` | yes | `host:port` of the Temporal frontend gRPC endpoint (e.g. `localhost:7233`). |
 | `TEMPORAL_NAMESPACE` | no | Temporal namespace the worker registers under. Defaults to `default` when unset. |
 | `TEMPORAL_API_KEY` | no | API key for authenticating to Temporal Cloud. Accepts either an inline token or `file:///absolute/path` — the file form is re-read on every RPC so external rotators can update the file in place without restarting the worker. Non-canonical `file:` forms (missing the third slash, or a relative path) are rejected at startup. |
 | `TEMPORAL_TLS` | no | Set to `false` to disable TLS on the Temporal gRPC connection. Useful for local dev stacks; defaults to `true` when `TEMPORAL_API_KEY` is set. |
+
+### Health endpoints
+
+The worker serves two HTTP health endpoints on `HEALTH_ADDR` (default `:8080`) for
+Kubernetes probes and the container `HEALTHCHECK`:
+
+| Endpoint | Meaning | Status |
+|----------|---------|--------|
+| `GET /healthz` | **Liveness** — the process is up and serving. Independent of Temporal connectivity, so a worker merely waiting on Temporal to recover is not restarted. | `200` once the server is listening. |
+| `GET /readyz` | **Readiness** — the worker is usefully connected. Re-checks the Temporal frontend health per request. | `200` when Temporal is reachable and healthy; `503` otherwise. |
+
+Neither endpoint gates or fails a run — they are observational only (SPEC §14). The
+endpoints are disabled (no port opened) when `HEALTH_ADDR` is set to an empty value.
+
+The `worker healthcheck` subcommand is a self-probe used as the container `HEALTHCHECK`:
+it `GET`s `/readyz` on the local health server and exits `0` when ready, non-zero
+otherwise, so `docker inspect` health reflects readiness. It never starts a Temporal
+worker. It targets `HEALTH_ADDR` by default; an optional positional `host:port` argument
+overrides the target.

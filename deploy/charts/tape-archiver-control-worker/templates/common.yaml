@@ -204,15 +204,24 @@ mTLS or CA verification.
 {{/* ============================================================ */}}
 {{/* Controller default (single "main" Deployment)                */}}
 {{/* ============================================================ */}}
-{{/* The worker exposes only /metrics on :9090 — no HTTP health endpoint — so the
-   probes are TCP-socket checks against the named metrics port. The worker exits
-   non-zero if the Temporal dial/health-check fails at startup, so a pod that
-   stays up implies a live Temporal connection (SPEC §4.1). */}}
+{{/* The worker serves HTTP health endpoints on the named health port: liveness
+   (/healthz, 200 as soon as the process is serving) and readiness (/readyz, 200
+   only while the Temporal connection is healthy, else 503) (SPEC §4.1). The
+   probes are httpGet checks against that port — distinct from the /metrics port,
+   so health stays meaningful even if metrics are disabled, and a worker that
+   loses its Temporal connection is taken out of readiness without the pod being
+   restarted. */}}
 {{- $userControllers := index .Values.resources "controllers" | default dict -}}
 {{- $userMain := index $userControllers $controllerName | default dict -}}
 {{- $replicas := index $userMain "replicas" | default 1 -}}
-{{- $probeSpec := dict
-  "tcpSocket" (dict "port" "metrics")
+{{- $livenessSpec := dict
+  "httpGet" (dict "path" "/healthz" "port" "health")
+  "initialDelaySeconds" 0
+  "periodSeconds" 10
+  "failureThreshold" 3
+-}}
+{{- $readinessSpec := dict
+  "httpGet" (dict "path" "/readyz" "port" "health")
   "initialDelaySeconds" 0
   "periodSeconds" 10
   "failureThreshold" 3
@@ -224,14 +233,21 @@ mTLS or CA verification.
       "repository" $defaultImageRepository
       "tag" $.Chart.AppVersion
     )
-    "ports" (list (dict
-      "name" "metrics"
-      "containerPort" 9090
-      "protocol" "TCP"
-    ))
+    "ports" (list
+      (dict
+        "name" "health"
+        "containerPort" 8080
+        "protocol" "TCP"
+      )
+      (dict
+        "name" "metrics"
+        "containerPort" 9090
+        "protocol" "TCP"
+      )
+    )
     "probes" (dict
-      "liveness" (dict "enabled" true "custom" true "spec" $probeSpec)
-      "readiness" (dict "enabled" true "custom" true "spec" $probeSpec)
+      "liveness" (dict "enabled" true "custom" true "spec" $livenessSpec)
+      "readiness" (dict "enabled" true "custom" true "spec" $readinessSpec)
     )
     "securityContext" (dict
       "allowPrivilegeEscalation" false

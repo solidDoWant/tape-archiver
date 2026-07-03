@@ -60,6 +60,9 @@ func TestRunRegistersWorkerOnTaskQueue(t *testing.T) {
 
 			t.Setenv("ROLE", string(test.role))
 			t.Setenv("METRICS_ADDR", "")
+			// Disable the health server too, so sequential subtests do not
+			// contend for the default health port.
+			t.Setenv("HEALTH_ADDR", "")
 
 			// interruptCh stands in for worker.InterruptCh: closing it drives
 			// the same run-phase drain a SIGTERM would, without signalling the
