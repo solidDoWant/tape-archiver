@@ -180,10 +180,11 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "copies",
 		},
 		{
-			name:        "copies exceeds drives",
-			mutate:      func(c *Config) { c.Copies = 5 },
-			wantErr:     require.Error,
-			errContains: "copies",
+			// Copies may exceed the drive count: the tape path writes the copies
+			// of each logical tape in successive drive-sets (issue #66).
+			name:    "copies exceeds drives is allowed",
+			mutate:  func(c *Config) { c.Copies = 5 },
+			wantErr: require.NoError,
 		},
 		{
 			name:        "library no changer",

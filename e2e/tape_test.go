@@ -85,6 +85,50 @@ func prepareBlankTapeAt(t *testing.T, slotIndex int) tapeFixture {
 	return fixture
 }
 
+// multiTapeFixture is several blanked tapes sharing a single drive, with a Library
+// that names all their slots as blank sources. It backs runs that write more
+// physical tapes than the library has drives (e.g. copies > drives), exercising
+// the drive-set loop end-to-end (issue #66).
+type multiTapeFixture struct {
+	barcodes []tape.Barcode
+	library  config.Library
+}
+
+// prepareBlankTapesAt blanks the tapes at the given storage slot indexes — each via
+// prepareBlankTapeAt, which also registers its own restore-on-cleanup — and returns
+// a single-drive Library naming all of them as blank sources, so a run with more
+// copies than drives writes them across successive drive-sets.
+func prepareBlankTapesAt(t *testing.T, slotIndexes ...int) multiTapeFixture {
+	t.Helper()
+
+	require.NotEmpty(t, slotIndexes, "at least one slot index required")
+
+	var (
+		barcodes   []tape.Barcode
+		blankSlots []int
+		drives     []string
+	)
+
+	for _, index := range slotIndexes {
+		// prepareBlankTapeAt leaves drive 0 empty when it returns, so the next
+		// slot's blanking finds the "drive 0 must start empty" precondition met.
+		fixture := prepareBlankTapeAt(t, index)
+		barcodes = append(barcodes, fixture.barcode)
+		blankSlots = append(blankSlots, fixture.slotAddr)
+		drives = fixture.library.Drives // the same single drive for every tape
+	}
+
+	return multiTapeFixture{
+		barcodes: barcodes,
+		library: config.Library{
+			Changer:           testutil.ChangerDev(t),
+			Drives:            drives,
+			BlankSlots:        blankSlots,
+			TapeCapacityBytes: 2_500_000_000_000,
+		},
+	}
+}
+
 // eraseLoadedTape issues a short SCSI ERASE (CDB 0x19, LONG=0) to the tape in the
 // drive, resetting mhvtl's state to blank without a long physical erase. It
 // rewinds first (bounded) so ERASE starts at BOT. Best-effort, mirroring the

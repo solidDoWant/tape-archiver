@@ -42,16 +42,18 @@ func TestParse(t *testing.T) {
 			assertErr: require.Error,
 		},
 		{
-			name: "copies exceeding drives fails validation",
+			// Copies exceeding the drive count is valid: the copies are written in
+			// successive drive-sets (issue #66).
+			name: "copies exceeding drives is accepted",
 			json: `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 3,
-  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2, 3], "tapeCapacityBytes": 2500000000000},
   "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
   "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
   "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
 }`,
-			assertErr: require.Error,
+			assertErr: require.NoError,
 		},
 		{
 			name:      "malformed JSON is rejected",

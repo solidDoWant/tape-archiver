@@ -142,7 +142,10 @@ staged and verified on disk** — eliminating any computation during the write w
    checksums. All output is staged to disk and its exact size measured.
 3. **Pack.** Bin-pack the prepared archives onto tapes by their *measured* size
    (≤ tape capacity, accounting for PAR2 and LTFS overhead), replicated across N copies
-   (N = configured copy count, ≤ number of drives for parallel writing). Plan against
+   (N = configured copy count). The copy count is **not** bounded by the drive count:
+   the Write phase writes at most one drive-set (≤ number of drives) of physical tapes
+   in parallel at a time and iterates over both logical tapes and copies (steps 6–8), so
+   a run may span any number of logical tapes and any number of copies. Plan against
    2.5 TB native capacity with LTO hardware compression disabled — `age` output is
    incompressible, so drive compression only adds variability.
 4. **Generate PAR2.** For each archive, generate its per-archive PAR2 recovery set.
@@ -153,18 +156,29 @@ staged and verified on disk** — eliminating any computation during the write w
 5. **Verify.** Re-read all staged files and verify checksums; confirm each planned
    tape's complete tree is present and within capacity. A run cannot proceed to write
    on any verification failure.
-6. **Load.** Move the selected blank tapes from their storage slots into the drives
+   Steps 6–8 run per **drive-set** — at most `len(Drives)` physical tapes, one per drive.
+   When a run needs more physical tapes (logical tapes × copies) than the library has
+   drives, they are written as a sequence of drive-sets: each set is loaded, written, and
+   ejected — freeing the drives — before the next set is loaded. Processing one set at a
+   time bounds the tapes loaded and read concurrently to the drive count, protecting the
+   write-rate floor (§14). A drive-set groups adjacent (logical tape, copy) pairs, so the
+   copies of one logical tape tend to share a set and read a single staged tree. A failure
+   in any set fails the run for that set; no later set is loaded. (Reloading blanks and
+   clearing I/O slots between sets when written tapes exceed I/O capacity is an
+   operator-in-the-loop concern tracked separately; a run assumes sufficient free storage
+   and I/O slots.)
+6. **Load.** Move the drive-set's blank tapes from their storage slots into the drives
    (`mtx`), and confirm each loaded tape is blank/empty before formatting — a run must
    never silently overwrite existing data.
-7. **Write.** `mkltfs` each tape (setting the LTFS volume name to the tape's barcode),
-   mount LTFS **with index sync deferred to unmount** (`-o sync_type=unmount`), and
-   stream the staged tree to tape. The N copies write to N drives in parallel. Writing
-   is a pure sequential disk→tape copy whose sustained rate is monitored. The LTFS index
-   is therefore written **once**, at unmount during Eject, rather than periodically
+7. **Write.** `mkltfs` each tape in the set (setting the LTFS volume name to the tape's
+   barcode), mount LTFS **with index sync deferred to unmount** (`-o sync_type=unmount`),
+   and stream the staged tree to tape. The set's tapes write to their drives in parallel.
+   Writing is a pure sequential disk→tape copy whose sustained rate is monitored. The LTFS
+   index is therefore written **once**, at unmount during Eject, rather than periodically
    during the write — see §14. A per-tape checksum/manifest file is written last; the
    LTFS index is read back after unmount and captured for the ISO.
-8. **Eject.** Unmount/unload each written tape and transfer it to an I/O station slot
-   for physical removal.
+8. **Eject.** Unmount/unload each written tape in the set and transfer it to an I/O
+   station slot for physical removal, freeing its drive for the next set.
 9. **Report.** Build the PDF report (§9) and the recovery ISO (§10).
 10. **Deliver.** Send the report and ISO to Discord via webhook (§11).
 
@@ -183,7 +197,9 @@ The config defines, at minimum:
   - **Raw ZFS paths:** explicit ZFS snapshot or dataset paths on the pool not visible
     to k8s (e.g. `bulk-pool-01/archive`, `bulk-pool-01/media`).
 - **Copies (N)** — number of identical physical tape copies to produce (default 2, the
-  drive count; copies write in parallel, one per drive).
+  drive count). Up to `len(Drives)` copies write in parallel; a copy count exceeding the
+  drive count is written across successive drive-sets (§4.3 steps 6–8). The library must
+  hold one blank tape per physical tape written (logical tapes × copies).
 - **Library** — device targets (real `/dev/sch0` + `/dev/nstX`, or a virtual library
   for dry-run, §12) and the list of storage slots holding usable blank tapes.
 - **Redundancy** — PAR2 policy: a target redundancy percentage, or **fill-to-capacity**
@@ -381,6 +397,16 @@ modified to pass — the code is fixed instead.
   below-floor verdict rather than judging against a guessed value. This is
   **observational only** — it never fails or gates a run — so principle 2 can be
   evaluated against the real workload before any gating is considered.
+- **Bound write concurrency to the drive count.** The Write phase writes at most one
+  drive-set (≤ `len(Drives)`) of physical tapes at a time (§4.3 steps 6–8); a run needing
+  more physical tapes iterates over drive-sets rather than reading more streams at once.
+  All tapes in a set read from the bulk pool concurrently — the same staged tree (for
+  copies of one logical tape) or different trees — so capping the in-flight set at the
+  drive count keeps disk read bandwidth predictable and protects the speed-matching floor.
+  Copies of a logical tape are grouped into a set where possible: the ZFS ARC and
+  sequential read-ahead coalesce their in-lockstep reads to near-1× physical disk reads,
+  and a lagging drive re-reads from its own page-cache window. Re-reading a logical tape's
+  staged tree across successive copy-sets is expected and acceptable.
 - The prepare phase (`tar`/`age`/PAR2) must, in aggregate, keep ahead of the planned
   write throughput; PAR2 uses the multithreaded par2cmdline-turbo. Because prepare and
   write are decoupled by staging, prepare throughput affects total run time but never

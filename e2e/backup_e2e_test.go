@@ -81,6 +81,63 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	assertRecoveryBinariesRun(t, iso)
 }
 
+// TestBackupEndToEnd_MultipleDriveSets drives a run whose copy count exceeds the
+// library's drive count through the full deployment, so the tape path writes the
+// copies across successive drive-sets (issue #66). With a single drive and two
+// copies of one logical tape, the run writes two physical tapes in two drive-sets,
+// one after the other, and delivers a report naming both. Skips (via the fixture
+// and harness) when mhvtl, the ZFS pool, or the deployment is unavailable.
+func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
+	h := requireHarness(t)
+
+	source := testutil.PoolDataset(t) + "@" + testutil.TestSnapshot(t)
+	// Two blank tapes on a single drive; Copies=2 makes the run span two drive-sets.
+	// Slots 8 and 9 avoid the FullRun (2), verify-fault (2), and k8s-source (3) tests.
+	fixture := prepareBlankTapesAt(t, 8, 9)
+	temporalClient := dialTemporal(t)
+	identity, recipient := generateTestKeypair(t)
+
+	runID := fmt.Sprintf("e2e-backup-multiset-%d", time.Now().UnixNano())
+
+	cfg := config.Config{
+		Sources:    []config.Source{{ZFSPath: &config.ZFSPathSource{Name: source}}},
+		Copies:     2,
+		Library:    fixture.library,
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10), SliceSizeBytes: 1 << 20},
+		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
+		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(runID)},
+	}
+	require.NoError(t, cfg.Validate(), "run config must be valid")
+	require.Greater(t, cfg.Copies, len(cfg.Library.Drives), "this test must exercise more copies than drives")
+
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
+	defer cancel()
+
+	h.submitRun(t, cfg, runID)
+	terminateOnCleanup(t, temporalClient, runID)
+
+	var result backup.Result
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+		"workflow must complete successfully")
+
+	// Every phase ran to completion, in order — the drive-set loop still reports
+	// Load, Write, and Eject once each.
+	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
+
+	// The run delivered the report and the compressed recovery ISO.
+	uploads := h.rec.uploadsFor(runID)
+	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
+
+	// Both physical copies were written across the two drive-sets, so the report
+	// lists both tape barcodes.
+	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
+	assert.Contains(t, report, runID, "report must name the run ID")
+
+	for _, barcode := range fixture.barcodes {
+		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
+	}
+}
+
 // findUpload returns the captured upload whose filename matches, failing if it is
 // absent.
 func findUpload(t *testing.T, uploads []upload, filename string) []byte {
@@ -112,6 +169,18 @@ func uploadNames(uploads []upload) []string {
 func assertReportContents(t *testing.T, reportPDF []byte, runID, barcode string) {
 	t.Helper()
 
+	report := extractPDFText(t, reportPDF)
+
+	assert.Contains(t, report, runID, "report must name the run ID")
+	assert.Contains(t, report, barcode, "report must list the tape barcode")
+	assert.Contains(t, report, "AGE-SECRET-KEY", "report must embed the age private identity for escrow")
+	assert.Contains(t, report, ".par2", "report manifest must list the PAR2 recovery-set files")
+}
+
+// extractPDFText returns the plain text of a delivered PDF report.
+func extractPDFText(t *testing.T, reportPDF []byte) string {
+	t.Helper()
+
 	reader, err := pdf.NewReader(bytes.NewReader(reportPDF), int64(len(reportPDF)))
 	require.NoError(t, err, "delivered report is not a valid PDF")
 
@@ -121,12 +190,7 @@ func assertReportContents(t *testing.T, reportPDF []byte, runID, barcode string)
 	text, err := io.ReadAll(plain)
 	require.NoError(t, err)
 
-	report := string(text)
-
-	assert.Contains(t, report, runID, "report must name the run ID")
-	assert.Contains(t, report, barcode, "report must list the tape barcode")
-	assert.Contains(t, report, "AGE-SECRET-KEY", "report must embed the age private identity for escrow")
-	assert.Contains(t, report, ".par2", "report manifest must list the PAR2 recovery-set files")
+	return string(text)
 }
 
 // assertRecoveryBinariesRun decompresses the delivered recovery ISO, extracts the

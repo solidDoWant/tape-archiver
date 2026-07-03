@@ -172,6 +172,31 @@ type PAR2Set struct {
 // proceed to write without one. Later sub-issues add the verification results.
 type VerifiedPlan struct{}
 
+// TapeAssignment is one physical tape's placement within a drive-set (SPEC §4.3
+// phases 6–8): which drive writes it, which blank slot holds it, and which
+// (logical tape, copy) pair it materializes. planDriveSets produces these; the
+// Load activity turns each into a LoadedTape.
+type TapeAssignment struct {
+	// Drive is the non-rewinding tape device node (e.g. /dev/nst0) this physical
+	// tape is loaded into and written on. Within a drive-set the assignments map
+	// one-to-one onto the library's drives in order.
+	Drive string
+	// BlankSlot is the storage slot address holding the blank tape to load. Every
+	// physical tape across the whole run has its own blank slot.
+	BlankSlot int
+	// TapeIndex is the 0-based logical tape (an index into plan.Tapes) this
+	// physical tape carries. All copies of a logical tape share it.
+	TapeIndex int
+	// CopyIndex is the 0-based copy number (0..plan.Copies-1) of this physical tape.
+	CopyIndex int
+}
+
+// driveSet is the batch of physical tapes written in parallel in one pass of the
+// tape path — at most len(Drives) of them (SPEC §4.3 phases 6–8). A run spanning
+// more physical tapes than the library has drives is written as a sequence of
+// drive-sets, each loaded, written, and ejected before the next begins.
+type driveSet []TapeAssignment
+
 // LoadedTape is one physical tape loaded into a drive by the Load phase
 // (SPEC §4.3 phase 6). It carries the device and slot provenance the Write and
 // Eject phases need to format, mount, and return the tape.
@@ -264,15 +289,14 @@ type runState struct {
 	// Pack plan once its complete staged tree has passed checksum and capacity
 	// verification on disk. The Load phase requires it before any tape is touched.
 	verified VerifiedPlan
-	// loaded is the list of tapes the Load phase loaded into drives (SPEC §4.3
-	// phase 6), one per physical tape (len(plan.Tapes) × plan.Copies). The Write
-	// phase consumes it to dispatch FormatTape → WriteTree → FinalizeTape per
-	// tape. The Eject phase uses the SourceSlot and DriveIndex for unload.
+	// loaded holds the tapes the current drive-set loaded into drives (SPEC §4.3
+	// phase 6). The tape path processes drive-sets one at a time, so this is the
+	// in-flight set (at most len(Drives) tapes), overwritten as each set loads.
 	loaded []LoadedTape
-	// written is the list of tapes written by the Write phase (SPEC §4.3 phase 7),
-	// one per LoadedTape. The Eject phase uses SourceSlot and DriveIndex to
-	// transfer each tape to an I/O station; the Report phase uses IndexXML for the
-	// recovery ISO.
+	// written accumulates every tape written by the Write phase across all
+	// drive-sets (SPEC §4.3 phase 7). Each set's tapes are appended as it
+	// completes; the Report phase uses the full list (barcodes, IndexXML) for the
+	// report and recovery ISO.
 	written []WrittenTape
 	// reportPath and isoPath are the on-disk paths of the artifacts the Report
 	// phase builds (SPEC §4.3 phase 9): the PDF report and the compressed recovery

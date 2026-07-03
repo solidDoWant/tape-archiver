@@ -78,18 +78,13 @@ func pack(cfg config.Config, staged []StagedArchive) (TapePlan, error) {
 
 	copies := cfg.Copies
 
-	drives := len(cfg.Library.Drives)
-
 	if copies < 1 {
 		return TapePlan{}, fmt.Errorf("copies must be at least 1, got %d", copies)
 	}
 
-	// N copies write to N drives in parallel, so the run cannot make more copies
-	// than it has drives (SPEC §4.3 phase 3). Config validation enforces this; the
-	// guard keeps the invariant local to the planner too.
-	if copies > drives {
-		return TapePlan{}, fmt.Errorf("copies (%d) exceeds the number of drives (%d) available for parallel writing", copies, drives)
-	}
+	// Copies may exceed the drive count: the tape path writes the copies of each
+	// logical tape in successive drive-sets of at most len(Drives) at a time
+	// (SPEC §4.3 phases 6–8), so the plan is not bounded by the drive count.
 
 	usable := usableCapacity(cfg.Library.TapeCapacityBytes)
 	if usable <= 0 {
