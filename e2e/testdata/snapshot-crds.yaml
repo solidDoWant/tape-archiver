@@ -1,0 +1,55 @@
+# Minimal external-snapshotter CRDs for the k8s-source e2e test
+# (e2e/k8s_source_e2e_test.go). The suite pre-creates already-bound VolumeSnapshot
+# and VolumeSnapshotContent objects that point at a real ZFS snapshot, so the CSI
+# controllers are not needed — only the two kinds must exist for the typed client
+# to store and the control worker to read them. The schema preserves unknown
+# fields (no field validation) and declares NO status subresource, so the bound
+# `status` (snapshotHandle, readyToUse, boundVolumeSnapshotContentName) can be set
+# directly on create. Not the upstream CRDs — deliberately minimal for the test.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: volumesnapshots.snapshot.storage.k8s.io
+  # snapshot.storage.k8s.io is a protected *.k8s.io group; the API server requires
+  # this approval annotation. Points at the upstream external-snapshotter approval.
+  annotations:
+    api-approved.kubernetes.io: "https://github.com/kubernetes-csi/external-snapshotter/pull/814"
+spec:
+  group: snapshot.storage.k8s.io
+  scope: Namespaced
+  names:
+    plural: volumesnapshots
+    singular: volumesnapshot
+    kind: VolumeSnapshot
+    listKind: VolumeSnapshotList
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: volumesnapshotcontents.snapshot.storage.k8s.io
+  annotations:
+    api-approved.kubernetes.io: "https://github.com/kubernetes-csi/external-snapshotter/pull/814"
+spec:
+  group: snapshot.storage.k8s.io
+  scope: Cluster
+  names:
+    plural: volumesnapshotcontents
+    singular: volumesnapshotcontent
+    kind: VolumeSnapshotContent
+    listKind: VolumeSnapshotContentList
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true

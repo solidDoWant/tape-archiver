@@ -80,6 +80,16 @@ const (
 	// containerRecoveryBin is where the static recovery-binary set is mounted in
 	// the data container (TAPE_RECOVERY_BINARIES_DIR).
 	containerRecoveryBin = "/recovery-bin"
+
+	// datasetParent is democratic-csi's datasetParentName for the k8s-source test:
+	// the CSI snapshotHandle's volume component is joined under it to rebuild the
+	// absolute ZFS path. It is the test pool root, so `<parent>/pvc-<uuid>` is a
+	// child dataset of the pool. Wired into the control worker as K8sDatasetParent.
+	datasetParent = "tape_test"
+	// rbacName is the ClusterRole + binding granting the control worker's
+	// ServiceAccount read access to VolumeSnapshots (the chart omits this by
+	// design — it is the operator's responsibility).
+	rbacName = "tape-archiver-e2e-snapshot-reader"
 )
 
 // orderedPhases is the full ten-phase sequence the backup workflow completes, in
@@ -209,11 +219,13 @@ func setupHarness() (*e2eHarness, error) {
 		{"recovery-binaries", h.buildRecoveryBinaries},
 		{"kind-cluster", h.createCluster},
 		{"load-control-image", h.loadControlImage},
+		{"snapshot-crds", h.installSnapshotCRDs},
 		{"temporal-on-kind-net", h.joinTemporalToNetwork},
 		{"mock-webhook", h.startWebhook},
 		{"clean-leftover-workflows", h.cleanLeftoverWorkflows},
 		{"staging-dir", h.createStagingDir},
 		{"deploy-control-worker", h.deployControlWorker},
+		{"snapshot-rbac", h.grantSnapshotRBAC},
 		{"data-worker-container", h.startDataWorker},
 	}
 
@@ -283,6 +295,62 @@ func (h *e2eHarness) loadControlImage() error {
 		controlRepo+":"+imageVersion, "--name", clusterName)
 
 	return err
+}
+
+// installSnapshotCRDs registers the minimal VolumeSnapshot/VolumeSnapshotContent
+// CRDs so the k8s-source test can create those objects and the control worker can
+// read them.
+func (h *e2eHarness) installSnapshotCRDs() error {
+	crds := filepath.Join("e2e", "testdata", "snapshot-crds.yaml")
+
+	if _, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "apply", "-f", crds); err != nil {
+		return err
+	}
+
+	// Wait until the API server serves the new kinds before any CR is created.
+	_, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "wait", "--for", "condition=established",
+		"--timeout", "60s",
+		"crd/volumesnapshots.snapshot.storage.k8s.io",
+		"crd/volumesnapshotcontents.snapshot.storage.k8s.io")
+
+	return err
+}
+
+// grantSnapshotRBAC binds a ClusterRole (get/list on VolumeSnapshots +
+// VolumeSnapshotContents) to the control worker's ServiceAccount. The chart omits
+// this by design (operator's responsibility), so the k8s-source path would fail
+// with a forbidden error without it — the test exercises that requirement too.
+func (h *e2eHarness) grantSnapshotRBAC() error {
+	sa, err := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "get", "deployment", "-n", namespace,
+		"-o", "jsonpath={.items[0].spec.template.spec.serviceAccountName}")
+	if err != nil {
+		return err
+	}
+
+	sa = strings.TrimSpace(sa)
+	if sa == "" {
+		sa = helmRelease
+	}
+
+	if _, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "create", "clusterrole", rbacName,
+		"--verb=get,list",
+		"--resource=volumesnapshots.snapshot.storage.k8s.io,volumesnapshotcontents.snapshot.storage.k8s.io",
+	); err != nil {
+		return err
+	}
+
+	if _, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "create", "clusterrolebinding", rbacName,
+		"--clusterrole="+rbacName, "--serviceaccount="+namespace+":"+sa,
+	); err != nil {
+		return err
+	}
+
+	h.push(func() {
+		_, _ = execOut(h.repoRoot, h.kubeEnv(), "kubectl", "delete", "clusterrolebinding", rbacName, "--ignore-not-found")
+		_, _ = execOut(h.repoRoot, h.kubeEnv(), "kubectl", "delete", "clusterrole", rbacName, "--ignore-not-found")
+	})
+
+	return nil
 }
 
 func (h *e2eHarness) joinTemporalToNetwork() error {
@@ -433,6 +501,7 @@ func (h *e2eHarness) deployControlWorker() error {
 		"--namespace", namespace, "--create-namespace", "--wait", "--timeout", "4m",
 		"--set", "config.temporal.address="+temporalAlias+":"+temporalPort,
 		"--set", "config.controlWorker.discordFailureWebhookUrl.value="+h.failureURL(),
+		"--set", "config.controlWorker.k8sDatasetParent="+datasetParent,
 		"--set-string", imagePath+".repository="+controlRepo,
 		"--set-string", imagePath+".tag="+imageVersion,
 		"--set", imagePath+".pullPolicy=Never",

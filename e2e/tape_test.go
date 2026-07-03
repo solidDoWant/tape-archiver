@@ -27,12 +27,22 @@ type tapeFixture struct {
 	library   config.Library
 }
 
-// prepareBlankTape mirrors the integration suite's setup: it confirms drive 0 is
-// empty, picks a populated storage slot, loads and blanks that tape, and unloads
-// it, leaving a genuinely blank tape for the run to load. It registers a cleanup
-// that returns the library to "drive 0 empty, tape in its slot" so a repeat run
-// (and the sibling verify-fault test) find the expected starting state.
+// prepareBlankTape prepares a blank tape from storage slot index 2 (the sibling
+// integration whole-run test's convention).
 func prepareBlankTape(t *testing.T) tapeFixture {
+	t.Helper()
+
+	return prepareBlankTapeAt(t, 2)
+}
+
+// prepareBlankTapeAt mirrors the integration suite's setup: it confirms drive 0 is
+// empty, picks the storage slot at slotIndex, loads and blanks that tape, and
+// unloads it, leaving a genuinely blank tape for the run to load. It registers a
+// cleanup that returns the library to "drive 0 empty, tape in its slot" so a
+// repeat run (and the sibling tests) find the expected starting state. Distinct
+// slots let the FullRun and k8s-source tests each write their own tape without
+// colliding on the shared mhvtl library.
+func prepareBlankTapeAt(t *testing.T, slotIndex int) tapeFixture {
 	t.Helper()
 
 	changer := tape.NewChanger(testutil.ChangerDev(t))
@@ -42,12 +52,10 @@ func prepareBlankTape(t *testing.T) tapeFixture {
 	require.GreaterOrEqual(t, len(inv.Drives), 1, "at least one drive required")
 	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
 
-	// Slot index 2 matches the sibling integration whole-run test's convention so
-	// the two never collide on a shared mhvtl library.
-	require.GreaterOrEqual(t, len(inv.Slots), 3, "at least three storage slots required")
-	slot := inv.Slots[2]
-	require.True(t, slot.Full, "slot 2 must hold a tape")
-	require.NotEmpty(t, slot.Barcode, "slot 2 tape must have a barcode")
+	require.Greater(t, len(inv.Slots), slotIndex, "storage slot %d required", slotIndex)
+	slot := inv.Slots[slotIndex]
+	require.Truef(t, slot.Full, "slot %d must hold a tape", slotIndex)
+	require.NotEmptyf(t, slot.Barcode, "slot %d tape must have a barcode", slotIndex)
 
 	stDev := testutil.Drive0Dev(t)
 	sgDev := testutil.Drive0SgDev(t)
