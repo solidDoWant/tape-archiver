@@ -355,7 +355,13 @@ type EjectInput struct {
 	WrittenTapes []WrittenTape
 }
 
-// EjectActivities hosts the Eject activity.
+// IOStatusInput is the payload for the IOStationStatus activity.
+type IOStatusInput struct {
+	// Changer is the changer device node (e.g. /dev/sch0).
+	Changer string
+}
+
+// EjectActivities hosts the Eject and IOStationStatus activities.
 type EjectActivities struct{}
 
 // newEjectActivities returns the Eject activities.
@@ -366,46 +372,91 @@ func newEjectActivities() *EjectActivities { return &EjectActivities{} }
 // reconciles, handling the case where a tape was already unloaded or already
 // transferred before this activity ran.
 //
+// When the I/O station has no free slot, Eject does not fail: it still unloads
+// each tape from its drive to its source storage slot (so no tape is ever left in
+// a drive) and returns the tapes it could not export in EjectResult.Remaining, so
+// the workflow can pause for the operator and retry. Passing that Remaining set
+// back on a later call resumes the export into the freed slots.
+//
 // MaximumAttempts is 1: tape moves are physical and non-idempotent.
-func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) error {
+func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectResult, error) {
 	if len(input.WrittenTapes) == 0 {
-		return nil
+		return EjectResult{}, nil
 	}
 
 	changer := tape.NewChanger(input.Changer)
 
 	inv, err := changer.Inventory(ctx)
 	if err != nil {
-		return fmt.Errorf("inventory for eject: %w", err)
+		return EjectResult{}, fmt.Errorf("inventory for eject: %w", err)
 	}
+
+	var remaining []WrittenTape
 
 	for i, wt := range input.WrittenTapes {
-		if err := ejectTape(ctx, changer, inv, wt); err != nil {
-			return fmt.Errorf("eject tape %s (drive %d, index %d): %w", wt.Barcode, wt.DriveIndex, i, err)
-		}
-
-		// Re-read inventory after each move so the next iteration sees accurate state.
-		if i < len(input.WrittenTapes)-1 {
+		// Re-read inventory before each move (after the first) so this iteration
+		// sees the freed drive and consumed I/O slot from the previous move.
+		if i > 0 {
 			inv, err = changer.Inventory(ctx)
 			if err != nil {
-				return fmt.Errorf("inventory after ejecting tape %s: %w", wt.Barcode, err)
+				return EjectResult{}, fmt.Errorf("inventory before ejecting tape %s: %w", wt.Barcode, err)
 			}
+		}
+
+		exported, err := ejectTape(ctx, changer, inv, wt)
+		if err != nil {
+			return EjectResult{}, fmt.Errorf("eject tape %s (drive %d, index %d): %w", wt.Barcode, wt.DriveIndex, i, err)
+		}
+
+		if !exported {
+			remaining = append(remaining, wt)
 		}
 	}
 
-	return nil
+	// Re-read once more to report the tapes now resting in the I/O station.
+	inv, err = changer.Inventory(ctx)
+	if err != nil {
+		return EjectResult{}, fmt.Errorf("inventory after eject: %w", err)
+	}
+
+	return EjectResult{
+		InIOStation: barcodesInIOStation(inv),
+		Remaining:   remaining,
+	}, nil
 }
 
-// ejectTape ejects a single written tape to an I/O station slot. It reconciles
-// the live drive state:
-//   - Drive loaded and SourceSlot matches → unload to SourceSlot, transfer to I/O.
-//   - Tape already in SourceSlot (drive empty) → transfer to I/O.
-//   - Tape already in an I/O slot → no-op.
-func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, wt WrittenTape) error {
+// IOStationStatus reads the changer and returns a read-only snapshot of the
+// import/export station (free slot count and access state). The workflow polls it
+// while paused in Eject to decide whether the operator has cleared and closed the
+// station so the run can resume automatically (SPEC §4.3 phase 8). It moves no
+// media, so it carries the default retry policy — a transient read failure is
+// safe to retry.
+func (a *EjectActivities) IOStationStatus(ctx context.Context, input IOStatusInput) (IOStatus, error) {
+	changer := tape.NewChanger(input.Changer)
+
+	inv, err := changer.Inventory(ctx)
+	if err != nil {
+		return IOStatus{}, fmt.Errorf("inventory for I/O station status: %w", err)
+	}
+
+	return ioStatus(inv), nil
+}
+
+// ejectTape ejects a single written tape to an I/O station slot and reports
+// whether it reached one. It reconciles the live drive state:
+//   - Tape already in an I/O slot → exported, no move.
+//   - Drive loaded with this tape → unload to SourceSlot, then transfer if a slot
+//     is free.
+//   - Tape already in SourceSlot (drive empty) → transfer if a slot is free.
+//
+// The unload always precedes the I/O-slot check, so a tape is moved out of its
+// drive even when the station is full — it then waits in its source storage slot
+// and is reported as not exported (returns false) for the workflow to retry.
+func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, wt WrittenTape) (bool, error) {
 	// Check if already in an I/O slot.
 	for _, io := range inv.IOSlots {
 		if io.Full && io.Barcode == wt.Barcode {
-			return nil
+			return true, nil
 		}
 	}
 
@@ -414,35 +465,128 @@ func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, w
 		drive := inv.Drives[wt.DriveIndex]
 		if drive.Loaded && drive.Barcode == wt.Barcode {
 			if err := changer.Unload(ctx, wt.SourceSlot, drive.Address); err != nil {
-				return fmt.Errorf("unload tape %s from drive %d to slot %d: %w",
+				return false, fmt.Errorf("unload tape %s from drive %d to slot %d: %w",
 					wt.Barcode, wt.DriveIndex, wt.SourceSlot, err)
 			}
 		}
 	}
 
-	// Transfer from source slot to a free I/O slot.
+	// Transfer from source slot to a free I/O slot when one is available;
+	// otherwise leave the tape in its source storage slot for a later retry.
 	ioSlot := findFreeIOSlot(inv)
 	if ioSlot == -1 {
-		return fmt.Errorf("no free I/O slot to transfer tape %s", wt.Barcode)
+		return false, nil
 	}
 
 	if err := changer.Transfer(ctx, wt.SourceSlot, ioSlot); err != nil {
-		return fmt.Errorf("transfer tape %s from slot %d to I/O slot %d: %w",
+		return false, fmt.Errorf("transfer tape %s from slot %d to I/O slot %d: %w",
 			wt.Barcode, wt.SourceSlot, ioSlot, err)
 	}
 
-	return nil
+	return true, nil
 }
+
+// barcodesInIOStation returns the barcodes of every tape currently occupying an
+// I/O-station slot — the tapes ready for the operator to remove.
+func barcodesInIOStation(inv tape.Inventory) []tape.Barcode {
+	var inIO []tape.Barcode
+
+	for _, io := range inv.IOSlots {
+		if io.Full {
+			inIO = append(inIO, io.Barcode)
+		}
+	}
+
+	return inIO
+}
+
+// ioStatus derives the import/export station snapshot the paused Eject phase polls
+// from a live inventory: the free-slot count and, when the library reports it, the
+// access state (StationClosed is true only when every I/O slot is accessible to
+// the changer robot — the operator has closed the station).
+func ioStatus(inv tape.Inventory) IOStatus {
+	free := 0
+	closed := true
+
+	for _, io := range inv.IOSlots {
+		if !io.Full {
+			free++
+		}
+
+		if !io.Accessible {
+			closed = false
+		}
+	}
+
+	return IOStatus{
+		FreeSlots:      free,
+		AccessReported: inv.IOAccessReported,
+		StationClosed:  inv.IOAccessReported && closed,
+	}
+}
+
+const (
+	// ioStationPollInterval is how often a paused Eject phase re-reads the I/O
+	// station to detect (on libraries that report access state) that the operator
+	// has cleared and closed it, so the run resumes without an explicit signal.
+	ioStationPollInterval = 30 * time.Second
+	// ioStatusTimeout bounds one IOStationStatus poll — a single mtx status read.
+	ioStatusTimeout = 30 * time.Second
+	// ioStatusMaxAttempts retries a transient poll read a few times before giving
+	// up; a persistently unreadable changer during the pause fails the run.
+	ioStatusMaxAttempts = 3
+)
 
 // ejectPhase orchestrates the Eject phase (SPEC §4.3 phase 8) for one drive-set:
 // it dispatches the Eject activity on the data worker to transfer this set's
-// written tapes from their drives to I/O station slots for physical removal. This
-// also frees the drives for the next drive-set. runTapePath calls it once per set.
+// written tapes from their drives to I/O station slots for physical removal, and
+// frees the drives for the next drive-set. runTapePath calls it once per set.
+//
+// When the I/O station fills before every tape is exported, the phase becomes
+// operator-in-the-loop: it notifies the operator which tapes to remove, then waits
+// — resuming automatically once the library reports the station cleared and closed
+// (waitForIOCleared), or on the explicit OperatorEjectClearedSignal — and retries
+// the remaining tapes into the freed slots. If the operator never responds within
+// the configured wait, it fails the run; every written tape is by then in an I/O
+// or storage slot and none is in a drive.
 func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) error {
 	if len(written) == 0 {
 		return nil
 	}
 
+	remaining := written
+
+	for {
+		result, err := runEject(ctx, cfg, remaining)
+		if err != nil {
+			return err
+		}
+
+		remaining = result.Remaining
+		if len(remaining) == 0 {
+			return nil
+		}
+
+		// The I/O station is full with tapes still to export. Alert the operator
+		// which tapes to remove, then pause until the station is cleared.
+		notifyOperatorPause(ctx, result.InIOStation, len(remaining))
+
+		resumed, err := waitForIOCleared(ctx, cfg)
+		if err != nil {
+			return err
+		}
+
+		if !resumed {
+			return fmt.Errorf("operator did not clear the import/export station within %s; "+
+				"%d written tape(s) remain in storage slots awaiting export (none is in a drive)",
+				cfg.Library.EffectiveIOWaitTimeout(), len(remaining))
+		}
+	}
+}
+
+// runEject dispatches one Eject activity call on the data worker and returns its
+// result. MaximumAttempts is 1: tape moves are physical and non-idempotent.
+func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (EjectResult, error) {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: ejectTimeout,
@@ -451,10 +595,120 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) 
 
 	input := EjectInput{
 		Changer:      cfg.Library.Changer,
-		WrittenTapes: written,
+		WrittenTapes: tapes,
 	}
 
 	var acts *EjectActivities
 
-	return workflow.ExecuteActivity(dataCtx, acts.Eject, input).Get(dataCtx, nil)
+	var result EjectResult
+	if err := workflow.ExecuteActivity(dataCtx, acts.Eject, input).Get(dataCtx, &result); err != nil {
+		return EjectResult{}, err
+	}
+
+	return result, nil
+}
+
+// waitForIOCleared pauses the Eject phase until the operator has cleared the I/O
+// station, returning true to resume and false when the configured wait elapses
+// first. It selects over three futures: the OperatorEjectClearedSignal (explicit
+// operator resume), an overall wait-timeout timer, and a repeating poll timer. On
+// each poll it reads the I/O station; libraries that report access state resume
+// automatically once the station is closed with a free slot (IOStatus.CanAutoResume),
+// while libraries that do not report it wait for the signal or the timeout.
+func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
+	signalCh := workflow.GetSignalChannel(ctx, OperatorEjectClearedSignal)
+	timeoutTimer := workflow.NewTimer(ctx, cfg.Library.EffectiveIOWaitTimeout())
+
+	for {
+		var signalled, timedOut, polled bool
+
+		selector := workflow.NewSelector(ctx)
+		selector.AddReceive(signalCh, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, nil)
+
+			signalled = true
+		})
+		selector.AddFuture(timeoutTimer, func(workflow.Future) {
+			timedOut = true
+		})
+		selector.AddFuture(workflow.NewTimer(ctx, ioStationPollInterval), func(workflow.Future) {
+			polled = true
+		})
+
+		selector.Select(ctx)
+
+		switch {
+		case signalled:
+			return true, nil
+		case timedOut:
+			return false, nil
+		case polled:
+			status, err := runIOStationStatus(ctx, cfg)
+			if err != nil {
+				return false, err
+			}
+
+			if status.CanAutoResume() {
+				return true, nil
+			}
+		}
+	}
+}
+
+// runIOStationStatus dispatches one IOStationStatus poll on the data worker. It
+// moves no media and is safe to retry, so it carries a small retry budget rather
+// than MaximumAttempts: 1.
+func runIOStationStatus(ctx workflow.Context, cfg config.Config) (IOStatus, error) {
+	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: ioStatusTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: ioStatusMaxAttempts},
+	})
+
+	input := IOStatusInput{Changer: cfg.Library.Changer}
+
+	var acts *EjectActivities
+
+	var status IOStatus
+	if err := workflow.ExecuteActivity(dataCtx, acts.IOStationStatus, input).Get(dataCtx, &status); err != nil {
+		return IOStatus{}, err
+	}
+
+	return status, nil
+}
+
+// notifyOperatorPause alerts the operator that the Eject phase paused because the
+// I/O station filled (SPEC §4.3 phase 8, §11). It runs the operational alert on
+// the control worker and is best-effort: a delivery failure is logged, never
+// propagated, so a webhook outage does not abort a run that is only waiting.
+func notifyOperatorPause(ctx workflow.Context, readyForRemoval []tape.Barcode, awaiting int) {
+	input := OperatorPauseInput{
+		RunID:           workflow.GetInfo(ctx).WorkflowExecution.ID,
+		ReadyForRemoval: barcodeStrings(readyForRemoval),
+		Awaiting:        awaiting,
+	}
+
+	actx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           TaskQueue,
+		StartToCloseTimeout: operatorPauseAlertTimeout,
+	})
+
+	var acts *FailureActivities
+	if err := workflow.ExecuteActivity(actx, acts.NotifyOperatorPause, input).Get(actx, nil); err != nil {
+		workflow.GetLogger(ctx).Error("failed to deliver operator-pause alert",
+			"awaiting", awaiting,
+			"error", err,
+		)
+	}
+}
+
+// barcodeStrings converts a slice of tape barcodes to plain strings for an
+// activity payload and operator-facing message.
+func barcodeStrings(barcodes []tape.Barcode) []string {
+	out := make([]string, len(barcodes))
+	for i, barcode := range barcodes {
+		out[i] = string(barcode)
+	}
+
+	return out
 }

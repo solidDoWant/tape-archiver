@@ -134,6 +134,29 @@ func TestParseStatusArgs(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestParseResumeArgs(t *testing.T) {
+	id, err := parseResumeArgs([]string{"backup-123"})
+	require.NoError(t, err)
+	assert.Equal(t, "backup-123", id)
+
+	_, err = parseResumeArgs(nil)
+	require.Error(t, err)
+
+	_, err = parseResumeArgs([]string{"a", "b"})
+	require.Error(t, err)
+}
+
+// TestResumeRunMissingTemporalAddress exercises the resume path with a workflow
+// ID but no TEMPORAL_ADDRESS: it must fail with a descriptive error and never
+// attempt a connection.
+func TestResumeRunMissingTemporalAddress(t *testing.T) {
+	withGetenv(t, func(string) string { return "" })
+
+	err := resumeRun(context.Background(), []string{"backup-123"}, &bytes.Buffer{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
+}
+
 func TestFormatStatus(t *testing.T) {
 	tests := []struct {
 		name   string

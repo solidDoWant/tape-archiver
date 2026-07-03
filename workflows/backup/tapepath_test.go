@@ -185,7 +185,7 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 	ejectCalls := 0
 
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
-		func(_ context.Context, input EjectInput) error {
+		func(_ context.Context, input EjectInput) (EjectResult, error) {
 			mu.Lock()
 			ejectCalls++
 
@@ -194,7 +194,8 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 			}
 			mu.Unlock()
 
-			return nil
+			// All tapes exported (no Remaining) → no operator pause.
+			return EjectResult{}, nil
 		})
 
 	plan, staged, par2 := seededPlan(tapes, copies)
@@ -285,12 +286,12 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	ejectCalls := 0
 
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
-		func(_ context.Context, _ EjectInput) error {
+		func(_ context.Context, _ EjectInput) (EjectResult, error) {
 			mu.Lock()
 			ejectCalls++
 			mu.Unlock()
 
-			return nil
+			return EjectResult{}, nil
 		})
 
 	plan, staged, par2 := seededPlan(tapes, copies)

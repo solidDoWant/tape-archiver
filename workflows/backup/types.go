@@ -249,6 +249,43 @@ type WrittenTape struct {
 	WriteHealth WriteHealth
 }
 
+// EjectResult reports the outcome of one Eject activity call (SPEC §4.3 phase 8).
+// The Eject activity exports as many tapes as the free I/O-station slots hold and,
+// rather than failing when the station fills, returns the tapes it could not yet
+// export so the workflow can pause for the operator and resume.
+type EjectResult struct {
+	// InIOStation lists the barcodes of this run's written tapes currently sitting
+	// in I/O-station slots — the tapes ready for the operator to remove. It is the
+	// full set across every Eject call so far, not just this call's transfers.
+	InIOStation []tape.Barcode
+	// Remaining lists the written tapes not yet exported. Each has been unloaded
+	// from its drive to its source storage slot (so no tape is left in a drive),
+	// and awaits a free I/O slot. Empty means the Eject phase is complete.
+	Remaining []WrittenTape
+}
+
+// IOStatus is a read-only snapshot of the import/export station used to decide
+// whether a paused Eject phase can resume automatically (SPEC §4.3 phase 8).
+type IOStatus struct {
+	// FreeSlots is the number of empty I/O-station slots.
+	FreeSlots int
+	// AccessReported is true when the library annotates the import/export ACCESS
+	// bit (tape.Inventory.IOAccessReported). When false the door cycle cannot be
+	// detected and the workflow waits for the explicit operator signal instead.
+	AccessReported bool
+	// StationClosed is true when every I/O-station slot reports accessible to the
+	// changer robot — the operator has closed the station. It is only meaningful
+	// when AccessReported is true.
+	StationClosed bool
+}
+
+// CanAutoResume reports whether a paused Eject phase may resume without an
+// explicit operator signal: the library reports access state, the station is
+// closed, and at least one I/O slot is free (SPEC §4.3 phase 8 AC2).
+func (s IOStatus) CanAutoResume() bool {
+	return s.AccessReported && s.StationClosed && s.FreeSlots > 0
+}
+
 // Result is the backup workflow's success return value. For now it reports the
 // phases that ran to completion, in order; later sub-issues enrich it with a
 // run summary (tapes written, sizes, checksums) for the report.

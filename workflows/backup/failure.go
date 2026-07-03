@@ -15,6 +15,10 @@ import (
 // unreachable webhook must not hold the run open.
 const failureAlertTimeout = 30 * time.Second
 
+// operatorPauseAlertTimeout bounds the operator-pause alert activity. Like the
+// failure alert it is a single best-effort webhook POST.
+const operatorPauseAlertTimeout = 30 * time.Second
+
 // FailureInput is the payload for the failure-alert activity. It carries exactly
 // what SPEC §11 requires in the alert: the run id, the failing phase, and the
 // error summary. Partial context (e.g. tapes already written and needing manual
@@ -46,6 +50,33 @@ type FailureActivities struct {
 // webhook URL is empty the client is a no-op and nothing is sent.
 func (a *FailureActivities) NotifyFailure(ctx context.Context, input FailureInput) error {
 	webhook.New(a.WebhookURL).SendFailure(ctx, input.RunID, input.Phase, errors.New(input.ErrorSummary))
+
+	return nil
+}
+
+// OperatorPauseInput is the payload for the operator-pause alert activity. It
+// carries what an operator needs to act on the Eject-phase pause (SPEC §4.3
+// phase 8, §11): the run id, the tapes now sitting in the import/export station
+// ready for removal, and how many written tapes still await a free slot.
+type OperatorPauseInput struct {
+	// RunID is the workflow (run) id, so an operator can correlate the alert with
+	// the run.
+	RunID string
+	// ReadyForRemoval lists the barcodes of the tapes currently in I/O-station
+	// slots — the tapes the operator should remove to free slots.
+	ReadyForRemoval []string
+	// Awaiting is the count of written tapes still to be exported once slots free.
+	Awaiting int
+}
+
+// NotifyOperatorPause posts the operator-in-the-loop pause alert when the Eject
+// phase fills the import/export station (SPEC §4.3 phase 8, §11). It uses the
+// same operational webhook as NotifyFailure and is best-effort: a delivery
+// failure is logged by pkg/webhook, not returned, so a webhook outage never
+// aborts a run that is only waiting for the operator. When the webhook URL is
+// empty the client is a no-op and nothing is sent.
+func (a *FailureActivities) NotifyOperatorPause(ctx context.Context, input OperatorPauseInput) error {
+	webhook.New(a.WebhookURL).SendOperatorPause(ctx, input.RunID, input.ReadyForRemoval, input.Awaiting)
 
 	return nil
 }

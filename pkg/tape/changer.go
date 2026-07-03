@@ -122,9 +122,13 @@ func parseInventory(output string) (Inventory, error) {
 			inv.Drives = append(inv.Drives, el)
 
 		case strings.HasPrefix(line, "Storage Element ") && strings.Contains(line, "IMPORT/EXPORT"):
-			el, err := parseIOElement(line)
+			el, reported, err := parseIOElement(line)
 			if err != nil {
 				return Inventory{}, err
+			}
+
+			if reported {
+				inv.IOAccessReported = true
 			}
 
 			inv.IOSlots = append(inv.IOSlots, el)
@@ -223,23 +227,29 @@ func parseStorageElement(line string) (StorageElement, error) {
 //
 //	Storage Element 48 IMPORT/EXPORT:Empty
 //	Storage Element 49 IMPORT/EXPORT:Full :VolumeTag=TA0048L6
-func parseIOElement(line string) (IOElement, error) {
+//
+// A library that surfaces the import/export ACCESS bit annotates the status with
+// an "Access" field (see parseAccess); when present, the second return value is
+// true and el.Accessible carries the bit. Stock mtx (and the mhvtl virtual
+// library) omit it, so most output yields reported=false and the Eject phase
+// falls back to the explicit operator signal (SPEC §4.3 phase 8).
+func parseIOElement(line string) (IOElement, bool, error) {
 	rest := strings.TrimPrefix(line, "Storage Element ")
 
 	// Address is the number before the space.
 	addrStr, after, found := strings.Cut(rest, " ")
 	if !found {
-		return IOElement{}, fmt.Errorf("unexpected IO element line: %q", line)
+		return IOElement{}, false, fmt.Errorf("unexpected IO element line: %q", line)
 	}
 
 	addr, err := strconv.Atoi(strings.TrimSpace(addrStr))
 	if err != nil {
-		return IOElement{}, fmt.Errorf("parse IO address %q: %w", addrStr, err)
+		return IOElement{}, false, fmt.Errorf("parse IO address %q: %w", addrStr, err)
 	}
 
 	_, status, found := strings.Cut(after, ":")
 	if !found {
-		return IOElement{}, fmt.Errorf("unexpected IO element line (no status): %q", line)
+		return IOElement{}, false, fmt.Errorf("unexpected IO element line (no status): %q", line)
 	}
 
 	el := IOElement{Address: addr}
@@ -249,7 +259,45 @@ func parseIOElement(line string) (IOElement, error) {
 		el.Barcode = parseVolumeTag(status)
 	}
 
-	return el, nil
+	accessible, reported := parseAccess(status)
+	el.Accessible = accessible
+
+	return el, reported, nil
+}
+
+// parseAccess extracts the import/export ACCESS bit from a status fragment that
+// contains an "Access" field, mirroring parseVolumeTag's colon-delimited,
+// spaces-optional-around-"=" tolerance. It reports whether the field was present
+// (reported) and, when present, whether the element is accessible to the changer
+// robot — the door is closed. Recognized truthy values are 1/yes/true/closed and
+// falsy values 0/no/false/open (case-insensitive); an unrecognized value counts
+// as reported-but-not-accessible so a partially understood annotation never
+// resumes a paused run prematurely.
+//
+// Stock mtx does not emit this field. It is the contract for libraries (or a
+// changer wrapper) whose tooling does surface the SCSI import/export ACCESS bit;
+// when absent, reported is false and the Eject phase uses the operator signal.
+func parseAccess(s string) (accessible, reported bool) {
+	for field := range strings.SplitSeq(s, ":") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(field), "Access")
+		if !ok {
+			continue
+		}
+
+		_, value, found := strings.Cut(rest, "=")
+		if !found {
+			continue
+		}
+
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "yes", "true", "closed":
+			return true, true
+		default:
+			return false, true
+		}
+	}
+
+	return false, false
 }
 
 // parseVolumeTag extracts the primary barcode from a status fragment containing

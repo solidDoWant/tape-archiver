@@ -129,6 +129,9 @@
         },
         "tapeCapacityBytes": {
           "type": "integer"
+        },
+        "ioWaitTimeoutSeconds": {
+          "type": "integer"
         }
       },
       "additionalProperties": false,

@@ -1,5 +1,14 @@
 package config
 
+import "time"
+
+// DefaultIOWaitTimeout is how long the Eject phase waits for an operator to clear
+// the import/export station when it fills, before the run fails (SPEC §4.3 phase
+// 8), when Library.IOWaitTimeoutSeconds is unset. It bounds the operator-in-the-
+// loop pause so an unattended run always reaches a defined end state rather than
+// waiting indefinitely.
+const DefaultIOWaitTimeout = 4 * time.Hour
+
 // DefaultFeasibilityOverhead is the multiplier applied to a source's
 // logicalreferenced size in the Resolve feasibility pre-check (SPEC.md §4.3
 // phase 1, §16) when Config.FeasibilityOverhead is unset. It covers tar/zstd/age
@@ -68,6 +77,23 @@ type Library struct {
 	// capacity the Pack phase bin-packs into; runs plan against native capacity
 	// with LTO hardware compression disabled (SPEC §4.3).
 	TapeCapacityBytes int64 `json:"tapeCapacityBytes"`
+	// IOWaitTimeoutSeconds bounds how long the Eject phase waits for the operator
+	// to clear the import/export station when it fills before more tapes can be
+	// exported (SPEC §4.3 phase 8). When unset, DefaultIOWaitTimeout applies. It
+	// must be positive when set: the wait is always bounded so an unattended run
+	// reaches a defined end state (every written tape in an I/O or storage slot,
+	// none in a drive) rather than pausing forever.
+	IOWaitTimeoutSeconds *int `json:"ioWaitTimeoutSeconds,omitempty"`
+}
+
+// EffectiveIOWaitTimeout returns the configured operator I/O-station wait, or
+// DefaultIOWaitTimeout when Library.IOWaitTimeoutSeconds is unset.
+func (l Library) EffectiveIOWaitTimeout() time.Duration {
+	if l.IOWaitTimeoutSeconds != nil {
+		return time.Duration(*l.IOWaitTimeoutSeconds) * time.Second
+	}
+
+	return DefaultIOWaitTimeout
 }
 
 // Redundancy specifies the PAR2 redundancy policy.

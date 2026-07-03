@@ -122,7 +122,11 @@ are visible. The worker stages into a plain subdirectory of an existing dataset 
 - **Tape inventory is resolved live, per run.** At startup the tool reads the library
   with `mtx status`; the config declares which storage elements hold usable blank
   tapes. Written tapes are exported to the I/O station at the end of the run; the
-  operator reloads blanks before the next run.
+  operator reloads blanks before the next run. Automated reloading of fresh blank
+  tapes into storage slots *between* runs is a non-goal — that is the operator's job.
+  Clearing the I/O station *within* a run whose written tapes exceed I/O-slot capacity
+  is not: the Eject phase pauses and prompts the operator to remove the exported tapes,
+  then resumes (§4.3 phase 8).
 
 ### 4.3 Backup pipeline (workflow phases)
 
@@ -163,10 +167,10 @@ staged and verified on disk** — eliminating any computation during the write w
    time bounds the tapes loaded and read concurrently to the drive count, protecting the
    write-rate floor (§14). A drive-set groups adjacent (logical tape, copy) pairs, so the
    copies of one logical tape tend to share a set and read a single staged tree. A failure
-   in any set fails the run for that set; no later set is loaded. (Reloading blanks and
-   clearing I/O slots between sets when written tapes exceed I/O capacity is an
-   operator-in-the-loop concern tracked separately; a run assumes sufficient free storage
-   and I/O slots.)
+   in any set fails the run for that set; no later set is loaded. (Reloading fresh blank
+   tapes into storage slots between runs remains a non-goal, §4.2. Clearing the I/O
+   station *within* a run when written tapes exceed I/O capacity is handled by the
+   operator-in-the-loop Eject pause below.)
 6. **Load.** Move the drive-set's blank tapes from their storage slots into the drives
    (`mtx`), and confirm each loaded tape is blank/empty before formatting — a run must
    never silently overwrite existing data.
@@ -178,7 +182,17 @@ staged and verified on disk** — eliminating any computation during the write w
    during the write — see §14. A per-tape checksum/manifest file is written last; the
    LTFS index is read back after unmount and captured for the ISO.
 8. **Eject.** Unmount/unload each written tape in the set and transfer it to an I/O
-   station slot for physical removal, freeing its drive for the next set.
+   station slot for physical removal, freeing its drive for the next set. Each tape is
+   unloaded from its drive to its source storage slot *before* the I/O transfer, so a
+   tape is never stranded in a drive. When a run writes more tapes than the library has
+   I/O slots, the station fills: the phase then becomes **operator-in-the-loop** — it
+   alerts the operator which tapes to remove (§11) and pauses, leaving every written tape
+   in an I/O or storage slot. It resumes automatically on libraries that report the
+   import/export ACCESS bit (once the station is cleared and closed), or on the explicit
+   `operatorEjectCleared` signal (`tapectl resume <run-id>`) otherwise, then exports the
+   remaining tapes into the freed slots. If the operator does not respond within
+   `library.ioWaitTimeoutSeconds` (default 4h), the run fails in that defined state and is
+   reported.
 9. **Report.** Build the PDF report (§9) and the recovery ISO (§10).
 10. **Deliver.** Send the report and ISO to Discord via webhook (§11).
 
@@ -349,6 +363,14 @@ This is implemented with Temporal's standard on-failure pattern: a deferred hand
 the backup workflow runs the alert activity on a `workflow.NewDisconnectedContext` so it
 fires even when the workflow is cancelled. The alert uses the same `pkg/webhook` client
 as success delivery.
+
+**Operator-pause alert (operational, same failure webhook).** When the Eject phase fills
+the I/O station and pauses for the operator (§4.3 phase 8), it posts a message on the same
+`DISCORD_FAILURE_WEBHOOK_URL` naming the run, the tapes now in the I/O station ready for
+removal, and how many still await a free slot. Like the failure alert it is best-effort —
+a delivery failure is logged, never raised — so a webhook outage never aborts a run that
+is only waiting for the operator. The operator clears the station and, on libraries that
+do not report the import/export access bit, runs `tapectl resume <run-id>` to continue.
 
 ## 12. Dry-run and the virtual library
 

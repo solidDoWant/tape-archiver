@@ -38,6 +38,14 @@ type IOElement struct {
 	Barcode Barcode
 	// Full is true when a tape is in the slot.
 	Full bool
+	// Accessible reflects the SCSI READ ELEMENT STATUS import/export ACCESS bit
+	// for this slot: true when the changer robot can reach the element (the I/O
+	// station door is closed), false when the operator has the station open. It is
+	// only meaningful when the library annotates access state in mtx status output
+	// (Inventory.IOAccessReported); libraries that do not report it leave this
+	// false. The operator-in-the-loop Eject phase uses it to auto-resume once the
+	// operator has cleared and closed the station (SPEC §4.3 phase 8).
+	Accessible bool
 }
 
 // Inventory is the result of an mtx status query.
@@ -45,6 +53,13 @@ type Inventory struct {
 	Drives  []DriveElement
 	Slots   []StorageElement
 	IOSlots []IOElement
+	// IOAccessReported is true when the library annotates the import/export
+	// ACCESS bit in mtx status output (see IOElement.Accessible). It is
+	// library-dependent: most libraries — including the mhvtl virtual library used
+	// for testing — do not surface it, in which case the Eject phase cannot detect
+	// the station door cycle automatically and falls back to an explicit operator
+	// signal (SPEC §4.3 phase 8).
+	IOAccessReported bool
 }
 
 // TapeAlertFlag is a single TapeAlert indicator from log page 0x2e.

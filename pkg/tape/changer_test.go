@@ -9,6 +9,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParseAccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		status         string
+		wantAccessible bool
+		wantReported   bool
+	}{
+		{name: "absent", status: "Full :VolumeTag=TA0001L6", wantReported: false},
+		{name: "access=1 closed", status: "Empty:Access=1", wantAccessible: true, wantReported: true},
+		{name: "access=0 open", status: "Empty:Access=0", wantAccessible: false, wantReported: true},
+		{name: "spaces around equals", status: "Empty:Access = yes", wantAccessible: true, wantReported: true},
+		{name: "closed keyword", status: "Full :VolumeTag=TA0001L6:Access=closed", wantAccessible: true, wantReported: true},
+		{name: "open keyword", status: "Empty:Access=open", wantAccessible: false, wantReported: true},
+		{name: "unrecognized value is reported but not accessible", status: "Empty:Access=maybe", wantAccessible: false, wantReported: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			accessible, reported := parseAccess(tc.status)
+			assert.Equal(t, tc.wantReported, reported, "reported")
+			assert.Equal(t, tc.wantAccessible, accessible, "accessible")
+		})
+	}
+}
+
 // allStorageSlots returns the expected StorageElement slice for the default
 // mhvtl fixture where slots 1–47 are all loaded with barcodes TA0001L6–TA0047L6.
 func allStorageSlots() []StorageElement {
@@ -77,12 +106,13 @@ func TestParseInventory(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		fixture    string
-		wantDrives []DriveElement
-		wantSlots  []StorageElement
-		wantIO     []IOElement
-		wantErr    require.ErrorAssertionFunc
+		name                 string
+		fixture              string
+		wantDrives           []DriveElement
+		wantSlots            []StorageElement
+		wantIO               []IOElement
+		wantIOAccessReported bool
+		wantErr              require.ErrorAssertionFunc
 	}{
 		{
 			name:    "all drives empty, all slots loaded",
@@ -127,6 +157,21 @@ func TestParseInventory(t *testing.T) {
 			},
 			wantErr: require.NoError,
 		},
+		{
+			name:    "IO station reports the access bit",
+			fixture: "testdata/mtx_status_io_access.txt",
+			wantDrives: []DriveElement{
+				{Address: 0},
+				{Address: 1},
+			},
+			wantIO: []IOElement{
+				{Address: 48, Full: true, Barcode: "TA0001L6", Accessible: true},
+				{Address: 49, Accessible: false},
+				{Address: 50, Accessible: true},
+			},
+			wantIOAccessReported: true,
+			wantErr:              require.NoError,
+		},
 	}
 
 	for _, tc := range tests {
@@ -145,6 +190,7 @@ func TestParseInventory(t *testing.T) {
 
 			assert.Equal(t, tc.wantDrives, inv.Drives, "drives")
 			assert.Equal(t, tc.wantIO, inv.IOSlots, "IO slots")
+			assert.Equal(t, tc.wantIOAccessReported, inv.IOAccessReported, "IO access reported")
 
 			if tc.wantSlots != nil {
 				assert.Equal(t, tc.wantSlots, inv.Slots, "storage slots")

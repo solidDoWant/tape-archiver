@@ -188,6 +188,41 @@ func TestSendFailurePayload(t *testing.T) {
 	assert.Contains(t, payload.Content, assert.AnError.Error())
 }
 
+func TestSendOperatorPausePayload(t *testing.T) {
+	t.Parallel()
+
+	server, cap := newServer(t, http.StatusNoContent)
+
+	client := webhook.New(server.URL)
+	client.SendOperatorPause(t.Context(), "run-123", []string{"TA0001L6", "TA0002L6"}, 2)
+
+	require.Equal(t, int32(1), cap.hits.Load())
+	assert.Equal(t, "application/json", cap.contentType)
+
+	var payload struct {
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(cap.body, &payload))
+
+	assert.Contains(t, payload.Content, "run-123")
+	assert.Contains(t, payload.Content, "TA0001L6")
+	assert.Contains(t, payload.Content, "TA0002L6")
+	assert.Contains(t, payload.Content, "2 more")
+}
+
+func TestSendOperatorPauseEmptyURLNoOp(t *testing.T) {
+	t.Parallel()
+
+	server, cap := newServer(t, http.StatusNoContent)
+	_ = server
+
+	client := webhook.New("")
+	// Must not panic and must not contact any endpoint.
+	client.SendOperatorPause(t.Context(), "run-123", []string{"TA0001L6"}, 1)
+
+	assert.Equal(t, int32(0), cap.hits.Load())
+}
+
 func TestSendFailureEmptyURLNoOp(t *testing.T) {
 	t.Parallel()
 

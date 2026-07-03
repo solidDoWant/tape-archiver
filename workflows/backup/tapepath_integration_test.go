@@ -184,10 +184,12 @@ func TestTapePath(t *testing.T) {
 
 	// --- Phase: Eject ---------------------------------------------------------
 	ejectActs := newEjectActivities()
-	require.NoError(t, ejectActs.Eject(t.Context(), EjectInput{
+	ejectResult, err := ejectActs.Eject(t.Context(), EjectInput{
 		Changer:      testutil.ChangerDev(t),
 		WrittenTapes: []WrittenTape{written},
-	}), "Eject")
+	})
+	require.NoError(t, err, "Eject")
+	require.Empty(t, ejectResult.Remaining, "the single tape must be exported, not left remaining")
 
 	// Verify the tape landed in an I/O slot (AC3: transferred for physical removal).
 	finalInv, err := changer.Inventory(t.Context())
@@ -337,7 +339,7 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 		assert.Containsf(t, string(indexXML), "<ltfsindex", "set %d: captured index must be LTFS XML", setIndex)
 
 		// --- Eject the set (frees the drive for the next set) --------------------
-		require.NoErrorf(t, ejectActs.Eject(t.Context(), EjectInput{
+		ejectResult, err := ejectActs.Eject(t.Context(), EjectInput{
 			Changer: testutil.ChangerDev(t),
 			WrittenTapes: []WrittenTape{{
 				Barcode:    lt.Barcode,
@@ -347,7 +349,9 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 				SourceSlot: lt.SourceSlot,
 				IndexXML:   indexXML,
 			}},
-		}), "set %d: Eject", setIndex)
+		})
+		require.NoErrorf(t, err, "set %d: Eject", setIndex)
+		require.Emptyf(t, ejectResult.Remaining, "set %d: the set's tape must be exported", setIndex)
 
 		writtenBarcodes = append(writtenBarcodes, lt.Barcode)
 
@@ -355,25 +359,30 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 		postInv, err := changer.Inventory(t.Context())
 		require.NoErrorf(t, err, "set %d: inventory after eject", setIndex)
 		assert.Falsef(t, postInv.Drives[0].Loaded, "drive must be free after ejecting set %d", setIndex)
+
+		// The tape must have reached an I/O slot for physical removal.
+		ioAddr := -1
+
+		for _, io := range postInv.IOSlots {
+			if io.Full && io.Barcode == lt.Barcode {
+				ioAddr = io.Address
+
+				break
+			}
+		}
+
+		require.NotEqualf(t, -1, ioAddr, "set %d: tape %s must be in an I/O slot after Eject", setIndex, lt.Barcode)
+
+		// This run writes four physical tapes but the library has only three I/O
+		// slots, so the operator must remove exported tapes between sets to free
+		// slots — the operator-in-the-loop flow the Eject phase relies on (issue
+		// #67). Simulate that here by moving the exported tape from its I/O slot
+		// back to its home storage slot before the next set runs.
+		require.NoErrorf(t, changer.Transfer(t.Context(), ioAddr, lt.SourceSlot),
+			"set %d: clear the I/O slot for the next set", setIndex)
 	}
 
 	require.Len(t, writtenBarcodes, 4, "all four physical tapes must be written")
-
-	// Every written tape ended up in an I/O slot for physical removal.
-	finalInv, err := changer.Inventory(t.Context())
-	require.NoError(t, err, "final inventory")
-
-	ioBarcodes := make(map[tape.Barcode]bool)
-
-	for _, io := range finalInv.IOSlots {
-		if io.Full {
-			ioBarcodes[io.Barcode] = true
-		}
-	}
-
-	for _, barcode := range writtenBarcodes {
-		assert.Truef(t, ioBarcodes[barcode], "tape %s must be in an I/O slot after its set's Eject", barcode)
-	}
 }
 
 // returnAndBlank restores one written tape to blank in its home storage slot,

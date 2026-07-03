@@ -211,6 +211,23 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "library.tapeCapacityBytes",
 		},
 		{
+			name:    "library io wait timeout set positive",
+			mutate:  func(c *Config) { c.Library.IOWaitTimeoutSeconds = ptr(3600) },
+			wantErr: require.NoError,
+		},
+		{
+			name:        "library io wait timeout zero",
+			mutate:      func(c *Config) { c.Library.IOWaitTimeoutSeconds = ptr(0) },
+			wantErr:     require.Error,
+			errContains: "library.ioWaitTimeoutSeconds",
+		},
+		{
+			name:        "library io wait timeout negative",
+			mutate:      func(c *Config) { c.Library.IOWaitTimeoutSeconds = ptr(-1) },
+			wantErr:     require.Error,
+			errContains: "library.ioWaitTimeoutSeconds",
+		},
+		{
 			name:        "redundancy neither mode",
 			mutate:      func(c *Config) { c.Redundancy.TargetPercentage = nil },
 			wantErr:     require.Error,

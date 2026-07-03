@@ -23,6 +23,7 @@ import (
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -130,6 +131,136 @@ func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 
 	// Both physical copies were written across the two drive-sets, so the report
 	// lists both tape barcodes.
+	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
+	assert.Contains(t, report, runID, "report must name the run ID")
+
+	for _, barcode := range fixture.barcodes {
+		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
+	}
+}
+
+// TestBackupEndToEnd_IOStationOverflow drives the operator-in-the-loop Eject phase
+// through the full deployment (issue #67, and the user's request that the e2e
+// suite cover this path). It runs a backup whose copies outnumber the library's
+// I/O slots, so the Eject phase fills the station and pauses; the test then
+// simulates the operator removing one exported tape and resumes the run through
+// `tapectl resume`, asserting it completes and delivers a report naming every
+// tape. mhvtl does not report the import/export access bit, so this exercises the
+// signalled-resume path end to end.
+func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
+	h := requireHarness(t)
+
+	source := testutil.PoolDataset(t) + "@" + testutil.TestSnapshot(t)
+
+	changer := tape.NewChanger(testutil.ChangerDev(t))
+
+	inv, err := changer.Inventory(t.Context())
+	require.NoError(t, err, "inventory")
+	require.GreaterOrEqualf(t, len(inv.IOSlots), 2, "need at least two I/O slots to overflow")
+
+	ioSlots := len(inv.IOSlots)
+	for _, io := range inv.IOSlots {
+		require.Falsef(t, io.Full, "I/O slot %d must start empty", io.Address)
+	}
+
+	// One more physical copy than the library has I/O slots, so the final eject
+	// overflows the station and pauses. Slots 12+ avoid the FullRun (2),
+	// verify-fault (2), k8s-source (3), and MultipleDriveSets (8, 9) tests.
+	copies := ioSlots + 1
+
+	slotIndexes := make([]int, copies)
+	for i := range slotIndexes {
+		slotIndexes[i] = 12 + i
+	}
+
+	fixture := prepareBlankTapesAt(t, slotIndexes...)
+	temporalClient := dialTemporal(t)
+	identity, recipient := generateTestKeypair(t)
+
+	runID := fmt.Sprintf("e2e-backup-overflow-%d", time.Now().UnixNano())
+
+	ioWait := 600
+
+	cfg := config.Config{
+		Sources:    []config.Source{{ZFSPath: &config.ZFSPathSource{Name: source}}},
+		Copies:     copies,
+		Library:    fixture.library,
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10), SliceSizeBytes: 1 << 20},
+		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
+		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(runID)},
+	}
+	cfg.Library.IOWaitTimeoutSeconds = &ioWait
+	require.NoError(t, cfg.Validate(), "run config must be valid")
+	require.Greaterf(t, copies, ioSlots, "run must write more tapes (%d) than the %d I/O slots", copies, ioSlots)
+
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 20*time.Minute)
+	defer cancel()
+
+	h.submitRun(t, cfg, runID)
+	terminateOnCleanup(t, temporalClient, runID)
+
+	// The run exports ioSlots tapes into the station, then the next eject fills it
+	// and pauses with the last tape unloaded back to its source slot (drive empty).
+	lastBarcode := fixture.barcodes[copies-1]
+	lastSlot := fixture.library.BlankSlots[copies-1]
+
+	require.Eventuallyf(t, func() bool {
+		cur, invErr := changer.Inventory(runCtx)
+		if invErr != nil {
+			return false
+		}
+
+		full := 0
+
+		for _, io := range cur.IOSlots {
+			if io.Full {
+				full++
+			}
+		}
+
+		lastParked := false
+
+		for _, storage := range cur.Slots {
+			if storage.Address == lastSlot && storage.Full && storage.Barcode == lastBarcode {
+				lastParked = true
+			}
+		}
+
+		return full == ioSlots && lastParked
+	}, 15*time.Minute, 2*time.Second, "the Eject phase must fill the I/O station and pause")
+
+	// Simulate the operator removing one exported tape: move the first exported tape
+	// from its I/O slot back to its source storage slot, freeing an I/O slot.
+	cur, err := changer.Inventory(runCtx)
+	require.NoError(t, err, "inventory at pause")
+
+	firstBarcode := fixture.barcodes[0]
+	firstSlot := fixture.library.BlankSlots[0]
+	ioAddr := -1
+
+	for _, io := range cur.IOSlots {
+		if io.Full && io.Barcode == firstBarcode {
+			ioAddr = io.Address
+
+			break
+		}
+	}
+
+	require.NotEqualf(t, -1, ioAddr, "exported tape %s must be in an I/O slot at the pause", firstBarcode)
+	require.NoError(t, changer.Transfer(runCtx, ioAddr, firstSlot), "operator clears one I/O slot")
+
+	// Resume through the operator CLI; the run exports the final tape and completes.
+	h.resumeRun(t, runID)
+
+	var result backup.Result
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+		"workflow must complete after the resume signal")
+
+	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
+
+	uploads := h.rec.uploadsFor(runID)
+	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
+
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
 	assert.Contains(t, report, runID, "report must name the run ID")
 

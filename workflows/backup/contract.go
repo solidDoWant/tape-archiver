@@ -30,4 +30,14 @@ const (
 	// no phase has completed yet. The workflow registers a handler for it so
 	// operators can inspect progress without consulting the Temporal UI.
 	LastCompletedPhaseQuery = "lastCompletedPhase"
+
+	// OperatorEjectClearedSignal is the Temporal signal an operator sends to
+	// resume a run paused in the Eject phase because the import/export station
+	// filled (SPEC §4.3 phase 8). It carries no payload — its receipt is the
+	// signal that the operator has removed the exported tapes and cleared the
+	// station. `tapectl resume <workflow-id>` sends it. The workflow re-reads the
+	// changer inventory and exports the remaining tapes into the freed slots. For
+	// libraries that report the import/export access bit the workflow resumes
+	// automatically without this signal; it is the fallback for those that do not.
+	OperatorEjectClearedSignal = "operatorEjectCleared"
 )
