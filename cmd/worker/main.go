@@ -13,9 +13,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/solidDoWant/tape-archiver/internal/envvar"
+	"github.com/solidDoWant/tape-archiver/pkg/health"
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
 	"github.com/solidDoWant/tape-archiver/pkg/metrics"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
@@ -26,7 +28,26 @@ import (
 // extra configuration; set METRICS_ADDR to "" to disable the endpoint.
 const defaultMetricsAddr = ":9090"
 
+// defaultHealthAddr is the /healthz + /readyz listen address used when
+// HEALTH_ADDR is not set. Health is on by default so orchestrator probes work
+// without extra configuration; set HEALTH_ADDR to "" to disable the endpoints.
+// The port is distinct from defaultMetricsAddr so health stays available even
+// when /metrics is disabled.
+const defaultHealthAddr = ":8080"
+
 func main() {
+	// The healthcheck self-probe is a distinct entrypoint used by the container
+	// HEALTHCHECK: it probes the local health server and exits, never starting a
+	// Temporal worker. Dispatch it before any worker/signal setup.
+	if len(os.Args) > 1 && os.Args[1] == healthcheckSubcommand {
+		if err := runHealthcheck(context.Background(), os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "worker: %v\n", err)
+			os.Exit(1)
+		}
+
+		return
+	}
+
 	// ctx is cancelled on SIGINT/SIGTERM so the startup phase (e.g. a hanging
 	// Temporal dial) honors shutdown signals. worker.InterruptCh, watching the
 	// same signals, drives the run phase: the SDK drains the worker when it
@@ -96,6 +117,21 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 		return fmt.Errorf("connect to Temporal: %w", err)
 	}
 	defer temporalShutdown()
+
+	// The health server exposes liveness (/healthz, always OK once serving) and
+	// readiness (/readyz, gated on live Temporal connectivity). Readiness re-runs
+	// CheckHealth per probe so a worker that loses its Temporal connection after
+	// startup reports not-ready without the process exiting. It is a dedicated
+	// always-on port, independent of the /metrics endpoint.
+	_, healthShutdown, err := health.NewFromEnv(defaultHealthAddr, func(ctx context.Context) error {
+		_, err := temporalClient.CheckHealth(ctx, &client.CheckHealthRequest{})
+
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("set up health server: %w", err)
+	}
+	defer healthShutdown()
 
 	queue := cfg.Role.taskQueue()
 

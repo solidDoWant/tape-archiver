@@ -83,10 +83,11 @@ so a forgotten `enabled` flag never silently disables mTLS or CA verification.
 
 `resources` follows the bjw-s app-template schema and is deep-merged **over** the
 chart-generated `main` controller, so anything you set wins. The generated default provides
-the image, a named `metrics` port (9090), TCP-socket liveness/readiness probes against that
-port (the worker exposes only `/metrics`, no HTTP health endpoint), a hardened
-`securityContext` (non-root, read-only rootfs, all capabilities dropped), a 60s termination
-grace period, and a `PodDisruptionBudget` when `replicas > 1`.
+the image, a named `health` port (8080) and `metrics` port (9090), an `httpGet` liveness
+probe on `/healthz` and an `httpGet` readiness probe on `/readyz` against the health port
+(readiness is gated on live Temporal connectivity), a hardened `securityContext` (non-root,
+read-only rootfs, all capabilities dropped), a 60s termination grace period, and a
+`PodDisruptionBudget` when `replicas > 1`.
 
 ```yaml
 resources:

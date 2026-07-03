@@ -116,6 +116,21 @@ dockerTools.streamLayeredImage {
       "PATH=/bin"
       "SSL_CERT_FILE=${cacert}/etc/ssl/certs/ca-bundle.crt"
     ];
+    # Container health via the worker's own `healthcheck` self-probe: the minimal
+    # image ships no curl/wget, so the binary probes its local /readyz endpoint
+    # and exits 0/non-zero (SPEC §4.1). Health reflects readiness — a worker that
+    # has lost its Temporal connection reports unhealthy. Durations are in
+    # nanoseconds per the OCI image config schema.
+    Healthcheck = {
+      Test = [
+        "CMD"
+        "/bin/worker"
+        "healthcheck"
+      ];
+      Interval = 10000000000; # 10s
+      Timeout = 3000000000; # 3s
+      Retries = 3;
+    };
     # Record the pinned versions on the image itself, so `docker inspect` reports
     # exactly what a run used without starting the container.
     Labels = {
