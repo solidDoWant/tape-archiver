@@ -31,6 +31,7 @@ Versions are pinned by the flake's `nixpkgs` revision and recorded as image labe
 | `mtx` | `mtx` | — | media-changer moves (SPEC §3) |
 | `sg_logs` / `sg_turs` | `sg3_utils` | — | TapeAlert / log pages, drive readiness (SPEC §3) |
 | `lsscsi` | `lsscsi` | — | enumerate SCSI tape/changer devices |
+| `zfs` | `zfs` | — | read dataset properties + locate `.zfs/snapshot/` (needs `/dev/zfs`) |
 
 `age`, `par2`, `zstd`, and `tar` are the tools the recovery disc also stages; their
 versions are identical to the disc by construction (build-time assert).
@@ -77,8 +78,13 @@ runs the image, it must provide:
   ZFS snapshot views (`.zfs/snapshot/<snap>/`) and the staging directory are visible
   inside the container. The image pre-creates the `/mnt/bulk-pool-01` mount point.
 - **Staging** happens in a plain subdirectory of an existing dataset
-  (`bulk-pool-01/archive/.tape-staging/`); the worker never runs `zfs create` and needs
-  no `/dev/zfs`.
+  (`bulk-pool-01/archive/.tape-staging/`); the worker never runs `zfs create`.
+- **`/dev/zfs` passthrough.** The data-side Resolve/Verify/Prepare activities read ZFS
+  dataset properties (`logicalreferenced`, `mountpoint`, user properties) and locate the
+  `.zfs/snapshot/` tree through the `zfs` CLI (`pkg/zfs`). `zfs get` issues read-only
+  ioctls against `/dev/zfs`, so the device must be passed through even though the worker
+  never mutates the pool. The pool bind mount must use `shared`/`rslave` propagation so
+  the on-demand `.zfs/snapshot/<snap>/` automounts are visible inside the container.
 
 The entrypoint is `/bin/worker`; run configuration is supplied via the environment and
 the Temporal workflow payload (SPEC §4.1, §5).

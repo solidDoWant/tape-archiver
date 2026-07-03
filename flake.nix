@@ -96,6 +96,14 @@
             pkgs.golangci-lint
             pkgs.gnumake
             pkgs.kubernetes-helm
+
+            # kind + kubectl drive the e2e suite (e2e/, `make test-e2e`): it
+            # stands up a real kind cluster and deploys the control worker via
+            # the Helm chart + control-worker image, then talks to it with
+            # kubectl/client-go. kind reuses the docker already in this shell.
+            pkgs.kind
+            pkgs.kubectl
+
             pkgs.gh
 
             # age (>= 1.3.1, native post-quantum recipients) — pkg/agewrap shells

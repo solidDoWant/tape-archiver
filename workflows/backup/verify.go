@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -159,6 +160,11 @@ func verifyPhase(ctx workflow.Context, _ config.Config, state *runState) error {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: verifyTimeout,
+		// A Verify failure aborts the run (see the doc comment): the staged bytes
+		// are re-read and re-hashed deterministically, so a checksum mismatch or
+		// capacity overflow will recur on every attempt. Without this, the default
+		// policy retries the permanent fault indefinitely and the run never fails.
+		RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
 
 	var activities *VerifyActivities

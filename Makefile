@@ -56,8 +56,26 @@ test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests
 	}
 
 .PHONY: test-e2e
-test-e2e: ## TODO: Run end-to-end tests (owned by later issue).
-	@echo "test-e2e: not yet implemented" >&2; exit 1
+test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: control worker in a kind cluster (Helm chart + image), data worker as its OCI container on the host, against mhvtl + ZFS pool + Temporal (brings host resources up/down; the suite manages the cluster + containers).
+	@{ \
+	  gocache=$$(mktemp -d); \
+	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; \
+	    kind delete cluster --name tape-archiver-e2e >/dev/null 2>&1 || true; \
+	    docker rm -f tape-archiver-e2e-data >/dev/null 2>&1 || true; \
+	    $(MAKE) zpool-down; $(MAKE) mhvtl-down; $(MAKE) temporal-down; exit $$rc; }; \
+	  trap cleanup EXIT; \
+	  : "-p 1 serializes the suite: it drives one physical mhvtl library and one"; \
+	  : "shared kind cluster + Temporal, so package binaries must not run"; \
+	  : "concurrently. Runs under sudo so the test process can drive the tape"; \
+	  : "devices and corrupt the root-owned staged slices (AC4)."; \
+	  sudo env \
+	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
+	    TAPE_POOL_MOUNT=/mnt/tape-test-pool/archive TAPE_POOL_DATASET=tape_test/archive \
+	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
+	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
+	    PATH="$$PATH" HOME="$$HOME" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
+	    go test -count=1 -p 1 -timeout 30m -tags e2e ./e2e/...; \
+	}
 
 .PHONY: benchmark
 benchmark: ## TODO: Run write-rate / shoe-shining benchmarks (real hardware; owned by later issue).

@@ -1,0 +1,11 @@
+# kind cluster for the tape-archiver e2e suite (e2e/harness_test.go).
+#
+# Single control-plane node is enough: the only workload is the control worker
+# (the Helm chart's Deployment), a lightweight Temporal client that runs the k8s-
+# side planning activities and dials Temporal. The data worker runs OFF-cluster,
+# as a container on the host with the tape devices and ZFS pool (SPEC §4.1), so
+# the cluster needs no host mounts, storage, or extra nodes.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
