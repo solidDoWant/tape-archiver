@@ -112,6 +112,15 @@ Specifies the SCSI changer, drives, and which storage slots hold blank tapes.
 | `drives` | `[]string` | yes | Tape drive device paths. Prefer the non-rewinding nodes (`/dev/nst0`, `/dev/nst1`). |
 | `blankSlots` | `[]integer` | yes | Storage slot numbers (from `mtx status`) that hold usable blank tapes. |
 | `tapeCapacityBytes` | `integer` | yes | Native (uncompressed) capacity of one tape, in bytes (e.g. `2500000000000` for LTO-6). Runs plan against native capacity with LTO hardware compression disabled. It is the single-tape ceiling the Resolve feasibility pre-check tests against and the capacity the Pack phase bin-packs into. Must be > 0. |
+| `ioWaitTimeoutSeconds` | `integer` | no | How long the Eject phase waits for the operator to clear the import/export station when it fills before failing the run (see below). Omit for the default of 12 hours. Must be > 0 when set. |
+
+When a run writes more physical tapes (logical tapes × copies) than the library has I/O
+slots, the Eject phase fills the station and then pauses: it posts an operator alert on the
+failure webhook naming the tapes ready for removal, and waits. On libraries that report the
+import/export access bit it resumes automatically once the station is cleared and closed;
+otherwise the operator runs [`tapectl resume <run-id>`](tapectl.md) after removing the
+tapes. If no one responds within `ioWaitTimeoutSeconds`, the run fails with every written
+tape left in an I/O or storage slot (none in a drive).
 
 ---
 

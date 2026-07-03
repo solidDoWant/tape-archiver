@@ -780,6 +780,18 @@ func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config, runID string) {
 	require.Equal(t, runID, strings.TrimSpace(string(out)), "tapectl must echo the submitted workflow ID")
 }
 
+// resumeRun resumes a run paused in the Eject phase by invoking `tapectl resume`,
+// exercising the operator CLI path end to end (issue #67).
+func (h *e2eHarness) resumeRun(t *testing.T, runID string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, h.tapectlPath, "resume", runID).CombinedOutput()
+	require.NoErrorf(t, err, "tapectl resume: %s", out)
+}
+
 // temporalRunID returns the Temporal RunID of a submitted workflow (its first
 // run). The staging directory is keyed by this, not the workflow ID.
 func temporalRunID(t *testing.T, c client.Client, workflowID string) string {

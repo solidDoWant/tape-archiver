@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -135,6 +136,40 @@ func (c *Client) SendFailure(ctx context.Context, runID, phase string, runErr er
 		slog.Error("failed to deliver webhook failure alert",
 			"run_id", runID,
 			"phase", phase,
+			"delivery_error", err,
+		)
+	}
+}
+
+// SendOperatorPause posts an operator-in-the-loop pause alert: the Eject phase
+// filled the import/export station and is waiting for the operator to remove the
+// exported tapes so the remaining ones can be exported (SPEC §4.3 phase 8, §11).
+// It names the run, the tapes ready for removal, and how many still await a free
+// slot. Like SendFailure it is best-effort — a delivery failure is logged, not
+// returned — so a webhook outage never aborts a run that is otherwise healthy.
+// When the client's URL is empty, it is a silent no-op.
+func (c *Client) SendOperatorPause(ctx context.Context, runID string, readyForRemoval []string, awaiting int) {
+	if c.url == "" {
+		return
+	}
+
+	ready := "none"
+	if len(readyForRemoval) > 0 {
+		ready = strings.Join(readyForRemoval, ", ")
+	}
+
+	msg := Message{
+		Content: fmt.Sprintf(
+			"Backup run %s paused during Eject: the import/export station is full. "+
+				"Remove the exported tape(s) [%s] from the station; %d more tape(s) "+
+				"will be exported once slots free up.",
+			runID, ready, awaiting),
+	}
+
+	if err := c.Send(ctx, msg); err != nil {
+		slog.Error("failed to deliver webhook operator-pause alert",
+			"run_id", runID,
+			"awaiting", awaiting,
 			"delivery_error", err,
 		)
 	}

@@ -19,10 +19,12 @@ const usage = `tapectl — submit and inspect tape-archiver backup runs
 Usage:
   tapectl run --config <file> [--dry-run] [--id <id>]
   tapectl status <workflow-id>
+  tapectl resume <workflow-id>
 
 Commands:
   run     Submit a run config to Temporal as a backup workflow.
   status  Print a workflow's status and last completed phase.
+  resume  Resume a run paused in Eject after you clear the I/O station.
 
 Connection is configured via TEMPORAL_ADDRESS (and TEMPORAL_NAMESPACE, etc.).
 `
@@ -51,6 +53,8 @@ func dispatch(ctx context.Context, args []string, out io.Writer) error {
 		return submitRun(ctx, rest, out)
 	case "status":
 		return showStatus(ctx, rest, out)
+	case "resume":
+		return resumeRun(ctx, rest, out)
 	case "-h", "--help", "help":
 		_, err := fmt.Fprint(out, usage)
 

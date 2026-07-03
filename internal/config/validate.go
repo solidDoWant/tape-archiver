@@ -117,6 +117,10 @@ func (l Library) validate() error {
 		return fmt.Errorf("library.tapeCapacityBytes: must be > 0, got %d", l.TapeCapacityBytes)
 	}
 
+	if l.IOWaitTimeoutSeconds != nil && *l.IOWaitTimeoutSeconds <= 0 {
+		return fmt.Errorf("library.ioWaitTimeoutSeconds: must be > 0 when set, got %d", *l.IOWaitTimeoutSeconds)
+	}
+
 	return nil
 }
 

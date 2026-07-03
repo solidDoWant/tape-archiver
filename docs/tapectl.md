@@ -1,8 +1,9 @@
 # tapectl — operator CLI
 
 `tapectl` submits a run config to Temporal as a backup workflow, triggers dry-runs
-against the `mhvtl` virtual library, and inspects the status of running or completed
-runs. It is built into `bin/tapectl` by `make build`.
+against the `mhvtl` virtual library, inspects the status of running or completed runs,
+and resumes a run paused in the Eject phase. It is built into `bin/tapectl` by
+`make build`.
 
 The run config it submits is documented in [configuration.md](configuration.md); the
 workflow phases it reports are defined in `SPEC.md` §4.3.
@@ -88,3 +89,31 @@ If no worker is currently polling the workflow (e.g. a completed run with no liv
 worker), or the workflow does not yet answer the query, the phase is reported as
 `unavailable` while the execution status is still shown. Before any phase has completed
 it is reported as `none`.
+
+---
+
+## `tapectl resume`
+
+Resume a run paused in the Eject phase because the import/export station filled
+(SPEC §4.3 phase 8).
+
+```
+tapectl resume <workflow-id>
+```
+
+```
+$ tapectl resume backup-20260629T134505Z
+Resume signal sent to run backup-20260629T134505Z.
+```
+
+When a run writes more physical tapes than the library has I/O slots, the Eject phase
+exports as many as fit, alerts the operator (on the failure webhook) which tapes to
+remove, and pauses. After physically removing the exported tapes and clearing the
+station, run `tapectl resume <workflow-id>` to continue: the run re-reads the changer
+inventory and exports the remaining tapes into the freed slots.
+
+Libraries that report the import/export access bit resume **automatically** once the
+station is cleared and closed, without this command; `resume` is the fallback for
+libraries that do not. Sending it to a run that is not paused has no effect. If no one
+responds within `library.ioWaitTimeoutSeconds` (default 12 hours), the run fails with
+every written tape left in an I/O or storage slot.
