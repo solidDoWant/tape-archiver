@@ -95,7 +95,7 @@ func TestRunThenStatus(t *testing.T) {
 
 	workflowID := strings.TrimSpace(runOut.String())
 	require.NotEmpty(t, workflowID, "run must print the workflow ID")
-	assert.True(t, strings.HasPrefix(workflowID, "backup-"), "default ID is backup-<timestamp>, got %q", workflowID)
+	assert.Equal(t, backupWorkflowID, workflowID, "run submits under the singleton workflow ID")
 
 	// `tapectl status` must eventually report the running workflow and the phase
 	// the stub reports via the query.
@@ -112,4 +112,61 @@ func TestRunThenStatus(t *testing.T) {
 
 	// Unblock the stub so it completes rather than lingering past the test.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, workflowID, "", stubFinishSignal, nil))
+}
+
+// TestConcurrentRunGuard exercises the singleton concurrency guard against a
+// live Temporal: while one backup run is in progress a second submission is
+// refused with an actionable error, and once the first run finishes a fresh run
+// starts normally.
+func TestConcurrentRunGuard(t *testing.T) {
+	skipWithoutTemporal(t)
+	isolateTemporalConfig(t)
+
+	ctx := t.Context()
+
+	temporalClient, shutdown, err := temporalclient.New(ctx, nil)
+	require.NoError(t, err)
+
+	defer shutdown()
+
+	backupWorker := worker.New(temporalClient, backup.TaskQueue, worker.Options{})
+	backupWorker.RegisterWorkflowWithOptions(stubBackupWorkflow, workflow.RegisterOptions{Name: backup.WorkflowType})
+	require.NoError(t, backupWorker.Start())
+
+	defer backupWorker.Stop()
+
+	configPath := writeConfig(t, validConfigJSON)
+
+	// Best-effort safety net: unblock whatever backup run is current so a failed
+	// assertion does not leave the singleton ID occupied for later runs.
+	t.Cleanup(func() {
+		_ = temporalClient.SignalWorkflow(ctx, backupWorkflowID, "", stubFinishSignal, nil)
+	})
+
+	// Start the first run. Tolerate a still-closing run from a previous test by
+	// retrying until the singleton ID is free.
+	require.Eventually(t, func() bool {
+		return submitRun(ctx, []string{"--config", configPath}, &bytes.Buffer{}) == nil
+	}, 30*time.Second, 250*time.Millisecond, "first run never started")
+
+	// AC1 + AC3: a second concurrent submission is refused with an actionable
+	// error naming the in-progress run, not an opaque Temporal error.
+	err = submitRun(ctx, []string{"--config", configPath}, &bytes.Buffer{})
+	require.Error(t, err, "second concurrent run must be refused")
+
+	message := err.Error()
+	assert.Contains(t, message, "already in progress")
+	assert.Contains(t, message, backupWorkflowID)
+	assert.Contains(t, message, "tapectl status")
+
+	// Finish the first run so the singleton ID frees up.
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backupWorkflowID, "", stubFinishSignal, nil))
+
+	// AC2: once the first run has closed, a new run starts normally.
+	require.Eventually(t, func() bool {
+		return submitRun(ctx, []string{"--config", configPath}, &bytes.Buffer{}) == nil
+	}, 30*time.Second, 250*time.Millisecond, "new run did not start after the first completed")
+
+	// Unblock the run started by the AC2 check so it does not linger.
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backupWorkflowID, "", stubFinishSignal, nil))
 }

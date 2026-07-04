@@ -30,14 +30,13 @@ Temporal envconfig loader.
 Submit a run config as a backup workflow and print the resulting workflow ID.
 
 ```
-tapectl run --config <file> [--dry-run] [--id <id>]
+tapectl run --config <file> [--dry-run]
 ```
 
 | Flag | Required | Description |
 |------|----------|-------------|
 | `--config` | yes | Path to the run-config JSON file. |
 | `--dry-run` | no | Override the library device targets to the `mhvtl` virtual library (see below). |
-| `--id` | no | Workflow ID to submit under. Defaults to `backup-<timestamp>` (UTC, e.g. `backup-20260629T134505Z`). |
 
 The config is fully validated **client-side before Temporal is contacted**: malformed
 JSON, an unrecognized field, or any validation failure exits non-zero with a
@@ -46,8 +45,27 @@ own line:
 
 ```
 $ tapectl run --config run.json
-backup-20260629T134505Z
+backup
 ```
+
+### One run at a time
+
+Every run submits under the fixed workflow ID `backup`. Backup runs are **mutually
+exclusive**: the model is serial — one data worker on one storage host stages every
+tape to disk before any write (SPEC §4.2, §4.3) — so two runs must never execute
+concurrently. If a run is submitted while another is still in progress, the submission
+is refused with an error identifying the in-progress run rather than racing it on the
+shared library:
+
+```
+$ tapectl run --config run.json
+a backup run is already in progress (workflow ID "backup", run ID 018f…);
+backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status backup`
+```
+
+Once the in-progress run has finished (success or failure), a new run submitted under
+the same ID starts normally. There is no flag to submit under a different ID — the
+singleton ID is what makes the guard airtight.
 
 ### Dry-run
 
@@ -78,8 +96,8 @@ tapectl status <workflow-id>
 ```
 
 ```
-$ tapectl status backup-20260629T134505Z
-Workflow:             backup-20260629T134505Z
+$ tapectl status backup
+Workflow:             backup
 Status:               Running
 Last completed phase: Verify
 ```
@@ -102,8 +120,8 @@ tapectl resume <workflow-id>
 ```
 
 ```
-$ tapectl resume backup-20260629T134505Z
-Resume signal sent to run backup-20260629T134505Z.
+$ tapectl resume backup
+Resume signal sent to run backup.
 ```
 
 When a run writes more physical tapes than the library has I/O slots, the Eject phase
