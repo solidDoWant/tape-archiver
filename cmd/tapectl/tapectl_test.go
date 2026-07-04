@@ -3,13 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,42 +36,30 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 func TestBuildSubmission(t *testing.T) {
-	now := time.Date(2026, 6, 29, 13, 45, 5, 0, time.UTC)
-
-	t.Run("generates timestamped ID and keeps configured devices", func(t *testing.T) {
-		cfg, id, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON)}, now)
+	t.Run("loads config and keeps configured devices", func(t *testing.T) {
+		cfg, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON)})
 		require.NoError(t, err)
 
-		assert.Equal(t, "backup-20260629T134505Z", id)
 		assert.Equal(t, "/dev/sch0", cfg.Library.Changer)
 		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, cfg.Library.Drives)
 	})
 
-	t.Run("operator-supplied ID overrides the default", func(t *testing.T) {
-		_, id, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), id: "my-run"}, now)
-		require.NoError(t, err)
-
-		assert.Equal(t, "my-run", id)
-	})
-
 	t.Run("missing --config is an error", func(t *testing.T) {
-		_, _, err := buildSubmission(runOptions{}, now)
+		_, err := buildSubmission(runOptions{})
 		require.Error(t, err)
 	})
 
 	t.Run("invalid config is rejected before submission", func(t *testing.T) {
-		_, _, err := buildSubmission(runOptions{configPath: writeConfig(t, `{"copies": 2}`)}, now)
+		_, err := buildSubmission(runOptions{configPath: writeConfig(t, `{"copies": 2}`)})
 		require.Error(t, err)
 	})
 }
 
 func TestBuildSubmissionDryRun(t *testing.T) {
-	now := time.Date(2026, 6, 29, 13, 45, 5, 0, time.UTC)
-
 	t.Run("default mhvtl devices when env unset", func(t *testing.T) {
 		withGetenv(t, func(string) string { return "" })
 
-		cfg, _, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), dryRun: true}, now)
+		cfg, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), dryRun: true})
 		require.NoError(t, err)
 
 		assert.Equal(t, defaultMHVTLChanger, cfg.Library.Changer)
@@ -86,7 +75,7 @@ func TestBuildSubmissionDryRun(t *testing.T) {
 
 		withGetenv(t, func(name string) string { return env[name] })
 
-		cfg, _, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), dryRun: true}, now)
+		cfg, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), dryRun: true})
 		require.NoError(t, err)
 
 		assert.Equal(t, "/dev/sch9", cfg.Library.Changer)
@@ -94,10 +83,34 @@ func TestBuildSubmissionDryRun(t *testing.T) {
 	})
 }
 
-func TestGenerateWorkflowID(t *testing.T) {
-	// A non-UTC input must still render as UTC.
-	now := time.Date(2026, 1, 2, 15, 4, 5, 0, time.FixedZone("PST", -8*3600))
-	assert.Equal(t, "backup-20260102T230405Z", generateWorkflowID(now))
+// TestParseRunArgsRejectsID guards the removal of the --id flag: with the
+// singleton workflow ID there is no way to submit under a distinct ID.
+func TestParseRunArgsRejectsID(t *testing.T) {
+	_, err := parseRunArgs([]string{"--config", "run.json", "--id", "my-run"})
+	require.Error(t, err)
+}
+
+func TestTranslateSubmitError(t *testing.T) {
+	t.Run("already-started conflict is reported as actionable", func(t *testing.T) {
+		started := serviceerror.NewWorkflowExecutionAlreadyStarted("already started", "req-1", "run-abc")
+
+		err := translateSubmitError(started)
+		require.Error(t, err)
+
+		message := err.Error()
+		assert.Contains(t, message, "already in progress")
+		assert.Contains(t, message, backupWorkflowID)
+		assert.Contains(t, message, "run-abc")
+		assert.Contains(t, message, "tapectl status")
+	})
+
+	t.Run("other errors are wrapped verbatim", func(t *testing.T) {
+		err := translateSubmitError(errors.New("boom"))
+		require.Error(t, err)
+
+		assert.Contains(t, err.Error(), "submit backup workflow")
+		assert.Contains(t, err.Error(), "boom")
+	})
 }
 
 func TestRequireTemporalAddress(t *testing.T) {
