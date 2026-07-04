@@ -50,7 +50,7 @@ it directly rather than for general portability.
 
 - **Storage host:** `ubuntu-storage-host-01` (Ubuntu). Reachable via Teleport
   (`tsh ssh root@ubuntu-storage-host-01`). The tape library and drives are physically
-  attached here. Has `mt`, `mtx`, `zfs`, `lsscsi`, `sg_map`, `sg3-utils`. Does **not**
+  attached here. Has `mt`, `zfs`, `lsscsi`, `sg_map`, `sg3-utils`. Does **not**
   yet have `ltfs`/`mkltfs`, `age`, or `par2` — these are provided by the worker
   container image (see §4).
 - **Tape library:** SCSI media changer at `/dev/sch0` — **2 drives, 47 storage slots,
@@ -97,7 +97,7 @@ where the data lives:
 
 The data worker is a **Nix-built OCI image** (`streamLayeredImage`, per media-processor)
 run by systemd-managed Docker on the host. The image bundles pinned tooling — `ltfs`,
-`age` (>= 1.3.1), `par2` (par2cmdline-turbo), `zstd`, `mt-st`, `mtx`, `sg3-utils`,
+`age` (>= 1.3.1), `par2` (par2cmdline-turbo), `zstd`, `mt-st`, `sg3-utils`,
 `lsscsi` — at the **same versions** shipped on the recovery disc, so backup tooling and
 recovery
 tooling come from one reproducible source. Both workers report to the same Temporal
@@ -120,7 +120,7 @@ are visible. The worker stages into a plain subdirectory of an existing dataset 
   been archived. The system of record is the physical media plus the printed report
   and the recovery ISO. Restore depends on zero online services.
 - **Tape inventory is resolved live, per run.** At startup the tool reads the library
-  with `mtx status`; the config declares which storage elements hold usable blank
+  with SCSI `READ ELEMENT STATUS`; the config declares which storage elements hold usable blank
   tapes. Written tapes are exported to the I/O station at the end of the run; the
   operator reloads blanks before the next run. Automated reloading of fresh blank
   tapes into storage slots *between* runs is a non-goal — that is the operator's job.
@@ -172,7 +172,7 @@ staged and verified on disk** — eliminating any computation during the write w
    station *within* a run when written tapes exceed I/O capacity is handled by the
    operator-in-the-loop Eject pause below.)
 6. **Load.** Move the drive-set's blank tapes from their storage slots into the drives
-   (`mtx`), and confirm each loaded tape is blank/empty before formatting — a run must
+   (SCSI `MOVE MEDIUM`), and confirm each loaded tape is blank/empty before formatting — a run must
    never silently overwrite existing data.
 7. **Write.** `mkltfs` each tape in the set (setting the LTFS volume name to the tape's
    barcode), mount LTFS **with index sync deferred to unmount** (`-o sync_type=unmount`),
@@ -232,7 +232,7 @@ All formats are open and widely implemented, for 20-year recoverability.
   self-describing filesystem with a readable index. Files are stored as regular files;
   a copy of the LTFS index is also captured to the recovery ISO in case the on-tape
   index is damaged.
-- **Tape identity:** the library-read **barcode (volume tag from `mtx`) is the
+- **Tape identity:** the library-read **barcode (SCSI volume tag) is the
   canonical physical ID**. `mkltfs` sets the LTFS volume name to the barcode; the
   per-tape manifest and the report reference tapes by barcode. (Production tapes are
   barcode-labeled and read by the library.)
@@ -387,7 +387,7 @@ Testing is a first-class requirement (principle 4). Layered, mirroring media-pro
 build-tag-gated tiers:
 
 - **Unit** (default, `-race`): pure logic — planning/bin-packing, config parsing, slice
-  sizing, PAR2 block-size computation, parsing of `mtx`/`mt`/`sg_logs` output.
+  sizing, PAR2 block-size computation, SCSI element-status decoding, parsing of `mt`/`sg_logs` output.
 - **Integration** (`//go:build integration`): the full tape path against an **`mhvtl`**
   virtual library and a dev Temporal — load, format, write, verify, eject. `pkg/zfs`
   tests run against an ephemeral, file-backed **ZFS pool** (`make zpool-up`) rather than
@@ -453,7 +453,7 @@ refinement as issues are implemented.
   activities.
 - `cmd/tapectl` — CLI to submit a run config to Temporal, trigger dry-runs, inspect.
 - `cmd/gen-config-schema` — emits the committed JSON schema for the run config.
-- `pkg/` — one concern per package: `tape` (mtx/mt/changer), `ltfs`, `agewrap`, `par2`,
+- `pkg/` — one concern per package: `tape` (changer via SG_IO, `mt`), `ltfs`, `agewrap`, `par2`,
   `archive` (tar), `zfs`, `k8ssnap` (VolumeSnapshot discovery), `report` (PDF),
   `recoverykit` (ISO), `webhook` (Discord), `checksum`, `logging`, `metrics`,
   `temporalclient`.
@@ -471,7 +471,7 @@ refinement as issues are implemented.
 
 The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
 
-- **Tape identity** — library barcode (mtx volume tag) is the canonical ID; LTFS volume
+- **Tape identity** — library barcode (SCSI volume tag) is the canonical ID; LTFS volume
   name set to barcode; report and per-tape manifest reference by barcode.
 - **Compression** — `zstd` before encryption, uniform default-on with a per-source
   override; safe because `age` + PAR2 already bound blast radius (§8).

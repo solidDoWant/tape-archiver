@@ -125,9 +125,21 @@ func sgDeviceForTapeNode(device string) (string, error) {
 		return "", fmt.Errorf("resolve SCSI address of tape device %s: %w", device, err)
 	}
 
+	if sgDevice, ok := sgDeviceForSCSIAddress(tapeAddr); ok {
+		return sgDevice, nil
+	}
+
+	return "", fmt.Errorf("no SCSI generic node found for tape device %s (SCSI address %s); "+
+		"set it explicitly with WithSGDevice", device, tapeAddr)
+}
+
+// sgDeviceForSCSIAddress returns the /dev/sgN node whose backing SCSI device is
+// at the given address (H:C:T:L). The boolean reports whether a match was found.
+// It is shared by the tape-drive and changer sg-node resolvers.
+func sgDeviceForSCSIAddress(scsiAddr string) (string, bool) {
 	entries, err := os.ReadDir(scsiGenericClassDir)
 	if err != nil {
-		return "", fmt.Errorf("read %s: %w", scsiGenericClassDir, err)
+		return "", false
 	}
 
 	for _, entry := range entries {
@@ -136,13 +148,12 @@ func sgDeviceForTapeNode(device string) (string, error) {
 			continue
 		}
 
-		if addr == tapeAddr {
-			return filepath.Join("/dev", entry.Name()), nil
+		if addr == scsiAddr {
+			return filepath.Join("/dev", entry.Name()), true
 		}
 	}
 
-	return "", fmt.Errorf("no SCSI generic node found for tape device %s (SCSI address %s); "+
-		"set it explicitly with WithSGDevice", device, tapeAddr)
+	return "", false
 }
 
 // scsiAddressOf returns the SCSI address (H:C:T:L) of a sysfs device node by
@@ -224,7 +235,7 @@ func scsiRewind(ctx context.Context, f *os.File) error {
 	// Heap-allocate the buffers so the addresses embedded in the SG_IO header
 	// as uintptrs remain valid for the duration of the (blocking) ioctl.
 	cdb := []byte{opcodeRewind, 0, 0, 0, 0, 0}
-	sense := make([]byte, 32)
+	sense := make([]byte, senseBufferLen)
 
 	hdr := sgIOHdr{
 		interfaceID:    'S',
@@ -260,7 +271,7 @@ func scsiRewind(ctx context.Context, f *os.File) error {
 // block at the current position and decodes the outcome.
 func scsiReadFirstBlock(ctx context.Context, f *os.File) (blankProbe, error) {
 	buf := make([]byte, firstBlockBufSize)
-	sense := make([]byte, 32)
+	sense := make([]byte, senseBufferLen)
 
 	// READ(6): variable block (FIXED=0), SILI set so a short/over-length block
 	// does not raise an incorrect-length CHECK CONDITION; the transfer length

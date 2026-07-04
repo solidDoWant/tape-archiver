@@ -4,7 +4,7 @@
 # Requires:
 #   - $MHVTL_KO set to the built mhvtl.ko path (set automatically by `nix develop`)
 #   - vtllibrary, vtltape, vtlcmd, make_vtl_media, mktape in PATH (from devShell)
-#   - mtx in PATH (from devShell)
+#   - sg_raw in PATH (sg3_utils, from devShell) for the readiness probe
 #   - sudo access for module loading and device permission changes
 #
 # Virtual library mirrors the production setup (SPEC.md §3):
@@ -33,7 +33,7 @@ if [ ! -f "$MHVTL_KO" ]; then
   echo "error: kernel module not found: $MHVTL_KO" >&2
   exit 1
 fi
-for cmd in vtllibrary vtltape vtlcmd make_vtl_media mktape mtx; do
+for cmd in vtllibrary vtltape vtlcmd make_vtl_media mktape sg_raw; do
   command -v "$cmd" > /dev/null 2>&1 || {
     echo "error: '$cmd' not found in PATH — run this script from within 'nix develop'" >&2
     exit 1
@@ -190,7 +190,8 @@ sudo chmod a+rw /dev/sg* 2>/dev/null || true
 
 echo -n "==> Waiting for library to become ready"
 for _ in $(seq 1 20); do
-  if sudo mtx -f /dev/sch0 status > /dev/null 2>&1; then
+  # READ ELEMENT STATUS (0xB8): succeeds once the changer daemon answers SCSI.
+  if sudo sg_raw -r 96 /dev/sch0 B8 10 00 00 FF FF 00 00 00 60 00 00 > /dev/null 2>&1; then
     break
   fi
   echo -n "."
@@ -208,5 +209,5 @@ echo "    changer : /dev/sch0"
 echo "    drive 0 : /dev/nst0  (non-rewinding)"
 echo "    drive 1 : /dev/nst1  (non-rewinding)"
 echo ""
-echo "==> Library status:"
-sudo mtx -f /dev/sch0 status
+echo "==> SCSI devices (changer + drives):"
+sudo lsscsi -g

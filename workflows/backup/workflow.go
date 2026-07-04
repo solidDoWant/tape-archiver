@@ -225,7 +225,7 @@ func runTapePath(ctx workflow.Context, cfg config.Config, state *runState, faili
 
 // The Load, Write, and Eject phases (SPEC §4.3 phases 6–8) form the tape path,
 // driven per drive-set by runTapePath above. loadPhase (library.go: blank-tape
-// gate + mtx moves) and ejectPhase (library.go: unload + transfer to I/O station)
+// gate + changer moves) and ejectPhase (library.go: unload + transfer to I/O station)
 // bracket writePhase (session.go: a session-pinned FormatTape → WriteTree →
 // FinalizeTape sequence). They interleave per set rather than running once each
 // so a run can span more physical tapes than the library has drives.

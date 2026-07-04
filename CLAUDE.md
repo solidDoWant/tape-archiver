@@ -37,7 +37,7 @@ When a change touches any of these, call it out explicitly.
   `data` (runs as a container on the storage host, where the bulk data lives).
 - **External tooling** bundled in the data worker image at pinned versions, matching the
   recovery disc: `ltfs`/`mkltfs`, `age` (>= 1.3.1, native post-quantum recipients),
-  `par2` (par2cmdline-turbo), `zstd`, `mt-st`, `mtx`, `sg3-utils`, `lsscsi`.
+  `par2` (par2cmdline-turbo), `zstd`, `mt-st`, `sg3-utils`, `lsscsi`.
 - **`mhvtl`** virtual tape library for dry-run and integration testing.
 - **Nix flakes** for the dev environment and for building OCI images
   (`streamLayeredImage`). **`golangci-lint`** for linting.

@@ -25,7 +25,6 @@
   zstd,
   gnutar,
   mt-st,
-  mtx,
   sg3_utils,
   lsscsi,
   zfs,
@@ -68,7 +67,6 @@ let
     zstd # optional pre-encryption compression (SPEC §4.3)
     gnutar # archive creation (SPEC §4.3); recovery disc stages the same `tar`
     mt-st # `mt` — drive control on the non-rewinding nst nodes
-    mtx # media-changer moves (SPEC §3)
     sg3_utils # sg_logs (TapeAlert / log pages), sg_turs (readiness) (SPEC §3)
     lsscsi # enumerate SCSI tape/changer devices
     zfs # `zfs get` — the data-side Resolve/Verify/Prepare activities read
@@ -80,7 +78,7 @@ let
     # fuse (v2) that `ltfs` links against, so the userspace helper matches.
     coreutils # basic file utilities the activities and LTFS scripts rely on
     util-linux # mount/umount and friends for the FUSE LTFS path
-    bashInteractive # a shell for ltfs/mtx helper invocations
+    bashInteractive # a shell for ltfs helper invocations
   ];
 
   toolEnv = buildEnv {

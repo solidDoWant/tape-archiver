@@ -1,7 +1,0 @@
-  Storage Changer /dev/sch0:2 Drives, 47 Slots ( 3 Import/Export )
-Data Transfer Element 0:Empty
-Data Transfer Element 1:Empty
-      Storage Element 1:Empty
-      Storage Element 48 IMPORT/EXPORT:Full :VolumeTag=TA0001L6:Access=1
-      Storage Element 49 IMPORT/EXPORT:Empty:Access = 0
-      Storage Element 50 IMPORT/EXPORT:Empty:Access=closed
