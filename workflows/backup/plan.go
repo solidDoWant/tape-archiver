@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -213,6 +214,12 @@ func packPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	controlCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           TaskQueue,
 		StartToCloseTimeout: packTimeout,
+		// Pack is a pure in-memory bin-pack that ignores its context: every failure
+		// (copies < 1, capacity too small after overhead, an archive too large for
+		// one tape) is deterministic and recurs identically on retry. Cap attempts
+		// at 1 so a permanent plan fault fails the run at once instead of retrying
+		// under the default policy until the timeout — the same rationale as Verify.
+		RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
 
 	var activities *PackActivities

@@ -70,7 +70,20 @@ type GeneratePAR2Input struct {
 // (SPEC §4.3 phase 4), returning a PAR2Set per input archive in the same order,
 // each with its recovery files' paths, sizes, and SHA-256 checksums.
 func (a *GeneratePAR2Activities) GeneratePAR2(ctx context.Context, input GeneratePAR2Input) ([]PAR2Set, error) {
-	return generatePAR2(ctx, input.Config, input.Plan, input.Archives)
+	// Emit a liveness heartbeat while generating parity so a data-worker restart
+	// mid-phase is caught within activityHeartbeatTimeout rather than the 24h
+	// StartToClose.
+	var sets []PAR2Set
+
+	err := withActivityHeartbeat(ctx, func() error {
+		var err error
+
+		sets, err = generatePAR2(ctx, input.Config, input.Plan, input.Archives)
+
+		return err
+	})
+
+	return sets, err
 }
 
 // generatePAR2 is the body of the Generate PAR2 activity, split out so it can be
@@ -236,6 +249,7 @@ func generatePAR2Phase(ctx workflow.Context, cfg config.Config, state *runState)
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: generatePAR2Timeout,
+		HeartbeatTimeout:    activityHeartbeatTimeout,
 	})
 
 	var activities *GeneratePAR2Activities
