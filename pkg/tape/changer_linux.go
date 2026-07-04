@@ -34,6 +34,9 @@ const (
 	// descriptor carries its primary volume tag (element type code 0 = all
 	// types).
 	readElementVoltag = 0x10
+	// readElementAllElements is the "number of elements" CDB field value that
+	// requests every element the library has.
+	readElementAllElements = 0xFFFF
 	// elementStatusBufSize bounds the READ ELEMENT STATUS transfer. It is far
 	// larger than any supported library's report (the production 3573-TL and the
 	// mhvtl L700 are well under 4 KiB), so the response is never truncated.
@@ -41,6 +44,9 @@ const (
 	// modeSenseBufSize bounds the MODE SENSE transfer; the 0x1D page plus header
 	// is 24 bytes.
 	modeSenseBufSize = 64
+	// senseBufferLen sizes the SCSI sense buffer for every changer command; a
+	// fixed-format sense response fits well within it.
+	senseBufferLen = 32
 )
 
 // Changer command timeouts. A MOVE MEDIUM is a physical robot move and can take
@@ -261,7 +267,7 @@ func withSGFile(device string, fn func(*os.File) error) (err error) {
 // disabled) and returns the raw response bytes.
 func scsiModeSense6(ctx context.Context, f *os.File, page byte) ([]byte, error) {
 	buf := make([]byte, modeSenseBufSize)
-	sense := make([]byte, 32)
+	sense := make([]byte, senseBufferLen)
 
 	cdb := []byte{opcodeModeSense6, modeSenseDBD, page, 0, byte(len(buf)), 0}
 
@@ -288,14 +294,14 @@ func scsiModeSense6(ctx context.Context, f *os.File, page byte) ([]byte, error) 
 // with volume tags and returns the raw response bytes.
 func scsiReadElementStatus(ctx context.Context, f *os.File) ([]byte, error) {
 	buf := make([]byte, elementStatusBufSize)
-	sense := make([]byte, 32)
+	sense := make([]byte, senseBufferLen)
 
 	alloc := uint32(len(buf))
 	cdb := []byte{
 		opcodeReadElementStatus,
 		readElementVoltag, // VOLTAG set, element type code 0 (all types)
 		0, 0,              // starting element address 0
-		0xFF, 0xFF, // number of elements: all
+		byte(readElementAllElements >> 8), byte(readElementAllElements & 0xFF), // number of elements
 		0,                                                // reserved (DVCID/CURDATA off)
 		byte(alloc >> 16), byte(alloc >> 8), byte(alloc), // allocation length (24-bit)
 		0, // reserved
@@ -324,7 +330,7 @@ func scsiReadElementStatus(ctx context.Context, f *os.File) ([]byte, error) {
 // scsiMoveMedium issues MOVE MEDIUM (0xA5) to move media from src to dst using
 // the given transport element (robot) as the origin of the arm.
 func scsiMoveMedium(ctx context.Context, f *os.File, transport, src, dst int) error {
-	sense := make([]byte, 32)
+	sense := make([]byte, senseBufferLen)
 
 	cdb := []byte{
 		opcodeMoveMedium,

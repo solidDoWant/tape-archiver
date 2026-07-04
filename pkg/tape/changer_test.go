@@ -104,8 +104,8 @@ const testDescLen = 52
 // descriptor builds a single element descriptor of the standard 52-byte length.
 func descriptor(addr int, flags byte, opts ...func([]byte)) []byte {
 	d := make([]byte, testDescLen)
-	d[0], d[1] = byte(addr>>8), byte(addr)
-	d[2] = flags
+	d[descAddressOffset], d[descAddressOffset+1] = byte(addr>>8), byte(addr)
+	d[descFlagsOffset] = flags
 
 	for _, opt := range opts {
 		opt(d)
@@ -130,24 +130,25 @@ func withVolumeTag(tag string) func([]byte) {
 // withSource sets SVALID and the raw source storage element address.
 func withSource(raw int) func([]byte) {
 	return func(d []byte) {
-		d[9] = svalidBit
-		d[10], d[11] = byte(raw>>8), byte(raw)
+		d[descSVALIDOffset] = svalidBit
+		d[descSourceOffset], d[descSourceOffset+1] = byte(raw>>8), byte(raw)
 	}
 }
 
 // statusPage builds an element status page for one element type.
 func statusPage(elementType byte, pvoltag bool, descs ...[]byte) []byte {
-	page := make([]byte, 8)
+	page := make([]byte, elementStatusPageHeaderLen)
 	page[0] = elementType
 
 	if pvoltag {
-		page[1] = pvoltagBit
+		page[pageFlagsOffset] = pvoltagBit
 	}
 
-	page[2], page[3] = byte(testDescLen>>8), byte(testDescLen)
+	page[pageDescLenOffset], page[pageDescLenOffset+1] = byte(testDescLen>>8), byte(testDescLen)
 
 	byteCount := len(descs) * testDescLen
-	page[5], page[6], page[7] = byte(byteCount>>16), byte(byteCount>>8), byte(byteCount)
+	page[pageByteCountOffset], page[pageByteCountOffset+1], page[pageByteCountOffset+2] =
+		byte(byteCount>>16), byte(byteCount>>8), byte(byteCount)
 
 	for _, d := range descs {
 		page = append(page, d...)
@@ -156,20 +157,16 @@ func statusPage(elementType byte, pvoltag bool, descs ...[]byte) []byte {
 	return page
 }
 
-// elementStatus wraps pages in the 8-byte status data header.
+// elementStatus wraps pages in the status data header. Its internal fields are
+// cosmetic here — the decoder walks pages by length from elementStatusHeaderLen
+// on — so only the header size matters.
 func elementStatus(pages ...[]byte) []byte {
+	header := make([]byte, elementStatusHeaderLen)
+
 	var body []byte
-
-	elements := 0
-
 	for _, p := range pages {
 		body = append(body, p...)
-		elements += (len(p) - 8) / testDescLen
 	}
-
-	header := make([]byte, 8)
-	header[2], header[3] = byte(elements>>8), byte(elements)
-	header[5], header[6], header[7] = byte(len(body)>>16), byte(len(body)>>8), byte(len(body))
 
 	return append(header, body...)
 }

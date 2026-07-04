@@ -235,7 +235,7 @@ func scsiRewind(ctx context.Context, f *os.File) error {
 	// Heap-allocate the buffers so the addresses embedded in the SG_IO header
 	// as uintptrs remain valid for the duration of the (blocking) ioctl.
 	cdb := []byte{opcodeRewind, 0, 0, 0, 0, 0}
-	sense := make([]byte, 32)
+	sense := make([]byte, senseBufferLen)
 
 	hdr := sgIOHdr{
 		interfaceID:    'S',
@@ -271,7 +271,7 @@ func scsiRewind(ctx context.Context, f *os.File) error {
 // block at the current position and decodes the outcome.
 func scsiReadFirstBlock(ctx context.Context, f *os.File) (blankProbe, error) {
 	buf := make([]byte, firstBlockBufSize)
-	sense := make([]byte, 32)
+	sense := make([]byte, senseBufferLen)
 
 	// READ(6): variable block (FIXED=0), SILI set so a short/over-length block
 	// does not raise an incorrect-length CHECK CONDITION; the transfer length

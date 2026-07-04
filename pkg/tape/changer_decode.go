@@ -36,12 +36,11 @@ const (
 )
 
 const (
-	// pvoltagBit is the PVOLTAG flag in a READ ELEMENT STATUS page header
-	// (byte 1): when set, each descriptor carries a primary volume tag.
+	// pvoltagBit is the PVOLTAG flag in a READ ELEMENT STATUS page header (at
+	// pageFlagsOffset): when set, each descriptor carries a primary volume tag.
 	pvoltagBit = 0x80
-	// svalidBit is the SVALID flag in a data-transfer element descriptor
-	// (byte 9): when set, the source storage element address (bytes 10-11) is
-	// valid.
+	// svalidBit is the SVALID flag in a data-transfer element descriptor (at
+	// descSVALIDOffset): when set, the source storage element address is valid.
 	svalidBit = 0x80
 	// primaryVolumeTagOffset and primaryVolumeTagLen bound the barcode within an
 	// element descriptor when PVOLTAG is set. The full primary volume tag field
@@ -49,6 +48,58 @@ const (
 	// reserved area and sequence number we do not use.
 	primaryVolumeTagOffset = 12
 	primaryVolumeTagLen    = 32
+)
+
+// MODE SENSE(6) response layout (Element Address Assignment page). The page
+// follows a 4-byte mode parameter header plus any block descriptors.
+const (
+	// modeParamHeaderLen is the length of the MODE SENSE(6) mode parameter header.
+	modeParamHeaderLen = 4
+	// modeParamBlockDescLenOffset is the header byte holding the block descriptor
+	// length (the page starts after the header and those descriptors).
+	modeParamBlockDescLenOffset = 3
+)
+
+// Byte offsets of the (first-address, count) fields within the Element Address
+// Assignment mode page body (after its 2-byte page code / length header), plus
+// the body length that must be present to read them all.
+const (
+	eaaFirstMediumTransport = 2
+	eaaNumMediumTransport   = 4
+	eaaFirstStorage         = 6
+	eaaNumStorage           = 8
+	eaaFirstImportExport    = 10
+	eaaNumImportExport      = 12
+	eaaFirstDataTransfer    = 14
+	eaaNumDataTransfer      = 16
+	eaaBodyLen              = 18
+)
+
+// READ ELEMENT STATUS response layout: an element status data header, then one
+// element status page per element type, each with its own header followed by
+// fixed-length element descriptors.
+const (
+	// elementStatusHeaderLen is the length of the element status data header.
+	elementStatusHeaderLen = 8
+	// elementStatusPageHeaderLen is the length of each element status page header.
+	elementStatusPageHeaderLen = 8
+)
+
+// Byte offsets within an element status page header.
+const (
+	pageFlagsOffset     = 1 // PVOLTAG flag byte
+	pageDescLenOffset   = 2 // element descriptor length (16-bit)
+	pageByteCountOffset = 5 // total descriptor byte count (24-bit)
+)
+
+// Byte offsets and minimum lengths within an element descriptor.
+const (
+	descAddressOffset = 0  // element address (16-bit)
+	descFlagsOffset   = 2  // FULL (0x01) / ACCESS (0x08) flags
+	descMinLen        = 3  // enough for the address + flags prefix
+	descSVALIDOffset  = 9  // SVALID flag byte
+	descSourceOffset  = 10 // source storage element address (16-bit)
+	descSourceMinLen  = 12 // enough to read SVALID + source address
 )
 
 // elementAddressing maps between a library's raw SCSI element addresses and the
@@ -138,14 +189,14 @@ func (a *elementAddressing) transportElement() int {
 // (first-address, count) 16-bit big-endian pairs for medium-transport, storage,
 // import/export, and data-transfer elements.
 func parseElementAddressing(data []byte) (*elementAddressing, error) {
-	if len(data) < 4 {
+	if len(data) < modeParamHeaderLen {
 		return nil, fmt.Errorf("mode sense: short response (%d bytes)", len(data))
 	}
 
-	page := 4 + int(data[3]) // skip header + block descriptors
+	// Skip the mode parameter header and any block descriptors it declares.
+	page := modeParamHeaderLen + int(data[modeParamBlockDescLenOffset])
 
-	// Need the page code, length, and all eight fields (up to byte 17).
-	if len(data) < page+18 {
+	if len(data) < page+eaaBodyLen {
 		return nil, fmt.Errorf("mode sense: truncated page 0x1D (%d bytes, page at %d)", len(data), page)
 	}
 
@@ -156,10 +207,10 @@ func parseElementAddressing(data []byte) (*elementAddressing, error) {
 	field := func(off int) int { return int(be16(data, page+off)) }
 
 	return &elementAddressing{
-		firstMTE: field(2), numMTE: field(4),
-		firstStorage: field(6), numStorage: field(8),
-		firstIE: field(10), numIE: field(12),
-		firstDTE: field(14), numDTE: field(16),
+		firstMTE: field(eaaFirstMediumTransport), numMTE: field(eaaNumMediumTransport),
+		firstStorage: field(eaaFirstStorage), numStorage: field(eaaNumStorage),
+		firstIE: field(eaaFirstImportExport), numIE: field(eaaNumImportExport),
+		firstDTE: field(eaaFirstDataTransfer), numDTE: field(eaaNumDataTransfer),
 	}, nil
 }
 
@@ -172,17 +223,17 @@ func parseElementAddressing(data []byte) (*elementAddressing, error) {
 func decodeElementStatus(data []byte, addressing *elementAddressing) (Inventory, error) {
 	var inv Inventory
 
-	if len(data) < 8 {
+	if len(data) < elementStatusHeaderLen {
 		return inv, fmt.Errorf("read element status: short response (%d bytes)", len(data))
 	}
 
-	// Walk the element status pages. Each page header is 8 bytes.
-	for pos := 8; pos+8 <= len(data); {
+	// Walk the element status pages that follow the status data header.
+	for pos := elementStatusHeaderLen; pos+elementStatusPageHeaderLen <= len(data); {
 		elementType := data[pos]
-		pvoltag := data[pos+1]&pvoltagBit != 0
-		descLen := int(be16(data, pos+2))
-		byteCount := be24(data, pos+5)
-		descStart := pos + 8
+		pvoltag := data[pos+pageFlagsOffset]&pvoltagBit != 0
+		descLen := int(be16(data, pos+pageDescLenOffset))
+		byteCount := be24(data, pos+pageByteCountOffset)
+		descStart := pos + elementStatusPageHeaderLen
 
 		if descLen <= 0 {
 			break // malformed; avoid an infinite loop
@@ -206,13 +257,13 @@ func decodeElementStatus(data []byte, addressing *elementAddressing) (Inventory,
 // page's PVOLTAG flag is set and the element is full, the barcode is the primary
 // volume tag at byte 12.
 func decodeDescriptor(elementType byte, pvoltag bool, desc []byte, addressing *elementAddressing, inv *Inventory) {
-	if len(desc) < 3 {
+	if len(desc) < descMinLen {
 		return
 	}
 
-	addr := int(be16(desc, 0))
-	full := desc[2]&elementFlagFull != 0
-	access := desc[2]&elementFlagAccess != 0
+	addr := int(be16(desc, descAddressOffset))
+	full := desc[descFlagsOffset]&elementFlagFull != 0
+	access := desc[descFlagsOffset]&elementFlagAccess != 0
 
 	var barcode Barcode
 	if full && pvoltag && len(desc) >= primaryVolumeTagOffset+primaryVolumeTagLen {
@@ -225,8 +276,8 @@ func decodeDescriptor(elementType byte, pvoltag bool, desc []byte, addressing *e
 
 		// Recover the source storage slot for a loaded drive, mirroring mtx's
 		// "(Storage Element N Loaded)" annotation, when the library reports it.
-		if full && len(desc) >= 12 && desc[9]&svalidBit != 0 {
-			if src := int(be16(desc, 10)); addressing.isStorageRaw(src) {
+		if full && len(desc) >= descSourceMinLen && desc[descSVALIDOffset]&svalidBit != 0 {
+			if src := int(be16(desc, descSourceOffset)); addressing.isStorageRaw(src) {
 				el.SourceSlot = addressing.friendlyStorage(src)
 			}
 		}
