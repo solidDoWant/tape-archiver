@@ -162,6 +162,12 @@ chart-lint: ## Fetch chart deps, lint, and render the control-worker Helm chart 
 	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS)
 	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) >/dev/null
 
+DATA_WORKER_UNIT := deploy/data-worker/tape-archiver-data-worker.service
+
+.PHONY: unit-lint
+unit-lint: ## Verify the reference data-worker systemd unit (no running service needed).
+	systemd-analyze verify $(DATA_WORKER_UNIT)
+
 ##@ Build
 
 $(BIN_DIR)/worker: $(GO_SOURCE_FILES)
