@@ -146,7 +146,20 @@ func (a *ReportActivities) BuildReport(ctx context.Context, input ReportInput) (
 
 	outDir := filepath.Join(a.stagingRoot, activity.GetInfo(ctx).WorkflowExecution.RunID)
 
-	return a.buildReport(ctx, outDir, input)
+	// Emit a liveness heartbeat while rendering the report and assembling the ISO
+	// so a data-worker restart mid-phase is caught within activityHeartbeatTimeout
+	// rather than the 1h StartToClose.
+	var output ReportOutput
+
+	err := withActivityHeartbeat(ctx, func() error {
+		var err error
+
+		output, err = a.buildReport(ctx, outDir, input)
+
+		return err
+	})
+
+	return output, err
 }
 
 // buildReport is the body of the Report activity, split out so it can be exercised
@@ -579,6 +592,7 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: reportTimeout,
+		HeartbeatTimeout:    activityHeartbeatTimeout,
 	})
 
 	var activities *ReportActivities

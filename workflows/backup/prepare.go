@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 	"golang.org/x/sync/errgroup"
 
@@ -105,12 +106,32 @@ type PrepareInput struct {
 // never collide; the run id comes from the activity context.
 func (a *PrepareActivities) PrepareArchives(ctx context.Context, input PrepareInput) ([]StagedArchive, error) {
 	if a.stagingRoot == "" {
-		return nil, fmt.Errorf("staging directory is not configured (set TAPE_STAGING_DIR on the data worker)")
+		// An unconfigured staging root is worker misconfiguration, not a transient
+		// fault: every retry hits the same missing env var. Mark it non-retryable
+		// so the run fails fast at the first attempt instead of retrying an
+		// unrecoverable state under the default policy until the 24h timeout.
+		return nil, temporal.NewNonRetryableApplicationError(
+			"staging directory is not configured (set TAPE_STAGING_DIR on the data worker)",
+			"prepare-misconfigured",
+			nil,
+		)
 	}
 
 	stagingDir := filepath.Join(a.stagingRoot, activity.GetInfo(ctx).WorkflowExecution.RunID)
 
-	return a.prepare(ctx, stagingDir, input)
+	// Emit a liveness heartbeat while staging so a data-worker restart mid-Prepare
+	// is caught within activityHeartbeatTimeout rather than the 24h StartToClose.
+	var staged []StagedArchive
+
+	err := withActivityHeartbeat(ctx, func() error {
+		var err error
+
+		staged, err = a.prepare(ctx, stagingDir, input)
+
+		return err
+	})
+
+	return staged, err
 }
 
 // prepare stages every archive under stagingDir. It is split from
@@ -315,6 +336,7 @@ func preparePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: prepareTimeout,
+		HeartbeatTimeout:    activityHeartbeatTimeout,
 	})
 
 	var activities *PrepareActivities

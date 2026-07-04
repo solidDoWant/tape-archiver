@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 )
@@ -321,6 +322,12 @@ func TestPrepareArchivesRequiresStagingDir(t *testing.T) {
 	_, err := activities.PrepareArchives(t.Context(), PrepareInput{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "staging directory")
+
+	// Misconfiguration recurs on every retry, so the activity must surface it as
+	// non-retryable — the run fails fast rather than retrying to the 24h timeout.
+	var appErr *temporal.ApplicationError
+	require.ErrorAs(t, err, &appErr)
+	assert.True(t, appErr.NonRetryable(), "unconfigured staging root must be non-retryable")
 }
 
 // writeTree creates a temp directory populated with the given relative-path →
