@@ -55,10 +55,10 @@ var speedMatchingFloorsMBps = map[string]float64{
 }
 
 // writeHealthFloor returns the speed-matching floor for the tape generation implied by
-// the configured native capacity (SPEC §5 library.tapeCapacityBytes), reusing the same
-// capacity→generation classification as the report (ltoGeneration). known is false when
-// the generation has no sourced floor, in which case the below-floor verdict is not
-// evaluated (writeHealthFloor never invents a floor).
+// the configured native capacity (SPEC §5 library.tapeCapacityBytes), classifying the
+// generation with ltoGeneration. known is false when the generation has no sourced
+// floor, in which case the below-floor verdict is not evaluated (writeHealthFloor never
+// invents a floor).
 func writeHealthFloor(capacityBytes int64) (floorMBps float64, known bool) {
 	floor, ok := speedMatchingFloorsMBps[ltoGeneration(capacityBytes)]
 

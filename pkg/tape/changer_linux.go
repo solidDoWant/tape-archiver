@@ -283,7 +283,7 @@ func scsiModeSense6(ctx context.Context, f *os.File, page byte) ([]byte, error) 
 		timeout:        timeoutMs(ctx, changerReadTimeout),
 	}
 
-	if err := changerIoctl(f, &hdr, cdb, sense, buf, "MODE SENSE(6)"); err != nil {
+	if err := sgCommand(f, &hdr, cdb, sense, buf, "MODE SENSE(6)"); err != nil {
 		return nil, err
 	}
 
@@ -320,7 +320,7 @@ func scsiReadElementStatus(ctx context.Context, f *os.File) ([]byte, error) {
 		timeout:        timeoutMs(ctx, changerReadTimeout),
 	}
 
-	if err := changerIoctl(f, &hdr, cdb, sense, buf, "READ ELEMENT STATUS"); err != nil {
+	if err := sgCommand(f, &hdr, cdb, sense, buf, "READ ELEMENT STATUS"); err != nil {
 		return nil, err
 	}
 
@@ -353,13 +353,14 @@ func scsiMoveMedium(ctx context.Context, f *os.File, transport, src, dst int) er
 		timeout:        timeoutMs(ctx, moveMediumTimeout),
 	}
 
-	return changerIoctl(f, &hdr, cdb, sense, nil, fmt.Sprintf("MOVE MEDIUM (src=%d dst=%d)", src, dst))
+	return sgCommand(f, &hdr, cdb, sense, nil, fmt.Sprintf("MOVE MEDIUM (src=%d dst=%d)", src, dst))
 }
 
-// changerIoctl runs one SG_IO command and turns a transport failure or CHECK
+// sgCommand runs one SG_IO command and turns a transport failure or CHECK
 // CONDITION into a descriptive error naming the SCSI sense. dxferBuf is the data
-// buffer to keep alive (nil for non-data commands).
-func changerIoctl(f *os.File, hdr *sgIOHdr, cdb, sense, dxferBuf []byte, name string) error {
+// buffer to keep alive (nil for non-data commands). It is the package's shared
+// SG_IO runner, used by the changer commands here and by INQUIRY (inquiry_linux.go).
+func sgCommand(f *os.File, hdr *sgIOHdr, cdb, sense, dxferBuf []byte, name string) error {
 	err := sgIoctl(f.Fd(), hdr)
 
 	runtime.KeepAlive(cdb)

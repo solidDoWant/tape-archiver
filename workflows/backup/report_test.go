@@ -109,6 +109,20 @@ func TestBuildReportManifest(t *testing.T) {
 	assert.NotEmpty(t, manifest.Build.AgeVersion)
 }
 
+// TestQueryDeviceIdentityDegrades covers the graceful-degradation contract: when
+// the library exposes no drives or changer to query (e.g. a dry run with no
+// device), every hardware identifier degrades to "unknown" rather than failing.
+func TestQueryDeviceIdentityDegrades(t *testing.T) {
+	t.Parallel()
+
+	device := queryDeviceIdentity(t.Context(), config.Library{})
+
+	assert.Equal(t, unknownIdentity, device.driveModel)
+	assert.Equal(t, unknownIdentity, device.driveSerial)
+	assert.Equal(t, unknownIdentity, device.driveGeneration)
+	assert.Equal(t, unknownIdentity, device.libraryModel)
+}
+
 // TestArchiveName covers the display name derived from each kind of config Source.
 func TestArchiveName(t *testing.T) {
 	t.Parallel()
@@ -134,8 +148,8 @@ func TestRedundancyPolicy(t *testing.T) {
 	assert.Equal(t, "none", redundancyPolicy(config.Redundancy{}))
 }
 
-// TestLTOGeneration covers the capacity→generation mapping, including the
-// below-range fallback.
+// TestLTOGeneration covers the capacity→generation mapping that classifies the
+// write-health speed-matching floor, including the below-range fallback.
 func TestLTOGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -156,29 +170,6 @@ func TestLTOGeneration(t *testing.T) {
 			assert.Equal(t, test.want, ltoGeneration(test.capacity))
 		})
 	}
-}
-
-// TestParseInquiry checks model/serial extraction from a representative sg_inq
-// standard-INQUIRY output.
-func TestParseInquiry(t *testing.T) {
-	t.Parallel()
-
-	output := `standard INQUIRY:
-  PQual=0  PDT=1  RMB=1  version=0x06
-  Vendor identification: IBM
-  Product identification: ULT3580-TD8
-  Product revision level: J3I2
-  Unit serial number: 1068000073
-`
-
-	model, serial := parseInquiry(output)
-	assert.Equal(t, "IBM ULT3580-TD8", model)
-	assert.Equal(t, "1068000073", serial)
-
-	// Missing fields yield empty strings for the caller to degrade.
-	emptyModel, emptySerial := parseInquiry("standard INQUIRY:\n  PQual=0\n")
-	assert.Empty(t, emptyModel)
-	assert.Empty(t, emptySerial)
 }
 
 // TestBuildSHA256Manifest checks the manifest lists every on-tape file for every
