@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -24,6 +23,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/archive"
 	"github.com/solidDoWant/tape-archiver/pkg/recoverykit"
 	"github.com/solidDoWant/tape-archiver/pkg/report"
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
 // The Report phase (SPEC §4.3 phase 9) builds the two durable recovery artifacts:
@@ -496,8 +496,9 @@ func buildSHA256Manifest(input ReportInput) ([]byte, error) {
 }
 
 // deviceIdentity carries the drive and library provenance rendered in the report's
-// build parameters. The generation is derived from the configured tape capacity;
-// the model and serial are read from the hardware by a best-effort SCSI INQUIRY.
+// build parameters. Every field is read from the hardware by a best-effort SCSI
+// INQUIRY — the model and serial directly, the drive generation from the product
+// id — so nothing is hand-entered from config.
 type deviceIdentity struct {
 	driveModel      string
 	driveSerial     string
@@ -505,37 +506,40 @@ type deviceIdentity struct {
 	libraryModel    string
 }
 
-// queryDeviceIdentity assembles the drive/library provenance for the report. The
-// LTO generation is derived from the configured native capacity; the model and
-// serial come from a best-effort SCSI INQUIRY on the first drive and the changer.
-// INQUIRY is provenance only, so any failure degrades to "unknown" and is logged
-// rather than failing the run.
+// queryDeviceIdentity assembles the drive/library provenance for the report from a
+// best-effort SCSI INQUIRY (0x12) on the first drive and the changer: the drive's
+// model, serial, and — from its product id — the LTO generation required to read
+// its tapes, plus the library model. INQUIRY is provenance only, so any failure
+// (e.g. dry-run/mhvtl without the device) degrades each field to "unknown" and is
+// logged rather than failing the run.
 func queryDeviceIdentity(ctx context.Context, library config.Library) deviceIdentity {
 	identity := deviceIdentity{
 		driveModel:      unknownIdentity,
 		driveSerial:     unknownIdentity,
-		driveGeneration: ltoGeneration(library.TapeCapacityBytes),
+		driveGeneration: unknownIdentity,
 		libraryModel:    unknownIdentity,
 	}
 
 	if len(library.Drives) > 0 {
-		if model, serial, err := inquireDevice(ctx, library.Drives[0]); err != nil {
+		if info, err := tape.NewDrive(library.Drives[0]).Inquire(ctx); err != nil {
 			slog.Warn("report: could not read drive identity", "device", library.Drives[0], "error", err)
 		} else {
-			if model != "" {
+			if model := info.Model(); model != "" {
 				identity.driveModel = model
 			}
 
-			if serial != "" {
-				identity.driveSerial = serial
+			if info.Serial != "" {
+				identity.driveSerial = info.Serial
 			}
+
+			identity.driveGeneration = info.LTOGeneration()
 		}
 	}
 
 	if library.Changer != "" {
-		if model, _, err := inquireDevice(ctx, library.Changer); err != nil {
+		if info, err := tape.NewChanger(library.Changer).Inquire(ctx); err != nil {
 			slog.Warn("report: could not read library identity", "device", library.Changer, "error", err)
-		} else if model != "" {
+		} else if model := info.Model(); model != "" {
 			identity.libraryModel = model
 		}
 	}
@@ -543,45 +547,13 @@ func queryDeviceIdentity(ctx context.Context, library config.Library) deviceIden
 	return identity
 }
 
-// inquireDevice runs a SCSI INQUIRY on a device node with sg_inq (sg3-utils, a
-// data-worker dependency) and returns the parsed model and serial.
-func inquireDevice(ctx context.Context, node string) (model, serial string, err error) {
-	out, err := exec.CommandContext(ctx, "sg_inq", node).CombinedOutput()
-	if err != nil {
-		return "", "", fmt.Errorf("sg_inq %s: %w: %s", node, err, strings.TrimSpace(string(out)))
-	}
-
-	model, serial = parseInquiry(string(out))
-
-	return model, serial, nil
-}
-
-// parseInquiry extracts the drive model (vendor + product) and unit serial number
-// from sg_inq's standard-INQUIRY output. Missing fields yield empty strings, which
-// the caller degrades to "unknown".
-func parseInquiry(output string) (model, serial string) {
-	var vendor, product string
-
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-
-		switch {
-		case strings.HasPrefix(line, "Vendor identification:"):
-			vendor = strings.TrimSpace(strings.TrimPrefix(line, "Vendor identification:"))
-		case strings.HasPrefix(line, "Product identification:"):
-			product = strings.TrimSpace(strings.TrimPrefix(line, "Product identification:"))
-		case strings.HasPrefix(line, "Unit serial number:"):
-			serial = strings.TrimSpace(strings.TrimPrefix(line, "Unit serial number:"))
-		}
-	}
-
-	return strings.TrimSpace(vendor + " " + product), serial
-}
-
 // ltoGeneration maps a tape's native capacity (SPEC §5 library.tapeCapacityBytes)
-// to the LTO generation required to read it — the fact a future recoverer needs.
-// Thresholds are the generations' native capacities; a capacity below LTO-5's or
-// non-positive yields an explicit "unknown" carrying the raw value.
+// to its LTO generation, used to look up the generation's write-health
+// speed-matching floor (writeHealthFloor). The report's "generation required to
+// read" field instead comes from the drive's INQUIRY product id (deviceIdentity),
+// not this capacity heuristic. Thresholds are the generations' native capacities;
+// a capacity below LTO-5's or non-positive yields an explicit "unknown" carrying
+// the raw value.
 func ltoGeneration(capacityBytes int64) string {
 	switch {
 	case capacityBytes >= 16_000_000_000_000:

@@ -141,6 +141,33 @@ func TestBlankCheck(t *testing.T) {
 	assert.True(t, blank, "freshly loaded mhvtl tape should be blank")
 }
 
+// TestInquire verifies that INQUIRY reads the SCSI identity of both the mhvtl
+// drive and the changer, and that the drive's LTO generation is derived from its
+// product id. INQUIRY needs no loaded tape and moves no media. The mhvtl default
+// config emulates an IBM ULT3580-TD6 (LTO-6) drive behind an STK L700 library.
+func TestInquire(t *testing.T) {
+	testutil.SkipIfMhvtlUnavailable(t)
+
+	// Pass only the tape/changer nodes; each resolves its paired sg node from the
+	// SCSI address, exercising the production path.
+	drive := tape.NewDrive(testutil.Drive0Dev(t))
+	changer := tape.NewChanger(testutil.ChangerDev(t))
+
+	driveInfo, err := drive.Inquire(t.Context())
+	require.NoError(t, err, "drive INQUIRY")
+	assert.Equal(t, "IBM", driveInfo.Vendor)
+	assert.Equal(t, "ULT3580-TD6", driveInfo.Product)
+	assert.Equal(t, "IBM ULT3580-TD6", driveInfo.Model())
+	assert.Equal(t, "LTO-6", driveInfo.LTOGeneration())
+	assert.NotEmpty(t, driveInfo.Serial, "drive should report a unit serial number")
+
+	changerInfo, err := changer.Inquire(t.Context())
+	require.NoError(t, err, "changer INQUIRY")
+	assert.Equal(t, "STK L700", changerInfo.Model())
+	// A changer has no LTO generation.
+	assert.Equal(t, "unknown", changerInfo.LTOGeneration())
+}
+
 // TestTransferToIO verifies that a tape can be transferred directly from a
 // storage slot into an I/O station slot.
 func TestTransferToIO(t *testing.T) {
