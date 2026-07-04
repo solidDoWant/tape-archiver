@@ -22,7 +22,7 @@ The image is deliberately minimal:
 | CA certificates | `cacert` | TLS roots for the Temporal control plane and the Discord webhook |
 
 It carries **none** of the bulk-data/tape tooling the data-worker image bundles — no
-`ltfs`/`mkltfs`, `mtx`, `mt`, `par2`, `age`, `zstd`, `sg3_utils`, or `lsscsi`. The
+`ltfs`/`mkltfs`, `mt`, `par2`, `age`, `zstd`, `sg3_utils`, or `lsscsi`. The
 control worker shells out to no such tools, so shipping them would only add weight and
 attack surface.
 

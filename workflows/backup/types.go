@@ -201,7 +201,7 @@ type driveSet []TapeAssignment
 // (SPEC §4.3 phase 6). It carries the device and slot provenance the Write and
 // Eject phases need to format, mount, and return the tape.
 type LoadedTape struct {
-	// Barcode is the tape's library barcode (volume tag from mtx), used as the
+	// Barcode is the tape's library barcode (the SCSI volume tag), used as the
 	// LTFS volume name and as the manifest and report identity (SPEC §6).
 	Barcode tape.Barcode
 	// DriveIndex is the 0-based position of the drive in cfg.Library.Drives,

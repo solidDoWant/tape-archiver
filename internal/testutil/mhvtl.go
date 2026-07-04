@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
 const (
@@ -30,12 +32,12 @@ const (
 
 // SkipIfMhvtlUnavailable skips the test if the mhvtl virtual library is not
 // accessible.  It checks MHVTL_CHANGER_DEV first, then falls back to probing
-// /dev/sch0, and verifies that mtx can actually query the changer.
+// /dev/sch0, and verifies that the changer can actually be queried via SG_IO.
 //
-// Sending SCSI commands via mtx requires CAP_SYS_RAWIO plus device access; when
-// the test process lacks it the status query fails and the test is skipped
-// rather than failed. Run "make test-integration" (which elevates the test
-// binary) to exercise these tests.
+// Issuing SCSI commands to the changer requires CAP_SYS_RAWIO plus device
+// access; when the test process lacks it the inventory query fails and the test
+// is skipped rather than failed. Run "make test-integration" (which elevates the
+// test binary) to exercise these tests.
 func SkipIfMhvtlUnavailable(t *testing.T) {
 	t.Helper()
 
@@ -45,8 +47,8 @@ func SkipIfMhvtlUnavailable(t *testing.T) {
 			" (run 'make mhvtl-up' or set %s)", dev, EnvChangerDev)
 	}
 
-	if err := MtxCommand(t.Context(), dev, "status").Run(); err != nil {
-		t.Skipf("mhvtl not accessible: mtx -f %s status: %v"+
+	if _, err := tape.NewChanger(dev).Inventory(t.Context()); err != nil {
+		t.Skipf("mhvtl not accessible: changer inventory on %s: %v"+
 			" (run 'make mhvtl-up' to start the virtual library)", dev, err)
 	}
 }
@@ -225,15 +227,4 @@ func SkipIfDriveNotReady(t *testing.T, dev string) {
 
 	t.Skipf("tape drive %s did not become ready within 30s after load"+
 		" (kernel/mhvtl ioctl incompatibility — last rewind error: %v)", dev, lastErr)
-}
-
-// MtxCommand returns an exec.Cmd for "mtx -f <dev> <args...>".
-//
-// It mirrors the production code and invokes mtx directly — the integration
-// test binary is expected to run with the privilege needed to issue SCSI
-// commands (CAP_SYS_RAWIO plus device access). "make test-integration" provides
-// this by running the test process under sudo; a non-privileged run simply
-// skips via SkipIfMhvtlUnavailable.
-func MtxCommand(ctx context.Context, dev string, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, "mtx", append([]string{"-f", dev}, args...)...)
 }

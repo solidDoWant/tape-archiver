@@ -111,8 +111,8 @@
             # The same binary and version ship on the recovery disc (SPEC §7).
             pkgs.age
 
-            # Tape library / changer tools (real hardware and virtual alike)
-            pkgs.mtx
+            # Tape drive tools (real hardware and virtual alike). The changer is
+            # driven in-process via SG_IO (pkg/tape), so no mtx is needed.
             pkgs.mt-st
             # SCSI generic tooling: sg_logs (drive log pages / TapeAlert),
             # sg_turs (TEST UNIT READY readiness probe), etc.

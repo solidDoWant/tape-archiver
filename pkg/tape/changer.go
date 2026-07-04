@@ -1,330 +1,61 @@
 package tape
 
-import (
-	"context"
-	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
-)
+import "sync"
 
-// Changer wraps the mtx tape library changer tool.
+// Changer drives a SCSI media-changer (tape library robot) directly via SG_IO,
+// issuing the two SCSI commands the library needs — READ ELEMENT STATUS (0xB8)
+// for inventory and MOVE MEDIUM (0xA5) for load/unload/transfer — plus a one-time
+// MODE SENSE of the Element Address Assignment page (0x1D) to map the library's
+// raw element addresses to the friendly drive/slot numbers callers use. It
+// replaces the former "mtx" subprocess so the import/export ACCESS bit, which the
+// mtx text output discards, is available to the operator-in-the-loop Eject phase
+// (SPEC §4.3 phase 8).
+//
+// The SG_IO decoding is Linux-only (changer_linux.go); other platforms get build
+// stubs (changer_other.go). The address arithmetic and binary descriptor decoding
+// are platform-independent (changer_decode.go).
 type Changer struct {
+	// device is the path passed to NewChanger. It is normally the changer node
+	// (/dev/sch0); the paired SCSI generic node (/dev/sgN) is resolved from its
+	// SCSI address on first use. A /dev/sgN path is also accepted and used as-is.
 	device string
+	// sgDevice, when set with WithChangerSGDevice, overrides the resolved SCSI
+	// generic node.
+	sgDevice string
+
+	// mu guards the lazily-resolved, cached SG node and addressing map so a
+	// Changer is safe to reuse across sequential activity calls.
+	mu sync.Mutex
+	// resolvedSG is the SCSI generic node actually issued commands, cached after
+	// the first resolution.
+	resolvedSG string
+	// addressing is the raw↔friendly element-address map read once from mode page
+	// 0x1D (the same authoritative source mtx reads) and cached.
+	addressing *elementAddressing
 }
 
-// NewChanger returns a Changer targeting the given device (e.g. /dev/sch0).
-func NewChanger(device string) *Changer {
-	return &Changer{device: device}
+// ChangerOption configures a Changer.
+type ChangerOption func(*Changer)
+
+// WithChangerSGDevice overrides the SCSI generic node (/dev/sgN) used to issue
+// commands. By default the sg node is resolved from the changer device's SCSI
+// address (see Inventory). Use this for non-standard device topologies or tests.
+func WithChangerSGDevice(sgDevice string) ChangerOption {
+	return func(c *Changer) {
+		c.sgDevice = sgDevice
+	}
 }
 
-// Inventory queries the changer with "mtx status" and returns the parsed result.
-func (c *Changer) Inventory(ctx context.Context) (Inventory, error) {
-	out, err := c.output(ctx, "status")
-	if err != nil {
-		return Inventory{}, err
+// NewChanger returns a Changer targeting the given device. Pass the changer node
+// (e.g. /dev/sch0); its paired SCSI generic node is resolved from the SCSI
+// address on first use. A /dev/sgN node is also accepted and used directly, and
+// WithChangerSGDevice overrides the resolution entirely.
+func NewChanger(device string, opts ...ChangerOption) *Changer {
+	c := &Changer{device: device}
+
+	for _, opt := range opts {
+		opt(c)
 	}
 
-	inv, err := parseInventory(string(out))
-	if err != nil {
-		return Inventory{}, fmt.Errorf("parse mtx status: %w", err)
-	}
-
-	return inv, nil
-}
-
-// Load moves the tape in the given storage slot into the given drive (0-indexed).
-func (c *Changer) Load(ctx context.Context, slot, drive int) error {
-	_, err := c.output(ctx, "load", strconv.Itoa(slot), strconv.Itoa(drive))
-
-	return err
-}
-
-// Unload moves the tape from the given drive (0-indexed) into the given slot.
-func (c *Changer) Unload(ctx context.Context, slot, drive int) error {
-	_, err := c.output(ctx, "unload", strconv.Itoa(slot), strconv.Itoa(drive))
-
-	return err
-}
-
-// Transfer moves media from srcSlot to dstSlot (both are element addresses).
-// Use this to move a tape from a drive's home slot to an I/O station slot.
-func (c *Changer) Transfer(ctx context.Context, srcSlot, dstSlot int) error {
-	_, err := c.output(ctx, "transfer", strconv.Itoa(srcSlot), strconv.Itoa(dstSlot))
-
-	return err
-}
-
-// output executes an mtx subcommand and returns its stdout. On failure the
-// returned error names the exact command that ran — the resolved binary path
-// via cmd.String() — and appends mtx's stderr, which carries the human-readable
-// reason (e.g. "Drive 0 Full"). This is the single place that turns an mtx
-// invocation into an error, so callers never reconstruct the command line by
-// hand (which previously diverged from the real invocation and dropped stderr).
-func (c *Changer) output(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := c.mtx(ctx, args...)
-
-	var stderr strings.Builder
-
-	cmd.Stderr = &stderr
-
-	out, err := cmd.Output()
-	if err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return nil, fmt.Errorf("%s: %w: %s", cmd, err, msg)
-		}
-
-		return nil, fmt.Errorf("%s: %w", cmd, err)
-	}
-
-	return out, nil
-}
-
-// mtx returns an exec.Cmd for "mtx -f <device> <args...>".
-//
-// The command is invoked directly; the program never escalates its own
-// privilege. Issuing SCSI commands to the changer requires CAP_SYS_RAWIO plus
-// access to the device node, which the operator grants by running the worker
-// with the necessary privilege (root, or CAP_SYS_RAWIO and a device mount in
-// the data-worker container). This matches the SG_IO blank check and the
-// sg_logs path, which likewise require an already-privileged process — there is
-// no way to elevate an in-process ioctl after the fact.
-func (c *Changer) mtx(ctx context.Context, args ...string) *exec.Cmd {
-	return exec.CommandContext(ctx, "mtx", append([]string{"-f", c.device}, args...)...)
-}
-
-// parseInventory parses the output of "mtx -f <dev> status" into an Inventory.
-//
-// Example lines:
-//
-//	  Storage Changer /dev/sch0:2 Drives, 47 Slots ( 3 Import/Export )
-//	Data Transfer Element 0:Empty
-//	Data Transfer Element 1:Full (Storage Element 3 Loaded):VolumeTag=TA0003L6
-//	      Storage Element 1:Full :VolumeTag=TA0001L6
-//	      Storage Element 3:Empty
-//	      Storage Element 48 IMPORT/EXPORT:Full :VolumeTag=TA0001L6
-func parseInventory(output string) (Inventory, error) {
-	var inv Inventory
-
-	for _, rawLine := range strings.Split(output, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" {
-			continue
-		}
-
-		switch {
-		case strings.HasPrefix(line, "Data Transfer Element "):
-			el, err := parseDriveElement(line)
-			if err != nil {
-				return Inventory{}, err
-			}
-
-			inv.Drives = append(inv.Drives, el)
-
-		case strings.HasPrefix(line, "Storage Element ") && strings.Contains(line, "IMPORT/EXPORT"):
-			el, reported, err := parseIOElement(line)
-			if err != nil {
-				return Inventory{}, err
-			}
-
-			if reported {
-				inv.IOAccessReported = true
-			}
-
-			inv.IOSlots = append(inv.IOSlots, el)
-
-		case strings.HasPrefix(line, "Storage Element "):
-			el, err := parseStorageElement(line)
-			if err != nil {
-				return Inventory{}, err
-			}
-
-			inv.Slots = append(inv.Slots, el)
-		}
-	}
-
-	return inv, nil
-}
-
-// parseDriveElement parses lines like:
-//
-//	Data Transfer Element 0:Empty
-//	Data Transfer Element 1:Full (Storage Element 3 Loaded):VolumeTag=TA0003L6
-//	Data Transfer Element 0:Full (Storage Element 1 Loaded):VolumeTag = TA0001L6
-//
-// mhvtl uses "VolumeTag = value" (spaces around =) while some real changers
-// omit the spaces; parseVolumeTag handles both.
-func parseDriveElement(line string) (DriveElement, error) {
-	// Strip prefix.
-	rest := strings.TrimPrefix(line, "Data Transfer Element ")
-
-	// Split on first colon to get address and the status part.
-	addrStr, status, found := strings.Cut(rest, ":")
-	if !found {
-		return DriveElement{}, fmt.Errorf("unexpected drive element line: %q", line)
-	}
-
-	addr, err := strconv.Atoi(strings.TrimSpace(addrStr))
-	if err != nil {
-		return DriveElement{}, fmt.Errorf("parse drive address %q: %w", addrStr, err)
-	}
-
-	el := DriveElement{Address: addr}
-
-	if strings.HasPrefix(status, "Empty") {
-		return el, nil
-	}
-
-	if !strings.HasPrefix(status, "Full") {
-		return DriveElement{}, fmt.Errorf("unexpected drive status in line: %q", line)
-	}
-
-	el.Loaded = true
-
-	// Extract source slot if present: "Full (Storage Element 3 Loaded):VolumeTag=..."
-	if idx := strings.Index(status, "(Storage Element "); idx >= 0 {
-		rest2 := status[idx+len("(Storage Element "):]
-
-		slotStr, _, _ := strings.Cut(rest2, " ")
-		if slot, e := strconv.Atoi(slotStr); e == nil {
-			el.SourceSlot = slot
-		}
-	}
-
-	el.Barcode = parseVolumeTag(status)
-
-	return el, nil
-}
-
-// parseStorageElement parses lines like:
-//
-//	Storage Element 1:Full :VolumeTag=TA0001L6
-//	Storage Element 3:Empty
-func parseStorageElement(line string) (StorageElement, error) {
-	rest := strings.TrimPrefix(line, "Storage Element ")
-
-	addrStr, status, found := strings.Cut(rest, ":")
-	if !found {
-		return StorageElement{}, fmt.Errorf("unexpected storage element line: %q", line)
-	}
-
-	addr, err := strconv.Atoi(strings.TrimSpace(addrStr))
-	if err != nil {
-		return StorageElement{}, fmt.Errorf("parse storage address %q: %w", addrStr, err)
-	}
-
-	el := StorageElement{Address: addr}
-
-	if strings.Contains(status, "Full") {
-		el.Full = true
-		el.Barcode = parseVolumeTag(status)
-	}
-
-	return el, nil
-}
-
-// parseIOElement parses lines like:
-//
-//	Storage Element 48 IMPORT/EXPORT:Empty
-//	Storage Element 49 IMPORT/EXPORT:Full :VolumeTag=TA0048L6
-//
-// A library that surfaces the import/export ACCESS bit annotates the status with
-// an "Access" field (see parseAccess); when present, the second return value is
-// true and el.Accessible carries the bit. Stock mtx (and the mhvtl virtual
-// library) omit it, so most output yields reported=false and the Eject phase
-// falls back to the explicit operator signal (SPEC §4.3 phase 8).
-func parseIOElement(line string) (IOElement, bool, error) {
-	rest := strings.TrimPrefix(line, "Storage Element ")
-
-	// Address is the number before the space.
-	addrStr, after, found := strings.Cut(rest, " ")
-	if !found {
-		return IOElement{}, false, fmt.Errorf("unexpected IO element line: %q", line)
-	}
-
-	addr, err := strconv.Atoi(strings.TrimSpace(addrStr))
-	if err != nil {
-		return IOElement{}, false, fmt.Errorf("parse IO address %q: %w", addrStr, err)
-	}
-
-	_, status, found := strings.Cut(after, ":")
-	if !found {
-		return IOElement{}, false, fmt.Errorf("unexpected IO element line (no status): %q", line)
-	}
-
-	el := IOElement{Address: addr}
-
-	if strings.Contains(status, "Full") {
-		el.Full = true
-		el.Barcode = parseVolumeTag(status)
-	}
-
-	accessible, reported := parseAccess(status)
-	el.Accessible = accessible
-
-	return el, reported, nil
-}
-
-// parseAccess extracts the import/export ACCESS bit from a status fragment that
-// contains an "Access" field, mirroring parseVolumeTag's colon-delimited,
-// spaces-optional-around-"=" tolerance. It reports whether the field was present
-// (reported) and, when present, whether the element is accessible to the changer
-// robot — the door is closed. Recognized truthy values are 1/yes/true/closed and
-// falsy values 0/no/false/open (case-insensitive); an unrecognized value counts
-// as reported-but-not-accessible so a partially understood annotation never
-// resumes a paused run prematurely.
-//
-// Stock mtx does not emit this field. It is the contract for libraries (or a
-// changer wrapper) whose tooling does surface the SCSI import/export ACCESS bit;
-// when absent, reported is false and the Eject phase uses the operator signal.
-func parseAccess(s string) (accessible, reported bool) {
-	for field := range strings.SplitSeq(s, ":") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(field), "Access")
-		if !ok {
-			continue
-		}
-
-		_, value, found := strings.Cut(rest, "=")
-		if !found {
-			continue
-		}
-
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "1", "yes", "true", "closed":
-			return true, true
-		default:
-			return false, true
-		}
-	}
-
-	return false, false
-}
-
-// parseVolumeTag extracts the primary barcode from a status fragment containing
-// "VolumeTag". Handles both "VolumeTag=TA0001L6" and "VolumeTag = TA0001L6"
-// (mhvtl style).
-//
-// mtx appends each tag as its own colon-delimited field and, when the library
-// reports one, follows the primary tag with ":AlternateVolumeTag=...". The
-// fragment is therefore split on ":" and only the field that is exactly the
-// primary VolumeTag is used — an AlternateVolumeTag field starts with "A" and is
-// skipped, and bounding the value to its own field stops the alternate tag from
-// bleeding into the barcode. SCSI volume tags printed by mtx contain neither ":"
-// nor embedded spaces, so this split is lossless.
-func parseVolumeTag(s string) Barcode {
-	for _, field := range strings.Split(s, ":") {
-		rest, ok := strings.CutPrefix(strings.TrimSpace(field), "VolumeTag")
-		if !ok {
-			continue
-		}
-
-		_, value, found := strings.Cut(rest, "=")
-		if !found {
-			continue
-		}
-
-		return Barcode(strings.TrimSpace(value))
-	}
-
-	return ""
+	return c
 }

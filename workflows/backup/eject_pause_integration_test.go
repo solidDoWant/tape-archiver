@@ -18,19 +18,26 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// TestEjectOperatorPause drives the operator-in-the-loop Eject phase through a
-// real Temporal server and real workers against mhvtl (issue #67 AC5). It runs a
-// run whose written tapes outnumber the library's I/O slots so the Eject phase
-// fills the station and pauses; it then simulates the operator clearing one slot,
-// sends the OperatorEjectClearedSignal, and asserts the run resumes and exports
-// the remaining tape. mhvtl does not report the import/export access bit, so this
-// exercises the signal-driven resume path (AC1 + AC3 end to end).
+// TestEjectAutoResumeOnAccess drives the operator-in-the-loop Eject phase through
+// a real Temporal server and real workers against mhvtl, exercising the
+// auto-resume path (issue #85 AC5): because the changer now reads element status
+// via SG_IO, the import/export ACCESS bit is reported, so a paused Eject resumes
+// automatically once the operator clears a slot — with no explicit
+// OperatorEjectClearedSignal.
+//
+// It runs a run whose written tapes outnumber the library's I/O slots so the
+// Eject phase fills the station and pauses, then simulates the operator removing
+// one exported tape (which frees and re-closes a slot). With the ACCESS bit now
+// live on mhvtl, IOStatus.CanAutoResume becomes true and the run resumes on the
+// next poll and exports the remaining tape — the signal is never sent. The
+// signal- and timeout-driven resume paths remain covered by the mock-based unit
+// tests in eject_pause_test.go.
 //
 // It drives only the Eject phase (ejectPauseTestWorkflow) so it needs no real
 // tape writes: the "written" tapes are ordinary tapes parked in storage slots that
 // Eject transfers straight to the I/O station. Skips when mhvtl or dev Temporal is
 // absent. Driven by `make test-integration`.
-func TestEjectOperatorPause(t *testing.T) {
+func TestEjectAutoResumeOnAccess(t *testing.T) {
 	requireTemporalAddress(t)
 	testutil.SkipIfMhvtlUnavailable(t)
 
@@ -41,6 +48,10 @@ func TestEjectOperatorPause(t *testing.T) {
 	require.NoError(t, err, "inventory")
 	require.GreaterOrEqual(t, len(inv.Drives), 1, "at least one drive required")
 	require.GreaterOrEqualf(t, len(inv.IOSlots), 2, "need at least two I/O slots to test overflow")
+
+	// The changer must now report the import/export ACCESS bit; otherwise
+	// auto-resume can never fire and this test could not pass.
+	require.True(t, inv.IOAccessReported, "SG_IO changer must report the import/export ACCESS bit")
 
 	ioSlots := len(inv.IOSlots)
 	for _, io := range inv.IOSlots {
@@ -130,7 +141,7 @@ func TestEjectOperatorPause(t *testing.T) {
 	defer cancel()
 
 	options := client.StartWorkflowOptions{
-		ID:        fmt.Sprintf("e2e-eject-pause-%d", time.Now().UnixNano()),
+		ID:        fmt.Sprintf("e2e-eject-auto-resume-%d", time.Now().UnixNano()),
 		TaskQueue: TaskQueue,
 	}
 
@@ -156,8 +167,9 @@ func TestEjectOperatorPause(t *testing.T) {
 		return full == ioSlots
 	}, 90*time.Second, time.Second, "the Eject phase must fill all %d I/O slots and pause", ioSlots)
 
-	// Simulate the operator removing one exported tape, freeing an I/O slot. mhvtl
-	// does not report access state, so this alone must NOT resume the run.
+	// Simulate the operator removing one exported tape, freeing an I/O slot. With
+	// the ACCESS bit now reported by the SG_IO changer, this alone must resume the
+	// run automatically — no OperatorEjectClearedSignal is ever sent.
 	cur, err := changer.Inventory(runCtx)
 	require.NoError(t, err, "inventory at pause")
 
@@ -189,11 +201,8 @@ func TestEjectOperatorPause(t *testing.T) {
 	require.NotEqual(t, -1, homeSlot, "the removed tape must be one of the written tapes")
 	require.NoError(t, changer.Transfer(runCtx, freedFrom, homeSlot), "operator clears one I/O slot")
 
-	// The explicit operator signal resumes the run.
-	require.NoError(t, temporalClient.SignalWorkflow(runCtx, options.ID, "", OperatorEjectClearedSignal, nil),
-		"signal resume")
-
-	require.NoError(t, run.Get(runCtx, nil), "workflow must complete after the resume signal")
+	// The run resumes on its own (poll interval) and completes — no signal.
+	require.NoError(t, run.Get(runCtx, nil), "workflow must auto-resume and complete once a slot is freed")
 
 	// Every written tape was exported: the ones still in I/O slots plus the one the
 	// operator removed account for all of them.

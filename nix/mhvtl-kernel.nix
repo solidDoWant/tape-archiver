@@ -20,7 +20,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   patches = [
     # Fix use-after-free race in the VTL_PUT_DATA ioctl path (kernel >= 6.18).
-    # Without this the st driver keeps drives in DR_OPEN after mtx load.
+    # Without this the st driver keeps drives in DR_OPEN after a changer load.
     ./patches/0001-mhvtl-fix-ioctl-use-after-free-race.patch
   ];
 

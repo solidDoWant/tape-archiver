@@ -28,7 +28,6 @@ Versions are pinned by the flake's `nixpkgs` revision and recorded as image labe
 | `zstd` | `zstd` | 1.5.7 | optional pre-encryption compression (SPEC §4.3) |
 | `tar` | `gnutar` | 1.35 | archive creation (SPEC §4.3) |
 | `mt` | `mt-st` | — | drive control (non-rewinding `nst` nodes) |
-| `mtx` | `mtx` | — | media-changer moves (SPEC §3) |
 | `sg_logs` / `sg_turs` | `sg3_utils` | — | TapeAlert / log pages, drive readiness (SPEC §3) |
 | `lsscsi` | `lsscsi` | — | enumerate SCSI tape/changer devices |
 | `zfs` | `zfs` | — | read dataset properties + locate `.zfs/snapshot/` (needs `/dev/zfs`) |

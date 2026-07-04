@@ -1,15 +1,17 @@
-// Package tape wraps the tape library (mtx) and drive (mt, sg_logs) tools.
-// All device paths are injected so the same code targets both mhvtl virtual
-// hardware and real LTO drives.
+// Package tape drives the tape library changer (directly via SG_IO) and drive
+// (mt, sg_logs) tools. All device paths are injected so the same code targets
+// both mhvtl virtual hardware and real LTO drives.
 package tape
 
 // Barcode is the canonical tape identity — the volume tag read by the library
 // changer (SPEC.md §6).
 type Barcode string
 
-// DriveElement is a data-transfer element (tape drive) reported by mtx status.
+// DriveElement is a data-transfer element (tape drive) reported by READ ELEMENT
+// STATUS.
 type DriveElement struct {
-	// Address is the element address as reported by mtx.
+	// Address is the friendly drive index (0-based), derived from the element
+	// address assignment mode page.
 	Address int
 	// Barcode is the volume tag of the loaded tape, or empty if the drive is empty.
 	Barcode Barcode
@@ -20,9 +22,10 @@ type DriveElement struct {
 	SourceSlot int
 }
 
-// StorageElement is a storage slot reported by mtx status.
+// StorageElement is a storage slot reported by READ ELEMENT STATUS.
 type StorageElement struct {
-	// Address is the element address (1-indexed slot number) as reported by mtx.
+	// Address is the friendly, 1-indexed storage slot number, derived from the
+	// element address assignment mode page.
 	Address int
 	// Barcode is the volume tag of the stored tape, or empty if the slot is empty.
 	Barcode Barcode
@@ -30,9 +33,11 @@ type StorageElement struct {
 	Full bool
 }
 
-// IOElement is an import/export (I/O) station slot reported by mtx status.
+// IOElement is an import/export (I/O) station slot reported by READ ELEMENT
+// STATUS.
 type IOElement struct {
-	// Address is the element address as reported by mtx.
+	// Address is the friendly slot number (numbered after the storage slots),
+	// derived from the element address assignment mode page.
 	Address int
 	// Barcode is the volume tag of the tape in the slot, or empty if empty.
 	Barcode Barcode
@@ -40,25 +45,21 @@ type IOElement struct {
 	Full bool
 	// Accessible reflects the SCSI READ ELEMENT STATUS import/export ACCESS bit
 	// for this slot: true when the changer robot can reach the element (the I/O
-	// station door is closed), false when the operator has the station open. It is
-	// only meaningful when the library annotates access state in mtx status output
-	// (Inventory.IOAccessReported); libraries that do not report it leave this
-	// false. The operator-in-the-loop Eject phase uses it to auto-resume once the
-	// operator has cleared and closed the station (SPEC §4.3 phase 8).
+	// station door is closed), false when the operator has the station open. The
+	// operator-in-the-loop Eject phase uses it to auto-resume once the operator has
+	// cleared and closed the station (SPEC §4.3 phase 8).
 	Accessible bool
 }
 
-// Inventory is the result of an mtx status query.
+// Inventory is the decoded result of a READ ELEMENT STATUS query.
 type Inventory struct {
 	Drives  []DriveElement
 	Slots   []StorageElement
 	IOSlots []IOElement
-	// IOAccessReported is true when the library annotates the import/export
-	// ACCESS bit in mtx status output (see IOElement.Accessible). It is
-	// library-dependent: most libraries — including the mhvtl virtual library used
-	// for testing — do not surface it, in which case the Eject phase cannot detect
-	// the station door cycle automatically and falls back to an explicit operator
-	// signal (SPEC §4.3 phase 8).
+	// IOAccessReported is true when the library reports import/export elements
+	// (see IOElement.Accessible). READ ELEMENT STATUS always carries the ACCESS
+	// bit, so any library with an I/O station reports it — enabling the Eject
+	// phase to detect the station door cycle and auto-resume (SPEC §4.3 phase 8).
 	IOAccessReported bool
 }
 

@@ -15,14 +15,15 @@ import (
 // The Load phase (SPEC §4.3 phase 6) is the gate between staging and tape: it
 // loads blank tapes from their storage slots into the drives and confirms each is
 // blank before any formatting or data transfer begins ("Never write to a non-blank
-// tape", CLAUDE.md). It reads live mtx status first and reconciles to the desired
-// state — idempotent for the normal case (drive already has the right blank tape),
-// auto-relocating unexpected tapes, and failing clearly for irrecoverable states.
+// tape", CLAUDE.md). It reads the live changer inventory first and reconciles to
+// the desired state — idempotent for the normal case (drive already has the right
+// blank tape), auto-relocating unexpected tapes, and failing clearly for
+// irrecoverable states.
 //
 // The Eject phase (SPEC §4.3 phase 8) transfers each written tape from its drive
 // to an I/O station slot for physical removal by the operator. Unmounting and
 // capturing the LTFS index happen in the Write phase (FinalizeTape); Eject only
-// issues the mtx unload + transfer.
+// issues the changer unload + transfer.
 //
 // Both activities carry MaximumAttempts: 1 — tape moves are physical and
 // non-idempotent. A failure surfaces for an operator decision rather than
@@ -32,8 +33,8 @@ const (
 	// loadTimeout bounds the Load activity: it loads tapes and runs blank checks,
 	// which include rewinds — up to several minutes each on real hardware.
 	loadTimeout = 30 * time.Minute
-	// ejectTimeout bounds the Eject activity: a few mtx unload + transfer
-	// commands, each taking seconds on real hardware.
+	// ejectTimeout bounds the Eject activity: a few changer unload + transfer
+	// moves, each taking seconds on real hardware.
 	ejectTimeout = 10 * time.Minute
 )
 
@@ -162,7 +163,7 @@ func blankCheckWhenReady(ctx context.Context, drive *tape.Drive) (bool, error) {
 
 // reconcileLoad ensures the drive at driveAddr (which corresponds to the i-th
 // drive in the config) is loaded with the tape from targetSlot. It reads the
-// current inventory state and issues only the mtx commands needed. Returns the
+// current inventory state and issues only the changer moves needed. Returns the
 // barcode of the tape that ends up in the drive.
 //
 // The reconciliation table (from the Load phase design in CLAUDE.md):
@@ -530,7 +531,7 @@ const (
 	// station to detect (on libraries that report access state) that the operator
 	// has cleared and closed it, so the run resumes without an explicit signal.
 	ioStationPollInterval = 30 * time.Second
-	// ioStatusTimeout bounds one IOStationStatus poll — a single mtx status read.
+	// ioStatusTimeout bounds one IOStationStatus poll — a single READ ELEMENT STATUS.
 	ioStatusTimeout = 30 * time.Second
 	// ioStatusMaxAttempts retries a transient poll read a few times before giving
 	// up; a persistently unreadable changer during the pause fails the run.

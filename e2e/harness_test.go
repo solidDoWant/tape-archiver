@@ -173,7 +173,7 @@ func requireHarness(t *testing.T) *e2eHarness {
 func checkPrerequisites() string {
 	for _, tool := range []string{
 		"docker", "kind", "helm", "kubectl", "nix", "make",
-		"age", "age-keygen", "zstd", "mtx", "mkltfs", "ltfs", "zfs", "mt", "sg_raw",
+		"age", "age-keygen", "zstd", "mkltfs", "ltfs", "zfs", "mt", "sg_raw",
 	} {
 		if _, err := exec.LookPath(tool); err != nil {
 			return fmt.Sprintf("%q not on PATH (run within `nix develop`)", tool)
@@ -557,7 +557,7 @@ func (h *e2eHarness) startDataWorker() error {
 
 	args = append(args,
 		"--cap-add", "SYS_ADMIN", // LTFS is FUSE-based and cannot mount without it
-		"--cap-add", "SYS_RAWIO", // mtx / sg_raw / LTFS issue raw SCSI via SG_IO
+		"--cap-add", "SYS_RAWIO", // changer / sg_raw / LTFS issue raw SCSI via SG_IO
 		"-v", poolMount+":"+poolMount+":rshared", // ZFS source + .zfs/snapshot automounts
 		"-v", h.stagingHostDir+":"+containerStagingDir, // staged archives + PAR2 (ample host dir)
 		"-v", h.recoveryBinDir+":"+containerRecoveryBin+":ro",
