@@ -67,8 +67,12 @@ Registry credentials are assumed to already be present in the Docker daemon (the
 ## Runtime requirements
 
 Tape and LTFS are physical and privileged, so the container needs host access the image
-cannot bake in (SPEC §4.1). When the storage-host systemd unit (managed out-of-band)
-runs the image, it must provide:
+cannot bake in (SPEC §4.1). A committed **reference systemd unit** encodes all of the
+following by construction — see [`deploy/data-worker/`](../deploy/data-worker) (the unit,
+an example environment file, and install/validation notes). It is a correct-by-default
+starting point for the storage host (`ubuntu-storage-host-01`), still managed out-of-band;
+`make unit-lint` validates it without a running service. When the unit runs the image, it
+must provide:
 
 - **Device passthrough** for the drives and changer: `/dev/nst0`, `/dev/nst1`,
   `/dev/sch0`, and the drives' `/dev/sg*` nodes.

@@ -1,0 +1,88 @@
+# tape-archiver data worker — REFERENCE unit for ubuntu-storage-host-01.
+#
+# This is executable documentation, not blessed production config. It is a
+# correct-by-default starting point for the single known storage host, kept in
+# tree so the runtime requirements in SPEC §4.1 and docs/data-worker-image.md
+# cannot drift from prose. The host's copy is "managed out-of-band" — an
+# operator installs and tunes it (see deploy/data-worker/README.md).
+#
+# It runs the Nix-built data-worker OCI image directly via `docker run` with
+# systemd as the SOLE supervisor: foreground (no `-d`), Type=simple, `--rm`.
+# No docker-compose — a single container needs no orchestration, and a second
+# supervisor would fight systemd over restarts.
+#
+# Before enabling: install /etc/tape-archiver/data-worker.env (copy
+# data-worker.env.example), pin TAPE_ARCHIVER_IMAGE below to the exact tag built
+# by `make build-images`, and confirm the drives' /dev/sg* nodes with `lsscsi`.
+
+[Unit]
+Description=tape-archiver data worker (reference unit for ubuntu-storage-host-01)
+Documentation=https://github.com/solidDoWant/tape-archiver/blob/master/docs/data-worker-image.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Content-anchored image tag — the short nixpkgs revision or a release version
+# emitted by `make build-images`. NEVER a floating `:latest`, and `--pull=never`
+# below means the tag must already be present in the local Docker daemon; the
+# unit never reaches out to a registry on start.
+Environment=TAPE_ARCHIVER_IMAGE=ghcr.io/soliddowant/tape-archiver/data-worker:REPLACE_WITH_PINNED_TAG
+
+# All run configuration lives in the env file, never hardcoded in this unit.
+# ROLE=data, the Temporal connection, TAPE_STAGING_DIR, and
+# TAPE_RECOVERY_BINARIES_DIR are supplied there and passed through with
+# --env-file. EnvironmentFile makes ${TAPE_ARCHIVER_STOP_TIMEOUT} (below)
+# overridable from the same file.
+EnvironmentFile=/etc/tape-archiver/data-worker.env
+
+# The pool bind mount only propagates the on-demand .zfs/snapshot/<snap>/
+# automounts into the container when the host mount is a shared mount. This is
+# THE silent-data-loss footgun: get it wrong and snapshot contents are simply
+# invisible inside the container — no error, just missing files. Make the pool
+# subtree rshared before every start so bind-propagation=rslave has effect.
+ExecStartPre=/bin/mount --make-rshared /mnt/bulk-pool-01
+# Clear any leftover container from an unclean stop (ignore failure if none).
+ExecStartPre=-/usr/bin/docker rm -f tape-archiver-data-worker
+
+# Device passthrough (SPEC §4.1): both drives' non-rewinding nodes, the changer,
+# and the drives' generic SCSI (/dev/sg*) nodes for raw SG_IO. Verify the sg*
+# numbers on THIS host with `lsscsi -g` — they are assigned by discovery order
+# and differ between hosts. /dev/zfs is read-only ioctls for `zfs get`; /dev/fuse
+# is required because LTFS is FUSE-based.
+#
+# Capabilities: SYS_ADMIN — LTFS/FUSE cannot mount without it. SYS_RAWIO — the
+# changer, `sg_raw`, and LTFS issue raw SCSI via SG_IO (e.g. READ ELEMENT
+# STATUS); without it library moves fail with EPERM.
+ExecStart=/usr/bin/docker run --rm --name tape-archiver-data-worker \
+    --pull=never \
+    --env-file /etc/tape-archiver/data-worker.env \
+    --device /dev/nst0 \
+    --device /dev/nst1 \
+    --device /dev/sch0 \
+    --device /dev/sg0 \
+    --device /dev/sg1 \
+    --device /dev/sg2 \
+    --device /dev/zfs \
+    --device /dev/fuse \
+    --cap-add SYS_ADMIN \
+    --cap-add SYS_RAWIO \
+    --mount type=bind,source=/mnt/bulk-pool-01,target=/mnt/bulk-pool-01,bind-propagation=rslave \
+    ${TAPE_ARCHIVER_IMAGE}
+
+# Graceful shutdown: SIGTERM lets the worker stop polling and drain its in-flight
+# activity instead of being killed mid-write at Docker's 10 s default. The stop
+# timeout defaults generously; raise TAPE_ARCHIVER_STOP_TIMEOUT (in the env file)
+# and TimeoutStopSec together for hosts that write very large tapes and need the
+# current activity to fully complete before reboot. TimeoutStopSec must exceed
+# the `docker stop` timeout so systemd does not SIGKILL the container first.
+ExecStop=/bin/sh -c '/usr/bin/docker stop --time="$${TAPE_ARCHIVER_STOP_TIMEOUT:-300}" tape-archiver-data-worker'
+TimeoutStopSec=360
+
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
