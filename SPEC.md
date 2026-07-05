@@ -118,7 +118,12 @@ are visible. The worker stages into a plain subdirectory of an existing dataset 
   deduplication between runs** and **no incremental backup**.
 - **No online catalog, no cross-run state.** The tool keeps no database of what has
   been archived. The system of record is the physical media plus the printed report
-  and the recovery ISO. Restore depends on zero online services.
+  and the recovery ISO. Restore depends on zero online services. This forbids state that
+  *survives a run*; it does not forbid the durable *single-run* execution state Temporal
+  keeps within one run. Operator-in-the-loop pauses (the Eject I/O-station pause, §4.3
+  phase 8, and the Load/Write-failure pause, §4.3 phases 6–8) hold their resume state in
+  the run's own workflow event history and discard it when the run ends — they are not a
+  catalog and not cross-run state.
 - **Tape inventory is resolved live, per run.** At startup the tool reads the library
   with SCSI `READ ELEMENT STATUS`; the config declares which storage elements hold usable blank
   tapes. Written tapes are exported to the I/O station at the end of the run; the
@@ -166,10 +171,22 @@ staged and verified on disk** — eliminating any computation during the write w
    ejected — freeing the drives — before the next set is loaded. Processing one set at a
    time bounds the tapes loaded and read concurrently to the drive count, protecting the
    write-rate floor (§14). A drive-set groups adjacent (logical tape, copy) pairs, so the
-   copies of one logical tape tend to share a set and read a single staged tree. A failure
-   in any set fails the run for that set; no later set is loaded. (Reloading fresh blank
-   tapes into storage slots between runs remains a non-goal, §4.2. Clearing the I/O
-   station *within* a run when written tapes exceed I/O capacity is handled by the
+   copies of one logical tape tend to share a set and read a single staged tree. A Load or
+   Write failure within a set does not fail the whole run: the set's successfully written
+   tapes are ejected and recorded, the failed tapes are ejected too (freeing their drives
+   and emptying their blank slots), and the run **pauses for operator approval** — it alerts
+   the operator (§11) and waits on a resume or abort signal. On resume it re-drives only the
+   failed (logical tape, copy) pairs onto fresh blanks in the same slots — never
+   re-formatting a tape already written (step 6's blank-check gates that), so the blast
+   radius is the failed tapes, not the whole set or the whole run. On abort — or if the
+   operator does not respond within `library.writeFailureWaitTimeoutSeconds` (default 12 h)
+   — the run ends in that defined paused state and is reported. No later set is loaded until
+   the failed set completes or the run ends. This mid-run pause is durable *single-run*
+   workflow state (the plan and which tapes are written vs. pending live in the run's
+   Temporal event history), not the cross-run state or online catalog §4.2 forbids — the
+   same operator-in-the-loop shape as the Eject pause below. (Reloading fresh blank tapes
+   into storage slots between runs remains a non-goal, §4.2. Clearing the I/O station
+   *within* a run when written tapes exceed I/O capacity is handled by the
    operator-in-the-loop Eject pause below.)
 6. **Load.** Move the drive-set's blank tapes from their storage slots into the drives
    (SCSI `MOVE MEDIUM`), and confirm each loaded tape is blank/empty before formatting — a run must
@@ -189,7 +206,7 @@ staged and verified on disk** — eliminating any computation during the write w
    alerts the operator which tapes to remove (§11) and pauses, leaving every written tape
    in an I/O or storage slot. It resumes automatically on libraries that report the
    import/export ACCESS bit (once the station is cleared and closed), or on the explicit
-   `operatorEjectCleared` signal (`tapectl resume <run-id>`) otherwise, then exports the
+   `operatorResume` signal (`tapectl resume`) otherwise, then exports the
    remaining tapes into the freed slots. If the operator does not respond within
    `library.ioWaitTimeoutSeconds` (default 12h), the run fails in that defined state and is
    reported.
@@ -370,7 +387,18 @@ the I/O station and pauses for the operator (§4.3 phase 8), it posts a message 
 removal, and how many still await a free slot. Like the failure alert it is best-effort —
 a delivery failure is logged, never raised — so a webhook outage never aborts a run that
 is only waiting for the operator. The operator clears the station and, on libraries that
-do not report the import/export access bit, runs `tapectl resume <run-id>` to continue.
+do not report the import/export access bit, runs `tapectl resume` to continue.
+
+**Write-path pause alert (operational, same failure webhook).** When a Load or Write fails
+for one drive-set the tape path pauses for the operator (§4.3 phases 6–8) rather than
+failing the whole run. It posts a message on the same `DISCORD_FAILURE_WEBHOOK_URL` naming
+the run, the failing phase, the tapes affected by the failure, the storage slots to restock
+with fresh blank tapes, and the error summary, and it tells the operator the exact
+`tapectl resume` / `tapectl abort` commands. Like the other alerts it is
+best-effort — a delivery failure is logged, never raised. The operator either swaps the
+affected tapes for fresh blanks and resumes, or aborts; if neither happens within
+`library.writeFailureWaitTimeoutSeconds` (default 12 h) the run fails in that defined
+paused state and is reported.
 
 ## 12. Dry-run and the virtual library
 

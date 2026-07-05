@@ -135,37 +135,41 @@ func TestSubmitRunMissingTemporalAddress(t *testing.T) {
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }
 
-func TestParseStatusArgs(t *testing.T) {
-	id, err := parseStatusArgs([]string{"backup-123"})
-	require.NoError(t, err)
-	assert.Equal(t, "backup-123", id)
+// TestRequireNoArgs covers the singleton subcommands' argument handling: they take
+// no arguments (every run is the singleton backupWorkflowID), so no args is valid
+// and any positional argument is rejected.
+func TestRequireNoArgs(t *testing.T) {
+	require.NoError(t, requireNoArgs("status", nil))
+	require.NoError(t, requireNoArgs("resume", nil))
+	require.NoError(t, requireNoArgs("abort", nil))
 
-	_, err = parseStatusArgs(nil)
+	err := requireNoArgs("resume", []string{"backup"})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "takes no arguments")
 
-	_, err = parseStatusArgs([]string{"a", "b"})
+	err = requireNoArgs("abort", []string{"a", "b"})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "takes no arguments")
 }
 
-func TestParseResumeArgs(t *testing.T) {
-	id, err := parseResumeArgs([]string{"backup-123"})
-	require.NoError(t, err)
-	assert.Equal(t, "backup-123", id)
-
-	_, err = parseResumeArgs(nil)
-	require.Error(t, err)
-
-	_, err = parseResumeArgs([]string{"a", "b"})
-	require.Error(t, err)
-}
-
-// TestResumeRunMissingTemporalAddress exercises the resume path with a workflow
-// ID but no TEMPORAL_ADDRESS: it must fail with a descriptive error and never
-// attempt a connection.
+// TestResumeRunMissingTemporalAddress exercises the resume path with no
+// TEMPORAL_ADDRESS: it must fail with a descriptive error and never attempt a
+// connection.
 func TestResumeRunMissingTemporalAddress(t *testing.T) {
 	withGetenv(t, func(string) string { return "" })
 
-	err := resumeRun(context.Background(), []string{"backup-123"}, &bytes.Buffer{})
+	err := resumeRun(context.Background(), nil, &bytes.Buffer{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
+}
+
+// TestAbortRunMissingTemporalAddress exercises the abort path with no
+// TEMPORAL_ADDRESS: it must fail with a descriptive error and never attempt a
+// connection.
+func TestAbortRunMissingTemporalAddress(t *testing.T) {
+	withGetenv(t, func(string) string { return "" })
+
+	err := abortRun(context.Background(), nil, &bytes.Buffer{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }

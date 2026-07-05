@@ -65,7 +65,7 @@ func newEjectPauseEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 
 // TestEjectPhaseSignalResume covers AC1 + AC3: when the I/O station fills, the
 // phase pauses and alerts the operator instead of failing, and an explicit
-// OperatorEjectClearedSignal (the fallback for libraries that do not report the
+// OperatorResumeSignal (the fallback for libraries that do not report the
 // access bit) resumes the export of the remaining tapes.
 func TestEjectPhaseSignalResume(t *testing.T) {
 	env := newEjectPauseEnv(t)
@@ -115,7 +115,7 @@ func TestEjectPhaseSignalResume(t *testing.T) {
 
 	// The operator clears the station and signals resume before the wait elapses.
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(OperatorEjectClearedSignal, nil)
+		env.SignalWorkflow(OperatorResumeSignal, nil)
 	}, 45*time.Second)
 
 	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{

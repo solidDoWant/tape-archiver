@@ -546,7 +546,7 @@ const (
 // When the I/O station fills before every tape is exported, the phase becomes
 // operator-in-the-loop: it notifies the operator which tapes to remove, then waits
 // — resuming automatically once the library reports the station cleared and closed
-// (waitForIOCleared), or on the explicit OperatorEjectClearedSignal — and retries
+// (waitForIOCleared), or on the explicit OperatorResumeSignal — and retries
 // the remaining tapes into the freed slots. If the operator never responds within
 // the configured wait, it fails the run; every written tape is by then in an I/O
 // or storage slot and none is in a drive.
@@ -611,13 +611,13 @@ func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (Eje
 
 // waitForIOCleared pauses the Eject phase until the operator has cleared the I/O
 // station, returning true to resume and false when the configured wait elapses
-// first. It selects over three futures: the OperatorEjectClearedSignal (explicit
+// first. It selects over three futures: the OperatorResumeSignal (explicit
 // operator resume), an overall wait-timeout timer, and a repeating poll timer. On
 // each poll it reads the I/O station; libraries that report access state resume
 // automatically once the station is closed with a free slot (IOStatus.CanAutoResume),
 // while libraries that do not report it wait for the signal or the timeout.
 func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
-	signalCh := workflow.GetSignalChannel(ctx, OperatorEjectClearedSignal)
+	signalCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	timeoutTimer := workflow.NewTimer(ctx, cfg.Library.EffectiveIOWaitTimeout())
 
 	for {

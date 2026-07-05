@@ -132,6 +132,9 @@
         },
         "ioWaitTimeoutSeconds": {
           "type": "integer"
+        },
+        "writeFailureWaitTimeoutSeconds": {
+          "type": "integer"
         }
       },
       "additionalProperties": false,

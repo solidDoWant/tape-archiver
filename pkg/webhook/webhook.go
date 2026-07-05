@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -173,6 +174,62 @@ func (c *Client) SendOperatorPause(ctx context.Context, runID string, readyForRe
 			"delivery_error", err,
 		)
 	}
+}
+
+// SendWritePathPause posts an operator-in-the-loop pause alert: a Load or Write
+// failed for one drive-set, so the tape path paused and is waiting for the
+// operator to swap the affected tapes for fresh blanks and resume, or to abort
+// the run (SPEC §4.3, §11). It names the run, the failing phase, the affected
+// tapes, the storage slots to restock with fresh blanks, and the error summary,
+// and tells the operator the exact `tapectl resume`/`tapectl abort` commands.
+// Like SendFailure it is best-effort — a delivery failure is logged, not returned
+// — so a webhook outage never aborts a run that is only waiting. When the
+// client's URL is empty, it is a silent no-op.
+func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, affectedTapes []string, reloadSlots []int, errSummary string) {
+	if c.url == "" {
+		return
+	}
+
+	tapes := "none"
+	if len(affectedTapes) > 0 {
+		tapes = strings.Join(affectedTapes, ", ")
+	}
+
+	if errSummary == "" {
+		errSummary = "unknown error"
+	}
+
+	msg := Message{
+		Content: fmt.Sprintf(
+			"Backup run %s paused: %s failed for one drive-set. Remove the affected tape(s) [%s], "+
+				"load fresh blank tape(s) into slot(s) %s, then run `tapectl resume` to continue "+
+				"or `tapectl abort` to end the run. Error: %s",
+			runID, phase, tapes, formatSlots(reloadSlots), errSummary),
+	}
+
+	if err := c.Send(ctx, msg); err != nil {
+		slog.Error("failed to deliver webhook write-path pause alert",
+			"run_id", runID,
+			"phase", phase,
+			"delivery_error", err,
+		)
+	}
+}
+
+// formatSlots renders a list of storage-slot addresses for an operator message.
+// An empty list falls back to a generic phrase (a Load failure has no per-tape
+// slots to name beyond the set's own).
+func formatSlots(slots []int) string {
+	if len(slots) == 0 {
+		return "the drive-set's blank slots"
+	}
+
+	parts := make([]string, len(slots))
+	for i, slot := range slots {
+		parts[i] = strconv.Itoa(slot)
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 // do sends req with the client's HTTP client and maps the response to an error:

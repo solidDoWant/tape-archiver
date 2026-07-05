@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 
@@ -22,11 +21,11 @@ const phaseUnavailable = "unavailable"
 // has completed yet.
 const phaseNone = "none"
 
-// showStatus implements `tapectl status <workflow-id>`. It prints the
-// workflow's current execution status and the name of its last completed phase.
+// showStatus implements `tapectl status`. It prints the backup run's current
+// execution status and the name of its last completed phase. Runs are a singleton
+// (backupWorkflowID, SPEC §4.2), so it takes no arguments.
 func showStatus(ctx context.Context, args []string, out io.Writer) error {
-	workflowID, err := parseStatusArgs(args)
-	if err != nil {
+	if err := requireNoArgs("status", args); err != nil {
 		return err
 	}
 
@@ -40,33 +39,19 @@ func showStatus(ctx context.Context, args []string, out io.Writer) error {
 	}
 	defer shutdown()
 
-	description, err := temporalClient.DescribeWorkflowExecution(ctx, workflowID, "")
+	description, err := temporalClient.DescribeWorkflowExecution(ctx, backupWorkflowID, "")
 	if err != nil {
-		return fmt.Errorf("describe workflow %q: %w", workflowID, err)
+		return fmt.Errorf("describe workflow %q: %w", backupWorkflowID, err)
 	}
 
 	status := description.GetWorkflowExecutionInfo().GetStatus()
-	phase := queryLastCompletedPhase(ctx, temporalClient, workflowID)
+	phase := queryLastCompletedPhase(ctx, temporalClient, backupWorkflowID)
 
 	_, err = fmt.Fprintf(out,
 		"Workflow:             %s\nStatus:               %s\nLast completed phase: %s\n",
-		workflowID, formatStatus(status), phase)
+		backupWorkflowID, formatStatus(status), phase)
 
 	return err
-}
-
-// parseStatusArgs parses the `status` subcommand and returns the workflow ID.
-func parseStatusArgs(args []string) (string, error) {
-	flagSet := flag.NewFlagSet("status", flag.ContinueOnError)
-	if err := flagSet.Parse(args); err != nil {
-		return "", err
-	}
-
-	if flagSet.NArg() != 1 {
-		return "", fmt.Errorf("exactly one workflow ID is required\n\nUsage: tapectl status <workflow-id>")
-	}
-
-	return flagSet.Arg(0), nil
 }
 
 // queryLastCompletedPhase asks the workflow for its last completed phase via the

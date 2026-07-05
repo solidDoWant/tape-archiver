@@ -113,14 +113,26 @@ Specifies the SCSI changer, drives, and which storage slots hold blank tapes.
 | `blankSlots` | `[]integer` | yes | Storage slot numbers that hold usable blank tapes. |
 | `tapeCapacityBytes` | `integer` | yes | Native (uncompressed) capacity of one tape, in bytes (e.g. `2500000000000` for LTO-6). Runs plan against native capacity with LTO hardware compression disabled. It is the single-tape ceiling the Resolve feasibility pre-check tests against and the capacity the Pack phase bin-packs into. Must be > 0. |
 | `ioWaitTimeoutSeconds` | `integer` | no | How long the Eject phase waits for the operator to clear the import/export station when it fills before failing the run (see below). Omit for the default of 12 hours. Must be > 0 when set. |
+| `writeFailureWaitTimeoutSeconds` | `integer` | no | How long the tape path waits for the operator to resume or abort a run paused because a Load or Write failed for one drive-set (see below). Omit for the default of 12 hours. Must be > 0 when set. |
 
 When a run writes more physical tapes (logical tapes × copies) than the library has I/O
 slots, the Eject phase fills the station and then pauses: it posts an operator alert on the
 failure webhook naming the tapes ready for removal, and waits. On libraries that report the
 import/export access bit it resumes automatically once the station is cleared and closed;
-otherwise the operator runs [`tapectl resume <run-id>`](tapectl.md) after removing the
+otherwise the operator runs [`tapectl resume`](tapectl.md) after removing the
 tapes. If no one responds within `ioWaitTimeoutSeconds`, the run fails with every written
 tape left in an I/O or storage slot (none in a drive).
+
+When a **Load or Write fails for one drive-set**, the tape path does not fail the whole
+run. The tapes that wrote successfully are ejected and recorded; the tapes that failed are
+ejected too (freeing their drives and emptying their blank slots), and the run pauses,
+posting an operator alert on the failure webhook naming the failing phase, the affected
+tapes, and the storage slots to restock with fresh blanks. The operator either loads fresh
+blank tapes into those slots and runs [`tapectl resume`](tapectl.md) — which
+re-drives **only** the failed tapes, never re-formatting a tape already written — or runs
+[`tapectl abort`](tapectl.md) to end the run with no further writes. If no one
+responds within `writeFailureWaitTimeoutSeconds`, the run fails in that defined paused
+state (every tape in a drive, I/O slot, or storage slot) and is reported.
 
 ---
 
