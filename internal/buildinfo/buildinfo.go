@@ -1,5 +1,6 @@
 // Package buildinfo exposes the tape-archiver build version and the pinned
-// versions of the external tools it shells out to (age, par2, ltfs, zstd, tar).
+// versions of the external tools it shells out to (age, par2, ltfs, zstd, tar,
+// xorriso).
 // These feed the run report's build-metadata section (SPEC §9), which a future
 // recoverer uses to understand how the tapes were produced.
 //
@@ -17,11 +18,12 @@ import "runtime/debug"
 // Tool names for the generated version map. They are the keys the generator
 // writes and the accessors below read.
 const (
-	toolAge  = "age"
-	toolPar2 = "par2"
-	toolLTFS = "ltfs"
-	toolZstd = "zstd"
-	toolTar  = "tar"
+	toolAge     = "age"
+	toolPar2    = "par2"
+	toolLTFS    = "ltfs"
+	toolZstd    = "zstd"
+	toolTar     = "tar"
+	toolXorriso = "xorriso"
 )
 
 // unknownVersion is returned when a version could not be determined (no embedded
@@ -66,14 +68,17 @@ func ToolVersion() string {
 	return revision
 }
 
-// AgeVersion, Par2Version, LTFSVersion, ZstdVersion, and TarVersion return the
-// captured version of each external tool, or unknownVersion when it is absent
-// from the generated map.
-func AgeVersion() string  { return externalVersion(toolAge) }
-func Par2Version() string { return externalVersion(toolPar2) }
-func LTFSVersion() string { return externalVersion(toolLTFS) }
-func ZstdVersion() string { return externalVersion(toolZstd) }
-func TarVersion() string  { return externalVersion(toolTar) }
+// AgeVersion, Par2Version, LTFSVersion, ZstdVersion, TarVersion, and
+// XorrisoVersion return the captured version of each external tool, or
+// unknownVersion when it is absent from the generated map. XorrisoVersion is the
+// libburnia burn tool bundled in the data-worker image only (SPEC §10); it is not
+// on the recovery disc, which only needs to read ISO 9660.
+func AgeVersion() string     { return externalVersion(toolAge) }
+func Par2Version() string    { return externalVersion(toolPar2) }
+func LTFSVersion() string    { return externalVersion(toolLTFS) }
+func ZstdVersion() string    { return externalVersion(toolZstd) }
+func TarVersion() string     { return externalVersion(toolTar) }
+func XorrisoVersion() string { return externalVersion(toolXorriso) }
 
 // externalVersion looks up a tool's captured version, returning unknownVersion
 // when it is missing or empty.

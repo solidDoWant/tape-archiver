@@ -133,6 +133,13 @@
             # the full path against mhvtl. Same binaries ship on the recovery disc.
             ltfs
 
+            # xorriso (libburnia) — pkg/optical shells out to it to burn the
+            # optical recovery disc and read it back for verification (SPEC §10);
+            # its `stdio:` pseudo-drive lets the integration tests run the real
+            # burn/verify path against a loop device. Bundled in the data-worker
+            # image only (nix/data-worker-image.nix), NOT on the recovery disc.
+            pkgs.xorriso
+
             # ZFS userspace tools (zpool, zfs, zdb). pkg/zfs shells out to `zfs`
             # and the integration-test harness creates an ephemeral file-backed
             # pool with `zpool`. The matching kernel module is built above as

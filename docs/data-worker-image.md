@@ -27,13 +27,17 @@ Versions are pinned by the flake's `nixpkgs` revision and recorded as image labe
 | `par2` | `par2cmdline-turbo` | 1.4.0 | per-archive PAR2 recovery sets (SPEC §8) |
 | `zstd` | `zstd` | 1.5.7 | optional pre-encryption compression (SPEC §4.3) |
 | `tar` | `gnutar` | 1.35 | archive creation (SPEC §4.3) |
+| `xorriso` | `xorriso` | 1.5.6 | burn/verify the optical recovery disc (`pkg/optical`, SPEC §10) |
 | `mt` | `mt-st` | — | drive control (non-rewinding `nst` nodes) |
 | `sg_logs` / `sg_turs` | `sg3_utils` | — | TapeAlert / log pages, drive readiness (SPEC §3) |
 | `lsscsi` | `lsscsi` | — | enumerate SCSI tape/changer devices |
 | `zfs` | `zfs` | — | read dataset properties + locate `.zfs/snapshot/` (needs `/dev/zfs`) |
 
 `age`, `par2`, `zstd`, and `tar` are the tools the recovery disc also stages; their
-versions are identical to the disc by construction (build-time assert).
+versions are identical to the disc by construction (build-time assert). `xorriso` is the
+one exception among the bulk-data tools: it burns and verifies the recovery disc but is
+**not** staged onto it — recovery only requires *reading* ISO 9660, which any DVD drive
+mounts, so shipping a burn tool on the disc would be dead weight (SPEC §10).
 
 ## Building
 

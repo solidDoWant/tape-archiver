@@ -23,11 +23,12 @@ func TestExternalVersions(t *testing.T) {
 	t.Parallel()
 
 	accessors := map[string]func() string{
-		toolAge:  AgeVersion,
-		toolPar2: Par2Version,
-		toolLTFS: LTFSVersion,
-		toolZstd: ZstdVersion,
-		toolTar:  TarVersion,
+		toolAge:     AgeVersion,
+		toolPar2:    Par2Version,
+		toolLTFS:    LTFSVersion,
+		toolZstd:    ZstdVersion,
+		toolTar:     TarVersion,
+		toolXorriso: XorrisoVersion,
 	}
 
 	for tool, accessor := range accessors {
