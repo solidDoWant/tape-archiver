@@ -51,9 +51,12 @@ const (
 	reportTimeout = 1 * time.Hour
 
 	// reportFileName, isoFileName, and compressedISOFileName are the staged
-	// artifact names under the run's staging directory. Only the PDF and the
-	// compressed ISO are delivered; the uncompressed ISO is an intermediate.
+	// artifact names under the run's staging directory. The PDF and the compressed
+	// ISO are always produced and delivered (SPEC §11); the uncompressed ISO is
+	// staged only when optical burning is enabled, as the mountable image the Burn
+	// phase (a later sub-issue of #98) consumes.
 	reportFileName        = "report.pdf"
+	isoFileName           = "recovery.iso"
 	compressedISOFileName = "recovery.iso.zst"
 
 	// unknownIdentity is the placeholder for a drive/library identifier that could
@@ -123,12 +126,17 @@ type ReportInput struct {
 }
 
 // ReportOutput is the Report activity's result: the on-disk paths of the two
-// delivered artifacts, which the Deliver phase uploads.
+// delivered artifacts, which the Deliver phase uploads, plus the optional
+// uncompressed ISO staged for the Burn phase.
 type ReportOutput struct {
 	// ReportPath is the staged PDF report (SPEC §9).
 	ReportPath string
 	// ISOPath is the staged, zstd-compressed recovery ISO (SPEC §10, §11).
 	ISOPath string
+	// UncompressedISOPath is the staged uncompressed recovery ISO 9660 image, set
+	// only when optical burning is enabled (delivery.opticalBurn) — the mountable
+	// image the Burn phase burns. Empty when burning is disabled.
+	UncompressedISOPath string
 }
 
 // BuildReport builds the PDF report and compressed recovery ISO for the run
@@ -198,6 +206,15 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 
 	isoPath := filepath.Join(outDir, compressedISOFileName)
 
+	// Stage the uncompressed ISO alongside the compressed one only when optical
+	// burning is enabled: it is the mountable image the Burn phase consumes. When
+	// burning is disabled it is not staged and behavior is byte-for-byte the prior
+	// compressed-only build.
+	var uncompressedISOPath string
+	if input.Config.Delivery.OpticalBurn.Enabled() {
+		uncompressedISOPath = filepath.Join(outDir, isoFileName)
+	}
+
 	isoInput := recoverykit.Input{
 		Report:            pdf.Bytes(),
 		Manifest:          sha256Manifest,
@@ -206,13 +223,13 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		RecoveryProcedure: recoveryProcedure,
 	}
 
-	if err := buildCompressedISO(ctx, isoInput, isoPath); err != nil {
+	if err := buildRecoveryISO(ctx, isoInput, isoPath, uncompressedISOPath); err != nil {
 		return ReportOutput{}, err
 	}
 
-	slog.Info("report: built recovery artifacts", "report", reportPath, "iso", isoPath)
+	slog.Info("report: built recovery artifacts", "report", reportPath, "iso", isoPath, "uncompressedISO", uncompressedISOPath)
 
-	return ReportOutput{ReportPath: reportPath, ISOPath: isoPath}, nil
+	return ReportOutput{ReportPath: reportPath, ISOPath: isoPath, UncompressedISOPath: uncompressedISOPath}, nil
 }
 
 // verifyEscrowIdentity enforces the key-escrow contract (SPEC §7): the private
@@ -236,13 +253,17 @@ func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) err
 	return nil
 }
 
-// buildCompressedISO assembles the recovery ISO and zstd-compresses it in one
-// pass, writing the compressed image to isoPath. The ISO writer's output is piped
-// straight into the compressor so the uncompressed image is never staged to disk.
-func buildCompressedISO(ctx context.Context, isoInput recoverykit.Input, isoPath string) error {
-	out, err := os.Create(isoPath)
+// buildRecoveryISO assembles the recovery ISO once and zstd-compresses it to
+// compressedPath in a single streaming pass. When uncompressedPath is non-empty
+// the raw ISO 9660 image is also staged there for the Burn phase: the ISO writer's
+// output is tee'd into both the staged uncompressed file and the compressor via an
+// io.MultiWriter, so the tens-of-MB image is assembled exactly once and never re-
+// built. When uncompressedPath is empty the raw stream is piped straight into the
+// compressor and nothing extra is staged (the prior compressed-only behavior).
+func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, compressedPath, uncompressedPath string) error {
+	out, err := os.Create(compressedPath)
 	if err != nil {
-		return fmt.Errorf("create compressed ISO %q: %w", isoPath, err)
+		return fmt.Errorf("create compressed ISO %q: %w", compressedPath, err)
 	}
 
 	defer func() { _ = out.Close() }()
@@ -251,8 +272,25 @@ func buildCompressedISO(ctx context.Context, isoInput recoverykit.Input, isoPath
 
 	reader, writer := io.Pipe()
 
+	// buildTarget is where recoverykit.Build writes: the compressor pipe alone, or
+	// the compressor pipe plus the staged uncompressed image when burning is on.
+	buildTarget := io.Writer(writer)
+
+	var raw *os.File
+
+	if uncompressedPath != "" {
+		raw, err = os.Create(uncompressedPath)
+		if err != nil {
+			return fmt.Errorf("create uncompressed ISO %q: %w", uncompressedPath, err)
+		}
+
+		defer func() { _ = raw.Close() }()
+
+		buildTarget = io.MultiWriter(writer, raw)
+	}
+
 	group.Go(func() error {
-		buildErr := recoverykit.Build(groupCtx, isoInput, writer)
+		buildErr := recoverykit.Build(groupCtx, isoInput, buildTarget)
 		_ = writer.CloseWithError(buildErr)
 
 		return buildErr
@@ -270,7 +308,13 @@ func buildCompressedISO(ctx context.Context, isoInput recoverykit.Input, isoPath
 	}
 
 	if err := out.Close(); err != nil {
-		return fmt.Errorf("close compressed ISO %q: %w", isoPath, err)
+		return fmt.Errorf("close compressed ISO %q: %w", compressedPath, err)
+	}
+
+	if raw != nil {
+		if err := raw.Close(); err != nil {
+			return fmt.Errorf("close uncompressed ISO %q: %w", uncompressedPath, err)
+		}
 	}
 
 	return nil
@@ -587,8 +631,10 @@ func ltoGeneration(capacityBytes int64) string {
 
 // reportPhase orchestrates the Report phase (SPEC §4.3 phase 9): it runs the
 // data-side BuildReport activity over the run state and records the artifact paths
-// in runState for the Deliver phase. RunID and Date are taken from the workflow so
-// the artifact is stamped deterministically across retries.
+// in runState — the PDF and compressed ISO for the Deliver phase, and the
+// uncompressed ISO (when optical burning is enabled) for the Burn phase. RunID and
+// Date are taken from the workflow so the artifact is stamped deterministically
+// across retries.
 func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
@@ -616,6 +662,7 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 
 	state.reportPath = output.ReportPath
 	state.isoPath = output.ISOPath
+	state.uncompressedISOPath = output.UncompressedISOPath
 
 	return nil
 }

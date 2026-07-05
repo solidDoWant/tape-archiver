@@ -283,6 +283,11 @@ func TestBuildReport(t *testing.T) {
 	assert.Equal(t, filepath.Join(outDir, reportFileName), output.ReportPath)
 	assert.Equal(t, filepath.Join(outDir, compressedISOFileName), output.ISOPath)
 
+	// Optical burning is disabled (no delivery.opticalBurn section), so no
+	// uncompressed ISO is staged: byte-for-byte the compressed-only behavior.
+	assert.Empty(t, output.UncompressedISOPath, "no uncompressed ISO must be staged when burning is disabled")
+	assert.NoFileExists(t, filepath.Join(outDir, isoFileName), "the uncompressed ISO file must not exist when burning is disabled")
+
 	pdf, err := os.ReadFile(output.ReportPath)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(string(pdf), "%PDF-"), "report must be a PDF")
@@ -292,6 +297,59 @@ func TestBuildReport(t *testing.T) {
 	assert.NotEmpty(t, iso)
 	// zstd magic number (little-endian 0xFD2FB528).
 	assert.Equal(t, []byte{0x28, 0xb5, 0x2f, 0xfd}, iso[:4], "ISO must be zstd-compressed")
+}
+
+// TestBuildReportStagesUncompressedISOWhenBurning checks that with optical burning
+// enabled the Report phase stages the uncompressed recovery ISO beside the run
+// artifacts and records its path, still produces the compressed ISO for delivery,
+// and that the staged image is a valid ISO 9660 identical to the compressed one
+// decompressed (same recovery contents).
+func TestBuildReportStagesUncompressedISOWhenBurning(t *testing.T) {
+	t.Parallel()
+
+	identity, recipient := generateTestKeypair(t)
+
+	input := reportTestInput(t)
+	input.Config.Encryption = config.Encryption{Recipients: []string{recipient}, Identity: identity}
+	input.Config.Delivery.OpticalBurn = &config.OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 1}
+
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+
+	outDir := t.TempDir()
+
+	output, err := acts.buildReport(t.Context(), outDir, input)
+	require.NoError(t, err)
+
+	// The compressed ISO is still produced for Discord delivery.
+	assert.Equal(t, filepath.Join(outDir, compressedISOFileName), output.ISOPath)
+
+	compressed, err := os.ReadFile(output.ISOPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0x28, 0xb5, 0x2f, 0xfd}, compressed[:4], "compressed ISO must be zstd-compressed")
+
+	// The uncompressed ISO is staged and its path recorded for the Burn phase.
+	assert.Equal(t, filepath.Join(outDir, isoFileName), output.UncompressedISOPath)
+
+	staged, err := os.ReadFile(output.UncompressedISOPath)
+	require.NoError(t, err)
+	assertValidISO9660(t, staged)
+
+	// Decompressing the delivered compressed ISO yields byte-for-byte the staged
+	// uncompressed image: same ISO 9660 image, same recovery contents.
+	assert.Equal(t, staged, zstdDecompress(t, compressed), "the staged uncompressed ISO must match the compressed artifact decompressed")
+}
+
+// assertValidISO9660 checks that data is an ISO 9660 image: its Primary Volume
+// Descriptor carries the "CD001" standard identifier at the start of logical
+// sector 16 (byte offset 32769, after the 32768-byte system area and the 1-byte
+// volume-descriptor type).
+func assertValidISO9660(t *testing.T, data []byte) {
+	t.Helper()
+
+	const pvdIdentifierOffset = 32769
+
+	require.GreaterOrEqual(t, len(data), pvdIdentifierOffset+5, "image too small to hold an ISO 9660 volume descriptor")
+	assert.Equal(t, "CD001", string(data[pvdIdentifierOffset:pvdIdentifierOffset+5]), "image must carry the ISO 9660 CD001 identifier")
 }
 
 // TestBuildReportRejectsBadIdentity checks the activity fails before writing any
