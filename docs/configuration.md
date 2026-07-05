@@ -114,6 +114,16 @@ Specifies the SCSI changer, drives, and which storage slots hold blank tapes.
 | `tapeCapacityBytes` | `integer` | yes | Native (uncompressed) capacity of one tape, in bytes (e.g. `2500000000000` for LTO-6). Runs plan against native capacity with LTO hardware compression disabled. It is the single-tape ceiling the Resolve feasibility pre-check tests against and the capacity the Pack phase bin-packs into. Must be > 0. |
 | `ioWaitTimeoutSeconds` | `integer` | no | How long the Eject phase waits for the operator to clear the import/export station when it fills before failing the run (see below). Omit for the default of 12 hours. Must be > 0 when set. |
 | `writeFailureWaitTimeoutSeconds` | `integer` | no | How long the tape path waits for the operator to resume or abort a run paused because a Load or Write failed for one drive-set (see below). Omit for the default of 12 hours. Must be > 0 when set. |
+| `allowNonBlankTapes` | `boolean` | no | Opt out of the non-blank-tape refusal so the run may overwrite used tapes (see below). Omit or set `false` (the default) to keep the safety behaviour: a non-blank tape fails the run before any format or write. |
+
+By default a run **never writes to a non-blank tape**: the Load phase confirms every loaded
+tape is blank and fails the run before any `mkltfs`/write if one is not, so existing data is
+never silently overwritten (SPEC §4.3 step 6). Set `allowNonBlankTapes: true` to deliberately
+reclaim used tapes — the run then logs a prominent warning naming each non-blank tape's barcode
+and slot and proceeds to format and overwrite it. Blank detection is unchanged; the flag only
+changes what happens when a non-blank tape is found, and the overwrite is **irreversible**. Each
+overwritten tape is recorded in the run's [PDF report](report.md) so the action is auditable.
+The flag is whole-run — it permits overwriting **any** non-blank tape loaded during the run.
 
 When a run writes more physical tapes (logical tapes × copies) than the library has I/O
 slots, the Eject phase fills the station and then pauses: it posts an operator alert on the

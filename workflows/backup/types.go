@@ -223,6 +223,11 @@ type LoadedTape struct {
 	// SGDevice is the SCSI generic device node (e.g. /dev/sg1) used by LTFS
 	// and the FormatTape activity (the reference LTFS sg backend).
 	SGDevice string
+	// OverwroteNonBlank is true when this tape was found to be non-blank at load
+	// and written anyway because the run set Library.AllowNonBlankTapes. It is
+	// false for the normal (blank) path. The Write phase carries it onto the
+	// WrittenTape so the run report can record the deliberate overwrite (SPEC §9).
+	OverwroteNonBlank bool
 }
 
 // WrittenTape records a tape written during the Write phase (SPEC §4.3 phase 7).
@@ -247,6 +252,10 @@ type WrittenTape struct {
 	// (sustained throughput, repositions, TapeAlert flags), taken after the write
 	// window closed. It never affects run success (SPEC §2 principle 2, §14).
 	WriteHealth WriteHealth
+	// OverwroteNonBlank is true when this tape was non-blank at load and written
+	// over because the run set Library.AllowNonBlankTapes. The run report records
+	// it so the deliberate overwrite is observable (SPEC §9).
+	OverwroteNonBlank bool
 }
 
 // EjectResult reports the outcome of one Eject activity call (SPEC §4.3 phase 8).

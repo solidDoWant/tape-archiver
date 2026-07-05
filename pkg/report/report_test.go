@@ -238,6 +238,33 @@ func TestBuildWriteHealthSection(t *testing.T) {
 	}
 }
 
+func TestBuildTapesSectionOverwroteNonBlank(t *testing.T) {
+	t.Parallel()
+
+	manifest := func(overwrote bool) report.Manifest {
+		m := completeManifest()
+		m.Tapes = []report.Tape{{
+			Barcode:           "TAPE0001L8",
+			Contents:          []string{"zfs-media"},
+			OverwroteNonBlank: overwrote,
+		}}
+
+		return m
+	}
+
+	const annotation = "Overwrote a non-blank tape"
+
+	// A tape written over a non-blank tape is annotated as such in the Tapes section.
+	overwrote := stripWhitespace(extractText(t, manifest(true)))
+	assert.Contains(t, overwrote, stripWhitespace(annotation),
+		"a tape written over a non-blank tape must be annotated in the report")
+
+	// A normally-written (blank) tape carries no such annotation.
+	normal := stripWhitespace(extractText(t, manifest(false)))
+	assert.NotContains(t, normal, stripWhitespace(annotation),
+		"a tape written to a blank tape must not be annotated as an overwrite")
+}
+
 func TestBuildProducesValidPDF(t *testing.T) {
 	t.Parallel()
 

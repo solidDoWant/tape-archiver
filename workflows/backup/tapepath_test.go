@@ -142,6 +142,80 @@ func mockLoadReturnsAssignments(env *testsuite.TestWorkflowEnvironment, mu *sync
 		})
 }
 
+// TestRunTapePathPassesAllowNonBlankTapes checks that the tape path forwards
+// Library.AllowNonBlankTapes from the run config into every Load activity call, so
+// the Load phase can honour the operator's opt-out (issue #91).
+func TestRunTapePathPassesAllowNonBlankTapes(t *testing.T) {
+	t.Parallel()
+
+	for _, allow := range []bool{false, true} {
+		allow := allow
+		t.Run(fmt.Sprintf("allow=%t", allow), func(t *testing.T) {
+			t.Parallel()
+
+			env := newTapePathEnv(t)
+
+			var (
+				mu   sync.Mutex
+				seen []bool
+			)
+
+			env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
+					mu.Lock()
+
+					seen = append(seen, input.AllowNonBlankTapes)
+					mu.Unlock()
+
+					loaded := make([]LoadedTape, len(input.Tapes))
+					for i, assignment := range input.Tapes {
+						loaded[i] = LoadedTape{
+							Barcode:    tape.Barcode(fmt.Sprintf("BC-%d-%d", assignment.TapeIndex, assignment.CopyIndex)),
+							DriveIndex: i,
+							TapeIndex:  assignment.TapeIndex,
+							CopyIndex:  assignment.CopyIndex,
+							SourceSlot: assignment.BlankSlot,
+							STDevice:   assignment.Drive,
+							SGDevice:   fmt.Sprintf("/dev/sg%d", i),
+						}
+					}
+
+					return loaded, nil
+				})
+
+			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
+				[]byte("<ltfsindex></ltfsindex>"), nil)
+			env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+				WriteHealth{}, nil)
+			env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+				EjectResult{}, nil)
+
+			cfg := tapePathConfig(1, 1, 1)
+			cfg.Library.AllowNonBlankTapes = allow
+			plan, staged, par2 := seededPlan(1, 1)
+
+			env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+				Cfg: cfg, Plan: plan, Staged: staged, PAR2: par2,
+			})
+
+			require.True(t, env.IsWorkflowCompleted())
+			require.NoError(t, env.GetWorkflowError())
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			require.NotEmpty(t, seen, "Load activity must be called at least once")
+
+			for _, got := range seen {
+				assert.Equal(t, allow, got, "Load must receive the configured AllowNonBlankTapes")
+			}
+		})
+	}
+}
+
 // TestRunTapePathMultipleDriveSets drives a plan that needs several drive-sets
 // from both extra logical tapes and extra copies, and asserts every (tape, copy)
 // pair is written and ejected with concurrency bounded by the drive count

@@ -49,6 +49,11 @@ type LoadInput struct {
 	// loaded into the i-th library drive; its Drive, BlankSlot, and
 	// TapeIndex/CopyIndex assignment come straight from the drive-set plan.
 	Tapes []TapeAssignment
+	// AllowNonBlankTapes mirrors Library.AllowNonBlankTapes: when true, a loaded
+	// tape that is not blank is written over (with a warning) instead of failing
+	// the run. The blank check itself always runs; this only changes the non-blank
+	// outcome (SPEC §4.3 step 6).
+	AllowNonBlankTapes bool
 }
 
 // LoadActivities hosts the Load activity, which moves blank tapes into drives and
@@ -105,19 +110,30 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 			return nil, fmt.Errorf("drive %d: blank check for tape %s: %w", i, barcode, err)
 		}
 
+		overwroteNonBlank := false
+
 		if !blank {
-			return nil, fmt.Errorf("drive %d: tape %s is not blank — refusing to write"+
-				" (SPEC §4.3 step 6; reload a blank tape to continue)", i, barcode)
+			if !input.AllowNonBlankTapes {
+				return nil, fmt.Errorf("drive %d: tape %s is not blank — refusing to write"+
+					" (SPEC §4.3 step 6; reload a blank tape to continue)", i, barcode)
+			}
+
+			// The operator deliberately opted in to reclaiming used tapes
+			// (Library.AllowNonBlankTapes). Record the irreversible overwrite so the
+			// workflow can warn and the run report can note it; blank detection above
+			// is unchanged.
+			overwroteNonBlank = true
 		}
 
 		loaded[i] = LoadedTape{
-			Barcode:    barcode,
-			DriveIndex: i,
-			TapeIndex:  assignment.TapeIndex,
-			CopyIndex:  assignment.CopyIndex,
-			SourceSlot: targetSlot,
-			STDevice:   stDev,
-			SGDevice:   sgDev,
+			Barcode:           barcode,
+			DriveIndex:        i,
+			TapeIndex:         assignment.TapeIndex,
+			CopyIndex:         assignment.CopyIndex,
+			SourceSlot:        targetSlot,
+			STDevice:          stDev,
+			SGDevice:          sgDev,
+			OverwroteNonBlank: overwroteNonBlank,
 		}
 	}
 
@@ -333,8 +349,9 @@ func loadPhase(ctx workflow.Context, cfg config.Config, set driveSet) ([]LoadedT
 	})
 
 	input := LoadInput{
-		Changer: cfg.Library.Changer,
-		Tapes:   set,
+		Changer:            cfg.Library.Changer,
+		Tapes:              set,
+		AllowNonBlankTapes: cfg.Library.AllowNonBlankTapes,
 	}
 
 	var acts *LoadActivities
@@ -342,6 +359,17 @@ func loadPhase(ctx workflow.Context, cfg config.Config, set driveSet) ([]LoadedT
 	var loaded []LoadedTape
 	if err := workflow.ExecuteActivity(dataCtx, acts.Load, input).Get(dataCtx, &loaded); err != nil {
 		return nil, err
+	}
+
+	// Overwriting a non-blank tape is deliberate (Library.AllowNonBlankTapes) but
+	// irreversible, so surface it loudly in the run's durable log — naming the
+	// barcode and slot whose existing data is being destroyed (SPEC §4.3 step 6).
+	for _, lt := range loaded {
+		if lt.OverwroteNonBlank {
+			workflow.GetLogger(ctx).Warn("overwriting a NON-BLANK tape "+
+				"(Library.AllowNonBlankTapes is set); existing data will be destroyed",
+				"barcode", lt.Barcode, "slot", lt.SourceSlot, "drive", lt.DriveIndex)
+		}
 	}
 
 	return loaded, nil

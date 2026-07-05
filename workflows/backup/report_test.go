@@ -109,6 +109,24 @@ func TestBuildReportManifest(t *testing.T) {
 	assert.NotEmpty(t, manifest.Build.AgeVersion)
 }
 
+// TestReportTapesPropagatesOverwroteNonBlank checks that a WrittenTape marked as
+// having overwritten a non-blank tape (Library.AllowNonBlankTapes) surfaces the
+// flag on its report.Tape, while a normally-written tape does not (SPEC §9).
+func TestReportTapesPropagatesOverwroteNonBlank(t *testing.T) {
+	t.Parallel()
+
+	input := reportTestInput(t)
+	input.Written[0].OverwroteNonBlank = true
+
+	manifest := buildReportManifest(input, deviceIdentity{})
+
+	require.Len(t, manifest.Tapes, 2)
+	assert.True(t, manifest.Tapes[0].OverwroteNonBlank,
+		"an overwritten non-blank tape must be flagged in the report")
+	assert.False(t, manifest.Tapes[1].OverwroteNonBlank,
+		"a tape written to a blank tape must not be flagged as an overwrite")
+}
+
 // TestQueryDeviceIdentityDegrades covers the graceful-degradation contract: when
 // the library exposes no drives or changer to query (e.g. a dry run with no
 // device), every hardware identifier degrades to "unknown" rather than failing.

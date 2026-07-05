@@ -190,7 +190,11 @@ staged and verified on disk** — eliminating any computation during the write w
    operator-in-the-loop Eject pause below.)
 6. **Load.** Move the drive-set's blank tapes from their storage slots into the drives
    (SCSI `MOVE MEDIUM`), and confirm each loaded tape is blank/empty before formatting — a run must
-   never silently overwrite existing data.
+   never silently overwrite existing data. The blank check always runs; when a loaded tape is
+   **not** blank the run fails before any format/write, *unless* the run config sets
+   `library.allowNonBlankTapes`, in which case the run instead logs a prominent warning naming the
+   tape's barcode and slot, proceeds to overwrite it, and records the overwrite in the run report.
+   The override changes only the non-blank outcome — never detection — and never silences it.
 7. **Write.** `mkltfs` each tape in the set (setting the LTFS volume name to the tape's
    barcode), mount LTFS **with index sync deferred to unmount** (`-o sync_type=unmount`),
    and stream the staged tree to tape. The set's tapes write to their drives in parallel.
@@ -232,7 +236,9 @@ The config defines, at minimum:
   drive count is written across successive drive-sets (§4.3 steps 6–8). The library must
   hold one blank tape per physical tape written (logical tapes × copies).
 - **Library** — device targets (real `/dev/sch0` + `/dev/nstX`, or a virtual library
-  for dry-run, §12) and the list of storage slots holding usable blank tapes.
+  for dry-run, §12) and the list of storage slots holding usable blank tapes. An optional
+  `allowNonBlankTapes` flag (default off) opts the run out of the non-blank refusal so it may
+  deliberately overwrite used tapes (§4.3 step 6).
 - **Redundancy** — PAR2 policy: a target redundancy percentage, or **fill-to-capacity**
   (size data first, then expand PAR2 to consume remaining tape down to a configured
   floor). Slice size is configurable.
@@ -328,7 +334,8 @@ Produced by the data worker (§4.1: its inputs — staged files, pinned tool ver
 recovery binaries, captured LTFS indexes — all live there). Contains, at minimum: run
 id and date; full contents
 manifest (archives, member volumes, source snapshots, sizes, SHA-256 checksums);
-which physical tape(s) (by barcode/label) hold what; per-tape **write health** (§14);
+which physical tape(s) (by barcode/label) hold what (annotating any tape written over a
+non-blank tape under `library.allowNonBlankTapes`, §4.3 step 6); per-tape **write health** (§14);
 how the tapes were built (tool
 version, `age`/`par2`/`ltfs` versions, slice size, PAR2 redundancy, drive/library
 identifiers); the **age private identity**; and the recovery procedure. Intended to be

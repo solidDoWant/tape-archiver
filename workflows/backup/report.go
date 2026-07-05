@@ -419,9 +419,10 @@ func reportTapes(input ReportInput, nameByIndex map[int]string) []report.Tape {
 		}
 
 		tapes = append(tapes, report.Tape{
-			Barcode:     string(written.Barcode),
-			Contents:    contents,
-			WriteHealth: reportWriteHealth(written.WriteHealth),
+			Barcode:           string(written.Barcode),
+			Contents:          contents,
+			WriteHealth:       reportWriteHealth(written.WriteHealth),
+			OverwroteNonBlank: written.OverwroteNonBlank,
 		})
 	}
 

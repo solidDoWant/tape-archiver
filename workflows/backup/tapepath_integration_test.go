@@ -207,6 +207,118 @@ func TestTapePath(t *testing.T) {
 	assert.True(t, inIOSlot, "tape %s must be in an I/O slot after Eject", lt.Barcode)
 }
 
+// TestTapePathAllowNonBlankTapes exercises the Library.AllowNonBlankTapes override
+// (issue #91) against mhvtl: a pre-written (non-blank) tape makes the Load activity
+// refuse by default, and proceed with an "overwrote non-blank" flag when the
+// override is set. Blank detection is unchanged either way. Skips when mhvtl or LTFS
+// is absent.
+func TestTapePathAllowNonBlankTapes(t *testing.T) {
+	testutil.SkipIfMhvtlUnavailable(t)
+	testutil.SkipIfLTFSUnavailable(t)
+
+	changer := tape.NewChanger(testutil.ChangerDev(t))
+
+	inv, err := changer.Inventory(t.Context())
+	require.NoError(t, err, "initial inventory")
+	require.GreaterOrEqual(t, len(inv.Drives), 1, "at least 1 drive required")
+	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
+
+	stDev := testutil.Drive0Dev(t)
+	sgDev := testutil.Drive0SgDev(t)
+	driveAddr := inv.Drives[0].Address
+
+	// Use a full storage slot distinct from those the other tape-path tests use
+	// (slot 0: session test, slot 1: TestTapePath) so a non-blank tape left here
+	// never interferes with them. Integration tests run sequentially, but this
+	// keeps the fixtures independent regardless of order.
+	slotIdx := -1
+
+	for i := 2; i < len(inv.Slots); i++ {
+		if inv.Slots[i].Full {
+			slotIdx = i
+			break
+		}
+	}
+
+	require.GreaterOrEqual(t, slotIdx, 2, "need a full storage slot at index >= 2")
+
+	slotAddr := inv.Slots[slotIdx].Address
+	barcode := inv.Slots[slotIdx].Barcode
+	require.NotEmpty(t, barcode, "chosen slot tape must have a barcode")
+
+	// Leave the library clean: the tape back in its slot AND blank so consecutive
+	// runs start from the same state. A short SCSI ERASE resets the vtltape daemon's
+	// cached in-memory content to blank (see TestTapePath cleanup for the rationale).
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
+		defer cancel()
+
+		cleanupInv, invErr := changer.Inventory(cleanupCtx)
+		if invErr != nil {
+			return
+		}
+
+		tapeInDrive := len(cleanupInv.Drives) > 0 &&
+			cleanupInv.Drives[0].Loaded &&
+			cleanupInv.Drives[0].Barcode == barcode
+
+		if !tapeInDrive {
+			if err := changer.Load(cleanupCtx, slotAddr, driveAddr); err != nil {
+				return
+			}
+		}
+
+		rewindCtx, rewindCancel := context.WithTimeout(cleanupCtx, 10*time.Second)
+		_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
+
+		rewindCancel()
+
+		_ = exec.CommandContext(cleanupCtx, "sg_raw", sgDev,
+			"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
+		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
+	})
+
+	// Load the tape and wait for the drive to become ready, skipping cleanly if it
+	// never does (like the other mhvtl tests). The tape stays in the drive so the
+	// format below can make it non-blank in place; the reconciling Load calls then
+	// see it already loaded and re-run only the blank check.
+	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load")
+	testutil.SkipIfDriveNotReady(t, stDev)
+
+	// Make the tape NON-BLANK by writing an LTFS volume to it. mkltfs leaves the
+	// vtltape daemon reporting the tape as non-blank, which is exactly the state the
+	// Load blank check must detect.
+	writeActs := newWriteActivities(newMountRegistry(), t.TempDir())
+	require.NoError(t, writeActs.FormatTape(t.Context(), FormatInput{
+		Device:  sgDev,
+		Barcode: barcode,
+	}), "FormatTape to make the tape non-blank")
+
+	loadActs := newLoadActivities()
+	loadInput := func(allow bool) LoadInput {
+		return LoadInput{
+			Changer:            testutil.ChangerDev(t),
+			Tapes:              []TapeAssignment{{Drive: stDev, BlankSlot: slotAddr, TapeIndex: 0, CopyIndex: 0}},
+			AllowNonBlankTapes: allow,
+		}
+	}
+
+	// Default: the Load activity refuses the non-blank tape before any write.
+	_, err = loadActs.Load(t.Context(), loadInput(false))
+	require.Error(t, err, "Load must refuse a non-blank tape by default")
+	assert.Contains(t, err.Error(), "not blank", "refusal must name the non-blank cause")
+
+	// Override: the Load activity warns and proceeds, flagging the overwrite. The
+	// tape is still in the drive, so this call reconciles to a no-op load and simply
+	// re-runs the (unchanged) blank check on the same non-blank tape.
+	loaded, err := loadActs.Load(t.Context(), loadInput(true))
+	require.NoError(t, err, "Load must proceed on a non-blank tape when AllowNonBlankTapes is set")
+	require.Len(t, loaded, 1, "Load must return one LoadedTape")
+	assert.Equal(t, barcode, loaded[0].Barcode, "loaded barcode must match the slot tape")
+	assert.True(t, loaded[0].OverwroteNonBlank,
+		"a non-blank tape written under the override must be flagged as overwritten")
+}
+
 // TestTapePathMultipleDriveSets exercises the drive-set loop against mhvtl: a plan
 // with more physical tapes than the library has drives is written as a sequence of
 // drive-sets, each loaded, written, and ejected before the next begins. With a
