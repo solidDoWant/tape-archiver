@@ -16,6 +16,14 @@ const DefaultIOWaitTimeout = 12 * time.Hour
 // run always reaches a defined end state rather than waiting indefinitely.
 const DefaultWriteFailureWaitTimeout = 12 * time.Hour
 
+// DefaultBurnWaitTimeout is how long the optical-burn phase waits for the operator
+// to load fresh discs or resume/abort a run paused because a burn failed or a
+// non-blank disc was refused, when Delivery.OpticalBurn.BurnWaitTimeoutSeconds is
+// unset. Like DefaultWriteFailureWaitTimeout it bounds the operator-in-the-loop pause
+// so an unattended run always reaches a defined end state rather than waiting
+// indefinitely.
+const DefaultBurnWaitTimeout = 12 * time.Hour
+
 // DefaultFeasibilityOverhead is the multiplier applied to a source's
 // logicalreferenced size in the Resolve feasibility pre-check (SPEC.md §4.3
 // phase 1, §16) when Config.FeasibilityOverhead is unset. It covers tar/zstd/age
@@ -161,4 +169,55 @@ type Encryption struct {
 // Delivery specifies how run artifacts are delivered on success.
 type Delivery struct {
 	WebhookURL string `json:"webhookUrl"`
+	// OpticalBurn optionally configures burning the recovery disc to optical media
+	// (M-DISC DVD; SPEC §10) as an extra redundancy layer. Burning is off unless the
+	// section is present with at least one burner drive and a positive copy count —
+	// see OpticalBurn.Enabled. It is a pointer so an absent section is the disabled
+	// default.
+	OpticalBurn *OpticalBurn `json:"opticalBurn,omitempty"`
+}
+
+// OpticalBurn configures optical recovery-disc burning. It mirrors the tape Library
+// fields: a disc copy count independent of the burner-drive count, an
+// AllowNonBlankDiscs opt-out paralleling Library.AllowNonBlankTapes, and a burn-wait
+// timeout paralleling Library.WriteFailureWaitTimeoutSeconds.
+type OpticalBurn struct {
+	// Drives lists the optical burner device paths (e.g. /dev/sr0). Burning is
+	// disabled when empty.
+	Drives []string `json:"drives"`
+	// Copies is the number of recovery-disc copies to burn. It is intentionally NOT
+	// bounded by the burner-drive count: copies burn in successive burn-sets of at
+	// most len(Drives) discs at a time (mirrors Config.Copies vs Library.Drives).
+	// Zero (or an absent section, or empty Drives) disables burning; it must not be
+	// negative.
+	Copies int `json:"copies"`
+	// AllowNonBlankDiscs opts a run out of the non-blank-disc refusal so an operator
+	// can deliberately reclaim used discs, mirroring Library.AllowNonBlankTapes. It
+	// can only reclaim rewritable media (DVD±RW / BD-RE): write-once media
+	// (DVD-R / M-DISC) can never be overwritten regardless of this flag.
+	AllowNonBlankDiscs bool `json:"allowNonBlankDiscs,omitempty"`
+	// BurnWaitTimeoutSeconds bounds how long the optical-burn phase waits for the
+	// operator to resume or abort a run paused because a burn failed or a non-blank
+	// disc was refused, mirroring Library.WriteFailureWaitTimeoutSeconds. When unset,
+	// DefaultBurnWaitTimeout applies. It must be positive when set: the wait is
+	// always bounded so an unattended run reaches a defined end state.
+	BurnWaitTimeoutSeconds *int `json:"burnWaitTimeoutSeconds,omitempty"`
+}
+
+// Enabled reports whether optical burning is configured: true only when the section
+// is present with at least one burner drive and a positive copy count. It is nil-safe
+// so downstream phases have one place to test whether burning should run.
+func (o *OpticalBurn) Enabled() bool {
+	return o != nil && len(o.Drives) > 0 && o.Copies > 0
+}
+
+// EffectiveBurnWaitTimeout returns the configured operator wait for a burn-failure
+// pause, or DefaultBurnWaitTimeout when BurnWaitTimeoutSeconds (or the whole section)
+// is unset.
+func (o *OpticalBurn) EffectiveBurnWaitTimeout() time.Duration {
+	if o != nil && o.BurnWaitTimeoutSeconds != nil {
+		return time.Duration(*o.BurnWaitTimeoutSeconds) * time.Second
+	}
+
+	return DefaultBurnWaitTimeout
 }

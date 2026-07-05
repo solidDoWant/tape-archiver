@@ -45,6 +45,9 @@
       "properties": {
         "webhookUrl": {
           "type": "string"
+        },
+        "opticalBurn": {
+          "$ref": "#/$defs/OpticalBurn"
         }
       },
       "additionalProperties": false,
@@ -147,6 +150,31 @@
         "drives",
         "blankSlots",
         "tapeCapacityBytes"
+      ]
+    },
+    "OpticalBurn": {
+      "properties": {
+        "drives": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "copies": {
+          "type": "integer"
+        },
+        "allowNonBlankDiscs": {
+          "type": "boolean"
+        },
+        "burnWaitTimeoutSeconds": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "drives",
+        "copies"
       ]
     },
     "Redundancy": {
