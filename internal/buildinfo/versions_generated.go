@@ -5,9 +5,10 @@ package buildinfo
 // externalToolVersions maps each external tool to the version captured from
 // the pinned binary at generation time. Regenerate with `make generate-versions`.
 var externalToolVersions = map[string]string{
-	"age":  "v1.3.1",
-	"ltfs": "LTFS version 2.4.8.4 (Prelim).",
-	"par2": "par2cmdline-turbo version 1.4.0",
-	"tar":  "tar (GNU tar) 1.35",
-	"zstd": "*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***",
+	"age":     "v1.3.1",
+	"ltfs":    "LTFS version 2.4.8.4 (Prelim).",
+	"par2":    "par2cmdline-turbo version 1.4.0",
+	"tar":     "tar (GNU tar) 1.35",
+	"xorriso": "xorriso 1.5.6 : RockRidge filesystem manipulator, libburnia project.",
+	"zstd":    "*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***",
 }

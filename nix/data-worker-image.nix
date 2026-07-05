@@ -24,6 +24,7 @@
   par2cmdline-turbo,
   zstd,
   gnutar,
+  xorriso,
   mt-st,
   sg3_utils,
   lsscsi,
@@ -66,6 +67,10 @@ let
     par2cmdline-turbo # per-archive PAR2 recovery sets (SPEC §8)
     zstd # optional pre-encryption compression (SPEC §4.3)
     gnutar # archive creation (SPEC §4.3); recovery disc stages the same `tar`
+    xorriso # burn/verify the optical recovery disc — pkg/optical shells out to
+    # xorriso (libburnia) to write the recovery ISO to M-DISC and read it back
+    # (SPEC §10). Data-worker image only: it is deliberately NOT on the recovery
+    # disc, which only needs to *read* ISO 9660 (any DVD drive mounts it).
     mt-st # `mt` — drive control on the non-rewinding nst nodes
     sg3_utils # sg_logs (TapeAlert / log pages), sg_turs (readiness) (SPEC §3)
     lsscsi # enumerate SCSI tape/changer devices
@@ -141,6 +146,7 @@ dockerTools.streamLayeredImage {
       "io.tape-archiver.version.par2" = par2cmdline-turbo.version;
       "io.tape-archiver.version.zstd" = zstd.version;
       "io.tape-archiver.version.tar" = gnutar.version;
+      "io.tape-archiver.version.xorriso" = xorriso.version;
     };
   };
 }

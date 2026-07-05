@@ -32,6 +32,7 @@ var tools = []struct {
 	{"ltfs", []string{"--version"}},
 	{"zstd", []string{"--version"}},
 	{"tar", []string{"--version"}},
+	{"xorriso", []string{"--version"}},
 }
 
 func main() {
