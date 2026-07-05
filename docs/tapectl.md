@@ -60,7 +60,7 @@ shared library:
 ```
 $ tapectl run --config run.json
 a backup run is already in progress (workflow ID "backup", run ID 018f…);
-backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status backup`
+backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status`
 ```
 
 Once the in-progress run has finished (success or failure), a new run submitted under
@@ -89,14 +89,15 @@ already occupies those nodes so a dry-run never targets real hardware:
 
 ## `tapectl status`
 
-Print a workflow's current execution status and its last completed phase.
+Print the backup run's current execution status and its last completed phase. Runs are a
+singleton (SPEC §4.2), so it takes no arguments.
 
 ```
-tapectl status <workflow-id>
+tapectl status
 ```
 
 ```
-$ tapectl status backup
+$ tapectl status
 Workflow:             backup
 Status:               Running
 Last completed phase: Verify
@@ -112,37 +113,38 @@ it is reported as `none`.
 
 ## `tapectl resume`
 
-Resume a paused run. It resumes either operator-in-the-loop pause (SPEC §4.3): the Eject
-phase paused because the import/export station filled (phase 8), or the tape path paused
-because a Load or Write failed for one drive-set (phases 6–8).
+Resume the paused backup run. It resumes either operator-in-the-loop pause (SPEC §4.3): the
+Eject phase paused because the import/export station filled (phase 8), or the tape path
+paused because a Load or Write failed for one drive-set (phases 6–8). Runs are a singleton
+(SPEC §4.2), so it takes no arguments.
 
 ```
-tapectl resume <workflow-id>
+tapectl resume
 ```
 
 ```
-$ tapectl resume backup
+$ tapectl resume
 Resume signal sent to run backup.
 ```
 
 **Eject pause.** When a run writes more physical tapes than the library has I/O slots, the
 Eject phase exports as many as fit, alerts the operator (on the failure webhook) which
 tapes to remove, and pauses. After physically removing the exported tapes and clearing the
-station, run `tapectl resume <workflow-id>` to continue: the run re-reads the changer
-inventory and exports the remaining tapes into the freed slots. Libraries that report the
-import/export access bit resume **automatically** once the station is cleared and closed,
-without this command; `resume` is the fallback for libraries that do not. If no one
-responds within `library.ioWaitTimeoutSeconds` (default 12 hours), the run fails with
-every written tape left in an I/O or storage slot.
+station, run `tapectl resume` to continue: the run re-reads the changer inventory and
+exports the remaining tapes into the freed slots. Libraries that report the import/export
+access bit resume **automatically** once the station is cleared and closed, without this
+command; `resume` is the fallback for libraries that do not. If no one responds within
+`library.ioWaitTimeoutSeconds` (default 12 hours), the run fails with every written tape
+left in an I/O or storage slot.
 
 **Load/Write-failure pause.** When a Load or Write fails for one drive-set, the run keeps
 the tapes that wrote successfully, ejects the failed tapes, and pauses — alerting the
 operator (on the failure webhook) which tapes failed and which storage slots to restock
-with fresh blanks. After loading fresh blank tapes into those slots, run
-`tapectl resume <workflow-id>`: the run re-drives **only** the failed tapes onto the fresh
-blanks, never re-formatting a tape already written. If no one responds within
-`library.writeFailureWaitTimeoutSeconds` (default 12 hours), the run fails in that defined
-paused state. To end the run instead of resuming, use [`tapectl abort`](#tapectl-abort).
+with fresh blanks. After loading fresh blank tapes into those slots, run `tapectl resume`:
+the run re-drives **only** the failed tapes onto the fresh blanks, never re-formatting a
+tape already written. If no one responds within `library.writeFailureWaitTimeoutSeconds`
+(default 12 hours), the run fails in that defined paused state. To end the run instead of
+resuming, use [`tapectl abort`](#tapectl-abort).
 
 Sending `resume` to a run that is not paused has no effect.
 
@@ -150,16 +152,17 @@ Sending `resume` to a run that is not paused has no effect.
 
 ## `tapectl abort`
 
-Abort a run paused because a Load or Write failed for one drive-set (SPEC §4.3 phases 6–8):
-instead of swapping in fresh blanks and resuming, end the run in a defined, reported state
-with no further tapes written.
+Abort the backup run paused because a Load or Write failed for one drive-set (SPEC §4.3
+phases 6–8): instead of swapping in fresh blanks and resuming, end the run in a defined,
+reported state with no further tapes written. Runs are a singleton (SPEC §4.2), so it takes
+no arguments.
 
 ```
-tapectl abort <workflow-id>
+tapectl abort
 ```
 
 ```
-$ tapectl abort backup
+$ tapectl abort
 Abort signal sent to run backup.
 ```
 

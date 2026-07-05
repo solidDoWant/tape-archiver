@@ -244,8 +244,8 @@ func TestSendWritePathPausePayload(t *testing.T) {
 	assert.Contains(t, payload.Content, "TA0002L6")
 	assert.Contains(t, payload.Content, "101")
 	assert.Contains(t, payload.Content, "mkltfs failed")
-	assert.Contains(t, payload.Content, "tapectl resume run-123")
-	assert.Contains(t, payload.Content, "tapectl abort run-123")
+	assert.Contains(t, payload.Content, "tapectl resume")
+	assert.Contains(t, payload.Content, "tapectl abort")
 }
 
 func TestSendWritePathPauseEmptyURLNoOp(t *testing.T) {

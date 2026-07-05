@@ -119,7 +119,7 @@ When a run writes more physical tapes (logical tapes × copies) than the library
 slots, the Eject phase fills the station and then pauses: it posts an operator alert on the
 failure webhook naming the tapes ready for removal, and waits. On libraries that report the
 import/export access bit it resumes automatically once the station is cleared and closed;
-otherwise the operator runs [`tapectl resume <run-id>`](tapectl.md) after removing the
+otherwise the operator runs [`tapectl resume`](tapectl.md) after removing the
 tapes. If no one responds within `ioWaitTimeoutSeconds`, the run fails with every written
 tape left in an I/O or storage slot (none in a drive).
 
@@ -128,9 +128,9 @@ run. The tapes that wrote successfully are ejected and recorded; the tapes that 
 ejected too (freeing their drives and emptying their blank slots), and the run pauses,
 posting an operator alert on the failure webhook naming the failing phase, the affected
 tapes, and the storage slots to restock with fresh blanks. The operator either loads fresh
-blank tapes into those slots and runs [`tapectl resume <run-id>`](tapectl.md) — which
+blank tapes into those slots and runs [`tapectl resume`](tapectl.md) — which
 re-drives **only** the failed tapes, never re-formatting a tape already written — or runs
-[`tapectl abort <run-id>`](tapectl.md) to end the run with no further writes. If no one
+[`tapectl abort`](tapectl.md) to end the run with no further writes. If no one
 responds within `writeFailureWaitTimeoutSeconds`, the run fails in that defined paused
 state (every tape in a drive, I/O slot, or storage slot) and is reported.
 

@@ -202,9 +202,9 @@ func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, af
 	msg := Message{
 		Content: fmt.Sprintf(
 			"Backup run %s paused: %s failed for one drive-set. Remove the affected tape(s) [%s], "+
-				"load fresh blank tape(s) into slot(s) %s, then run `tapectl resume %s` to continue "+
-				"or `tapectl abort %s` to end the run. Error: %s",
-			runID, phase, tapes, formatSlots(reloadSlots), runID, runID, errSummary),
+				"load fresh blank tape(s) into slot(s) %s, then run `tapectl resume` to continue "+
+				"or `tapectl abort` to end the run. Error: %s",
+			runID, phase, tapes, formatSlots(reloadSlots), errSummary),
 	}
 
 	if err := c.Send(ctx, msg); err != nil {

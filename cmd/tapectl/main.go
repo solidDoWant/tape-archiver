@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -17,19 +18,22 @@ import (
 const usage = `tapectl — submit and inspect tape-archiver backup runs
 
 Usage:
-  tapectl run --config <file> [--dry-run] [--id <id>]
-  tapectl status <workflow-id>
-  tapectl resume <workflow-id>
-  tapectl abort <workflow-id>
+  tapectl run --config <file> [--dry-run]
+  tapectl status
+  tapectl resume
+  tapectl abort
 
 Commands:
   run     Submit a run config to Temporal as a backup workflow.
-  status  Print a workflow's status and last completed phase.
-  resume  Resume a paused run: after you clear the I/O station (Eject pause), or
-          after you swap failed tapes for fresh blanks (Load/Write pause).
-  abort   Abort a run paused on a Load/Write failure, ending it with no more writes.
+  status  Print the backup run's status and last completed phase.
+  resume  Resume the paused backup run: after you clear the I/O station (Eject
+          pause), or after you swap failed tapes for fresh blanks (Load/Write pause).
+  abort   Abort the backup run paused on a Load/Write failure, ending it with no
+          more writes.
 
-Connection is configured via TEMPORAL_ADDRESS (and TEMPORAL_NAMESPACE, etc.).
+Runs are a singleton (SPEC §4.2), so status, resume, and abort take no arguments;
+they act on the one backup run. Connection is configured via TEMPORAL_ADDRESS (and
+TEMPORAL_NAMESPACE, etc.).
 `
 
 // getenv reads environment variables. It is a package variable so tests can
@@ -76,6 +80,23 @@ func dispatch(ctx context.Context, args []string, out io.Writer) error {
 func requireTemporalAddress(getenv func(string) string) error {
 	if getenv("TEMPORAL_ADDRESS") == "" {
 		return fmt.Errorf("TEMPORAL_ADDRESS is not set; set it to the Temporal frontend address (e.g. localhost:7233)")
+	}
+
+	return nil
+}
+
+// requireNoArgs rejects any positional arguments for the singleton subcommands
+// (status, resume, abort). Every run submits under the same workflow ID
+// (backupWorkflowID, SPEC §4.2), so these commands act on that one run and take no
+// arguments; a stray argument is a mistake worth reporting rather than ignoring.
+func requireNoArgs(command string, args []string) error {
+	flagSet := flag.NewFlagSet(command, flag.ContinueOnError)
+	if err := flagSet.Parse(args); err != nil {
+		return err
+	}
+
+	if flagSet.NArg() != 0 {
+		return fmt.Errorf("tapectl %s takes no arguments\n\nUsage: tapectl %s", command, command)
 	}
 
 	return nil

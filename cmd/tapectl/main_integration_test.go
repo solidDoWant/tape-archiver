@@ -101,7 +101,7 @@ func TestRunThenStatus(t *testing.T) {
 	// the stub reports via the query.
 	require.Eventually(t, func() bool {
 		var statusOut bytes.Buffer
-		if err := showStatus(ctx, []string{workflowID}, &statusOut); err != nil {
+		if err := showStatus(ctx, nil, &statusOut); err != nil {
 			return false
 		}
 

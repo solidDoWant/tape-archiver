@@ -37,8 +37,8 @@ const (
 	// the tape path paused because a Load or Write failed for one drive-set. It
 	// carries no payload — its receipt means the operator has cleared the blocking
 	// condition (removed the exported tapes, or swapped the suspect tapes for fresh
-	// blanks in the same slots) and the run may continue. `tapectl resume
-	// <workflow-id>` sends it. On an Eject pause the workflow re-reads the changer
+	// blanks in the same slots) and the run may continue. `tapectl resume` sends
+	// it. On an Eject pause the workflow re-reads the changer
 	// inventory and exports the remaining tapes into the freed slots; on a
 	// write-path pause it re-drives only the failed tapes onto the fresh blanks.
 	// For an Eject pause on libraries that report the import/export access bit the
@@ -50,6 +50,6 @@ const (
 	// paused because a Load or Write failed for one drive-set (SPEC §4.3): instead
 	// of swapping in fresh blanks and resuming, the operator ends the run in a
 	// defined, reported state with no further tapes written. It carries no payload.
-	// `tapectl abort <workflow-id>` sends it.
+	// `tapectl abort` sends it.
 	OperatorAbortSignal = "operatorAbort"
 )

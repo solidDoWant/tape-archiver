@@ -206,7 +206,7 @@ staged and verified on disk** — eliminating any computation during the write w
    alerts the operator which tapes to remove (§11) and pauses, leaving every written tape
    in an I/O or storage slot. It resumes automatically on libraries that report the
    import/export ACCESS bit (once the station is cleared and closed), or on the explicit
-   `operatorEjectCleared` signal (`tapectl resume <run-id>`) otherwise, then exports the
+   `operatorResume` signal (`tapectl resume`) otherwise, then exports the
    remaining tapes into the freed slots. If the operator does not respond within
    `library.ioWaitTimeoutSeconds` (default 12h), the run fails in that defined state and is
    reported.
@@ -387,14 +387,14 @@ the I/O station and pauses for the operator (§4.3 phase 8), it posts a message 
 removal, and how many still await a free slot. Like the failure alert it is best-effort —
 a delivery failure is logged, never raised — so a webhook outage never aborts a run that
 is only waiting for the operator. The operator clears the station and, on libraries that
-do not report the import/export access bit, runs `tapectl resume <run-id>` to continue.
+do not report the import/export access bit, runs `tapectl resume` to continue.
 
 **Write-path pause alert (operational, same failure webhook).** When a Load or Write fails
 for one drive-set the tape path pauses for the operator (§4.3 phases 6–8) rather than
 failing the whole run. It posts a message on the same `DISCORD_FAILURE_WEBHOOK_URL` naming
 the run, the failing phase, the tapes affected by the failure, the storage slots to restock
 with fresh blank tapes, and the error summary, and it tells the operator the exact
-`tapectl resume <run-id>` / `tapectl abort <run-id>` commands. Like the other alerts it is
+`tapectl resume` / `tapectl abort` commands. Like the other alerts it is
 best-effort — a delivery failure is logged, never raised. The operator either swaps the
 affected tapes for fresh blanks and resumes, or aborts; if neither happens within
 `library.writeFailureWaitTimeoutSeconds` (default 12 h) the run fails in that defined
