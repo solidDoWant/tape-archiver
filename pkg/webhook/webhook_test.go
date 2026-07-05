@@ -223,6 +223,44 @@ func TestSendOperatorPauseEmptyURLNoOp(t *testing.T) {
 	assert.Equal(t, int32(0), cap.hits.Load())
 }
 
+func TestSendWritePathPausePayload(t *testing.T) {
+	t.Parallel()
+
+	server, cap := newServer(t, http.StatusNoContent)
+
+	client := webhook.New(server.URL)
+	client.SendWritePathPause(t.Context(), "run-123", "Write", []string{"TA0002L6"}, []int{101}, "mkltfs failed")
+
+	require.Equal(t, int32(1), cap.hits.Load())
+	assert.Equal(t, "application/json", cap.contentType)
+
+	var payload struct {
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(cap.body, &payload))
+
+	assert.Contains(t, payload.Content, "run-123")
+	assert.Contains(t, payload.Content, "Write")
+	assert.Contains(t, payload.Content, "TA0002L6")
+	assert.Contains(t, payload.Content, "101")
+	assert.Contains(t, payload.Content, "mkltfs failed")
+	assert.Contains(t, payload.Content, "tapectl resume run-123")
+	assert.Contains(t, payload.Content, "tapectl abort run-123")
+}
+
+func TestSendWritePathPauseEmptyURLNoOp(t *testing.T) {
+	t.Parallel()
+
+	server, cap := newServer(t, http.StatusNoContent)
+	_ = server
+
+	client := webhook.New("")
+	// Must not panic and must not contact any endpoint.
+	client.SendWritePathPause(t.Context(), "run-123", "Load", nil, []int{100, 101}, "move medium failed")
+
+	assert.Equal(t, int32(0), cap.hits.Load())
+}
+
 func TestSendFailureEmptyURLNoOp(t *testing.T) {
 	t.Parallel()
 

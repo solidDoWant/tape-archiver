@@ -9,6 +9,13 @@ import "time"
 // waiting indefinitely.
 const DefaultIOWaitTimeout = 12 * time.Hour
 
+// DefaultWriteFailureWaitTimeout is how long the tape path waits for the operator
+// to resume or abort a run paused because a Load or Write failed for one drive-set
+// (SPEC §4.3), when Library.WriteFailureWaitTimeoutSeconds is unset. Like
+// DefaultIOWaitTimeout it bounds the operator-in-the-loop pause so an unattended
+// run always reaches a defined end state rather than waiting indefinitely.
+const DefaultWriteFailureWaitTimeout = 12 * time.Hour
+
 // DefaultFeasibilityOverhead is the multiplier applied to a source's
 // logicalreferenced size in the Resolve feasibility pre-check (SPEC.md §4.3
 // phase 1, §16) when Config.FeasibilityOverhead is unset. It covers tar/zstd/age
@@ -84,6 +91,13 @@ type Library struct {
 	// reaches a defined end state (every written tape in an I/O or storage slot,
 	// none in a drive) rather than pausing forever.
 	IOWaitTimeoutSeconds *int `json:"ioWaitTimeoutSeconds,omitempty"`
+	// WriteFailureWaitTimeoutSeconds bounds how long the tape path waits for the
+	// operator to resume or abort a run paused because a Load or Write failed for
+	// one drive-set (SPEC §4.3). When unset, DefaultWriteFailureWaitTimeout applies.
+	// It must be positive when set: the wait is always bounded so an unattended run
+	// reaches a defined end state (every tape in a drive, I/O, or storage slot)
+	// rather than pausing forever.
+	WriteFailureWaitTimeoutSeconds *int `json:"writeFailureWaitTimeoutSeconds,omitempty"`
 }
 
 // EffectiveIOWaitTimeout returns the configured operator I/O-station wait, or
@@ -94,6 +108,17 @@ func (l Library) EffectiveIOWaitTimeout() time.Duration {
 	}
 
 	return DefaultIOWaitTimeout
+}
+
+// EffectiveWriteFailureWaitTimeout returns the configured operator wait for a
+// Load/Write-failure pause, or DefaultWriteFailureWaitTimeout when
+// Library.WriteFailureWaitTimeoutSeconds is unset.
+func (l Library) EffectiveWriteFailureWaitTimeout() time.Duration {
+	if l.WriteFailureWaitTimeoutSeconds != nil {
+		return time.Duration(*l.WriteFailureWaitTimeoutSeconds) * time.Second
+	}
+
+	return DefaultWriteFailureWaitTimeout
 }
 
 // Redundancy specifies the PAR2 redundancy policy.

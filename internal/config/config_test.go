@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 	"github.com/stretchr/testify/assert"
@@ -228,6 +229,23 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "library.ioWaitTimeoutSeconds",
 		},
 		{
+			name:    "library write failure wait timeout set positive",
+			mutate:  func(c *Config) { c.Library.WriteFailureWaitTimeoutSeconds = ptr(3600) },
+			wantErr: require.NoError,
+		},
+		{
+			name:        "library write failure wait timeout zero",
+			mutate:      func(c *Config) { c.Library.WriteFailureWaitTimeoutSeconds = ptr(0) },
+			wantErr:     require.Error,
+			errContains: "library.writeFailureWaitTimeoutSeconds",
+		},
+		{
+			name:        "library write failure wait timeout negative",
+			mutate:      func(c *Config) { c.Library.WriteFailureWaitTimeoutSeconds = ptr(-1) },
+			wantErr:     require.Error,
+			errContains: "library.writeFailureWaitTimeoutSeconds",
+		},
+		{
 			name:        "redundancy neither mode",
 			mutate:      func(c *Config) { c.Redundancy.TargetPercentage = nil },
 			wantErr:     require.Error,
@@ -317,6 +335,16 @@ func TestEffectiveFeasibilityOverhead(t *testing.T) {
 
 	set := Config{FeasibilityOverhead: ptr(1.2)}
 	assert.InDelta(t, 1.2, set.EffectiveFeasibilityOverhead(), 1e-9)
+}
+
+func TestEffectiveWriteFailureWaitTimeout(t *testing.T) {
+	t.Parallel()
+
+	var unset Library
+	assert.Equal(t, DefaultWriteFailureWaitTimeout, unset.EffectiveWriteFailureWaitTimeout())
+
+	set := Library{WriteFailureWaitTimeoutSeconds: ptr(90)}
+	assert.Equal(t, 90*time.Second, set.EffectiveWriteFailureWaitTimeout())
 }
 
 // findModuleRoot walks up from the test working directory to find go.mod.

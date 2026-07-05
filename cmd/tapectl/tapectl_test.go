@@ -170,6 +170,29 @@ func TestResumeRunMissingTemporalAddress(t *testing.T) {
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }
 
+func TestParseAbortArgs(t *testing.T) {
+	id, err := parseAbortArgs([]string{"backup-123"})
+	require.NoError(t, err)
+	assert.Equal(t, "backup-123", id)
+
+	_, err = parseAbortArgs(nil)
+	require.Error(t, err)
+
+	_, err = parseAbortArgs([]string{"a", "b"})
+	require.Error(t, err)
+}
+
+// TestAbortRunMissingTemporalAddress exercises the abort path with a workflow ID
+// but no TEMPORAL_ADDRESS: it must fail with a descriptive error and never attempt
+// a connection.
+func TestAbortRunMissingTemporalAddress(t *testing.T) {
+	withGetenv(t, func(string) string { return "" })
+
+	err := abortRun(context.Background(), []string{"backup-123"}, &bytes.Buffer{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
+}
+
 func TestFormatStatus(t *testing.T) {
 	tests := []struct {
 		name   string

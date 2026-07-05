@@ -81,6 +81,39 @@ func (a *FailureActivities) NotifyOperatorPause(ctx context.Context, input Opera
 	return nil
 }
 
+// WritePathPauseInput is the payload for the write-path pause alert activity. It
+// carries what an operator needs to act on a Load/Write-failure pause (SPEC §4.3,
+// §11): the run id, the failing phase, the tapes affected by the failure, the
+// storage slots to restock with fresh blanks, and the error summary.
+type WritePathPauseInput struct {
+	// RunID is the workflow (run) id, so an operator can correlate the alert with
+	// the run.
+	RunID string
+	// Phase is the failing phase — "Load" or "Write".
+	Phase string
+	// AffectedTapes lists the barcodes of the tapes the operator should remove and
+	// replace with fresh blanks. It is empty for a Load failure, which has no
+	// loaded tapes to name.
+	AffectedTapes []string
+	// ReloadSlots lists the storage slots to restock with fresh blank tapes before
+	// resuming. On resume the run loads from these same slots (SPEC §4.3).
+	ReloadSlots []int
+	// ErrorSummary is the failure rendered as text.
+	ErrorSummary string
+}
+
+// NotifyWritePathPause posts the operator-in-the-loop pause alert when a Load or
+// Write fails for one drive-set and the tape path pauses for the operator (SPEC
+// §4.3, §11). It uses the same operational webhook as NotifyFailure and is
+// best-effort: a delivery failure is logged by pkg/webhook, not returned, so a
+// webhook outage never aborts a run that is only waiting. When the webhook URL is
+// empty the client is a no-op and nothing is sent.
+func (a *FailureActivities) NotifyWritePathPause(ctx context.Context, input WritePathPauseInput) error {
+	webhook.New(a.WebhookURL).SendWritePathPause(ctx, input.RunID, input.Phase, input.AffectedTapes, input.ReloadSlots, input.ErrorSummary)
+
+	return nil
+}
+
 // notifyFailure runs the failure-alert activity from the workflow when a run
 // fails (SPEC §11). It executes on a disconnected context so the alert still
 // fires when the workflow itself is cancelled, and it never propagates an error:

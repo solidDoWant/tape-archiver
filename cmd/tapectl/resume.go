@@ -11,12 +11,14 @@ import (
 )
 
 // resumeRun implements `tapectl resume <workflow-id>`. It sends the
-// OperatorEjectClearedSignal to a run paused in the Eject phase because the
-// import/export station filled (SPEC §4.3 phase 8). The operator runs it after
-// removing the exported tapes and clearing the station; the run then re-reads the
-// changer inventory and exports the remaining tapes into the freed slots. It is
-// the fallback for libraries that do not report the import/export access bit — one
-// that does resumes automatically without this signal.
+// OperatorResumeSignal to a paused run, resuming either operator-in-the-loop pause
+// (SPEC §4.3): the Eject phase paused because the import/export station filled, or
+// the tape path paused because a Load or Write failed for one drive-set. The
+// operator runs it after clearing the blocking condition — removing the exported
+// tapes, or swapping the suspect tapes for fresh blanks in the same slots. On an
+// Eject pause it is the fallback for libraries that do not report the import/export
+// access bit (one that does resumes automatically); on a write-path pause it is
+// the sole resume path.
 func resumeRun(ctx context.Context, args []string, out io.Writer) error {
 	workflowID, err := parseResumeArgs(args)
 	if err != nil {
@@ -33,7 +35,7 @@ func resumeRun(ctx context.Context, args []string, out io.Writer) error {
 	}
 	defer shutdown()
 
-	if err := temporalClient.SignalWorkflow(ctx, workflowID, "", backup.OperatorEjectClearedSignal, nil); err != nil {
+	if err := temporalClient.SignalWorkflow(ctx, workflowID, "", backup.OperatorResumeSignal, nil); err != nil {
 		return fmt.Errorf("signal workflow %q to resume: %w", workflowID, err)
 	}
 

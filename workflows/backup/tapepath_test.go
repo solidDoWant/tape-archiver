@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -252,9 +253,11 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 	assert.Len(t, ejectedBarcodes, tapes*copies, "every written tape must be ejected")
 }
 
-// TestRunTapePathStopsAfterSetFailure verifies that when a tape in a drive-set
-// fails its write, the run fails for that set and no later set is loaded
-// (issue #66 AC5).
+// TestRunTapePathStopsAfterSetFailure verifies the bounded blast radius when a
+// tape in a drive-set fails its write: the run pauses for the operator and, if the
+// operator aborts, no later set is loaded (issue #66 AC5, as amended by issue #92:
+// a write failure now pauses for operator approval rather than failing the whole
+// run outright — but the "no later set is loaded" bound is preserved).
 func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	t.Parallel()
 
@@ -265,6 +268,7 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	)
 
 	env := newTapePathEnv(t)
+	env.RegisterActivity(&FailureActivities{})
 
 	var mu sync.Mutex
 
@@ -272,8 +276,8 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 
 	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
 
-	// The first (and only) tape in set 0 fails to format; the Write phase fails,
-	// so runTapePath returns before any later set loads.
+	// The first (and only) tape in set 0 fails to format; the Write phase pauses,
+	// and the operator aborts, so runTapePath returns before any later set loads.
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
 		fmt.Errorf("simulated format failure"))
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
@@ -282,6 +286,7 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
 	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
 
 	ejectCalls := 0
 
@@ -293,6 +298,11 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 
 			return EjectResult{}, nil
 		})
+
+	// The operator aborts the paused run rather than reloading fresh blanks.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorAbortSignal, nil)
+	}, 30*time.Second)
 
 	plan, staged, par2 := seededPlan(tapes, copies)
 
@@ -306,12 +316,97 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 
 	err := env.GetWorkflowError()
-	require.Error(t, err, "a set's write failure must fail the run")
-	assert.Contains(t, err.Error(), PhaseWrite, "the failure must be attributed to the Write phase")
+	require.Error(t, err, "an aborted write failure must fail the run")
+	assert.Contains(t, err.Error(), "aborted by operator", "the run ends in the aborted state")
 
 	mu.Lock()
 	defer mu.Unlock()
 
 	assert.Len(t, loadSetSizes, 1, "only the failing set may be loaded; no later set is loaded")
-	assert.Equal(t, 0, ejectCalls, "a failed set is not ejected")
+	assert.Equal(t, 1, ejectCalls, "the failed set's tape is ejected so its drive frees and its slot empties")
+}
+
+// TestRunTapePathResumeNeverReformatsCompletedTapes covers issue #92 AC5 across
+// drive-sets: with two sets, the first completes and one tape in the second fails.
+// On resume only that failed tape is re-driven — the first set's tapes (a
+// completed drive-set) and the second set's tape that succeeded are never
+// re-formatted, so an already-written tape is never overwritten.
+func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		drives = 2
+		tapes  = 4 // two drive-sets of two tapes each
+		copies = 1
+	)
+
+	env := newTapePathEnv(t)
+	env.RegisterActivity(&FailureActivities{})
+
+	var (
+		mu            sync.Mutex
+		loadSetSizes  []int
+		formatsByTape = map[tape.Barcode]int{}
+	)
+
+	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
+
+	// Barcodes are BC-<tapeIndex>-<copyIndex>; tape index 3 (in the second set)
+	// fails to format on its first attempt, then succeeds on the resume retry.
+	failed := tape.Barcode("BC-3-0")
+
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			formatsByTape[input.Barcode]++
+
+			if input.Barcode == failed && formatsByTape[input.Barcode] == 1 {
+				return fmt.Errorf("simulated format failure")
+			}
+
+			return nil
+		})
+
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
+		[]byte("<ltfsindex></ltfsindex>"), nil)
+	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+		WriteHealth{}, nil)
+	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
+
+	// The operator loads a fresh blank and resumes.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 30*time.Second)
+
+	plan, staged, par2 := seededPlan(tapes, copies)
+
+	env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+		Cfg:    tapePathConfig(drives, tapes, copies),
+		Plan:   plan,
+		Staged: staged,
+		PAR2:   par2,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	var written []WrittenTape
+	require.NoError(t, env.GetWorkflowResult(&written))
+	require.Len(t, written, tapes*copies, "every physical tape ends up written")
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Only the failed tape is ever re-formatted; every other tape — including the
+	// whole first (completed) drive-set — is formatted exactly once (AC5).
+	assert.Equal(t, 2, formatsByTape[failed], "the failed tape is re-formatted once on resume")
+
+	for _, barcode := range []tape.Barcode{"BC-0-0", "BC-1-0", "BC-2-0"} {
+		assert.Equal(t, 1, formatsByTape[barcode],
+			"already-written tape %s must never be re-formatted", barcode)
+	}
 }

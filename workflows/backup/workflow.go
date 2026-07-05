@@ -160,10 +160,15 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 // loaded and read concurrently to the drive count, protecting the write-rate floor
 // (SPEC §14). An empty plan yields no sets and is a no-op.
 //
-// On the first set's failure it returns immediately, so no later set is loaded. It
-// updates *failingPhase to the sub-phase in flight so the caller's failure alert
-// names where the run failed, and advances state.lastCompletedPhase as each
-// sub-phase of a set completes so the progress query reflects the live phase.
+// Each set runs through runDriveSet, which pauses for the operator on a Load or
+// Write failure instead of failing the whole run (SPEC §4.3): on resume it
+// re-drives only the failed tapes onto fresh blanks, leaving already-completed
+// sets — and the tapes that succeeded within the failing set — untouched. A set
+// that the operator aborts (or that exhausts the operator wait) returns an error,
+// so no later set is loaded. runDriveSet updates *failingPhase to the sub-phase in
+// flight so the caller's failure alert names where the run stopped, and advances
+// state.lastCompletedPhase as each set completes so the progress query reflects
+// the live phase.
 func runTapePath(ctx workflow.Context, cfg config.Config, state *runState, failingPhase *string) error {
 	*failingPhase = PhaseLoad
 
@@ -173,33 +178,9 @@ func runTapePath(ctx workflow.Context, cfg config.Config, state *runState, faili
 	}
 
 	for _, set := range sets {
-		*failingPhase = PhaseLoad
-
-		loaded, err := loadPhase(ctx, cfg, set)
-		if err != nil {
+		if err := runDriveSet(ctx, cfg, state, set, failingPhase); err != nil {
 			return err
 		}
-
-		state.loaded = loaded
-		state.lastCompletedPhase = PhaseLoad
-
-		*failingPhase = PhaseWrite
-
-		written, err := writePhase(ctx, cfg, state, loaded)
-		if err != nil {
-			return err
-		}
-
-		state.written = append(state.written, written...)
-		state.lastCompletedPhase = PhaseWrite
-
-		*failingPhase = PhaseEject
-
-		if err := ejectPhase(ctx, cfg, written); err != nil {
-			return err
-		}
-
-		state.lastCompletedPhase = PhaseEject
 	}
 
 	return nil

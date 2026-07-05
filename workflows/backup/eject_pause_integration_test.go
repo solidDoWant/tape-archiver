@@ -23,7 +23,7 @@ import (
 // auto-resume path (issue #85 AC5): because the changer now reads element status
 // via SG_IO, the import/export ACCESS bit is reported, so a paused Eject resumes
 // automatically once the operator clears a slot — with no explicit
-// OperatorEjectClearedSignal.
+// OperatorResumeSignal.
 //
 // It runs a run whose written tapes outnumber the library's I/O slots so the
 // Eject phase fills the station and pauses, then simulates the operator removing
@@ -169,7 +169,7 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 
 	// Simulate the operator removing one exported tape, freeing an I/O slot. With
 	// the ACCESS bit now reported by the SG_IO changer, this alone must resume the
-	// run automatically — no OperatorEjectClearedSignal is ever sent.
+	// run automatically — no OperatorResumeSignal is ever sent.
 	cur, err := changer.Inventory(runCtx)
 	require.NoError(t, err, "inventory at pause")
 

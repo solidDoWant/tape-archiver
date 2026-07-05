@@ -31,13 +31,25 @@ const (
 	// operators can inspect progress without consulting the Temporal UI.
 	LastCompletedPhaseQuery = "lastCompletedPhase"
 
-	// OperatorEjectClearedSignal is the Temporal signal an operator sends to
-	// resume a run paused in the Eject phase because the import/export station
-	// filled (SPEC §4.3 phase 8). It carries no payload — its receipt is the
-	// signal that the operator has removed the exported tapes and cleared the
-	// station. `tapectl resume <workflow-id>` sends it. The workflow re-reads the
-	// changer inventory and exports the remaining tapes into the freed slots. For
-	// libraries that report the import/export access bit the workflow resumes
-	// automatically without this signal; it is the fallback for those that do not.
-	OperatorEjectClearedSignal = "operatorEjectCleared"
+	// OperatorResumeSignal is the Temporal signal an operator sends to resume a
+	// paused run. It resumes both operator-in-the-loop pauses (SPEC §4.3): the
+	// Eject phase paused because the import/export station filled (phase 8), and
+	// the tape path paused because a Load or Write failed for one drive-set. It
+	// carries no payload — its receipt means the operator has cleared the blocking
+	// condition (removed the exported tapes, or swapped the suspect tapes for fresh
+	// blanks in the same slots) and the run may continue. `tapectl resume
+	// <workflow-id>` sends it. On an Eject pause the workflow re-reads the changer
+	// inventory and exports the remaining tapes into the freed slots; on a
+	// write-path pause it re-drives only the failed tapes onto the fresh blanks.
+	// For an Eject pause on libraries that report the import/export access bit the
+	// workflow resumes automatically without this signal; it is the fallback for
+	// those that do not, and the sole resume path for a write-path pause.
+	OperatorResumeSignal = "operatorResume"
+
+	// OperatorAbortSignal is the Temporal signal an operator sends to abort a run
+	// paused because a Load or Write failed for one drive-set (SPEC §4.3): instead
+	// of swapping in fresh blanks and resuming, the operator ends the run in a
+	// defined, reported state with no further tapes written. It carries no payload.
+	// `tapectl abort <workflow-id>` sends it.
+	OperatorAbortSignal = "operatorAbort"
 )

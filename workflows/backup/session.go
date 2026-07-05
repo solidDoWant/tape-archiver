@@ -326,7 +326,14 @@ func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInpu
 //
 // The deferred TeardownSession activity runs on the same worker (within the
 // session) so it can unmount any live mount the session still owns on exit.
-func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded []LoadedTape) ([]WrittenTape, error) {
+//
+// It returns the tapes that wrote successfully and, separately, the tapes whose
+// Format/WriteTree/FinalizeTape failed — so a partial failure keeps the good
+// tapes (the caller ejects and records them) while the caller pauses on and
+// re-drives only the failed ones (SPEC §4.3). The returned error is reserved for
+// an unrecoverable orchestration fault (e.g. session creation) that touched no
+// tape; per-tape write failures come back as failedTape values, not as error.
+func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded []LoadedTape) ([]WrittenTape, []failedTape, error) {
 	// CreateSession pins the session to the task queue in the context's activity
 	// options, falling back to the workflow's own queue (control) when none is
 	// set. The session must run on the data worker — that is where the tape
@@ -344,7 +351,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		ExecutionTimeout: sessionExecutionTimeout,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create Write phase session: %w", err)
+		return nil, nil, fmt.Errorf("create Write phase session: %w", err)
 	}
 
 	defer func() {
@@ -362,7 +369,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 	}()
 
 	if len(loaded) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// Activity options for Format and WriteTree: MaximumAttempts=1 because
@@ -462,19 +469,23 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		})
 	}
 
-	// Collect results from all drives.
+	// Collect results from all drives, partitioning them into the tapes that wrote
+	// successfully and the tapes that failed. A partial failure is not fatal here:
+	// the caller ejects and records the successes and pauses on the failures, so
+	// the failed tapes come back as failedTape values rather than a joined error.
 	var written []WrittenTape
 
-	var errs []error
+	var failed []failedTape
 
 	for range loaded {
 		var res driveResult
 		ch.Receive(sessionCtx, &res)
 
+		lt := loaded[res.loadedIdx]
+
 		if res.err != nil {
-			errs = append(errs, res.err)
+			failed = append(failed, failedTape{Tape: lt, Err: res.err})
 		} else {
-			lt := loaded[res.loadedIdx]
 			written = append(written, WrittenTape{
 				Barcode:     lt.Barcode,
 				DriveIndex:  lt.DriveIndex,
@@ -487,11 +498,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		}
 	}
 
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
-	}
-
-	return written, nil
+	return written, failed, nil
 }
 
 // measureWriteHealth runs the observational MeasureWriteHealth activity for one tape
