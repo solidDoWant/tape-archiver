@@ -349,4 +349,9 @@ type runState struct {
 	// ISO, staged on the data worker. The Deliver phase uploads them.
 	reportPath string
 	isoPath    string
+	// uncompressedISOPath is the on-disk path of the uncompressed recovery ISO 9660
+	// image the Report phase stages only when optical burning is enabled
+	// (delivery.opticalBurn). It is the mountable image the Burn phase consumes;
+	// empty when burning is disabled.
+	uncompressedISOPath string
 }
