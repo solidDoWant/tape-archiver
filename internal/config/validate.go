@@ -51,6 +51,47 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("feasibilityOverhead: must be >= 1, got %v", *c.FeasibilityOverhead)
 	}
 
+	if err := c.Delivery.validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d Delivery) validate() error {
+	return d.OpticalBurn.validate()
+}
+
+func (o *OpticalBurn) validate() error {
+	// An absent section (or one that leaves burning disabled) is valid: burning is
+	// off by default. Only the fields that are set are constrained.
+	if o == nil {
+		return nil
+	}
+
+	// Copies may be 0 (disabled) but never negative. It is intentionally not bounded
+	// by the drive count: copies burn in successive burn-sets of at most len(Drives).
+	if o.Copies < 0 {
+		return fmt.Errorf("delivery.opticalBurn.copies: must be >= 0, got %d", o.Copies)
+	}
+
+	seen := make(map[string]struct{}, len(o.Drives))
+	for i, drive := range o.Drives {
+		if strings.TrimSpace(drive) == "" {
+			return fmt.Errorf("delivery.opticalBurn.drives[%d]: must not be empty", i)
+		}
+
+		if _, ok := seen[drive]; ok {
+			return fmt.Errorf("delivery.opticalBurn.drives[%d]: duplicate device path %q", i, drive)
+		}
+
+		seen[drive] = struct{}{}
+	}
+
+	if o.BurnWaitTimeoutSeconds != nil && *o.BurnWaitTimeoutSeconds <= 0 {
+		return fmt.Errorf("delivery.opticalBurn.burnWaitTimeoutSeconds: must be > 0 when set, got %d", *o.BurnWaitTimeoutSeconds)
+	}
+
 	return nil
 }
 

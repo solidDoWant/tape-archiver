@@ -64,6 +64,12 @@ func TestConfigRoundTrip(t *testing.T) {
 		FillToCapacity: &FillConfig{Floor: 5.0},
 		SliceSizeBytes: 2 << 30,
 	}
+	original.Delivery.OpticalBurn = &OpticalBurn{
+		Drives:                 []string{"/dev/sr0", "/dev/sr1"},
+		Copies:                 2,
+		AllowNonBlankDiscs:     true,
+		BurnWaitTimeoutSeconds: ptr(3600),
+	}
 
 	data, err := json.Marshal(original)
 	require.NoError(t, err)
@@ -311,6 +317,88 @@ func TestConfigValidate(t *testing.T) {
 			wantErr:     require.Error,
 			errContains: "feasibilityOverhead",
 		},
+		{
+			// No opticalBurn section: burning disabled, accepted.
+			name:    "optical burn absent",
+			mutate:  func(c *Config) { c.Delivery.OpticalBurn = nil },
+			wantErr: require.NoError,
+		},
+		{
+			// Present but no drives: disabled, still accepted.
+			name: "optical burn empty drives",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{Copies: 2}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			// Present with drives but zero copies: disabled, still accepted.
+			name: "optical burn zero copies",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 0}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "optical burn enabled",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 2}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "optical burn negative copies",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: -1}
+			},
+			wantErr:     require.Error,
+			errContains: "delivery.opticalBurn.copies",
+		},
+		{
+			name: "optical burn blank drive path",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{Drives: []string{"/dev/sr0", "  "}, Copies: 2}
+			},
+			wantErr:     require.Error,
+			errContains: "delivery.opticalBurn.drives[1]",
+		},
+		{
+			name: "optical burn duplicate drive path",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{Drives: []string{"/dev/sr0", "/dev/sr0"}, Copies: 2}
+			},
+			wantErr:     require.Error,
+			errContains: "delivery.opticalBurn.drives[1]",
+		},
+		{
+			name: "optical burn burn wait timeout set positive",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{
+					Drives: []string{"/dev/sr0"}, Copies: 2, BurnWaitTimeoutSeconds: ptr(3600),
+				}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "optical burn burn wait timeout zero",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{
+					Drives: []string{"/dev/sr0"}, Copies: 2, BurnWaitTimeoutSeconds: ptr(0),
+				}
+			},
+			wantErr:     require.Error,
+			errContains: "delivery.opticalBurn.burnWaitTimeoutSeconds",
+		},
+		{
+			name: "optical burn burn wait timeout negative",
+			mutate: func(c *Config) {
+				c.Delivery.OpticalBurn = &OpticalBurn{
+					Drives: []string{"/dev/sr0"}, Copies: 2, BurnWaitTimeoutSeconds: ptr(-1),
+				}
+			},
+			wantErr:     require.Error,
+			errContains: "delivery.opticalBurn.burnWaitTimeoutSeconds",
+		},
 	}
 
 	for _, tt := range tests {
@@ -345,6 +433,40 @@ func TestEffectiveWriteFailureWaitTimeout(t *testing.T) {
 
 	set := Library{WriteFailureWaitTimeoutSeconds: ptr(90)}
 	assert.Equal(t, 90*time.Second, set.EffectiveWriteFailureWaitTimeout())
+}
+
+func TestOpticalBurnEnabled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		burn    *OpticalBurn
+		enabled bool
+	}{
+		{name: "nil", burn: nil, enabled: false},
+		{name: "empty drives", burn: &OpticalBurn{Copies: 2}, enabled: false},
+		{name: "zero copies", burn: &OpticalBurn{Drives: []string{"/dev/sr0"}}, enabled: false},
+		{name: "drives and copies", burn: &OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 1}, enabled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.enabled, tt.burn.Enabled())
+		})
+	}
+}
+
+func TestEffectiveBurnWaitTimeout(t *testing.T) {
+	t.Parallel()
+
+	var nilBurn *OpticalBurn
+	assert.Equal(t, DefaultBurnWaitTimeout, nilBurn.EffectiveBurnWaitTimeout())
+
+	unset := &OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 1}
+	assert.Equal(t, DefaultBurnWaitTimeout, unset.EffectiveBurnWaitTimeout())
+
+	set := &OpticalBurn{BurnWaitTimeoutSeconds: ptr(90)}
+	assert.Equal(t, 90*time.Second, set.EffectiveBurnWaitTimeout())
 }
 
 // findModuleRoot walks up from the test working directory to find go.mod.

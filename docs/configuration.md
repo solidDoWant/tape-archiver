@@ -191,6 +191,32 @@ Delivery of run artifacts (PDF report and recovery ISO) to Discord on success.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `webhookUrl` | `string` | yes | Discord incoming webhook URL for success delivery. |
+| `opticalBurn` | `OpticalBurn` | no | Optionally burn the recovery disc to optical media as an extra redundancy layer (see below). Omit to leave optical burning off. |
+
+### OpticalBurn
+
+Configures burning the recovery disc to optical media (M-DISC DVD; SPEC §10). Burning is
+**off by default**: it stays disabled when the section is absent, has no `drives`, or has a
+`copies` of zero. It is enabled only when at least one burner drive is listed **and**
+`copies` is positive.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `drives` | `[]string` | no | Optical burner device paths (e.g. `/dev/sr0`). Burning is disabled when empty. |
+| `copies` | `integer` | no | Number of recovery-disc copies to burn. Zero disables burning; must not be negative. |
+| `allowNonBlankDiscs` | `boolean` | no | Opt out of the non-blank-disc refusal so the run may reclaim used discs (see caveat below). Omit or set `false` (the default) to fail the run before burning if a loaded disc is not blank. |
+| `burnWaitTimeoutSeconds` | `integer` | no | How long the optical-burn phase waits for the operator to resume or abort a run paused because a burn failed or a non-blank disc was refused. Omit for the default of 12 hours. Must be > 0 when set. |
+
+**Copies are independent of drive count.** As with tape `copies` versus `library.drives`,
+the disc `copies` count is intentionally not bounded by the number of `drives`: copies burn
+in successive burn-sets of at most `len(drives)` discs at a time. Two burners and three
+copies means two discs burn together, then the third.
+
+**`allowNonBlankDiscs` can only reclaim rewritable media.** The flag mirrors
+`library.allowNonBlankTapes`, but optical physics limit what it can do: only rewritable media
+(DVD±RW / BD-RE) can be erased and re-burned. Write-once media — **DVD-R and M-DISC**, the
+archival target — can **never** be overwritten regardless of this flag; a non-blank write-once
+disc always fails the burn.
 
 ---
 
