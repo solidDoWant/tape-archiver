@@ -12,7 +12,10 @@ The report contains, at minimum:
 - **Run** — run id and date.
 - **Contents manifest** — every archive, with its member volumes, source snapshots, and
   per-file sizes and SHA-256 checksums.
-- **Tapes** — which physical tape (by barcode/label) holds what.
+- **Tapes** — which physical tape (by barcode/label) holds what. A tape that was written
+  over a non-blank tape (because the run set [`library.allowNonBlankTapes`](configuration.md))
+  is annotated here as `[Overwrote a non-blank tape]`, so a deliberate, irreversible
+  overwrite is on the record.
 - **Write health** — per-tape, observational write-health from the run's tape-write
   window (see below).
 - **Build parameters** — how the tapes were built: tool version, `age`/`par2`/`ltfs`

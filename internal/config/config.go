@@ -98,6 +98,14 @@ type Library struct {
 	// reaches a defined end state (every tape in a drive, I/O, or storage slot)
 	// rather than pausing forever.
 	WriteFailureWaitTimeoutSeconds *int `json:"writeFailureWaitTimeoutSeconds,omitempty"`
+	// AllowNonBlankTapes opts a run out of the non-blank-tape refusal so an operator
+	// can deliberately reclaim used tapes. The Load phase always confirms whether each
+	// loaded tape is blank (Drive.IsBlank is unconditional); this flag changes only
+	// what happens when a non-blank tape is found: with the default false, the run
+	// fails before any format/write ("Never write to a non-blank tape", CLAUDE.md;
+	// SPEC §4.3 step 6); with true, the run logs a prominent warning naming the tape
+	// and proceeds to overwrite it. The overwrite is recorded in the run's PDF report.
+	AllowNonBlankTapes bool `json:"allowNonBlankTapes,omitempty"`
 }
 
 // EffectiveIOWaitTimeout returns the configured operator I/O-station wait, or

@@ -135,6 +135,9 @@
         },
         "writeFailureWaitTimeoutSeconds": {
           "type": "integer"
+        },
+        "allowNonBlankTapes": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false,

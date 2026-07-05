@@ -487,13 +487,14 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 			failed = append(failed, failedTape{Tape: lt, Err: res.err})
 		} else {
 			written = append(written, WrittenTape{
-				Barcode:     lt.Barcode,
-				DriveIndex:  lt.DriveIndex,
-				TapeIndex:   lt.TapeIndex,
-				CopyIndex:   lt.CopyIndex,
-				SourceSlot:  lt.SourceSlot,
-				IndexXML:    res.indexXML,
-				WriteHealth: res.health,
+				Barcode:           lt.Barcode,
+				DriveIndex:        lt.DriveIndex,
+				TapeIndex:         lt.TapeIndex,
+				CopyIndex:         lt.CopyIndex,
+				SourceSlot:        lt.SourceSlot,
+				IndexXML:          res.indexXML,
+				WriteHealth:       res.health,
+				OverwroteNonBlank: lt.OverwroteNonBlank,
 			})
 		}
 	}

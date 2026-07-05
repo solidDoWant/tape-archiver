@@ -87,6 +87,10 @@ type Tape struct {
 	// sustained throughput, repositions, and TapeAlert flags. It is nil when
 	// write-health was not measured for the tape.
 	WriteHealth *WriteHealth
+	// OverwroteNonBlank is true when this tape was not blank at load and was written
+	// over because the run set Library.AllowNonBlankTapes. The Tapes section annotates
+	// such tapes so a deliberate, irreversible overwrite is recorded (SPEC §9).
+	OverwroteNonBlank bool
 }
 
 // WriteHealth is a tape's observational write-health measurement rendered in the
@@ -392,7 +396,15 @@ func (d *doc) tapesSection(m Manifest) {
 
 		d.pdf.SetXY(x+barcodeW, y)
 		d.pdf.SetFont(fontBody, "", 8.5)
-		d.pdf.MultiCell(holdsW, 5.5, d.tr(joinOrNone(tape.Contents)), "", "L", false)
+
+		holds := joinOrNone(tape.Contents)
+		if tape.OverwroteNonBlank {
+			// The run deliberately reclaimed a used tape (Library.AllowNonBlankTapes).
+			// Record the irreversible overwrite alongside the tape's contents.
+			holds += "\n[Overwrote a non-blank tape]"
+		}
+
+		d.pdf.MultiCell(holdsW, 5.5, d.tr(holds), "", "L", false)
 
 		if d.pdf.GetY() < barcodeEndY {
 			d.pdf.SetY(barcodeEndY)
