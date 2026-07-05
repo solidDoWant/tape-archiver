@@ -19,8 +19,6 @@ func abortRun(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 
-	workflowID := backupWorkflowID
-
 	if err := requireTemporalAddress(getenv); err != nil {
 		return err
 	}
@@ -31,11 +29,11 @@ func abortRun(ctx context.Context, args []string, out io.Writer) error {
 	}
 	defer shutdown()
 
-	if err := temporalClient.SignalWorkflow(ctx, workflowID, "", backup.OperatorAbortSignal, nil); err != nil {
-		return fmt.Errorf("signal workflow %q to abort: %w", workflowID, err)
+	if err := temporalClient.SignalWorkflow(ctx, backupWorkflowID, "", backup.OperatorAbortSignal, nil); err != nil {
+		return fmt.Errorf("signal workflow %q to abort: %w", backupWorkflowID, err)
 	}
 
-	_, err = fmt.Fprintf(out, "Abort signal sent to run %s.\n", workflowID)
+	_, err = fmt.Fprintf(out, "Abort signal sent to run %s.\n", backupWorkflowID)
 
 	return err
 }

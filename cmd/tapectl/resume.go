@@ -23,8 +23,6 @@ func resumeRun(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 
-	workflowID := backupWorkflowID
-
 	if err := requireTemporalAddress(getenv); err != nil {
 		return err
 	}
@@ -35,11 +33,11 @@ func resumeRun(ctx context.Context, args []string, out io.Writer) error {
 	}
 	defer shutdown()
 
-	if err := temporalClient.SignalWorkflow(ctx, workflowID, "", backup.OperatorResumeSignal, nil); err != nil {
-		return fmt.Errorf("signal workflow %q to resume: %w", workflowID, err)
+	if err := temporalClient.SignalWorkflow(ctx, backupWorkflowID, "", backup.OperatorResumeSignal, nil); err != nil {
+		return fmt.Errorf("signal workflow %q to resume: %w", backupWorkflowID, err)
 	}
 
-	_, err = fmt.Fprintf(out, "Resume signal sent to run %s.\n", workflowID)
+	_, err = fmt.Fprintf(out, "Resume signal sent to run %s.\n", backupWorkflowID)
 
 	return err
 }

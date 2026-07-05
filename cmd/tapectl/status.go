@@ -29,8 +29,6 @@ func showStatus(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 
-	workflowID := backupWorkflowID
-
 	if err := requireTemporalAddress(getenv); err != nil {
 		return err
 	}
@@ -41,17 +39,17 @@ func showStatus(ctx context.Context, args []string, out io.Writer) error {
 	}
 	defer shutdown()
 
-	description, err := temporalClient.DescribeWorkflowExecution(ctx, workflowID, "")
+	description, err := temporalClient.DescribeWorkflowExecution(ctx, backupWorkflowID, "")
 	if err != nil {
-		return fmt.Errorf("describe workflow %q: %w", workflowID, err)
+		return fmt.Errorf("describe workflow %q: %w", backupWorkflowID, err)
 	}
 
 	status := description.GetWorkflowExecutionInfo().GetStatus()
-	phase := queryLastCompletedPhase(ctx, temporalClient, workflowID)
+	phase := queryLastCompletedPhase(ctx, temporalClient, backupWorkflowID)
 
 	_, err = fmt.Fprintf(out,
 		"Workflow:             %s\nStatus:               %s\nLast completed phase: %s\n",
-		workflowID, formatStatus(status), phase)
+		backupWorkflowID, formatStatus(status), phase)
 
 	return err
 }
