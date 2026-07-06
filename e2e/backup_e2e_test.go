@@ -7,16 +7,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"maps"
-	"os"
-	"os/exec"
-	"path"
-	"path/filepath"
-	"slices"
 	"testing"
 	"time"
 
-	"github.com/kdomanski/iso9660"
 	"github.com/ledongthuc/pdf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,12 +25,11 @@ import (
 // data worker as its OCI container on the host, real dev Temporal, mhvtl, and a
 // real ZFS snapshot — then inspects the delivered artifacts.
 //
-//   - AC1: the run completes with all ten phases in order and delivers exactly two
-//     artifacts (report + compressed recovery ISO).
+//   - AC1: the run completes with all ten phases in order and delivers exactly one
+//     artifact — the PDF report (report-only delivery, SPEC §5; the recovery ISO's
+//     durable home is the burned disc, not a Discord upload — commit 7e3ea2b).
 //   - AC2: the delivered PDF report carries the run ID, the archive manifest, the
 //     tape barcode, and the age private identity.
-//   - AC3: the delivered recovery ISO contains age, par2, and zstd, each a valid
-//     executable that actually runs.
 func TestBackupEndToEnd_FullRun(t *testing.T) {
 	h := requireHarness(t)
 
@@ -71,15 +63,13 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	// AC1: every phase ran to completion, in order.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
-	// AC1: the run delivered exactly the report and the compressed recovery ISO.
+	// AC1: the run delivered exactly the report (report-only delivery, SPEC §5).
 	uploads := h.rec.uploadsFor(runID)
-	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
+	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
 	report := findUpload(t, uploads, "report.pdf")
-	iso := findUpload(t, uploads, "recovery.iso.zst")
 
 	assertReportContents(t, report, backupWorkflowID, string(fixture.barcode))
-	assertRecoveryBinariesRun(t, iso)
 }
 
 // TestBackupEndToEnd_MultipleDriveSets drives a run whose copy count exceeds the
@@ -125,9 +115,9 @@ func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 	// Load, Write, and Eject once each.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
-	// The run delivered the report and the compressed recovery ISO.
+	// The run delivered the report (report-only delivery, SPEC §5).
 	uploads := h.rec.uploadsFor(runID)
-	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
+	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
 	// Both physical copies were written across the two drive-sets, so the report
 	// lists both tape barcodes.
@@ -259,7 +249,7 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
 	uploads := h.rec.uploadsFor(runID)
-	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
+	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
 	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
@@ -322,93 +312,4 @@ func extractPDFText(t *testing.T, reportPDF []byte) string {
 	require.NoError(t, err)
 
 	return string(text)
-}
-
-// assertRecoveryBinariesRun decompresses the delivered recovery ISO, extracts the
-// recovery binaries, and runs each one to prove it is present and executable (AC3,
-// strong reading: the ISO carries the real static binaries and they actually run).
-func assertRecoveryBinariesRun(t *testing.T, isoZst []byte) {
-	t.Helper()
-
-	files := readISO(t, decompressZstd(t, isoZst))
-
-	for _, name := range []string{"age", "par2", "zstd"} {
-		binary, ok := files["bin/"+name]
-		require.Truef(t, ok, "recovery ISO must contain bin/%s (have %v)", name, slices.Collect(maps.Keys(files)))
-
-		binPath := filepath.Join(t.TempDir(), name)
-		require.NoError(t, os.WriteFile(binPath, binary, 0o755))
-
-		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-
-		out, err := exec.CommandContext(ctx, binPath, "--version").CombinedOutput()
-
-		cancel()
-
-		require.NoErrorf(t, err, "recovery binary %s must run: %s", name, out)
-		assert.NotEmptyf(t, out, "recovery binary %s --version must print a version", name)
-	}
-}
-
-// decompressZstd inflates a .zst blob by shelling to the zstd CLI (pkg/archive
-// only compresses).
-func decompressZstd(t *testing.T, compressed []byte) []byte {
-	t.Helper()
-
-	dir := t.TempDir()
-	src := filepath.Join(dir, "in.zst")
-	dst := filepath.Join(dir, "out")
-
-	require.NoError(t, os.WriteFile(src, compressed, 0o600))
-
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, "zstd", "-d", "-f", "-o", dst, src).CombinedOutput()
-	require.NoErrorf(t, err, "zstd -d: %s", out)
-
-	data, err := os.ReadFile(dst)
-	require.NoError(t, err)
-
-	return data
-}
-
-// readISO reads an ISO 9660 image into a name→content map (Rock Ridge names, e.g.
-// "bin/age"), walking the directory tree.
-func readISO(t *testing.T, image []byte) map[string][]byte {
-	t.Helper()
-
-	img, err := iso9660.OpenImage(bytes.NewReader(image))
-	require.NoError(t, err)
-
-	root, err := img.RootDir()
-	require.NoError(t, err)
-
-	files := make(map[string][]byte)
-
-	var walk func(dir *iso9660.File, prefix string)
-
-	walk = func(dir *iso9660.File, prefix string) {
-		children, err := dir.GetChildren()
-		require.NoError(t, err)
-
-		for _, child := range children {
-			full := path.Join(prefix, child.Name())
-
-			if child.IsDir() {
-				walk(child, full)
-
-				continue
-			}
-
-			data, err := io.ReadAll(child.Reader())
-			require.NoError(t, err)
-
-			files[full] = data
-		}
-	}
-
-	walk(root, "")
-
-	return files
 }

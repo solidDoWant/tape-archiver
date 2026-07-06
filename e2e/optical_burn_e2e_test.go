@@ -81,10 +81,11 @@ func TestBackupEndToEnd_OpticalBurn(t *testing.T) {
 	// Deliver.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all phases must complete in order, including Burn")
 
-	// The run still delivers exactly the report and the compressed recovery ISO;
-	// burning re-renders the report but adds no upload.
+	// The run still delivers exactly the report (report-only delivery, SPEC §5);
+	// burning re-renders the report but adds no upload — the ISO's durable home is
+	// the burned disc, not a Discord upload.
 	uploads := h.rec.uploadsFor(runID)
-	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
+	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
 	// The re-rendered report records every burned disc, naming its burner and that
 	// it was burned and verified (SPEC §10).

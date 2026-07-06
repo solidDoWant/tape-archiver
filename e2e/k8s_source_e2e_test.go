@@ -87,7 +87,7 @@ func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 	// A completed run means the k8s source resolved (VolumeSnapshot + Content read
 	// under the granted RBAC, handle mapped) and the snapshot verified + backed up.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete for a k8s source")
-	assert.Len(t, h.rec.uploadsFor(runID), 2, "report and recovery ISO must both be delivered")
+	assert.Len(t, h.rec.uploadsFor(runID), 1, "the report is delivered (report-only delivery, SPEC §5)")
 }
 
 // snapshotClient builds an external-snapshotter clientset against the kind

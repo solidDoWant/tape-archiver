@@ -102,8 +102,13 @@ const (
 	// path is genuinely covered rather than silently skipped.
 	kedaNamespace    = "keda"
 	kedaRelease      = "keda"
+	kedaChartName    = "keda"
 	kedaChartVersion = "2.16.1"
-	kedaChartRef     = "oci://ghcr.io/kedacore/charts/keda"
+	// kedaChartRepo is the KEDA chart's GitHub Pages Helm repository, used via
+	// helm's --repo flag so no global repo entry is added to the host. (KEDA also
+	// publishes an OCI chart at ghcr.io, but the Pages repo is the more broadly
+	// reachable of the two; the operator images still come from ghcr regardless.)
+	kedaChartRepo = "https://kedacore.github.io/charts"
 	// rbacName is the ClusterRole + binding granting the control worker's
 	// ServiceAccount read access to VolumeSnapshots (the chart omits this by
 	// design — it is the operator's responsibility).
@@ -348,7 +353,8 @@ func (h *e2eHarness) createCluster() error {
 // KEDA is torn down with the cluster (createCluster's delete), so no separate cleanup
 // is registered.
 func (h *e2eHarness) installKeda() error {
-	_, err := execOut(h.repoRoot, h.kubeEnv(), "helm", "install", kedaRelease, kedaChartRef,
+	_, err := execOut(h.repoRoot, h.kubeEnv(), "helm", "install", kedaRelease, kedaChartName,
+		"--repo", kedaChartRepo,
 		"--version", kedaChartVersion,
 		"--namespace", kedaNamespace, "--create-namespace",
 		"--wait", "--timeout", "5m",
@@ -670,8 +676,21 @@ func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 
 	imagePath := "resources.controllers.main.containers.main.image"
 
+	// Register the uninstall before installing so a failed/partial install (e.g. a
+	// left-behind Secret or a ScaledJob KEDA has started acting on) is still cleaned
+	// up — otherwise a stray ScaledJob would keep spawning control-queue pollers that
+	// interfere with every later test in the shared suite.
+	t.Cleanup(func() {
+		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", scaledJobRelease,
+			"--namespace", namespace, "--wait", "--timeout", "2m", "--ignore-not-found")
+	})
+
+	// No --wait: the only workload this release yields is a KEDA-spawned Job that does
+	// not exist until a backlog appears, and helm's readiness wait trips on the
+	// ScaledJob's transient "InProgress" status. The scale assertions poll pods
+	// directly instead.
 	_, err = execOut(h.repoRoot, h.kubeEnv(), "helm", "install", scaledJobRelease, chart,
-		"--namespace", namespace, "--wait", "--timeout", "2m",
+		"--namespace", namespace,
 		"--set", "config.temporal.address="+temporalAlias+":"+temporalPort,
 		"--set", "config.controlWorker.discordFailureWebhookUrl.value="+h.failureURL(),
 		"--set", "resources.controllers.main.type=scaledjob",
@@ -683,11 +702,6 @@ func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 		"--set", imagePath+".pullPolicy=Never",
 	)
 	require.NoError(t, err, "helm install scaledjob worker")
-
-	t.Cleanup(func() {
-		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", scaledJobRelease,
-			"--namespace", namespace, "--wait", "--timeout", "2m")
-	})
 }
 
 // scaleControlDeployment scales the shared Deployment control worker (helmRelease) to

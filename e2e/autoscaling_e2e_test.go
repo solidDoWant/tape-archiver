@@ -205,7 +205,7 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
 	uploads := h.rec.uploadsFor(runID)
-	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
+	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
 	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
@@ -318,9 +318,9 @@ func TestControlWorkerMultipleReplicas(t *testing.T) {
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
 	// Exactly-once: two concurrent workers must not double-process the run, so exactly
-	// the report and the recovery ISO are delivered — never a duplicate set.
+	// one report is delivered (report-only delivery, SPEC §5) — never a duplicate.
 	uploads := h.rec.uploadsFor(runID)
-	require.Len(t, uploads, 2, "exactly the report and recovery ISO must be delivered — no duplicates from the second worker")
+	require.Len(t, uploads, 1, "exactly one report is delivered — no duplicate from the second worker")
 
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
 	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
