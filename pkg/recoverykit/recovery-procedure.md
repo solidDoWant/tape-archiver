@@ -94,34 +94,51 @@ file** out of an archive:
    ltfs -o ro -o devname=/dev/sg0 /mnt/tape
    ```
 
-3. **Verify integrity** of that archive's files against the disc manifest before
-   trusting them:
+3. **Copy the archive to local disk in one pass, then unmount the tape.** Do
+   every later step from the local copy — never repeatedly off the tape:
 
    ```
-   cd /mnt/tape
-   sha256sum -c /path/to/disc/manifest.sha256   # or check the on-tape manifest.json
+   mkdir -p /scratch
+   cp -r /mnt/tape/archives/NNN /scratch/     # -> /scratch/NNN
+                                              # (or `cp -r /mnt/tape/* /scratch/` to take the whole tape)
+   fusermount -u /mnt/tape                     # the tape is no longer needed
    ```
 
-4. **Repair anything corrupt** with the archive's PAR2 recovery set (this
-   reconstructs the exact original bytes when damage is within the PAR2
-   redundancy):
+   Copy the target archive's whole directory — all of its `archive.NNN` slices
+   **and** its `archive.par2` set — or the entire tape if you are recovering
+   everything and have the disk space (up to one tape's capacity, e.g. ~2.5 TB for
+   LTO-6). This first copy matters for two reasons:
+
+   - **It minimizes tape wear.** The verify, repair, and reassemble steps below
+     each read the archive; running them straight off the mount drags the drive
+     back and forth over the same tape (repositioning / "shoe-shining"). Copying
+     once is a single sequential streaming pass — the read-side mirror of how the
+     archiver *writes* (SPEC §2, principle 2). Once the copy is on disk you can
+     retry freely without touching the tape again.
+   - **PAR2 repair needs a writable copy.** `par2 repair` rewrites the repaired
+     slice in place, which cannot be done on the read-only tape mount.
+
+4. **Verify and repair with PAR2.** `par2 repair` checks every slice against the
+   recovery set and reconstructs the exact original bytes when damage is within
+   the PAR2 redundancy (as an independent cross-check you can also `sha256sum -c`
+   against the disc's `manifest.sha256` or the tape's `manifest.json`):
 
    ```
-   bin/par2 repair /mnt/tape/archives/NNN/archive.par2
+   bin/par2 repair /scratch/NNN/archive.par2
    ```
 
 5. **Reassemble the encrypted archive** by concatenating its slice files in
-   numeric order (the on-tape `manifest.json` lists them; they are named
-   `archive.000`, `archive.001`, …):
+   numeric order (`manifest.json` lists them; they are named `archive.000`,
+   `archive.001`, …):
 
    ```
-   cat /mnt/tape/archives/NNN/archive.[0-9][0-9][0-9] > archive.age
+   cat /scratch/NNN/archive.[0-9][0-9][0-9] > /scratch/archive.age
    ```
 
 6. **Decrypt** with the escrowed identity:
 
    ```
-   bin/age -d -i identity.txt -o archive.tar.zst archive.age
+   bin/age -d -i identity.txt -o /scratch/archive.tar.zst /scratch/archive.age
    ```
 
 7. **Decompress** if the source was stored compressed (the report's contents
@@ -129,7 +146,7 @@ file** out of an archive:
    after step 6):
 
    ```
-   bin/zstd -d archive.tar.zst -o archive.tar
+   bin/zstd -d /scratch/archive.tar.zst -o /scratch/archive.tar
    ```
 
 8. **Extract the specific file** you need (omit the path to extract everything).
@@ -137,10 +154,8 @@ file** out of an archive:
    volume:
 
    ```
-   bin/tar -xf archive.tar path/inside/the/archive
+   bin/tar -xf /scratch/archive.tar path/inside/the/archive
    ```
-
-Unmount when done: `fusermount -u /mnt/tape`.
 
 ## Index-loss recovery
 
@@ -212,10 +227,10 @@ each extent listed under that file in the captured index:
    `byteoffset` — and append them into the slice file at `fileoffset`. Process a
    file's extents in `fileoffset` order.
 
-4. **Reassemble and finish.** Once every slice file is reconstructed, continue
-   exactly as in [Normal recovery](#normal-recovery-ltfs-mounts-cleanly) from
-   step 5: `cat` the slices into `archive.age`, then PAR2-repair, `age` decrypt,
-   `zstd` decompress, and `tar` extract.
+4. **Reassemble and finish.** You have now written the slice files to local disk,
+   so continue exactly as in [Normal recovery](#normal-recovery-ltfs-mounts-cleanly)
+   from step 4: PAR2-repair, `cat` the slices into `archive.age`, then `age`
+   decrypt, `zstd` decompress, and `tar` extract.
 
 The extents alone are sufficient to recover the exact archive bytes; this is
 proven end-to-end by an automated test that corrupts the on-tape index and
