@@ -11,8 +11,8 @@
 //   - a backup copy of each tape's LTFS index (from pkg/ltfs.ReadIndex), in case
 //     the on-tape index is damaged;
 //   - the static recovery binaries (age, par2, zstd, tar) staged from a
-//     configurable source directory, plus the written, step-by-step recovery
-//     procedure.
+//     configurable source directory, plus the full step-by-step recovery
+//     procedure (recovery-procedure.md), embedded from docs/recovery-procedure.md.
 //
 // Recovery binaries MUST be statically linked. At restore time — potentially
 // decades later, on unknown hardware with no package manager — a dynamically
@@ -33,6 +33,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"debug/elf"
+	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -48,6 +49,16 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/checksum"
 )
 
+// recoveryProcedureDoc is the full operator recovery procedure, embedded so the
+// disc always carries the same bytes as docs/recovery-procedure.md (a test
+// asserts they are identical). It is shipped verbatim on the disc as
+// recovery-procedure.md and is the authoritative, self-contained recovery
+// reference — the PDF report carries only a concise copy (SPEC §10, issue #21).
+//
+//go:generate cp ../../docs/recovery-procedure.md recovery-procedure.md
+//go:embed recovery-procedure.md
+var recoveryProcedureDoc []byte
+
 // volumeIdentifier is the ISO 9660 primary volume identifier. It uses only
 // valid d-characters and is within the 32-character limit.
 const volumeIdentifier = "TAPE_ARCHIVER_RECOVERY"
@@ -58,7 +69,7 @@ const volumeIdentifier = "TAPE_ARCHIVER_RECOVERY"
 const (
 	reportPath    = "report.pdf"
 	manifestPath  = "manifest.sha256"
-	procedurePath = "recovery.txt"
+	procedurePath = "recovery-procedure.md"
 	indexDir      = "ltfs-index"
 	indexSuffix   = ".schema"
 	binDir        = "bin"
@@ -81,9 +92,6 @@ type Input struct {
 	// versions — this package only stages what is present and proves it is
 	// static.
 	BinariesDir string
-	// RecoveryProcedure is the written, step-by-step recovery text (including
-	// LTFS read instructions). It is stored verbatim on the disc.
-	RecoveryProcedure string
 }
 
 // Manifest maps each disc-relative, slash-separated path Build stages to the
@@ -172,7 +180,7 @@ func Build(ctx context.Context, in Input, w io.Writer) (Manifest, error) {
 	}{
 		{reportPath, in.Report},
 		{manifestPath, in.Manifest},
-		{procedurePath, []byte(in.RecoveryProcedure)},
+		{procedurePath, recoveryProcedureDoc},
 	} {
 		if err := writer.AddFile(bytes.NewReader(artifact.data), artifact.name); err != nil {
 			return nil, fmt.Errorf("recoverykit: stage %s: %w", artifact.name, err)
@@ -214,10 +222,6 @@ func (in Input) validate() error {
 
 	if len(in.Manifest) == 0 {
 		return fmt.Errorf("SHA-256 manifest is empty")
-	}
-
-	if strings.TrimSpace(in.RecoveryProcedure) == "" {
-		return fmt.Errorf("recovery procedure is empty")
 	}
 
 	if len(in.TapeIndexes) == 0 {

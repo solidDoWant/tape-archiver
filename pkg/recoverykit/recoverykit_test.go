@@ -19,10 +19,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/recoverykit"
 )
 
-const recoveryProcedure = "1. Load a tape into an LTO drive and mount its LTFS volume read-only.\n" +
-	"2. Verify each slice against manifest.sha256; repair with par2 if needed.\n" +
-	"3. Concatenate slices, decrypt with age, decompress with zstd, unpack with tar."
-
 // completeInput returns a valid Input with two tapes and the four recovery
 // binaries, each a statically linked ELF fixture.
 func completeInput(t *testing.T) recoverykit.Input {
@@ -40,8 +36,7 @@ func completeInput(t *testing.T) recoverykit.Input {
 			{Barcode: "TAPE0001L8", Index: []byte(`<ltfsindex><generationnumber>1</generationnumber></ltfsindex>`)},
 			{Barcode: "TAPE0002L8", Index: []byte(`<ltfsindex><generationnumber>2</generationnumber></ltfsindex>`)},
 		},
-		BinariesDir:       binDir,
-		RecoveryProcedure: recoveryProcedure,
+		BinariesDir: binDir,
 	}
 }
 
@@ -60,10 +55,17 @@ func TestBuild_RoundTrip(t *testing.T) {
 
 	files := readISO(t, buf.Bytes())
 
+	// The recovery procedure shipped on the disc is the embedded
+	// recovery-procedure.md (the same bytes as docs/recovery-procedure.md; the
+	// drift test proves the two are identical). Read the package copy to know
+	// what the ISO must carry.
+	procedureDoc, err := os.ReadFile("recovery-procedure.md")
+	require.NoError(t, err)
+
 	want := map[string][]byte{
 		"report.pdf":                   in.Report,
 		"manifest.sha256":              in.Manifest,
-		"recovery.txt":                 []byte(in.RecoveryProcedure),
+		"recovery-procedure.md":        procedureDoc,
 		"ltfs-index/tape0001l8.schema": in.TapeIndexes[0].Index,
 		"ltfs-index/tape0002l8.schema": in.TapeIndexes[1].Index,
 		"bin/age":                      staticELF(),
@@ -136,7 +138,6 @@ func TestBuild_Validation(t *testing.T) {
 	}{
 		"empty report":      {func(in *recoverykit.Input) { in.Report = nil }, "report PDF is empty"},
 		"empty manifest":    {func(in *recoverykit.Input) { in.Manifest = nil }, "SHA-256 manifest is empty"},
-		"empty procedure":   {func(in *recoverykit.Input) { in.RecoveryProcedure = "  " }, "recovery procedure is empty"},
 		"no tapes":          {func(in *recoverykit.Input) { in.TapeIndexes = nil }, "at least one tape"},
 		"empty barcode":     {func(in *recoverykit.Input) { in.TapeIndexes[0].Barcode = "" }, "empty barcode"},
 		"empty index":       {func(in *recoverykit.Input) { in.TapeIndexes[0].Index = nil }, "is empty"},
@@ -169,6 +170,24 @@ func TestBuild_EmptyBinariesDirFails(t *testing.T) {
 	_, err := recoverykit.Build(t.Context(), in, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no recovery binaries found")
+}
+
+// TestRecoveryProcedureDocMatchesCanonical guards against drift: the disc ships
+// the embedded pkg/recoverykit/recovery-procedure.md, which must be byte-for-byte
+// identical to the canonical operator doc docs/recovery-procedure.md. Editing the
+// canonical doc without re-copying it (go:generate, or `cp`) fails this test.
+func TestRecoveryProcedureDocMatchesCanonical(t *testing.T) {
+	t.Parallel()
+
+	shipped, err := os.ReadFile("recovery-procedure.md")
+	require.NoError(t, err)
+
+	canonical, err := os.ReadFile(filepath.Join("..", "..", "docs", "recovery-procedure.md"))
+	require.NoError(t, err)
+
+	assert.Equalf(t, string(canonical), string(shipped),
+		"pkg/recoverykit/recovery-procedure.md is out of sync with docs/recovery-procedure.md; "+
+			"run `go generate ./pkg/recoverykit/` (or copy the doc) to resync")
 }
 
 // readISO opens an ISO image and returns a map of every regular file's full

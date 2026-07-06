@@ -184,7 +184,7 @@ func TestBuildReportStagesDiscManifest(t *testing.T) {
 
 	// The disc-content manifest names the recovery ISO's own files, not the on-tape
 	// files listed inside it.
-	for _, discPath := range []string{"report.pdf", "manifest.sha256", "recovery.txt"} {
+	for _, discPath := range []string{"report.pdf", "manifest.sha256", "recovery-procedure.md"} {
 		assert.Contains(t, manifest, discPath, "disc manifest must list the ISO's own %s", discPath)
 	}
 

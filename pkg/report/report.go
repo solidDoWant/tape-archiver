@@ -278,6 +278,76 @@ func (d *doc) ensureSpace(h float64) {
 	}
 }
 
+// rowCell is one cell of a table row rendered by tableRow.
+type rowCell struct {
+	w     float64 // column width
+	text  string  // cell text (may wrap across lines)
+	align string  // "L" (default) or "R"
+	mono  bool    // monospace font (barcodes, device nodes)
+}
+
+// tableRow renders one table row as an atomic unit. It measures the tallest cell,
+// and if the row will not fit on the current page it moves the whole row to the
+// next page — re-drawing the column header via drawHeader — before drawing any
+// cell, so a row's columns can never split across a page boundary. Every cell is
+// then drawn from the same top and a hairline rule closes the row.
+//
+// This is deliberately not built from a MultiCell followed by SetXY back to the
+// row's starting y: a MultiCell that auto-page-breaks mid-row would leave the
+// later, manually positioned columns anchored to the previous page's y, which
+// scatters a single row's columns across pages.
+func (d *doc) tableRow(cells []rowCell, lineH float64, drawHeader func()) {
+	rowH := lineH
+
+	for _, cell := range cells {
+		lines := d.pdf.SplitLines([]byte(d.tr(cell.text)), cell.w)
+		if h := float64(len(lines)) * lineH; h > rowH {
+			rowH = h
+		}
+	}
+
+	_, pageH := d.pdf.GetPageSize()
+	_, _, _, bottom := d.pdf.GetMargins()
+
+	if d.pdf.GetY()+rowH > pageH-bottom {
+		d.pdf.AddPage()
+
+		if drawHeader != nil {
+			drawHeader()
+		}
+	}
+
+	x := marginX
+	y := d.pdf.GetY()
+
+	d.text(colInk)
+
+	for _, cell := range cells {
+		align := cell.align
+		if align == "" {
+			align = "L"
+		}
+
+		if cell.mono {
+			d.pdf.SetFont(fontMono, "", 8.5)
+		} else {
+			d.pdf.SetFont(fontBody, "", 8.5)
+		}
+
+		d.pdf.SetXY(x, y)
+		d.pdf.MultiCell(cell.w, lineH, d.tr(cell.text), "", align, false)
+
+		x += cell.w
+	}
+
+	d.draw(colRule)
+	d.pdf.SetLineWidth(0.2)
+
+	rowBottom := y + rowH
+	d.pdf.Line(marginX, rowBottom, marginX+contentW, rowBottom)
+	d.pdf.SetXY(marginX, rowBottom)
+}
+
 // section renders a full-width filled heading bar. It first reserves enough
 // vertical space for the bar plus the first lines of its content, so a heading
 // is never stranded at the bottom of a page apart from what it introduces.
@@ -397,25 +467,19 @@ func (d *doc) tapesSection(m Manifest) {
 
 	holdsW := contentW - barcodeW
 
-	d.draw(colRule)
-	d.pdf.SetLineWidth(0.2)
-	d.fill(colBar)
-	d.text(colMuted)
-	d.pdf.SetFont(fontBody, "B", 8.5)
-	d.pdf.CellFormat(barcodeW, 6, d.tr("Barcode"), "B", 0, "L", true, 0, "")
-	d.pdf.CellFormat(holdsW, 6, d.tr("Holds"), "B", 1, "L", true, 0, "")
+	header := func() {
+		d.draw(colRule)
+		d.pdf.SetLineWidth(0.2)
+		d.fill(colBar)
+		d.text(colMuted)
+		d.pdf.SetFont(fontBody, "B", 8.5)
+		d.pdf.CellFormat(barcodeW, 6, d.tr("Barcode"), "B", 0, "L", true, 0, "")
+		d.pdf.CellFormat(holdsW, 6, d.tr("Holds"), "B", 1, "L", true, 0, "")
+	}
+
+	header()
 
 	for _, tape := range m.Tapes {
-		x, y := d.pdf.GetX(), d.pdf.GetY()
-
-		d.text(colInk)
-		d.pdf.SetFont(fontMono, "", 8.5)
-		d.pdf.MultiCell(barcodeW, 5.5, d.tr(tape.Barcode), "", "L", false)
-		barcodeEndY := d.pdf.GetY()
-
-		d.pdf.SetXY(x+barcodeW, y)
-		d.pdf.SetFont(fontBody, "", 8.5)
-
 		holds := joinOrNone(tape.Contents)
 		if tape.OverwroteNonBlank {
 			// The run deliberately reclaimed a used tape (Library.AllowNonBlankTapes).
@@ -423,16 +487,10 @@ func (d *doc) tapesSection(m Manifest) {
 			holds += "\n[Overwrote a non-blank tape]"
 		}
 
-		d.pdf.MultiCell(holdsW, 5.5, d.tr(holds), "", "L", false)
-
-		if d.pdf.GetY() < barcodeEndY {
-			d.pdf.SetY(barcodeEndY)
-		}
-
-		rowEndY := d.pdf.GetY()
-		d.draw(colRule)
-		d.pdf.Line(x, rowEndY, x+contentW, rowEndY)
-		d.pdf.SetX(x)
+		d.tableRow([]rowCell{
+			{w: barcodeW, text: tape.Barcode, mono: true},
+			{w: holdsW, text: holds},
+		}, 5.5, header)
 	}
 }
 
@@ -451,25 +509,19 @@ func (d *doc) discsSection(m Manifest) {
 
 	notesW := contentW - deviceW
 
-	d.draw(colRule)
-	d.pdf.SetLineWidth(0.2)
-	d.fill(colBar)
-	d.text(colMuted)
-	d.pdf.SetFont(fontBody, "B", 8.5)
-	d.pdf.CellFormat(deviceW, 6, d.tr("Burner"), "B", 0, "L", true, 0, "")
-	d.pdf.CellFormat(notesW, 6, d.tr("Notes"), "B", 1, "L", true, 0, "")
+	header := func() {
+		d.draw(colRule)
+		d.pdf.SetLineWidth(0.2)
+		d.fill(colBar)
+		d.text(colMuted)
+		d.pdf.SetFont(fontBody, "B", 8.5)
+		d.pdf.CellFormat(deviceW, 6, d.tr("Burner"), "B", 0, "L", true, 0, "")
+		d.pdf.CellFormat(notesW, 6, d.tr("Notes"), "B", 1, "L", true, 0, "")
+	}
+
+	header()
 
 	for _, disc := range m.Discs {
-		x, y := d.pdf.GetX(), d.pdf.GetY()
-
-		d.text(colInk)
-		d.pdf.SetFont(fontMono, "", 8.5)
-		d.pdf.MultiCell(deviceW, 5.5, d.tr(disc.Device), "", "L", false)
-		deviceEndY := d.pdf.GetY()
-
-		d.pdf.SetXY(x+deviceW, y)
-		d.pdf.SetFont(fontBody, "", 8.5)
-
 		notes := "burned and verified"
 		if disc.OverwroteNonBlank {
 			// The run deliberately reclaimed a used rewritable disc
@@ -478,16 +530,10 @@ func (d *doc) discsSection(m Manifest) {
 			notes += "\n[Overwrote a non-blank disc]"
 		}
 
-		d.pdf.MultiCell(notesW, 5.5, d.tr(notes), "", "L", false)
-
-		if d.pdf.GetY() < deviceEndY {
-			d.pdf.SetY(deviceEndY)
-		}
-
-		rowEndY := d.pdf.GetY()
-		d.draw(colRule)
-		d.pdf.Line(x, rowEndY, x+contentW, rowEndY)
-		d.pdf.SetX(x)
+		d.tableRow([]rowCell{
+			{w: deviceW, text: disc.Device, mono: true},
+			{w: notesW, text: notes},
+		}, 5.5, header)
 	}
 }
 
@@ -514,57 +560,42 @@ func (d *doc) writeHealthSection(m Manifest) {
 
 	statusW := contentW - barcodeW - thrW - floorW - reposW
 
-	d.draw(colRule)
-	d.pdf.SetLineWidth(0.2)
-	d.fill(colBar)
-	d.text(colMuted)
-	d.pdf.SetFont(fontBody, "B", 8.5)
-	d.pdf.CellFormat(barcodeW, 6, d.tr("Barcode"), "B", 0, "L", true, 0, "")
-	d.pdf.CellFormat(thrW, 6, d.tr("MB/s"), "B", 0, "R", true, 0, "")
-	d.pdf.CellFormat(floorW, 6, d.tr("Floor"), "B", 0, "R", true, 0, "")
-	d.pdf.CellFormat(reposW, 6, d.tr("Repos"), "B", 0, "R", true, 0, "")
-	d.pdf.CellFormat(statusW, 6, d.tr("Status"), "B", 1, "L", true, 0, "")
+	header := func() {
+		d.draw(colRule)
+		d.pdf.SetLineWidth(0.2)
+		d.fill(colBar)
+		d.text(colMuted)
+		d.pdf.SetFont(fontBody, "B", 8.5)
+		d.pdf.CellFormat(barcodeW, 6, d.tr("Barcode"), "B", 0, "L", true, 0, "")
+		d.pdf.CellFormat(thrW, 6, d.tr("MB/s"), "B", 0, "R", true, 0, "")
+		d.pdf.CellFormat(floorW, 6, d.tr("Floor"), "B", 0, "R", true, 0, "")
+		d.pdf.CellFormat(reposW, 6, d.tr("Repos"), "B", 0, "R", true, 0, "")
+		d.pdf.CellFormat(statusW, 6, d.tr("Status"), "B", 1, "L", true, 0, "")
+	}
+
+	header()
 
 	for _, tape := range m.Tapes {
-		x, y := d.pdf.GetX(), d.pdf.GetY()
-
 		health := tape.WriteHealth
 
-		d.text(colInk)
-		d.pdf.SetFont(fontMono, "", 8.5)
-		d.pdf.MultiCell(barcodeW, 5.5, d.tr(tape.Barcode), "", "L", false)
-		barcodeEndY := d.pdf.GetY()
-
-		d.pdf.SetXY(x+barcodeW, y)
-		d.pdf.SetFont(fontBody, "", 8.5)
-
-		if health == nil {
-			d.pdf.CellFormat(thrW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
-			d.pdf.CellFormat(floorW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
-			d.pdf.CellFormat(reposW, 5.5, d.tr("-"), "", 0, "R", false, 0, "")
-		} else {
-			floor := "n/a"
+		thr, floor, repos := "-", "-", "-"
+		if health != nil {
+			floor = "n/a"
 			if health.FloorKnown {
 				floor = fmt.Sprintf("%.0f", health.FloorMBps)
 			}
 
-			d.pdf.CellFormat(thrW, 5.5, d.tr(fmt.Sprintf("%.1f", health.ThroughputMBps)), "", 0, "R", false, 0, "")
-			d.pdf.CellFormat(floorW, 5.5, d.tr(floor), "", 0, "R", false, 0, "")
-			d.pdf.CellFormat(reposW, 5.5, d.tr(strconv.FormatInt(health.Repositions, 10)), "", 0, "R", false, 0, "")
+			thr = fmt.Sprintf("%.1f", health.ThroughputMBps)
+			repos = strconv.FormatInt(health.Repositions, 10)
 		}
 
-		statusX := x + barcodeW + thrW + floorW + reposW
-		d.pdf.SetXY(statusX, y)
-		d.pdf.MultiCell(statusW, 5.5, d.tr(writeHealthStatus(health)), "", "L", false)
-
-		rowEndY := d.pdf.GetY()
-		if barcodeEndY > rowEndY {
-			rowEndY = barcodeEndY
-		}
-
-		d.draw(colRule)
-		d.pdf.Line(x, rowEndY, x+contentW, rowEndY)
-		d.pdf.SetXY(x, rowEndY)
+		d.tableRow([]rowCell{
+			{w: barcodeW, text: tape.Barcode, mono: true},
+			{w: thrW, text: thr, align: "R"},
+			{w: floorW, text: floor, align: "R"},
+			{w: reposW, text: repos, align: "R"},
+			{w: statusW, text: writeHealthStatus(health)},
+		}, 5.5, header)
 	}
 }
 
@@ -643,21 +674,227 @@ func (d *doc) identitySection(m Manifest) {
 	d.pdf.MultiCell(contentW, 7, d.tr(m.AgeIdentity), "1", "L", true)
 }
 
-// recoverySection renders the recovery procedure, one step per non-empty line.
+// recoverySection renders the recovery procedure with its structure preserved:
+// a title, wrapped intro paragraphs, numbered steps with a hanging indent, and
+// indented command lines in monospace. It reads the source text's leading
+// indentation to classify each line rather than flattening everything to the
+// left margin (which produced ragged, unindented output).
 func (d *doc) recoverySection(m Manifest) {
 	d.section("Recovery procedure")
-	d.pdf.SetFont(fontBody, "", 10)
-	d.text(colInk)
 
-	for _, line := range strings.Split(m.RecoveryProcedure, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	const (
+		stepNumW  = 7.0 // gutter holding the step number
+		cmdIndent = 6.0 // extra indent for command lines under a step body
+		lineH     = 5.0
+	)
+
+	titleDone := false
+
+	// Re-flow the source text: the procedure is hard-wrapped at ~80 columns, so a
+	// prose paragraph arrives as several lines. Joining each paragraph back into
+	// one line lets MultiCell wrap it to the page naturally instead of preserving
+	// the source's arbitrary break points mid-sentence. Command lines are left
+	// untouched, one per line.
+	lines := normalizeRecovery(m.RecoveryProcedure)
+
+	for i := 0; i < len(lines); i++ {
+		raw := lines[i]
+
+		content := strings.TrimSpace(raw)
+		if content == "" {
+			d.pdf.Ln(2) // blank line -> paragraph gap
 			continue
 		}
 
-		d.pdf.MultiCell(contentW, 5.5, d.tr(line), "", "L", false)
-		d.pdf.Ln(1)
+		indent := leadingSpaces(raw)
+		number, rest := splitStep(content)
+
+		switch {
+		case !titleDone:
+			// The first non-empty line is the procedure's title.
+			titleDone = true
+
+			d.pdf.SetFont(fontBody, "B", 11)
+			d.text(colInk)
+			d.pdf.SetX(marginX)
+			d.pdf.MultiCell(contentW, 6, d.tr(content), "", "L", false)
+			d.pdf.Ln(0.5)
+
+		case indent == 0 && number != "":
+			// "N. text" -> the number in the gutter, the text hanging-indented.
+			// Reserve space for the whole step block — the step line plus the
+			// indented command/continuation lines that belong to it (up to the
+			// next step, blank line, or paragraph) — so a page break never lands
+			// between an instruction and its command.
+			d.ensureSpace(d.stepBlockHeight(lines, i, stepNumW, cmdIndent, lineH))
+			y := d.pdf.GetY()
+
+			d.pdf.SetFont(fontBody, "B", 10)
+			d.text(colMuted)
+			d.pdf.SetXY(marginX, y)
+			d.pdf.CellFormat(stepNumW, lineH, d.tr(number), "", 0, "L", false, 0, "")
+
+			d.pdf.SetFont(fontBody, "", 10)
+			d.text(colInk)
+			d.pdf.SetXY(marginX+stepNumW, y)
+			d.pdf.MultiCell(contentW-stepNumW, lineH, d.tr(rest), "", "L", false)
+			d.pdf.SetX(marginX)
+
+		case indent >= 8:
+			// Deeply indented command line -> monospace, under the step body.
+			d.pdf.SetFont(fontMono, "", 8.5)
+			d.text(colInk)
+			d.pdf.SetX(marginX + stepNumW + cmdIndent)
+			d.pdf.MultiCell(contentW-stepNumW-cmdIndent, lineH, d.tr(content), "", "L", false)
+			d.pdf.SetX(marginX)
+
+		case indent >= 1:
+			// Step continuation prose -> aligned to the step body column.
+			d.pdf.SetFont(fontBody, "", 10)
+			d.text(colInk)
+			d.pdf.SetX(marginX + stepNumW)
+			d.pdf.MultiCell(contentW-stepNumW, lineH, d.tr(content), "", "L", false)
+			d.pdf.SetX(marginX)
+
+		default:
+			// An indent-0 line that is not a numbered step -> a full-width
+			// paragraph (the intro text).
+			d.pdf.SetFont(fontBody, "", 10)
+			d.text(colInk)
+			d.pdf.SetX(marginX)
+			d.pdf.MultiCell(contentW, lineH, d.tr(content), "", "L", false)
+		}
 	}
+}
+
+// splitStep splits a "N.  text" line into its number label ("N.") and the
+// remaining text. It returns an empty number when the line is not a numbered
+// step, so callers can treat it as ordinary prose.
+func splitStep(s string) (number, rest string) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+
+	if i == 0 || i >= len(s) || s[i] != '.' {
+		return "", s
+	}
+
+	return s[:i+1], strings.TrimSpace(s[i+1:])
+}
+
+// leadingSpaces returns the number of leading space/tab characters in s.
+func leadingSpaces(s string) int {
+	return len(s) - len(strings.TrimLeft(s, " \t"))
+}
+
+// normalizeRecovery re-flows the recovery procedure so each prose paragraph is a
+// single line, ready to be wrapped to the page. The source is hard-wrapped at
+// ~80 columns; preserving those breaks and re-wrapping each fragment produced
+// ragged, mid-sentence line breaks. It joins consecutive prose lines (a numbered
+// step and the soft-wrapped continuation lines that follow it) into one line,
+// preserving the paragraph's leading indent, and leaves blank lines and command
+// lines (indent >= 8) on their own so they render verbatim.
+func normalizeRecovery(text string) []string {
+	var out []string
+
+	var para strings.Builder
+
+	paraIndent := 0
+	titleDone := false
+
+	flush := func() {
+		if para.Len() == 0 {
+			return
+		}
+
+		out = append(out, strings.Repeat(" ", paraIndent)+para.String())
+		para.Reset()
+	}
+
+	for _, raw := range strings.Split(text, "\n") {
+		content := strings.TrimSpace(raw)
+		if content == "" {
+			flush()
+
+			out = append(out, "")
+
+			continue
+		}
+
+		indent := leadingSpaces(raw)
+		number, _ := splitStep(content)
+
+		switch {
+		case !titleDone:
+			titleDone = true
+
+			flush()
+
+			out = append(out, content)
+		case indent >= 8:
+			// Command line: keep it verbatim, on its own line.
+			flush()
+
+			out = append(out, raw)
+		case para.Len() > 0 && (indent != 0 || number == ""):
+			// A soft-wrapped continuation of the open paragraph.
+			para.WriteString(" ")
+			para.WriteString(content)
+		default:
+			// A numbered step, or the first line of a new prose paragraph.
+			flush()
+
+			paraIndent = indent
+
+			para.WriteString(content)
+		}
+	}
+
+	flush()
+
+	return out
+}
+
+// wrappedHeight returns the rendered height of text wrapped to width in the body
+// or monospace recovery font. It sets the font it measures in (the caller resets
+// the font when it draws), and never reports less than a single line.
+func (d *doc) wrappedHeight(text string, width float64, mono bool, lineH float64) float64 {
+	if mono {
+		d.pdf.SetFont(fontMono, "", 8.5)
+	} else {
+		d.pdf.SetFont(fontBody, "", 10)
+	}
+
+	count := len(d.pdf.SplitLines([]byte(d.tr(text)), width))
+	if count < 1 {
+		count = 1
+	}
+
+	return float64(count) * lineH
+}
+
+// stepBlockHeight measures a recovery step and the indented lines that belong to
+// it — its wrapped command and continuation lines, up to the next step, blank
+// line, or paragraph — so the whole block can be kept together on one page.
+func (d *doc) stepBlockHeight(lines []string, start int, stepNumW, cmdIndent, lineH float64) float64 {
+	_, rest := splitStep(strings.TrimSpace(lines[start]))
+	height := d.wrappedHeight(rest, contentW-stepNumW, false, lineH)
+
+	for j := start + 1; j < len(lines); j++ {
+		indent := leadingSpaces(lines[j])
+		if strings.TrimSpace(lines[j]) == "" || indent == 0 {
+			break
+		}
+
+		if indent >= 8 {
+			height += d.wrappedHeight(strings.TrimSpace(lines[j]), contentW-stepNumW-cmdIndent, true, lineH)
+		} else {
+			height += d.wrappedHeight(strings.TrimSpace(lines[j]), contentW-stepNumW, false, lineH)
+		}
+	}
+
+	return height
 }
 
 // text, fill, and draw set the current text, fill, and draw colors.
