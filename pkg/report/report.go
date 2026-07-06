@@ -41,6 +41,11 @@ type Manifest struct {
 	Archives []Archive
 	// Tapes maps each physical tape (by barcode) to what it holds.
 	Tapes []Tape
+	// Discs lists the optical recovery discs burned for the run (SPEC §10), each
+	// naming the burner it was written on and whether a non-blank disc was
+	// deliberately reclaimed. It is empty when optical burning was not enabled;
+	// the Discs section is then omitted entirely.
+	Discs []Disc
 	// Build records how the tapes were built: tool and external tool versions,
 	// slice size, PAR2 redundancy, and drive/library identifiers.
 	Build BuildParams
@@ -90,6 +95,19 @@ type Tape struct {
 	// OverwroteNonBlank is true when this tape was not blank at load and was written
 	// over because the run set Library.AllowNonBlankTapes. The Tapes section annotates
 	// such tapes so a deliberate, irreversible overwrite is recorded (SPEC §9).
+	OverwroteNonBlank bool
+}
+
+// Disc records one optical recovery disc burned for the run (SPEC §10),
+// referenced by the burner device it was written on.
+type Disc struct {
+	// Device is the optical burner the disc was written on (e.g. /dev/sr0),
+	// recorded as provenance.
+	Device string
+	// OverwroteNonBlank is true when this disc was not blank and was reclaimed and
+	// written over because the run set Delivery.OpticalBurn.AllowNonBlankDiscs. The
+	// Discs section annotates such discs so a deliberate, irreversible overwrite is
+	// recorded (SPEC §9, §10).
 	OverwroteNonBlank bool
 }
 
@@ -188,6 +206,7 @@ func Build(m Manifest, w io.Writer) error {
 	d.runSection(m)
 	d.contentsSection(m)
 	d.tapesSection(m)
+	d.discsSection(m)
 	d.writeHealthSection(m)
 	d.buildSection(m)
 	d.identitySection(m)
@@ -408,6 +427,61 @@ func (d *doc) tapesSection(m Manifest) {
 
 		if d.pdf.GetY() < barcodeEndY {
 			d.pdf.SetY(barcodeEndY)
+		}
+
+		rowEndY := d.pdf.GetY()
+		d.draw(colRule)
+		d.pdf.Line(x, rowEndY, x+contentW, rowEndY)
+		d.pdf.SetX(x)
+	}
+}
+
+// discsSection renders the optical recovery discs burned for the run (SPEC §10),
+// as a table of burner device and notes. It is omitted entirely when no discs
+// were burned (optical burning disabled), so a run without burning renders
+// exactly as before.
+func (d *doc) discsSection(m Manifest) {
+	if len(m.Discs) == 0 {
+		return
+	}
+
+	d.section("Recovery discs")
+
+	const deviceW = 46.0
+
+	notesW := contentW - deviceW
+
+	d.draw(colRule)
+	d.pdf.SetLineWidth(0.2)
+	d.fill(colBar)
+	d.text(colMuted)
+	d.pdf.SetFont(fontBody, "B", 8.5)
+	d.pdf.CellFormat(deviceW, 6, d.tr("Burner"), "B", 0, "L", true, 0, "")
+	d.pdf.CellFormat(notesW, 6, d.tr("Notes"), "B", 1, "L", true, 0, "")
+
+	for _, disc := range m.Discs {
+		x, y := d.pdf.GetX(), d.pdf.GetY()
+
+		d.text(colInk)
+		d.pdf.SetFont(fontMono, "", 8.5)
+		d.pdf.MultiCell(deviceW, 5.5, d.tr(disc.Device), "", "L", false)
+		deviceEndY := d.pdf.GetY()
+
+		d.pdf.SetXY(x+deviceW, y)
+		d.pdf.SetFont(fontBody, "", 8.5)
+
+		notes := "burned and verified"
+		if disc.OverwroteNonBlank {
+			// The run deliberately reclaimed a used rewritable disc
+			// (Delivery.OpticalBurn.AllowNonBlankDiscs). Record the irreversible
+			// overwrite alongside the disc's provenance.
+			notes += "\n[Overwrote a non-blank disc]"
+		}
+
+		d.pdf.MultiCell(notesW, 5.5, d.tr(notes), "", "L", false)
+
+		if d.pdf.GetY() < deviceEndY {
+			d.pdf.SetY(deviceEndY)
 		}
 
 		rowEndY := d.pdf.GetY()

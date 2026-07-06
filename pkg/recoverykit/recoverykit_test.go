@@ -2,8 +2,10 @@ package recoverykit_test
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"debug/elf"
 	"encoding/binary"
+	"encoding/hex"
 	"io"
 	"os"
 	"path"
@@ -52,7 +54,9 @@ func TestBuild_RoundTrip(t *testing.T) {
 	in := completeInput(t)
 
 	var buf bytes.Buffer
-	require.NoError(t, recoverykit.Build(t.Context(), in, &buf))
+
+	manifest, err := recoverykit.Build(t.Context(), in, &buf)
+	require.NoError(t, err)
 
 	files := readISO(t, buf.Bytes())
 
@@ -75,6 +79,25 @@ func TestBuild_RoundTrip(t *testing.T) {
 	}
 
 	assert.Lenf(t, files, len(want), "unexpected extra files in ISO: %v", keys(files))
+
+	// The returned disc-content manifest must name exactly the read-back paths of
+	// the burned disc, each with its content's SHA-256, so the Burn phase's
+	// read-back verification (pkg/optical.Verify) compares equal against the
+	// mounted disc.
+	assert.Lenf(t, manifest, len(want), "manifest must list exactly the on-disc files")
+
+	for name, content := range want {
+		sum := sha256.Sum256(content)
+		assert.Equalf(t, hex.EncodeToString(sum[:]), manifest[name],
+			"manifest digest mismatch for %s", name)
+	}
+
+	// The manifest keys must equal the ISO's read-back paths exactly, so a
+	// verification never reports spurious missing/extra files.
+	for name := range manifest {
+		_, ok := files[name]
+		assert.Truef(t, ok, "manifest path %q is not a read-back path of the ISO", name)
+	}
 }
 
 // TestBuild_RejectsDynamicBinary proves a dynamically linked recovery binary is
@@ -85,7 +108,7 @@ func TestBuild_RejectsDynamicBinary(t *testing.T) {
 	in := completeInput(t)
 	writeFile(t, filepath.Join(in.BinariesDir, "age"), dynamicELF())
 
-	err := recoverykit.Build(t.Context(), in, io.Discard)
+	_, err := recoverykit.Build(t.Context(), in, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dynamically linked")
 }
@@ -98,7 +121,7 @@ func TestBuild_RejectsNonELFBinary(t *testing.T) {
 	in := completeInput(t)
 	writeFile(t, filepath.Join(in.BinariesDir, "age"), []byte("#!/bin/sh\necho not static\n"))
 
-	err := recoverykit.Build(t.Context(), in, io.Discard)
+	_, err := recoverykit.Build(t.Context(), in, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a valid ELF executable")
 }
@@ -128,7 +151,7 @@ func TestBuild_Validation(t *testing.T) {
 			in := completeInput(t)
 			test.mutate(&in)
 
-			err := recoverykit.Build(t.Context(), in, io.Discard)
+			_, err := recoverykit.Build(t.Context(), in, io.Discard)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.wantErr)
 		})
@@ -143,7 +166,7 @@ func TestBuild_EmptyBinariesDirFails(t *testing.T) {
 	in := completeInput(t)
 	in.BinariesDir = t.TempDir()
 
-	err := recoverykit.Build(t.Context(), in, io.Discard)
+	_, err := recoverykit.Build(t.Context(), in, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no recovery binaries found")
 }

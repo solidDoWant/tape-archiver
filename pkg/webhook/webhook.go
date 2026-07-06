@@ -216,6 +216,44 @@ func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, af
 	}
 }
 
+// SendBurnPause posts an operator-in-the-loop pause alert for the optical Burn
+// phase: either a burn/verify failed for one disc-set, or a disc-set completed
+// and the next set needs fresh blanks loaded (there is no optical autoloader, so
+// every set after the first requires a manual disc swap). It names the run, the
+// burner drive(s) involved, and the reason, and tells the operator the exact
+// `tapectl resume`/`tapectl abort` commands (SPEC §10, §11). Like SendFailure it
+// is best-effort — a delivery failure is logged, not returned — so a webhook
+// outage never aborts a run that is only waiting. When the client's URL is empty,
+// it is a silent no-op.
+func (c *Client) SendBurnPause(ctx context.Context, runID string, devices []string, reason string) {
+	if c.url == "" {
+		return
+	}
+
+	drives := "the burner(s)"
+	if len(devices) > 0 {
+		drives = strings.Join(devices, ", ")
+	}
+
+	if reason == "" {
+		reason = "unknown reason"
+	}
+
+	msg := Message{
+		Content: fmt.Sprintf(
+			"Backup run %s paused during Burn on drive(s) %s: %s. Load a blank recovery disc into each "+
+				"named drive, then run `tapectl resume` to continue or `tapectl abort` to end the run.",
+			runID, drives, reason),
+	}
+
+	if err := c.Send(ctx, msg); err != nil {
+		slog.Error("failed to deliver webhook burn pause alert",
+			"run_id", runID,
+			"delivery_error", err,
+		)
+	}
+}
+
 // formatSlots renders a list of storage-slot addresses for an operator message.
 // An empty list falls back to a generic phrase (a Load failure has no per-tape
 // slots to name beyond the set's own).

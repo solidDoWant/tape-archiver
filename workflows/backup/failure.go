@@ -114,6 +114,34 @@ func (a *FailureActivities) NotifyWritePathPause(ctx context.Context, input Writ
 	return nil
 }
 
+// BurnPauseInput is the payload for the optical-burn pause alert activity. It
+// carries what an operator needs to act on a Burn-phase pause (SPEC §10, §11):
+// the run id, the burner drive(s) involved, and the reason (a burn/verify
+// failure, or a between-set disc swap).
+type BurnPauseInput struct {
+	// RunID is the workflow (run) id, so an operator can correlate the alert with
+	// the run.
+	RunID string
+	// Devices lists the optical burner device nodes the operator should load a
+	// fresh blank disc into before resuming (e.g. /dev/sr0).
+	Devices []string
+	// ErrorSummary is the pause reason rendered as text — the burn/verify failure,
+	// or the between-set disc-swap prompt.
+	ErrorSummary string
+}
+
+// NotifyBurnPause posts the operator-in-the-loop pause alert when the optical
+// Burn phase pauses — for a burn/verify failure or a between-set disc swap (SPEC
+// §10, §11). It uses the same operational webhook as NotifyFailure and is
+// best-effort: a delivery failure is logged by pkg/webhook, not returned, so a
+// webhook outage never aborts a run that is only waiting. When the webhook URL is
+// empty the client is a no-op and nothing is sent.
+func (a *FailureActivities) NotifyBurnPause(ctx context.Context, input BurnPauseInput) error {
+	webhook.New(a.WebhookURL).SendBurnPause(ctx, input.RunID, input.Devices, input.ErrorSummary)
+
+	return nil
+}
+
 // notifyFailure runs the failure-alert activity from the workflow when a run
 // fails (SPEC §11). It executes on a disconnected context so the alert still
 // fires when the workflow itself is cancelled, and it never propagates an error:

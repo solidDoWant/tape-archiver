@@ -8,9 +8,15 @@ no online services, no package manager, no original host. It is built by
 
 **Target media: M-DISC DVD.** Its inorganic recording layer is ISO/IEC 10995-tested and
 NIST-listed for 100+ year archival life, and it is readable in the large, long-lived
-installed base of DVD drives. The image is tens of MB, so DVD capacity is ample. Burning
-and read-back verification are manual operator steps (burn **at least two copies** and
-verify each against the manifest); periodic re-burn/refresh is a documented maintenance
+installed base of DVD drives. The image is tens of MB, so DVD capacity is ample.
+
+**Burning and read-back verification** can run **in the workflow** — configure
+[`delivery.opticalBurn`](configuration.md#opticalburn) with the burner drives and copy
+count and the Burn phase burns each disc and verifies it against the disc-content
+manifest, pausing for the operator between burn-sets and on any failure (see
+[configuration.md](configuration.md#optical-burn-operator-loop)). Left unconfigured,
+burning stays a **manual operator step** (burn **at least two copies** and verify each
+against the manifest). Either way, periodic re-burn/refresh is a documented maintenance
 task.
 
 ## Contents

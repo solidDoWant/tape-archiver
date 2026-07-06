@@ -58,6 +58,10 @@ const (
 	reportFileName        = "report.pdf"
 	isoFileName           = "recovery.iso"
 	compressedISOFileName = "recovery.iso.zst"
+	// discManifestFileName is the staged sha256sum manifest of the recovery ISO's
+	// contents, written beside the uncompressed ISO only when optical burning is
+	// enabled. The Burn phase verifies each burned disc against it (SPEC §10).
+	discManifestFileName = "disc-manifest.sha256"
 
 	// unknownIdentity is the placeholder for a drive/library identifier that could
 	// not be read, so the report never renders a blank provenance field.
@@ -123,6 +127,11 @@ type ReportInput struct {
 	PAR2     []PAR2Set
 	Plan     TapePlan
 	Written  []WrittenTape
+	// Discs are the recovery discs burned for the run, populated only for the
+	// post-burn re-render of the delivered report (the Report phase itself runs
+	// before the Burn phase, so it leaves this empty). When set, the report records
+	// a Discs section noting each burner and any deliberate overwrite (SPEC §10).
+	Discs []BurnResult
 }
 
 // ReportOutput is the Report activity's result: the on-disk paths of the two
@@ -137,6 +146,11 @@ type ReportOutput struct {
 	// only when optical burning is enabled (delivery.opticalBurn) — the mountable
 	// image the Burn phase burns. Empty when burning is disabled.
 	UncompressedISOPath string
+	// DiscManifestPath is the staged sha256sum manifest of the recovery ISO's
+	// contents, set only when optical burning is enabled. The Burn phase passes it
+	// to VerifyDisc to read back and verify each burned disc. Empty when burning is
+	// disabled.
+	DiscManifestPath string
 }
 
 // BuildReport builds the PDF report and compressed recovery ISO for the run
@@ -187,15 +201,13 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 
 	// Render the PDF to memory so the same bytes are both written to disk and
 	// embedded in the ISO (SPEC §10) — no round-trip through the filesystem.
-	manifest := buildReportManifest(input, queryDeviceIdentity(ctx, input.Config.Library))
-
-	var pdf bytes.Buffer
-	if err := report.Build(manifest, &pdf); err != nil {
-		return ReportOutput{}, fmt.Errorf("build PDF report: %w", err)
+	pdf, err := renderReportPDF(ctx, input)
+	if err != nil {
+		return ReportOutput{}, err
 	}
 
 	reportPath := filepath.Join(outDir, reportFileName)
-	if err := os.WriteFile(reportPath, pdf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(reportPath, pdf, 0o644); err != nil {
 		return ReportOutput{}, fmt.Errorf("write PDF report to %q: %w", reportPath, err)
 	}
 
@@ -216,20 +228,106 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 	}
 
 	isoInput := recoverykit.Input{
-		Report:            pdf.Bytes(),
+		Report:            pdf,
 		Manifest:          sha256Manifest,
 		TapeIndexes:       tapeIndexes(input.Written),
 		BinariesDir:       a.binariesDir,
 		RecoveryProcedure: recoveryProcedure,
 	}
 
-	if err := buildRecoveryISO(ctx, isoInput, isoPath, uncompressedISOPath); err != nil {
+	discManifest, err := buildRecoveryISO(ctx, isoInput, isoPath, uncompressedISOPath)
+	if err != nil {
 		return ReportOutput{}, err
+	}
+
+	// When burning is enabled, stage the disc-content manifest beside the
+	// uncompressed ISO so the Burn phase can verify each burned disc against it
+	// (SPEC §10). It lists the ISO's own files (report.pdf, manifest.sha256, …),
+	// distinct from the on-tape SHA-256 manifest embedded inside the ISO.
+	var discManifestPath string
+	if uncompressedISOPath != "" {
+		discManifestPath = filepath.Join(outDir, discManifestFileName)
+		if err := os.WriteFile(discManifestPath, discManifest.Bytes(), 0o644); err != nil {
+			return ReportOutput{}, fmt.Errorf("write disc-content manifest to %q: %w", discManifestPath, err)
+		}
 	}
 
 	slog.Info("report: built recovery artifacts", "report", reportPath, "iso", isoPath, "uncompressedISO", uncompressedISOPath)
 
-	return ReportOutput{ReportPath: reportPath, ISOPath: isoPath, UncompressedISOPath: uncompressedISOPath}, nil
+	return ReportOutput{
+		ReportPath:          reportPath,
+		ISOPath:             isoPath,
+		UncompressedISOPath: uncompressedISOPath,
+		DiscManifestPath:    discManifestPath,
+	}, nil
+}
+
+// renderReportPDF renders the run's PDF report to bytes (SPEC §9). It is shared
+// by the Report phase (which also embeds the bytes in the recovery ISO) and the
+// post-burn re-render of the delivered report (which records the burned discs),
+// so both produce byte-identical PDFs from the same run state. The escrow-identity
+// contract is enforced by the caller before staging anything.
+func renderReportPDF(ctx context.Context, input ReportInput) ([]byte, error) {
+	manifest := buildReportManifest(input, queryDeviceIdentity(ctx, input.Config.Library))
+
+	var pdf bytes.Buffer
+	if err := report.Build(manifest, &pdf); err != nil {
+		return nil, fmt.Errorf("build PDF report: %w", err)
+	}
+
+	return pdf.Bytes(), nil
+}
+
+// RebuildDeliveredReport re-renders the delivered PDF report from the full run
+// state now that the Burn phase has run, overwriting the staged report.pdf so the
+// delivered report records the burned discs and any deliberate disc overwrite
+// (SPEC §10). Only the delivered PDF is re-rendered — the recovery ISO (and the
+// pre-burn PDF copy inside it, which necessarily predates the burn) is left as-is.
+// It returns the path of the re-rendered report. The phase orders Report → Burn →
+// this re-render → Deliver.
+func (a *ReportActivities) RebuildDeliveredReport(ctx context.Context, input ReportInput) (string, error) {
+	if a.stagingRoot == "" {
+		return "", fmt.Errorf("staging directory is not configured (set TAPE_STAGING_DIR on the data worker)")
+	}
+
+	outDir := filepath.Join(a.stagingRoot, activity.GetInfo(ctx).WorkflowExecution.RunID)
+
+	var reportPath string
+
+	err := withActivityHeartbeat(ctx, func() error {
+		var err error
+
+		reportPath, err = a.rebuildReport(ctx, outDir, input)
+
+		return err
+	})
+
+	return reportPath, err
+}
+
+// rebuildReport is the body of the RebuildDeliveredReport activity, split out so
+// it can be exercised against a real directory without an activity context. It
+// re-renders the delivered PDF into outDir, overwriting the pre-burn report.pdf.
+func (a *ReportActivities) rebuildReport(ctx context.Context, outDir string, input ReportInput) (string, error) {
+	if err := verifyEscrowIdentity(ctx, input.Config.Encryption); err != nil {
+		return "", err
+	}
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return "", fmt.Errorf("create report output directory %q: %w", outDir, err)
+	}
+
+	pdf, err := renderReportPDF(ctx, input)
+	if err != nil {
+		return "", err
+	}
+
+	reportPath := filepath.Join(outDir, reportFileName)
+	if err := os.WriteFile(reportPath, pdf, 0o644); err != nil {
+		return "", fmt.Errorf("write delivered PDF report to %q: %w", reportPath, err)
+	}
+
+	return reportPath, nil
 }
 
 // verifyEscrowIdentity enforces the key-escrow contract (SPEC §7): the private
@@ -260,10 +358,10 @@ func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) err
 // io.MultiWriter, so the tens-of-MB image is assembled exactly once and never re-
 // built. When uncompressedPath is empty the raw stream is piped straight into the
 // compressor and nothing extra is staged (the prior compressed-only behavior).
-func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, compressedPath, uncompressedPath string) error {
+func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, compressedPath, uncompressedPath string) (recoverykit.Manifest, error) {
 	out, err := os.Create(compressedPath)
 	if err != nil {
-		return fmt.Errorf("create compressed ISO %q: %w", compressedPath, err)
+		return nil, fmt.Errorf("create compressed ISO %q: %w", compressedPath, err)
 	}
 
 	defer func() { _ = out.Close() }()
@@ -281,7 +379,7 @@ func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, compresse
 	if uncompressedPath != "" {
 		raw, err = os.Create(uncompressedPath)
 		if err != nil {
-			return fmt.Errorf("create uncompressed ISO %q: %w", uncompressedPath, err)
+			return nil, fmt.Errorf("create uncompressed ISO %q: %w", uncompressedPath, err)
 		}
 
 		defer func() { _ = raw.Close() }()
@@ -289,8 +387,14 @@ func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, compresse
 		buildTarget = io.MultiWriter(writer, raw)
 	}
 
+	// discManifest is the disc-content manifest recoverykit.Build returns as it
+	// stages each file; the Burn phase verifies the burned disc against it.
+	var discManifest recoverykit.Manifest
+
 	group.Go(func() error {
-		buildErr := recoverykit.Build(groupCtx, isoInput, buildTarget)
+		var buildErr error
+
+		discManifest, buildErr = recoverykit.Build(groupCtx, isoInput, buildTarget)
 		_ = writer.CloseWithError(buildErr)
 
 		return buildErr
@@ -300,24 +404,24 @@ func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, compresse
 	_ = reader.CloseWithError(compressErr)
 
 	if waitErr := group.Wait(); waitErr != nil {
-		return fmt.Errorf("build recovery ISO: %w", waitErr)
+		return nil, fmt.Errorf("build recovery ISO: %w", waitErr)
 	}
 
 	if compressErr != nil {
-		return fmt.Errorf("compress recovery ISO: %w", compressErr)
+		return nil, fmt.Errorf("compress recovery ISO: %w", compressErr)
 	}
 
 	if err := out.Close(); err != nil {
-		return fmt.Errorf("close compressed ISO %q: %w", compressedPath, err)
+		return nil, fmt.Errorf("close compressed ISO %q: %w", compressedPath, err)
 	}
 
 	if raw != nil {
 		if err := raw.Close(); err != nil {
-			return fmt.Errorf("close uncompressed ISO %q: %w", uncompressedPath, err)
+			return nil, fmt.Errorf("close uncompressed ISO %q: %w", uncompressedPath, err)
 		}
 	}
 
-	return nil
+	return discManifest, nil
 }
 
 // tapeIndexes maps each written physical tape to its LTFS index backup for the
@@ -372,10 +476,31 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 		Date:              input.Date,
 		Archives:          archives,
 		Tapes:             reportTapes(input, nameByIndex),
+		Discs:             reportDiscs(input.Discs),
 		Build:             buildParams(input.Config, device),
 		AgeIdentity:       input.Config.Encryption.Identity,
 		RecoveryProcedure: recoveryProcedure,
 	}
+}
+
+// reportDiscs maps the recovery discs burned for the run to the report shape,
+// carrying each burner device and whether a non-blank disc was reclaimed (SPEC
+// §10). It returns nil for a run without burning so the report omits the Discs
+// section entirely (the on-disc, pre-burn report never has one).
+func reportDiscs(discs []BurnResult) []report.Disc {
+	if len(discs) == 0 {
+		return nil
+	}
+
+	out := make([]report.Disc, 0, len(discs))
+	for _, disc := range discs {
+		out = append(out, report.Disc{
+			Device:            disc.Device,
+			OverwroteNonBlank: disc.OverwroteNonBlank,
+		})
+	}
+
+	return out
 }
 
 // archiveName is the display name of the archive for source index, taken from the
@@ -644,25 +769,38 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 
 	var activities *ReportActivities
 
-	input := ReportInput{
-		Config:   cfg,
-		RunID:    workflow.GetInfo(ctx).WorkflowExecution.ID,
-		Date:     workflow.Now(ctx),
-		Resolved: state.resolved,
-		Staged:   state.staged,
-		PAR2:     state.par2,
-		Plan:     state.plan,
-		Written:  state.written,
-	}
+	// Capture the report date once so the post-burn re-render of the delivered
+	// report carries the same date as the on-disc copy that predates the burn.
+	state.reportDate = workflow.Now(ctx)
 
 	var output ReportOutput
-	if err := workflow.ExecuteActivity(dataCtx, activities.BuildReport, input).Get(dataCtx, &output); err != nil {
+	if err := workflow.ExecuteActivity(dataCtx, activities.BuildReport, reportInput(ctx, cfg, state)).Get(dataCtx, &output); err != nil {
 		return err
 	}
 
 	state.reportPath = output.ReportPath
 	state.isoPath = output.ISOPath
 	state.uncompressedISOPath = output.UncompressedISOPath
+	state.discManifestPath = output.DiscManifestPath
 
 	return nil
+}
+
+// reportInput assembles the Report activity payload from the run config and run
+// state (SPEC §4.3 phase 9). It is shared by the Report phase and the post-burn
+// report re-render so both render from identical run state; RunID and the report
+// date come from the workflow (deterministic) so the artifact is stamped
+// identically across retries and across the two renders. Discs is left empty; the
+// re-render sets it from the burned discs.
+func reportInput(ctx workflow.Context, cfg config.Config, state *runState) ReportInput {
+	return ReportInput{
+		Config:   cfg,
+		RunID:    workflow.GetInfo(ctx).WorkflowExecution.ID,
+		Date:     state.reportDate,
+		Resolved: state.resolved,
+		Staged:   state.staged,
+		PAR2:     state.par2,
+		Plan:     state.plan,
+		Written:  state.written,
+	}
 }

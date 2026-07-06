@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/pkg/optical"
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
@@ -125,6 +127,108 @@ func TestReportTapesPropagatesOverwroteNonBlank(t *testing.T) {
 		"an overwritten non-blank tape must be flagged in the report")
 	assert.False(t, manifest.Tapes[1].OverwroteNonBlank,
 		"a tape written to a blank tape must not be flagged as an overwrite")
+}
+
+// TestReportDiscsPropagatesOverwrite checks the burned discs map into the report
+// manifest, carrying each burner device and any deliberate overwrite (SPEC §10),
+// and that a run without burning yields no Discs section.
+func TestReportDiscsPropagatesOverwrite(t *testing.T) {
+	t.Parallel()
+
+	input := reportTestInput(t)
+	input.Discs = []BurnResult{
+		{Device: "/dev/sr0"},
+		{Device: "/dev/sr1", OverwroteNonBlank: true},
+	}
+
+	manifest := buildReportManifest(input, deviceIdentity{})
+
+	require.Len(t, manifest.Discs, 2)
+	assert.Equal(t, "/dev/sr0", manifest.Discs[0].Device)
+	assert.False(t, manifest.Discs[0].OverwroteNonBlank, "a disc burned to a blank medium is not an overwrite")
+	assert.True(t, manifest.Discs[1].OverwroteNonBlank, "a reclaimed non-blank disc must be flagged in the report")
+
+	input.Discs = nil
+	assert.Empty(t, buildReportManifest(input, deviceIdentity{}).Discs,
+		"a run without optical burning renders no Discs section")
+}
+
+// TestBuildReportStagesDiscManifest checks that with optical burning enabled the
+// Report phase stages the disc-content manifest beside the uncompressed ISO and
+// records its path (SPEC §10). The manifest lists the ISO's own files with SHA-256
+// digests, so the Burn phase's VerifyDisc can read each burned disc back against
+// it — distinct from the on-tape SHA-256 manifest embedded inside the ISO.
+func TestBuildReportStagesDiscManifest(t *testing.T) {
+	t.Parallel()
+
+	identity, recipient := generateTestKeypair(t)
+
+	input := reportTestInput(t)
+	input.Config.Encryption = config.Encryption{Recipients: []string{recipient}, Identity: identity}
+	input.Config.Delivery.OpticalBurn = &config.OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 1}
+
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+
+	outDir := t.TempDir()
+
+	output, err := acts.buildReport(t.Context(), outDir, input)
+	require.NoError(t, err)
+
+	require.Equal(t, filepath.Join(outDir, discManifestFileName), output.DiscManifestPath)
+
+	data, err := os.ReadFile(output.DiscManifestPath)
+	require.NoError(t, err)
+
+	manifest, err := optical.ParseManifest(bytes.NewReader(data))
+	require.NoError(t, err)
+
+	// The disc-content manifest names the recovery ISO's own files, not the on-tape
+	// files listed inside it.
+	for _, discPath := range []string{"report.pdf", "manifest.sha256", "recovery.txt"} {
+		assert.Contains(t, manifest, discPath, "disc manifest must list the ISO's own %s", discPath)
+	}
+
+	assert.Contains(t, manifest, "ltfs-index/tape01l6.schema",
+		"disc manifest must list each tape's LTFS index backup at its lowercased read-back path")
+
+	for discPath, digest := range manifest {
+		assert.Lenf(t, digest, 64, "digest for %s must be a hex SHA-256", discPath)
+	}
+}
+
+// TestRebuildDeliveredReport checks the post-burn re-render (SPEC §10): it
+// overwrites the delivered report.pdf at the same path with a fresh render that
+// records the burned discs, leaving any other staged artifact untouched.
+func TestRebuildDeliveredReport(t *testing.T) {
+	t.Parallel()
+
+	identity, recipient := generateTestKeypair(t)
+
+	input := reportTestInput(t)
+	input.Config.Encryption = config.Encryption{Recipients: []string{recipient}, Identity: identity}
+
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+	outDir := t.TempDir()
+
+	// Pre-burn build: the delivered report predates the burn, so it records no discs.
+	preBurn, err := acts.rebuildReport(t.Context(), outDir, input)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(outDir, reportFileName), preBurn)
+
+	before, err := os.ReadFile(preBurn)
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(string(before), "%PDF-"), "delivered report must be a PDF")
+
+	// Post-burn re-render with the burned discs (one deliberately reclaimed).
+	input.Discs = []BurnResult{{Device: "/dev/sr0", OverwroteNonBlank: true}}
+
+	rebuilt, err := acts.rebuildReport(t.Context(), outDir, input)
+	require.NoError(t, err)
+	assert.Equal(t, preBurn, rebuilt, "the re-render overwrites the delivered report at the same path")
+
+	after, err := os.ReadFile(rebuilt)
+	require.NoError(t, err)
+	assert.NotEqual(t, before, after, "the re-rendered report must differ once it records the burned discs")
 }
 
 // TestQueryDeviceIdentityDegrades covers the graceful-degradation contract: when
@@ -287,6 +391,8 @@ func TestBuildReport(t *testing.T) {
 	// uncompressed ISO is staged: byte-for-byte the compressed-only behavior.
 	assert.Empty(t, output.UncompressedISOPath, "no uncompressed ISO must be staged when burning is disabled")
 	assert.NoFileExists(t, filepath.Join(outDir, isoFileName), "the uncompressed ISO file must not exist when burning is disabled")
+	assert.Empty(t, output.DiscManifestPath, "no disc-content manifest must be staged when burning is disabled")
+	assert.NoFileExists(t, filepath.Join(outDir, discManifestFileName), "the disc-content manifest must not exist when burning is disabled")
 
 	pdf, err := os.ReadFile(output.ReportPath)
 	require.NoError(t, err)

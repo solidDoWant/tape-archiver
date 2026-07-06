@@ -22,6 +22,7 @@ const (
 	PhaseWrite        = "Write"
 	PhaseEject        = "Eject"
 	PhaseReport       = "Report"
+	PhaseBurn         = "Burn"
 	PhaseDeliver      = "Deliver"
 )
 
@@ -55,11 +56,11 @@ type phase struct {
 	completes []string
 }
 
-// backupPhases returns the ten backup pipeline phases in execution order
+// backupPhases returns the backup pipeline phases in execution order
 // (SPEC §4.3). Control-side phases (snapshot resolution, planning, report/ISO,
 // delivery) run on the control queue; bulk-data phases (prepare, PAR2, verify,
-// changer, LTFS) run on the data queue (SPEC §4.1). The activities are stubs
-// today; later sub-issues fill in each body.
+// changer, LTFS, optical burn) run on the data queue (SPEC §4.1). The activities
+// are stubs today; later sub-issues fill in each body.
 func backupPhases() []phase {
 	return []phase{
 		{name: PhaseResolve, queue: TaskQueue, run: resolvePhase},
@@ -70,6 +71,10 @@ func backupPhases() []phase {
 		// The Load → Write → Eject drive-set loop (SPEC §4.3 phases 6–8).
 		{name: PhaseWrite, queue: DataTaskQueue, tapePath: true, completes: []string{PhaseLoad, PhaseWrite, PhaseEject}},
 		{name: PhaseReport, queue: DataTaskQueue, run: reportPhase},
+		// Burn runs between Report and Deliver: it burns the recovery disc from the
+		// uncompressed ISO Report staged (SPEC §10), then re-renders the delivered
+		// report to record the discs. A no-op when optical burning is disabled.
+		{name: PhaseBurn, queue: DataTaskQueue, run: burnPhase},
 		{name: PhaseDeliver, queue: DataTaskQueue, run: deliverPhase},
 	}
 }
@@ -90,7 +95,7 @@ func (p phase) execute(ctx workflow.Context, cfg config.Config, state *runState)
 	return workflow.ExecuteActivity(actx, p.activity).Get(actx, nil)
 }
 
-// Backup is the tape-archiver backup workflow (SPEC §4.3). It sequences the ten
+// Backup is the tape-archiver backup workflow (SPEC §4.3). It sequences the
 // pipeline phases in order, tracking the most recently completed phase for the
 // LastCompletedPhaseQuery, and returns a Result listing the completed phases on
 // success. On any phase failure a deferred handler fires the operational failure
@@ -214,5 +219,13 @@ func runTapePath(ctx workflow.Context, cfg config.Config, state *runState, faili
 // The Report phase (SPEC §4.3 phase 9) is implemented in report.go; it
 // orchestrates the data-side report/ISO build activity.
 
-// The Deliver phase (SPEC §4.3 phase 10) is implemented in deliver.go; it
+// The Burn phase (SPEC §10) is implemented in burnpath.go / burnpause.go, driven
+// per burn-set by burnPhase → runBurnPath (the optical analogue of the tape
+// Load/Write/Eject drive-set loop). It burns the recovery disc from the
+// uncompressed ISO Report staged, pausing for the operator between burn-sets (a
+// manual disc swap — there is no optical autoloader) and on any burn/verify
+// failure, then re-renders the delivered report to record the discs. It is a
+// no-op when optical burning is disabled, so the run completes exactly as before.
+
+// The Deliver phase (SPEC §4.3 phase 11) is implemented in deliver.go; it
 // orchestrates the data-side Discord delivery activity.

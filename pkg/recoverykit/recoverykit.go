@@ -31,16 +31,21 @@ package recoverykit
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"debug/elf"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kdomanski/iso9660"
+
+	"github.com/solidDoWant/tape-archiver/pkg/checksum"
 )
 
 // volumeIdentifier is the ISO 9660 primary volume identifier. It uses only
@@ -81,6 +86,49 @@ type Input struct {
 	RecoveryProcedure string
 }
 
+// Manifest maps each disc-relative, slash-separated path Build stages to the
+// lowercase hex SHA-256 of that file's content. It is the set of files a burned
+// disc must contain, and their digests, for the Burn phase's read-back
+// verification (SPEC §10; pkg/optical.Verify). Paths are recorded exactly as the
+// burned disc presents them on read-back — this image carries no Rock Ridge, so
+// the ISO 9660 mount lowercases names — so a manifest built here compares equal
+// to what pkg/optical.Verify walks off the mounted disc without any per-caller
+// case fix-up. Render it to standard sha256sum format with Bytes.
+type Manifest map[string]string
+
+// Bytes renders the manifest to the standard sha256sum format — one
+// "<hex-digest>  <path>" line per file, sorted by path for a deterministic,
+// diff-stable file — which pkg/optical.ParseManifest reads back verbatim.
+func (m Manifest) Bytes() []byte {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	var builder strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&builder, "%s  %s\n", m[name], name)
+	}
+
+	return []byte(builder.String())
+}
+
+// add records the disc-relative path -> SHA-256 of data, under the path the
+// burned disc presents on read-back (lowercased; see Manifest).
+func (m Manifest) add(discPath string, data []byte) {
+	sum := sha256.Sum256(data)
+	m[readbackPath(discPath)] = hex.EncodeToString(sum[:])
+}
+
+// readbackPath maps a staged disc path to the path the read-back presents. The
+// image carries no Rock Ridge, so the ISO 9660 mount (and the pure-Go reader)
+// lowercases every name; the manifest keys must match that to compare equal.
+func readbackPath(discPath string) string {
+	return strings.ToLower(discPath)
+}
+
 // TapeIndex is one tape's LTFS index backup, named by the tape's barcode — the
 // canonical physical ID (SPEC §6).
 type TapeIndex struct {
@@ -91,28 +139,32 @@ type TapeIndex struct {
 	Index []byte
 }
 
-// Build assembles in into a valid ISO 9660 image and writes it to w. It returns
-// an error if any input is missing, if any recovery binary is not a statically
+// Build assembles in into a valid ISO 9660 image and writes it to w, returning
+// the disc-content Manifest (every staged file's read-back path -> SHA-256) so
+// the Burn phase can verify the burned disc against it (SPEC §10). It returns an
+// error if any input is missing, if any recovery binary is not a statically
 // linked ELF executable, or if the image cannot be written. ctx cancellation is
 // honored between staging steps.
-func Build(ctx context.Context, in Input, w io.Writer) error {
+func Build(ctx context.Context, in Input, w io.Writer) (Manifest, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := in.validate(); err != nil {
-		return fmt.Errorf("recoverykit: %w", err)
+		return nil, fmt.Errorf("recoverykit: %w", err)
 	}
 
 	writer, err := iso9660.NewWriter()
 	if err != nil {
-		return fmt.Errorf("recoverykit: create ISO writer: %w", err)
+		return nil, fmt.Errorf("recoverykit: create ISO writer: %w", err)
 	}
 	defer func() {
 		if cerr := writer.Cleanup(); cerr != nil {
 			slog.Warn("recoverykit: cleaning up ISO staging directory", "error", cerr)
 		}
 	}()
+
+	manifest := make(Manifest)
 
 	for _, artifact := range []struct {
 		name string
@@ -123,30 +175,34 @@ func Build(ctx context.Context, in Input, w io.Writer) error {
 		{procedurePath, []byte(in.RecoveryProcedure)},
 	} {
 		if err := writer.AddFile(bytes.NewReader(artifact.data), artifact.name); err != nil {
-			return fmt.Errorf("recoverykit: stage %s: %w", artifact.name, err)
+			return nil, fmt.Errorf("recoverykit: stage %s: %w", artifact.name, err)
 		}
+
+		manifest.add(artifact.name, artifact.data)
 	}
 
 	for _, tape := range in.TapeIndexes {
 		target := path.Join(indexDir, tape.Barcode+indexSuffix)
 		if err := writer.AddFile(bytes.NewReader(tape.Index), target); err != nil {
-			return fmt.Errorf("recoverykit: stage LTFS index for tape %s: %w", tape.Barcode, err)
+			return nil, fmt.Errorf("recoverykit: stage LTFS index for tape %s: %w", tape.Barcode, err)
 		}
+
+		manifest.add(target, tape.Index)
 	}
 
-	if err := stageBinaries(ctx, writer, in.BinariesDir); err != nil {
-		return fmt.Errorf("recoverykit: %w", err)
+	if err := stageBinaries(ctx, writer, in.BinariesDir, manifest); err != nil {
+		return nil, fmt.Errorf("recoverykit: %w", err)
 	}
 
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := writer.WriteTo(w, volumeIdentifier); err != nil {
-		return fmt.Errorf("recoverykit: write ISO: %w", err)
+		return nil, fmt.Errorf("recoverykit: write ISO: %w", err)
 	}
 
-	return nil
+	return manifest, nil
 }
 
 // validate checks that every required artifact is present and that the tape
@@ -197,11 +253,12 @@ func (in Input) validate() error {
 }
 
 // stageBinaries stages every top-level regular file in dir into /bin, after
-// proving each is a statically linked ELF executable. It fails if the directory
+// proving each is a statically linked ELF executable, recording each staged
+// binary's read-back path and SHA-256 into manifest. It fails if the directory
 // cannot be read, if a non-regular file is present, if a binary is not static,
 // or if the directory yields no binaries (a recovery kit with no tooling is
 // useless).
-func stageBinaries(ctx context.Context, writer *iso9660.ImageWriter, dir string) error {
+func stageBinaries(ctx context.Context, writer *iso9660.ImageWriter, dir string, manifest Manifest) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("read binaries directory %s: %w", dir, err)
@@ -237,6 +294,13 @@ func stageBinaries(ctx context.Context, writer *iso9660.ImageWriter, dir string)
 		if err := writer.AddLocalFile(origin, target); err != nil {
 			return fmt.Errorf("stage recovery binary %s: %w", origin, err)
 		}
+
+		digest, err := checksum.SHA256File(origin)
+		if err != nil {
+			return fmt.Errorf("checksum recovery binary %s: %w", origin, err)
+		}
+
+		manifest[readbackPath(target)] = digest
 
 		slog.Debug("recoverykit: staged recovery binary", "binary", entry.Name())
 

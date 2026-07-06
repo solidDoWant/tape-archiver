@@ -265,6 +265,44 @@ func TestBuildTapesSectionOverwroteNonBlank(t *testing.T) {
 		"a tape written to a blank tape must not be annotated as an overwrite")
 }
 
+// TestBuildDiscsSection asserts the optical Recovery discs section renders only
+// when discs were burned (SPEC §10), naming each burner and annotating a
+// deliberately reclaimed non-blank disc — and is omitted entirely otherwise, so a
+// run without optical burning renders exactly as before.
+func TestBuildDiscsSection(t *testing.T) {
+	t.Parallel()
+
+	const (
+		heading    = "Recovery discs"
+		annotation = "Overwrote a non-blank disc"
+	)
+
+	// No discs: the section is omitted entirely.
+	none := stripWhitespace(extractText(t, completeManifest()))
+	assert.NotContains(t, none, stripWhitespace(heading),
+		"a run without optical burning must not render a Recovery discs section")
+
+	// Blank discs: the section names the burners without an overwrite annotation.
+	withDiscs := completeManifest()
+	withDiscs.Discs = []report.Disc{
+		{Device: "/dev/sr0"},
+		{Device: "/dev/sr1", OverwroteNonBlank: true},
+	}
+
+	rendered := stripWhitespace(extractText(t, withDiscs))
+	assert.Contains(t, rendered, stripWhitespace(heading), "burned discs render a Recovery discs section")
+	assert.Contains(t, rendered, stripWhitespace("/dev/sr0"), "the section names each burner")
+	assert.Contains(t, rendered, stripWhitespace("/dev/sr1"), "the section names each burner")
+	assert.Contains(t, rendered, stripWhitespace(annotation),
+		"a reclaimed non-blank disc must be annotated in the Recovery discs section")
+
+	// A disc burned to a blank medium carries no overwrite annotation.
+	blankOnly := completeManifest()
+	blankOnly.Discs = []report.Disc{{Device: "/dev/sr0"}}
+	assert.NotContains(t, stripWhitespace(extractText(t, blankOnly)), stripWhitespace(annotation),
+		"a disc burned to a blank medium must not be annotated as an overwrite")
+}
+
 func TestBuildProducesValidPDF(t *testing.T) {
 	t.Parallel()
 
