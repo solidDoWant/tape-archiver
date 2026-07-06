@@ -231,8 +231,6 @@ func burnDiscSet(ctx workflow.Context, cfg config.Config, state *runState, set b
 	ch := workflow.NewBufferedChannel(ctx, len(set))
 
 	for i, assignment := range set {
-		i, assignment := i, assignment
-
 		workflow.Go(ctx, func(gctx workflow.Context) {
 			res := discResult{index: i}
 
