@@ -60,6 +60,7 @@ a raw ZFS dataset/snapshot. Exactly one of `k8s` or `zfsPath` must be set.
 | `compression` | `boolean` | no | Enable zstd compression before encryption. Defaults to `true` when absent. |
 | `k8s` | `K8sRef` | no* | Reference to a Kubernetes snapshot resource. |
 | `zfsPath` | `ZFSPathSource` | no* | Explicit ZFS dataset or snapshot name. |
+| `label` | `string` | no | Overrides the descriptive on-tape archive directory name (`archives/NNN-<label>/`). When absent, a label is derived from the source's identity (a raw ZFS source's dataset last component, a named k8s resource's name, or its label selector). The value is lowercased and sanitized to `[a-z0-9._-]` (`/`, `@`, `:`, and whitespace become `-`) and truncated to 40 characters, so it need not already be filesystem-safe. It must not be blank when set. It need not be unique — the zero-padded source-index prefix keeps directories distinct. |
 
 \* Exactly one of `k8s` or `zfsPath` must be set.
 

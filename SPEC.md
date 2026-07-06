@@ -276,8 +276,15 @@ All formats are open and widely implemented, for 20-year recoverability.
   per-tape manifest and the report reference tapes by barcode. (Production tapes are
   barcode-labeled and read by the library.)
 - **Directory layout within LTFS:**
-  - `archives/NNN/` — one directory per archive, where `NNN` is the zero-padded source
-    index (e.g. `archives/000/`, `archives/001/`). Each contains: the fixed-size
+  - `archives/NNN-<label>/` — one directory per archive, where `NNN` is the zero-padded
+    source index and `<label>` a short, sanitized descriptive name for the source
+    (e.g. `archives/000-photos/`, `archives/001-plex-group-snap/`). The `NNN` prefix
+    orders the directories and keeps them unique even when two sources share a label;
+    `<label>` is the source's optional `label` override, or a name derived from its
+    identity (a raw ZFS source's dataset last component, a named k8s resource's name,
+    or a label selector), sanitized to `[a-z0-9._-]` and bounded in length. The slice
+    and PAR2 basenames inside are unchanged (`archive.NNN`, `archive*.par2`), so the
+    recovery globs still match. Each directory contains: the fixed-size
     `age`-encrypted, optionally `zstd`-compressed `tar` slice files; and the PAR2
     recovery set covering those slices.
   - `manifest.json` — top-level checksum manifest at the LTFS root, written **last**

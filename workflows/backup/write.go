@@ -13,17 +13,19 @@ import (
 
 // The on-tape directory layout (SPEC §6):
 //
-//   archives/NNN/<files>   per-archive slices and PAR2 recovery files,
-//                          where NNN is the zero-padded source index.
-//   manifest.json          top-level checksum manifest, written LAST so its
-//                          presence signals a complete write.
+//   archives/NNN-<label>/<files>   per-archive slices and PAR2 recovery files,
+//                                  where NNN is the zero-padded source index and
+//                                  <label> a sanitized descriptive source name.
+//   manifest.json                  top-level checksum manifest, written LAST so its
+//                                  presence signals a complete write.
 //
-// Writing the manifest last means an incomplete write can always be identified:
-// a tape without manifest.json was not fully written by this run.
+// The NNN prefix keeps directories unique and ordered even when two sources share a
+// label; the slice and PAR2 basenames within a directory are unchanged, so the
+// recovery globs still match (archiveDirName, SPEC §6). Writing the manifest last
+// means an incomplete write can always be identified: a tape without manifest.json
+// was not fully written by this run.
 
 const (
-	// archiveDirFmt is the per-archive directory name under the LTFS root.
-	archiveDirFmt = "archives/%03d"
 	// manifestName is the top-level manifest filename at the LTFS root.
 	manifestName = "manifest.json"
 )
@@ -32,8 +34,13 @@ const (
 // It is embedded in WriteTreeInput so the WriteTree activity knows what to copy.
 type TapeWriteArchive struct {
 	// SourceIndex identifies the archive within the run (its position in
-	// Config.Sources and the matching StagedArchive/PAR2Set).
+	// Config.Sources and the matching StagedArchive/PAR2Set). It is the NNN prefix
+	// of the on-tape directory and its guaranteed-unique key.
 	SourceIndex int
+	// Label is the sanitized descriptive name in the archive's on-tape directory
+	// (archives/NNN-<label>/, SPEC §6), carried from the resolved work list. It may
+	// be empty or shared with another archive; the SourceIndex prefix disambiguates.
+	Label string
 	// Slices are the staged, checksummed archive slice files in order.
 	Slices []StagedSlice
 	// PAR2Files are the staged PAR2 recovery files for this archive.
@@ -69,7 +76,8 @@ type ArchiveManifest struct {
 // checksum. The SHA-256 is the precomputed digest from Prepare/GeneratePAR2 —
 // no computation occurs in the write window (SPEC §14, CLAUDE.md).
 type ManifestFile struct {
-	// TapePath is the path relative to the LTFS root (e.g. archives/000/archive.000).
+	// TapePath is the path relative to the LTFS root (e.g.
+	// archives/000-photos/archive.000).
 	TapePath string `json:"tape_path"`
 	// SHA256 is the lowercase hex SHA-256 digest of the file's contents.
 	SHA256 string `json:"sha256"`
@@ -79,17 +87,16 @@ type ManifestFile struct {
 }
 
 // copyTape copies the staged archive slices and PAR2 recovery files for each
-// archive to the LTFS mountpoint. Each archive lands under archives/NNN/
-// (NNN = zero-padded source index). The context is checked between files so a
-// long copy honours cancellation without leaving a partial file in the
-// destination.
+// archive to the LTFS mountpoint. Each archive lands under archives/NNN-<label>/
+// (archiveDirName). The context is checked between files so a long copy honours
+// cancellation without leaving a partial file in the destination.
 //
 // This is a pure disk→tape copy — no checksumming or computation occurs here.
 // The precomputed SHA-256s from Prepare/GeneratePAR2 populate the manifest
 // written by writeManifest.
 func copyTape(ctx context.Context, mountpoint string, archives []TapeWriteArchive) error {
 	for _, archive := range archives {
-		dir := filepath.Join(mountpoint, fmt.Sprintf(archiveDirFmt, archive.SourceIndex))
+		dir := filepath.Join(mountpoint, archiveDirName(archive.SourceIndex, archive.Label))
 
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create archive directory %s: %w", dir, err)
@@ -154,7 +161,7 @@ func buildManifest(barcode tape.Barcode, tapeIndex, copyIndex int, archives []Ta
 	archiveManifests := make([]ArchiveManifest, 0, len(archives))
 
 	for _, archive := range archives {
-		dir := fmt.Sprintf(archiveDirFmt, archive.SourceIndex)
+		dir := archiveDirName(archive.SourceIndex, archive.Label)
 
 		files := make([]ManifestFile, 0, len(archive.Slices))
 		for _, slice := range archive.Slices {
@@ -232,6 +239,13 @@ func archivesForTape(state *runState, tapeIndex int) ([]TapeWriteArchive, error)
 		par2ByIndex[p.SourceIndex] = p
 	}
 
+	// The descriptive on-tape directory label travels with the resolved work list
+	// (SPEC §6); map it by source index so each written archive carries its label.
+	labelByIndex := make(map[int]string, len(state.resolved))
+	for _, r := range state.resolved {
+		labelByIndex[r.SourceIndex] = r.Label
+	}
+
 	archives := make([]TapeWriteArchive, 0, len(planned.Archives))
 
 	for _, placement := range planned.Archives {
@@ -249,6 +263,7 @@ func archivesForTape(state *runState, tapeIndex int) ([]TapeWriteArchive, error)
 
 		archives = append(archives, TapeWriteArchive{
 			SourceIndex: placement.SourceIndex,
+			Label:       labelByIndex[placement.SourceIndex],
 			Slices:      staged.Slices,
 			PAR2Files:   par2.Files,
 		})

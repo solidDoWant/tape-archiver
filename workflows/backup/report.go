@@ -86,16 +86,17 @@ on this disc.
 2.  Mount the tape's LTFS volume read-only:  ltfs -o ro <mountpoint>
     If the on-tape LTFS index is damaged, see recovery-procedure.md (ltfsck
     --deep-recovery, or the captured ltfs-index/<barcode>.schema extents).
-3.  Copy the tape's files to disk. Each archive lives under archives/NNN/; the
-    per-tape manifest.json lists every file and its SHA-256.
+3.  Copy the tape's files to disk. Each archive lives under archives/NNN-<label>/
+    (NNN is the source index; <label> is a descriptive name); the per-tape
+    manifest.json lists every file and its SHA-256.
 4.  Verify the copied files against manifest.sha256 with the system sha256sum
     (coreutils, on any Linux host). From the directory holding the copied
     archives/ tree:
         sha256sum -c /path/to/disc/manifest.sha256
     If any archive slice or its PAR2 files are corrupt, repair with:
-        bin/par2 repair archives/NNN/archive.par2
+        bin/par2 repair archives/NNN-<label>/archive.par2
 5.  Concatenate an archive's slices in order to reconstruct its age stream:
-        cat archives/NNN/archive.000 archives/NNN/archive.001 ... > archive.age
+        cat archives/NNN-<label>/archive.000 archives/NNN-<label>/archive.001 ... > archive.age
 6.  Decrypt with the escrowed identity (save it to identity.txt first):
         bin/age -d -i identity.txt -o archive.tar.zst archive.age
 7.  If the archive was compressed, decompress it:
@@ -414,6 +415,7 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 
 		archives = append(archives, report.Archive{
 			Name:            name,
+			Directory:       archiveDirName(staged.SourceIndex, resolved.Label),
 			MemberVolumes:   memberVolumes(resolved),
 			SourceSnapshots: sourceSnapshots(resolved),
 			Files:           archiveFiles(staged, par2ByIndex[staged.SourceIndex]),
@@ -603,7 +605,9 @@ func redundancyPolicy(redundancy config.Redundancy) string {
 // any tape. Lines are sorted for a deterministic, diff-stable manifest. It reads
 // no files — every digest is the precomputed one from Prepare/GeneratePAR2.
 func buildSHA256Manifest(input ReportInput) ([]byte, error) {
-	state := &runState{staged: input.Staged, par2: input.PAR2, plan: input.Plan, written: input.Written}
+	// resolved carries each archive's descriptive directory label, so it is needed
+	// here for archivesForTape to reproduce the on-tape paths (SPEC §6).
+	state := &runState{resolved: input.Resolved, staged: input.Staged, par2: input.PAR2, plan: input.Plan, written: input.Written}
 
 	var lines []string
 

@@ -150,6 +150,7 @@ func TestTapePath(t *testing.T) {
 	archives := []TapeWriteArchive{
 		{
 			SourceIndex: 0,
+			Label:       "integration",
 			Slices: []StagedSlice{
 				{Path: srcFile, SHA256: "deadbeef", SizeBytes: 31},
 			},
@@ -406,6 +407,7 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 	archives := []TapeWriteArchive{
 		{
 			SourceIndex: 0,
+			Label:       "integration",
 			Slices:      []StagedSlice{{Path: srcFile, SHA256: "deadbeef", SizeBytes: 36}},
 		},
 	}

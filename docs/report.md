@@ -10,8 +10,9 @@ embedded in the recovery ISO.
 The report contains, at minimum:
 
 - **Run** — run id and date.
-- **Contents manifest** — every archive, with its member volumes, source snapshots, and
-  per-file sizes and SHA-256 checksums.
+- **Contents manifest** — every archive, with its on-tape directory
+  (`archives/NNN-<label>/`), member volumes, source snapshots, and per-file sizes and
+  SHA-256 checksums.
 - **Tapes** — which physical tape (by barcode/label) holds what. A tape that was written
   over a non-blank tape (because the run set [`library.allowNonBlankTapes`](configuration.md))
   is annotated here as `[Overwrote a non-blank tape]`, so a deliberate, irreversible

@@ -182,7 +182,7 @@ func (a *WriteActivities) FormatTape(ctx context.Context, input FormatInput) err
 }
 
 // WriteTree mounts the LTFS volume on the formatted tape, copies the staged
-// archive tree to the mountpoint (archives/NNN/ per archive, SPEC §6), writes
+// archive tree to the mountpoint (archives/NNN-<label>/ per archive, SPEC §6), writes
 // the per-tape manifest last, and parks the live mount in the registry so
 // FinalizeTape can retrieve it.
 //

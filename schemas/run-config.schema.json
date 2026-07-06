@@ -205,6 +205,9 @@
         },
         "zfsPath": {
           "$ref": "#/$defs/ZFSPathSource"
+        },
+        "label": {
+          "type": "string"
         }
       },
       "additionalProperties": false,

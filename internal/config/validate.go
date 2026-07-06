@@ -96,6 +96,13 @@ func (o *OpticalBurn) validate() error {
 }
 
 func (s Source) validate(index int) error {
+	// A set-but-blank label is a mistake worth surfacing rather than silently
+	// sanitizing to nothing; any other characters are sanitized at use, so no
+	// further character validation is needed here.
+	if s.Label != nil && strings.TrimSpace(*s.Label) == "" {
+		return fmt.Errorf("sources[%d].label: must not be blank when set", index)
+	}
+
 	hasK8s := s.K8s != nil
 
 	hasZFS := s.ZFSPath != nil

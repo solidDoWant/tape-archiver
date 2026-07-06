@@ -61,6 +61,12 @@ type Source struct {
 	Compression *bool          `json:"compression,omitempty"`
 	K8s         *K8sRef        `json:"k8s,omitempty"`
 	ZFSPath     *ZFSPathSource `json:"zfsPath,omitempty"`
+	// Label optionally overrides the descriptive on-tape archive directory name
+	// (archives/NNN-<label>/, SPEC §6). When unset, a label is derived from the
+	// source's identity. The value is sanitized to [a-z0-9._-] and bounded in
+	// length, so it need not already be filesystem-safe; it is never relied on for
+	// uniqueness, as the NNN prefix disambiguates.
+	Label *string `json:"label,omitempty"`
 }
 
 // K8sRef identifies a Kubernetes snapshot resource by GVK, namespace, and name or

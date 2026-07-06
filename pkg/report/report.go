@@ -61,6 +61,10 @@ type Manifest struct {
 type Archive struct {
 	// Name identifies the archive (the snapshot group or volume name).
 	Name string
+	// Directory is the archive's on-tape directory relative to the LTFS root
+	// (e.g. archives/000-photos), so an operator can locate its files on the
+	// mounted volume. Empty renders the row as absent.
+	Directory string
 	// MemberVolumes lists the volumes contained in this archive. A snapshot
 	// group is archived as a single tar with one member per volume.
 	MemberVolumes []string
@@ -421,6 +425,10 @@ func (d *doc) archive(archive Archive) {
 	d.text(colInk)
 	d.pdf.MultiCell(contentW, 6, d.tr(archive.Name), "", "L", false)
 	d.pdf.Ln(0.5)
+
+	if archive.Directory != "" {
+		d.kv("On-tape directory", archive.Directory, false)
+	}
 
 	d.kv("Member volumes", joinOrNone(archive.MemberVolumes), false)
 	d.kv("Source snapshots", joinOrNone(archive.SourceSnapshots), false)

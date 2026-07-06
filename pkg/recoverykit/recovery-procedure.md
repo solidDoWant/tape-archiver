@@ -93,7 +93,10 @@ Use this when the tape's on-tape LTFS index is intact. To pull **one specific
 file** out of an archive:
 
 1. **Load the tape** and confirm its barcode against the report to find which
-   `archives/NNN/` directory holds the file's source snapshot.
+   `archives/NNN-<label>/` directory holds the file's source snapshot. `NNN` is the
+   zero-padded source index and `<label>` a descriptive name for the source; the
+   report maps each directory to its source. (In the commands below, substitute the
+   actual directory name for `NNN-<label>`.)
 2. **Mount the volume read-only** (LTFS uses the SCSI generic node):
 
    ```
@@ -106,7 +109,7 @@ file** out of an archive:
 
    ```
    mkdir -p /scratch
-   cp -r /mnt/tape/archives/NNN /scratch/     # -> /scratch/NNN
+   cp -r /mnt/tape/archives/NNN-<label> /scratch/   # -> /scratch/NNN-<label>
                                               # (or `cp -r /mnt/tape/* /scratch/` to take the whole tape)
    fusermount -u /mnt/tape                     # the tape is no longer needed
    ```
@@ -253,7 +256,7 @@ below are **recovery-time**.
 
 | Symptom | What it means | What to do |
 |---------|---------------|------------|
-| A slice or PAR2 file fails its checksum, but only a little | Media damage **within** the PAR2 redundancy | `bin/par2 repair archives/NNN/archive.par2` reconstructs the exact bytes; continue. |
+| A slice or PAR2 file fails its checksum, but only a little | Media damage **within** the PAR2 redundancy | `bin/par2 repair archives/NNN-<label>/archive.par2` reconstructs the exact bytes; continue. |
 | `par2 repair` cannot repair (damage **exceeds** PAR2 capacity) | Too much of one region is gone | Recover that archive from the **redundant copy on another tape** (the report lists every copy by barcode). Blast radius is bounded — one bad region damages at most one slice. |
 | `age -d` aborts partway with a stream error | `age` authenticates each ~64 KiB chunk and stops at the first uncorrectable one, so the archive is truncated there | PAR2-repair first; if that is not enough, decrypt the **other copy**. |
 | A file's digest does not match `manifest.sha256` / on-tape `manifest.json` | That file is corrupt | Identify the slice, `par2 repair` it, or use the other copy. |

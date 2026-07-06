@@ -49,7 +49,7 @@ func reportTestInput(t *testing.T) ReportInput {
 		},
 		RunID:    "run-123",
 		Date:     time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC),
-		Resolved: []ResolvedArchive{{SourceIndex: 0, Snapshots: []ResolvedSnapshot{{ZFSPath: "bulk-pool-01/archive@snap"}}}},
+		Resolved: []ResolvedArchive{{SourceIndex: 0, Label: "archive", Snapshots: []ResolvedSnapshot{{ZFSPath: "bulk-pool-01/archive@snap"}}}},
 		Staged:   []StagedArchive{staged},
 		PAR2:     []PAR2Set{par2},
 		Plan: TapePlan{
@@ -89,6 +89,8 @@ func TestBuildReportManifest(t *testing.T) {
 	require.Len(t, manifest.Archives, 1)
 	archive := manifest.Archives[0]
 	assert.Equal(t, "bulk-pool-01/archive@snap", archive.Name)
+	assert.Equal(t, "archives/000-archive", archive.Directory,
+		"the report must show each archive's descriptive on-tape directory")
 	assert.Equal(t, []string{"bulk-pool-01/archive@snap"}, archive.SourceSnapshots)
 	// slices then PAR2 file, by base name.
 	require.Len(t, archive.Files, 3)
@@ -306,8 +308,8 @@ func TestBuildSHA256Manifest(t *testing.T) {
 	// 3 files × 2 tapes = 6 lines.
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	assert.Len(t, lines, 6)
-	assert.Contains(t, text, "aa  TAPE01L6/archives/000/archive.000")
-	assert.Contains(t, text, "cc  TAPE02L6/archives/000/archive.par2")
+	assert.Contains(t, text, "aa  TAPE01L6/archives/000-archive/archive.000")
+	assert.Contains(t, text, "cc  TAPE02L6/archives/000-archive/archive.par2")
 	// Sorted output.
 	assert.True(t, sortedStrings(lines), "manifest lines must be sorted")
 }
