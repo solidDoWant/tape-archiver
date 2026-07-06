@@ -16,6 +16,12 @@ The report contains, at minimum:
   over a non-blank tape (because the run set [`library.allowNonBlankTapes`](configuration.md))
   is annotated here as `[Overwrote a non-blank tape]`, so a deliberate, irreversible
   overwrite is on the record.
+- **Recovery discs** — when optical burning ran ([`delivery.opticalBurn`](configuration.md#opticalburn)),
+  the burner each recovery disc was written on. A disc burned over a reclaimed non-blank
+  rewritable disc is annotated `[Overwrote a non-blank disc]`, mirroring the tape overwrite
+  note. The section is omitted entirely when no discs were burned. Because the Report phase
+  runs before the Burn phase, this section appears only in the **delivered** report (re-rendered
+  after the burn), not in the copy embedded in the burned ISO.
 - **Write health** — per-tape, observational write-health from the run's tape-write
   window (see below).
 - **Build parameters** — how the tapes were built: tool version, `age`/`par2`/`ltfs`

@@ -215,7 +215,19 @@ staged and verified on disk** — eliminating any computation during the write w
    `library.ioWaitTimeoutSeconds` (default 12h), the run fails in that defined state and is
    reported.
 9. **Report.** Build the PDF report (§9) and the recovery ISO (§10).
-10. **Deliver.** Send the report and ISO to Discord via webhook (§11).
+10. **Burn (optional).** When `delivery.opticalBurn` is configured, burn the recovery
+    disc from the staged uncompressed ISO (§10) and read each disc back to verify it.
+    Copies are burned in successive **burn-sets** of at most `len(drives)` discs;
+    because there is no optical autoloader, the run pauses between sets for the
+    operator to load fresh blanks and resume, and pauses on any burn/verify failure or
+    refused non-blank disc — the operator-in-the-loop shape of the tape Write/Eject
+    pauses, on the same `operatorResume`/`operatorAbort` signals, bounded by
+    `delivery.opticalBurn.burnWaitTimeoutSeconds` (default 12 h). The Report phase runs
+    before Burn, so the report inside the burned ISO predates the burn and cannot record
+    it; after Burn the **delivered** `report.pdf` is re-rendered from the full run state
+    to record the discs (and any overwrite). Disabled by default: a run with no
+    `opticalBurn` section completes exactly as without this phase.
+11. **Deliver.** Send the report and ISO to Discord via webhook (§11).
 
 ## 5. Run configuration
 
@@ -359,8 +371,20 @@ and drive production are being discontinued (Sony exited recordable BD in Feb 20
 The ISO is tens of MB, so DVD capacity is ample. Burn **at least two copies** and verify
 each by reading back and comparing against the manifest. Optical is one redundancy layer,
 not a hard dependency: the laminated report independently carries the key, procedure, and
-manifest, and every tape carries its own LTFS index and checksums. Burning is a manual
-operator step; periodic re-burn/refresh is a documented maintenance task.
+manifest, and every tape carries its own LTFS index and checksums.
+
+**Burning is an optional in-workflow phase** (§4.3 phase 10), enabled by
+`delivery.opticalBurn`; it is not only a manual step. When configured, the Burn phase
+burns the staged uncompressed ISO to each disc and reads it back to verify against the
+disc-content manifest, in burn-sets of at most `len(drives)` discs, pausing for the
+operator between sets (a manual disc swap — there is no optical autoloader) and on any
+failure. By default a non-blank disc is refused and the run pauses rather than
+overwriting it; `delivery.opticalBurn.allowNonBlankDiscs` opts into reclaiming a used
+disc, but **only rewritable media (DVD±RW / BD-RE) can be reclaimed** — write-once media
+(DVD-R, **M-DISC**, CD-R, BD-R) cannot be erased, so a non-blank write-once disc always
+pauses for the operator regardless of the opt-in. Any deliberate overwrite is recorded in
+the delivered report. Leaving `opticalBurn` unset keeps burning a manual operator step.
+Periodic re-burn/refresh remains a documented maintenance task.
 
 ## 11. Notifications (Discord)
 

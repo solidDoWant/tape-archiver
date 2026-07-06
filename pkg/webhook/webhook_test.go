@@ -261,6 +261,43 @@ func TestSendWritePathPauseEmptyURLNoOp(t *testing.T) {
 	assert.Equal(t, int32(0), cap.hits.Load())
 }
 
+func TestSendBurnPausePayload(t *testing.T) {
+	t.Parallel()
+
+	server, cap := newServer(t, http.StatusNoContent)
+
+	client := webhook.New(server.URL)
+	client.SendBurnPause(t.Context(), "run-123", []string{"/dev/sr0", "/dev/sr1"}, "a burn or verify failed: drive reported a write error")
+
+	require.Equal(t, int32(1), cap.hits.Load())
+	assert.Equal(t, "application/json", cap.contentType)
+
+	var payload struct {
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(cap.body, &payload))
+
+	assert.Contains(t, payload.Content, "run-123")
+	assert.Contains(t, payload.Content, "/dev/sr0")
+	assert.Contains(t, payload.Content, "/dev/sr1")
+	assert.Contains(t, payload.Content, "a burn or verify failed")
+	assert.Contains(t, payload.Content, "tapectl resume")
+	assert.Contains(t, payload.Content, "tapectl abort")
+}
+
+func TestSendBurnPauseEmptyURLNoOp(t *testing.T) {
+	t.Parallel()
+
+	server, cap := newServer(t, http.StatusNoContent)
+	_ = server
+
+	client := webhook.New("")
+	// Must not panic and must not contact any endpoint.
+	client.SendBurnPause(t.Context(), "run-123", []string{"/dev/sr0"}, "the burn-set is complete; load fresh blank recovery discs for the next set")
+
+	assert.Equal(t, int32(0), cap.hits.Load())
+}
+
 func TestSendFailureEmptyURLNoOp(t *testing.T) {
 	t.Parallel()
 

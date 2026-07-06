@@ -216,7 +216,22 @@ copies means two discs burn together, then the third.
 `library.allowNonBlankTapes`, but optical physics limit what it can do: only rewritable media
 (DVD±RW / BD-RE) can be erased and re-burned. Write-once media — **DVD-R and M-DISC**, the
 archival target — can **never** be overwritten regardless of this flag; a non-blank write-once
-disc always fails the burn.
+disc always fails the burn. A deliberate reclaim is recorded in the run's PDF report.
+
+#### Optical burn operator loop
+
+The Burn phase is operator-in-the-loop, mirroring the tape write-failure pause. Because
+there is no optical autoloader, **every burn-set after the first pauses** for you to load
+fresh blank discs into the burners and resume. The run also pauses **within a set** on any
+burn failure, verify mismatch, or refused non-blank disc. On each pause it posts an alert
+on the failure webhook (`DISCORD_FAILURE_WEBHOOK_URL`) naming the run, the burner drive(s),
+and the reason, then waits: run [`tapectl resume`](tapectl.md) after loading blank discs to
+continue (a within-set pause re-burns only the failed discs; the discs that already verified
+are never re-burned), or [`tapectl abort`](tapectl.md) to end the run with no further discs
+burned. If no one responds within `burnWaitTimeoutSeconds` (default 12 h), the run fails in
+that defined paused state and is reported. After all discs are burned, the delivered
+`report.pdf` is re-rendered so it records the burned discs and any overwrite — the copy
+inside the burned ISO predates the burn and cannot.
 
 ---
 

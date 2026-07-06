@@ -24,6 +24,7 @@ var orderedPhases = []string{
 	PhaseWrite,
 	PhaseEject,
 	PhaseReport,
+	PhaseBurn,
 	PhaseDeliver,
 }
 

@@ -11,7 +11,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/webhook"
 )
 
-// The Deliver phase (SPEC §4.3 phase 10) is the run's final step: it uploads the
+// The Deliver phase (SPEC §4.3 phase 11) is the run's final step: it uploads the
 // two recovery artifacts the Report phase built — the PDF report and the
 // compressed recovery ISO — to the Discord webhook named in the run config
 // (SPEC §11 success delivery). This is the per-run success path, distinct from the
@@ -47,7 +47,7 @@ type DeliverInput struct {
 }
 
 // Deliver uploads the report and compressed ISO to the configured Discord webhook
-// (SPEC §4.3 phase 10, §11). It uploads the report first, then the ISO, so the
+// (SPEC §4.3 phase 11, §11). It uploads the report first, then the ISO, so the
 // smaller, always-usable artifact lands even if the larger upload later fails. A
 // non-2xx response or transport error on either upload fails the activity (and
 // Temporal retries it); an empty webhook URL makes both uploads no-ops.
@@ -65,7 +65,7 @@ func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) err
 	return nil
 }
 
-// deliverPhase orchestrates the Deliver phase (SPEC §4.3 phase 10): it runs the
+// deliverPhase orchestrates the Deliver phase (SPEC §4.3 phase 11): it runs the
 // data-side Deliver activity with the webhook target and the artifact paths the
 // Report phase recorded in runState.
 func deliverPhase(ctx workflow.Context, cfg config.Config, state *runState) error {

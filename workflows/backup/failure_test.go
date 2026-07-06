@@ -70,6 +70,61 @@ func TestNotifyFailureActivity(t *testing.T) {
 	}
 }
 
+// TestNotifyBurnPauseActivity asserts the burn-pause alert activity is best-effort
+// like the other operator alerts: it delivers on a healthy webhook, swallows a
+// delivery error, and is a no-op when the webhook URL is unset — always returning
+// nil so a webhook outage never aborts a paused burn (SPEC §10, §11).
+func TestNotifyBurnPauseActivity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    int
+		emptyURL  bool
+		expectHit bool
+	}{
+		{name: "delivers alert on 2xx", status: http.StatusNoContent, expectHit: true},
+		{name: "swallows delivery error on non-2xx", status: http.StatusInternalServerError, expectHit: true},
+		{name: "no-op when URL unset", emptyURL: true, expectHit: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var hits atomic.Int32
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(test.status)
+			}))
+			t.Cleanup(server.Close)
+
+			url := server.URL
+			if test.emptyURL {
+				url = ""
+			}
+
+			activities := &FailureActivities{WebhookURL: url}
+
+			err := activities.NotifyBurnPause(t.Context(), BurnPauseInput{
+				RunID:        "backup-1",
+				Devices:      []string{"/dev/sr0"},
+				ErrorSummary: "a burn or verify failed: drive reported a write error",
+			})
+			// SendBurnPause never returns a delivery error, so the activity always
+			// succeeds regardless of the webhook's response.
+			require.NoError(t, err)
+
+			if test.expectHit {
+				assert.Equal(t, int32(1), hits.Load())
+			} else {
+				assert.Equal(t, int32(0), hits.Load())
+			}
+		})
+	}
+}
+
 // TestWorkflowFailureSendsAlert asserts that when a phase fails the deferred
 // handler fires the failure-alert activity with the run id, failing phase, and
 // error summary, while the run's original error surfaces unmasked (SPEC §11).

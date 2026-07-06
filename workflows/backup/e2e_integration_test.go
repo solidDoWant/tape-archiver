@@ -29,7 +29,7 @@ import (
 // server and real control + data workers, against mhvtl and the ephemeral ZFS
 // pool: it stages a real ZFS snapshot, packs it, generates PAR2, verifies,
 // writes it to a virtual tape, ejects it, builds the report and recovery ISO, and
-// delivers both to a local webhook. It asserts every one of the ten phases
+// delivers both to a local webhook. It asserts every one of the pipeline phases
 // (SPEC §4.3) completes in order and the run succeeds.
 //
 // Covers issue #55 AC3 (all 10 phases execute in order, success) and AC4 (the
@@ -149,8 +149,8 @@ func TestBackupEndToEnd(t *testing.T) {
 	var result Result
 	require.NoError(t, run.Get(runCtx, &result), "workflow must complete successfully")
 
-	// AC3: all ten phases ran to completion, in order.
-	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
+	// AC3: all pipeline phases ran to completion, in order.
+	assert.Equal(t, orderedPhases, result.CompletedPhases, "all pipeline phases must complete in order")
 
 	// AC1/AC2: the Deliver phase uploaded both artifacts (report + compressed ISO).
 	assert.Equal(t, int32(2), uploads.Load(), "report and recovery ISO must both be delivered")

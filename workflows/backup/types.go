@@ -1,6 +1,10 @@
 package backup
 
-import "github.com/solidDoWant/tape-archiver/pkg/tape"
+import (
+	"time"
+
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
+)
 
 // This file holds the run-state types that flow between the backup workflow's
 // phases (SPEC §4.3). They are defined here as the scaffold so that each phase
@@ -354,4 +358,18 @@ type runState struct {
 	// (delivery.opticalBurn). It is the mountable image the Burn phase consumes;
 	// empty when burning is disabled.
 	uncompressedISOPath string
+	// discManifestPath is the on-disk sha256sum manifest of the recovery ISO's
+	// contents, staged by the Report phase only when optical burning is enabled.
+	// The Burn phase passes it to VerifyDisc so each burned disc is read back and
+	// checked against it (SPEC §10). Empty when burning is disabled.
+	discManifestPath string
+	// reportDate is the run's report timestamp (workflow.Now at the Report phase),
+	// captured once so the post-burn re-render of the delivered report carries the
+	// same date as the on-disc copy that predates the burn (SPEC §10).
+	reportDate time.Time
+	// burnedDiscs accumulates every recovery disc the Burn phase burned and
+	// verified, across all burn-sets (SPEC §4.3, §10). The post-burn report
+	// re-render records them (including any deliberate overwrite). Empty when
+	// optical burning is disabled.
+	burnedDiscs []BurnResult
 }
