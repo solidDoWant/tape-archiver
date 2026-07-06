@@ -62,6 +62,52 @@ config:
     # through verbatim (the Temporal SDK lowercases and hyphenates them at load time). Rendered
     # under [profile.default.grpc_meta] in temporal.toml.
     grpcMeta: {}
+    # keda configures KEDA's own connection to the Temporal frontend, used by the per-release
+    # TriggerAuthentication that backs the ScaledJob's Temporal trigger. It applies ONLY on the
+    # opt-in scaledjob path (resources.controllers.main.type: scaledjob) and is ignored on the
+    # default Deployment path. Credential and TLS posture are configured independently of the
+    # worker's so KEDA can be granted a less-privileged, read-only credential (Temporal RBAC
+    # scoped to DescribeTaskQueue) without ever being handed the worker's own API key. To share
+    # material with the worker, point keda.apiKey.secretKeyRef / keda.tls.* at the same Secrets
+    # used under config.temporal.apiKey / config.temporal.tls.
+    #
+    # When type: scaledjob is enabled, keda.apiKey must be populated (value or secretKeyRef) or
+    # the chart fails at render time — without it the scaler cannot read the task-queue backlog
+    # and would never spawn a Job. With the default Deployment, this entire block is unused.
+    keda:
+      # apiKey is the Temporal API key KEDA's scaler uses to query task-queue backlog. Setting
+      # both value and secretKeyRef is rejected. value is intended for dev; production should use
+      # secretKeyRef. When value is set, the chart materialises a Secret named
+      # "<release>-keda-temporal-apikey" holding it and points the TriggerAuthentication at it.
+      apiKey:
+        value: ""
+        secretKeyRef:
+          name: ""
+          key: ""
+      # tls configures KEDA's transport security to the Temporal frontend. Mirrors the shape of
+      # config.temporal.tls but is resolved independently so KEDA's TLS posture can differ from
+      # the worker's. serverName / disableHostVerification become scaler-side trigger metadata;
+      # clientCertificate / caCert become authParams on the KEDA-side TriggerAuthentication only.
+      # Setting any reference while enabled is false is a render-time error.
+      tls:
+        enabled: false
+        # serverName overrides the SNI / cert-verification hostname (KEDA metadata tlsServerName).
+        serverName: ""
+        # disableHostVerification skips server-cert hostname verification (KEDA metadata
+        # unsafeSsl). Development / self-signed only.
+        disableHostVerification: false
+        # clientCertificate enables mTLS by pointing at a kubernetes.io/tls Secret with the
+        # standard "tls.crt" / "tls.key" keys. Leave secretName empty to skip mTLS.
+        clientCertificate:
+          secretName: ""
+        # caCert overrides the trusted CA pool. Free-form secretKeyRef because CA bundles do not
+        # standardise on a single Secret layout; both name and key must be set together (this
+        # surface validates the pair bidirectionally so a missed name never silently drops the CA
+        # reference from KEDA's TriggerAuthentication). Leave name empty to use the system roots.
+        caCert:
+          secretKeyRef:
+            name: ""
+            key: ""
 
   controlWorker:
     # logLevel is passed verbatim to the worker's logging setup via LOG_LEVEL (empty → info).
@@ -120,4 +166,24 @@ resources:
     #         image:
     #           repository: ghcr.io/soliddowant/tape-archiver/control-worker
     #           tag: v1.2.3
+    #
+    # Set main.type: scaledjob to opt into KEDA scale-to-zero: the chart renders a
+    # keda.sh/v1alpha1 ScaledJob (job template = the control worker with
+    # WORKER_IDLE_EXIT_AFTER defaulted to 15m so the Job self-completes) plus a per-release
+    # TriggerAuthentication, and NO Deployment. A control-queue backlog scales the worker
+    # 0 -> 1; it drains and exits after the idle window, scaling back to 0. This requires a
+    # separate KEDA credential under config.temporal.keda.* and KEDA >= 2.16 / Temporal
+    # server >= 1.24 in the cluster. The default (type absent) stays the fixed-replica
+    # Deployment; the default render is byte-identical to before this option existed.
+    #
+    # KEDA-level knobs live under main.keda.* (pollingInterval, maxReplicaCount [default 1],
+    # successfulJobsHistoryLimit, failedJobsHistoryLimit, scalingStrategy, targetQueueSize
+    # [default 5], activationTargetQueueSize [default 0]); Job-template knobs under main.job.*
+    # (backoffLimit, ttlSecondsAfterFinished, parallelism, completions, activeDeadlineSeconds).
+    #   main:
+    #     type: scaledjob
+    #     keda:
+    #       pollingInterval: 30
+    #     job:
+    #       ttlSecondsAfterFinished: 600
     main: {}

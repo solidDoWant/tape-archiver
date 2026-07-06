@@ -92,6 +92,82 @@ mTLS or CA verification.
 {{- end -}}
 
 {{/* ============================================================ */}}
+{{/* Controller type: Deployment (default) vs KEDA ScaledJob       */}}
+{{/* ============================================================ */}}
+{{/* resources.controllers.main.type selects the deployment shape. Absent or any
+   non-"scaledjob" value keeps the historical fixed-replica Deployment path
+   untouched (byte-identical default render). "scaledjob" opts in to a
+   keda.sh/v1alpha1 ScaledJob that scales the worker to zero between runs and a
+   control-queue backlog scales it back to 1 (SPEC §4.1; parent #113). */}}
+{{- $userTypeControllers := index .Values.resources "controllers" | default dict -}}
+{{- $userTypeMain := index $userTypeControllers $controllerName | default dict -}}
+{{- $userMainType := index $userTypeMain "type" | default "deployment" -}}
+{{- $isScaledJob := eq $userMainType "scaledjob" -}}
+
+{{/* ============================================================ */}}
+{{/* KEDA (ScaledJob) credential + TLS reference resolution        */}}
+{{/* ============================================================ */}}
+{{/* config.temporal.keda.* is a separate, least-privilege Temporal credential
+   used only by KEDA's scaler (read-only DescribeTaskQueue), distinct from the
+   worker's own config.temporal.apiKey / tls.*. It is resolved into a per-release
+   TriggerAuthentication only on the scaledjob path; the same value/secretKeyRef
+   and TLS secretName shapes are reused so operators configure KEDA exactly like
+   the worker. */}}
+{{- $keda := index .Values.config.temporal "keda" | default dict -}}
+{{- $kedaAPIKeyValue      := dig "apiKey" "value"             "" $keda -}}
+{{- $kedaAPIKeySecretName := dig "apiKey" "secretKeyRef" "name" "" $keda -}}
+{{- $kedaAPIKeySecretKey  := dig "apiKey" "secretKeyRef" "key"  "" $keda -}}
+{{- if or (and $kedaAPIKeySecretName (not $kedaAPIKeySecretKey)) (and $kedaAPIKeySecretKey (not $kedaAPIKeySecretName)) -}}
+  {{- fail "config.temporal.keda.apiKey.secretKeyRef.name and config.temporal.keda.apiKey.secretKeyRef.key must both be set when using secretKeyRef" -}}
+{{- end -}}
+{{- if and $kedaAPIKeyValue $kedaAPIKeySecretName -}}
+  {{- fail "config.temporal.keda.apiKey.value and config.temporal.keda.apiKey.secretKeyRef are mutually exclusive — set only one" -}}
+{{- end -}}
+
+{{/* KEDA TLS: mirrors the worker's tls resolution but is configured independently
+   so KEDA's transport posture can differ from the worker's. serverName /
+   disableHostVerification are scaler-side metadata (tlsServerName / unsafeSsl);
+   cert/key/CA references become authParams on the TriggerAuthentication. Setting
+   any keda.tls.* reference while keda.tls.enabled is false is a config error, so a
+   forgotten enabled flag never silently drops KEDA's mTLS or CA verification. */}}
+{{- $kedaTLSEnabled := dig "tls" "enabled" false $keda -}}
+{{- $kedaTLSServerName := dig "tls" "serverName" "" $keda -}}
+{{- $kedaTLSDisableHostVerification := dig "tls" "disableHostVerification" false $keda -}}
+{{- if and (not $kedaTLSEnabled) $kedaTLSServerName -}}
+  {{- fail "config.temporal.keda.tls.serverName is set but config.temporal.keda.tls.enabled is false — enable TLS or remove the override" -}}
+{{- end -}}
+{{- if and (not $kedaTLSEnabled) $kedaTLSDisableHostVerification -}}
+  {{- fail "config.temporal.keda.tls.disableHostVerification is set but config.temporal.keda.tls.enabled is false — enable TLS or remove the override" -}}
+{{- end -}}
+{{- $kedaTLSEntries := list -}}
+{{- $kedaClientCertSecret := dig "tls" "clientCertificate" "secretName" "" $keda -}}
+{{- if $kedaClientCertSecret -}}
+  {{- if not $kedaTLSEnabled -}}
+    {{- fail "config.temporal.keda.tls.clientCertificate.secretName is set but config.temporal.keda.tls.enabled is false — enable TLS or remove the reference" -}}
+  {{- end -}}
+  {{- $kedaTLSEntries = append $kedaTLSEntries (dict "parameter" "cert" "name" $kedaClientCertSecret "key" "tls.crt") -}}
+  {{- $kedaTLSEntries = append $kedaTLSEntries (dict "parameter" "key"  "name" $kedaClientCertSecret "key" "tls.key") -}}
+{{- end -}}
+{{- $kedaCACertSecretName := dig "tls" "caCert" "secretKeyRef" "name" "" $keda -}}
+{{- $kedaCACertSecretKey  := dig "tls" "caCert" "secretKeyRef" "key"  "" $keda -}}
+{{- if or (and $kedaCACertSecretName (not $kedaCACertSecretKey)) (and $kedaCACertSecretKey (not $kedaCACertSecretName)) -}}
+  {{- fail "config.temporal.keda.tls.caCert.secretKeyRef.name and config.temporal.keda.tls.caCert.secretKeyRef.key must both be set when using secretKeyRef" -}}
+{{- end -}}
+{{- if $kedaCACertSecretName -}}
+  {{- if not $kedaTLSEnabled -}}
+    {{- fail "config.temporal.keda.tls.caCert.secretKeyRef is set but config.temporal.keda.tls.enabled is false — enable TLS or remove the reference" -}}
+  {{- end -}}
+  {{- $kedaTLSEntries = append $kedaTLSEntries (dict "parameter" "ca" "name" $kedaCACertSecretName "key" $kedaCACertSecretKey) -}}
+{{- end -}}
+
+{{/* On the scaledjob path a KEDA credential is mandatory — without it the scaler
+   cannot query the backlog and would never spawn a Job, so fail at render time
+   rather than deploy a ScaledJob that never scales. */}}
+{{- if and $isScaledJob (not $kedaAPIKeyValue) (not $kedaAPIKeySecretName) -}}
+  {{- fail "config.temporal.keda.apiKey is required when resources.controllers.main.type is \"scaledjob\" — set config.temporal.keda.apiKey.value or config.temporal.keda.apiKey.secretKeyRef" -}}
+{{- end -}}
+
+{{/* ============================================================ */}}
 {{/* Control-worker env vars                                       */}}
 {{/* ============================================================ */}}
 {{- $env := dict -}}
@@ -104,6 +180,18 @@ mTLS or CA verification.
 {{/* Address, namespace, TLS, and grpc_meta come from the rendered temporal.toml
    pointed to by TEMPORAL_CONFIG_FILE. */}}
 {{- $_ := set $env "TEMPORAL_CONFIG_FILE" $temporalConfigFile -}}
+
+{{/* WORKER_IDLE_EXIT_AFTER (control role only): on the scaledjob path the worker must
+   drain and exit after an idle window so its Job completes and KEDA can scale back to
+   zero (SPEC §4.1). Defaults to 15m — the workflow-bearing default (issue #115); a
+   backup run's tape-write window and operator pauses leave the control queue idle far
+   longer, so a respawn-and-replay mid-run is expected, not exceptional. Operators
+   override via resources.controllers.main.containers.main.env.WORKER_IDLE_EXIT_AFTER,
+   which wins in the user-resources merge below. Unset on the Deployment path, where the
+   worker runs until SIGTERM. */}}
+{{- if $isScaledJob -}}
+  {{- $_ := set $env "WORKER_IDLE_EXIT_AFTER" "15m" -}}
+{{- end -}}
 
 {{/* LOG_LEVEL */}}
 {{- if .Values.config.controlWorker.logLevel -}}
@@ -345,4 +433,101 @@ mTLS or CA verification.
   {{- $_ := set .Values "global" (mustMergeOverwrite (dict "nameOverride" .Release.Name) $existingGlobal) -}}
 {{- end -}}
 
+{{- if $isScaledJob -}}
+{{/* ============================================================ */}}
+{{/* ScaledJob path: render the KEDA resources ourselves, then     */}}
+{{/* hand the rest (ConfigMap, ServiceAccount, PodMonitor) to      */}}
+{{/* bjw-s with the "main" controller partitioned out.             */}}
+{{/* ============================================================ */}}
+{{/* Split init from generate so the scaledjob helper can reuse the post-init
+   bjw-s helpers (fullname, metadata, pod.spec) without bjw-s' generate pass ever
+   seeing a controller of type "scaledjob" — bjw-s has no such controller type and
+   its validation would reject it. */}}
+{{- include "bjw-s.common.loader.init" . -}}
+
+{{- $fullName := include "bjw-s.common.lib.chart.names.fullname" . -}}
+{{- $authRefName := printf "%s-keda" $fullName -}}
+
+{{/* Resolve the Secret backing the KEDA API key: an operator-supplied Secret via
+   secretKeyRef, or a chart-managed Secret carrying the inline value. The
+   scaledjob-enabled + no-credential case already failed above. */}}
+{{- $kedaSecretName := "" -}}
+{{- $kedaSecretKey := "" -}}
+{{- if $kedaAPIKeySecretName -}}
+  {{- $kedaSecretName = $kedaAPIKeySecretName -}}
+  {{- $kedaSecretKey = $kedaAPIKeySecretKey -}}
+{{- else -}}
+  {{- $kedaSecretName = printf "%s-keda-temporal-apikey" $fullName -}}
+  {{- $kedaSecretKey = "apiKey" -}}
+{{- end -}}
+
+{{- $kedaTLS := dict -}}
+{{- if $kedaTLSServerName -}}
+  {{- $_ := set $kedaTLS "serverName" $kedaTLSServerName -}}
+{{- end -}}
+{{- if $kedaTLSDisableHostVerification -}}
+  {{- $_ := set $kedaTLS "unsafeSsl" true -}}
+{{- end -}}
+
+{{- include "tape-archiver-control-worker.triggerAuthentication" (dict
+  "rootContext" .
+  "name" $authRefName
+  "apiKeySecret" (dict "name" $kedaSecretName "key" $kedaSecretKey)
+  "tlsSecrets" $kedaTLSEntries
+) }}
+
+{{/* Chart-managed Secret carrying the inline keda.apiKey.value (dev only). */}}
+{{- if $kedaAPIKeyValue }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $kedaSecretName }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{ include "bjw-s.common.lib.metadata.allLabels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{ $kedaSecretKey }}: {{ $kedaAPIKeyValue | quote }}
+{{- end }}
+
+{{/* Render the ScaledJob from the merged "main" controller (still present in
+   .Values.controllers at this point, so pod.spec resolves its persistence mounts). */}}
+{{- $scaledMainController := index (index .Values "controllers") $controllerName -}}
+{{- include "tape-archiver-control-worker.scaledjob" (dict
+  "rootContext" .
+  "controllerName" $controllerName
+  "controller" $scaledMainController
+  "endpoint" $temporalAddress
+  "namespace" $temporalNamespace
+  "taskQueue" "control"
+  "authRefName" $authRefName
+  "kedaTLS" $kedaTLS
+) }}
+
+{{/* Strip the "main" controller and its advancedMounts references before bjw-s'
+   generate pass: bjw-s must not render it (no scaledjob type) and its persistence
+   validation fails on advancedMounts entries pointing at a now-absent controller.
+   The ScaledJob above already consumed the pre-strip mount config. */}}
+{{- $valuesControllers := index .Values "controllers" -}}
+{{- $_ := unset $valuesControllers $controllerName -}}
+{{- $valuesPersistence := index .Values "persistence" | default dict -}}
+{{- range $persistenceValues := values $valuesPersistence -}}
+  {{- $advancedMounts := index $persistenceValues "advancedMounts" | default dict -}}
+  {{- $_ := unset $advancedMounts $controllerName -}}
+{{- end -}}
+{{/* Drop persistence items whose advancedMounts emptied out — with the sole
+   controller stripped, bjw-s' volumes helper would otherwise fall back to mounting
+   them at /<identifier>; harmless with zero controllers, but dropping them keeps the
+   generate pass clean. The ConfigMap itself renders from .Values.configMaps. */}}
+{{- range $persistenceKey, $persistenceValues := $valuesPersistence -}}
+  {{- if hasKey $persistenceValues "advancedMounts" -}}
+    {{- if empty (index $persistenceValues "advancedMounts") -}}
+      {{- $_ := unset $valuesPersistence $persistenceKey -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+
+{{- include "bjw-s.common.loader.generate" . }}
+{{- else -}}
 {{- include "bjw-s.common.loader.all" . }}
+{{- end -}}

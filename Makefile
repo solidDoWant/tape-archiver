@@ -156,11 +156,26 @@ CONTROL_WORKER_CHART := deploy/charts/tape-archiver-control-worker
 # satisfies the lint/template checks and is not baked into any release artifact.
 CHART_LINT_ADDRESS ?= temporal-frontend.temporal.svc.cluster.local:7233
 
+# Render args for the opt-in KEDA ScaledJob path (type: scaledjob + a KEDA credential).
+# The dev API key value only satisfies the render check; it is not a release artifact.
+CHART_LINT_SCALEDJOB_ARGS := --set resources.controllers.main.type=scaledjob \
+	--set config.temporal.keda.apiKey.value=chart-lint-placeholder
+
 .PHONY: chart-lint
-chart-lint: ## Fetch chart deps, lint, and render the control-worker Helm chart (no cluster needed).
+chart-lint: ## Fetch chart deps, lint, and render both control-worker chart shapes (Deployment + ScaledJob; no cluster needed).
 	helm dependency update $(CONTROL_WORKER_CHART)
 	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS)
+	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $(CHART_LINT_SCALEDJOB_ARGS)
+	# Default (Deployment) shape.
 	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) >/dev/null
+	# Opt-in ScaledJob shape: must render a ScaledJob + TriggerAuthentication and no Deployment.
+	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $(CHART_LINT_SCALEDJOB_ARGS) \
+		| grep -q '^kind: ScaledJob' || { echo "chart-lint: ScaledJob not rendered on the scaledjob path"; exit 1; }
+	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $(CHART_LINT_SCALEDJOB_ARGS) \
+		| grep -q '^kind: Deployment' && { echo "chart-lint: Deployment leaked onto the scaledjob path"; exit 1; } || true
+	# Enabling scaledjob without a KEDA credential must fail the render.
+	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) --set resources.controllers.main.type=scaledjob >/dev/null 2>&1 \
+		&& { echo "chart-lint: scaledjob without a KEDA credential should have failed to render"; exit 1; } || true
 
 DATA_WORKER_UNIT := deploy/data-worker/tape-archiver-data-worker.service
 
