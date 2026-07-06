@@ -690,14 +690,18 @@ func (d *doc) recoverySection(m Manifest) {
 
 	titleDone := false
 
-	for _, raw := range strings.Split(m.RecoveryProcedure, "\n") {
+	lines := strings.Split(m.RecoveryProcedure, "\n")
+
+	for i := 0; i < len(lines); i++ {
+		raw := lines[i]
+
 		content := strings.TrimSpace(raw)
 		if content == "" {
 			d.pdf.Ln(2) // blank line -> paragraph gap
 			continue
 		}
 
-		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
+		indent := leadingSpaces(raw)
 		number, rest := splitStep(content)
 
 		switch {
@@ -713,7 +717,11 @@ func (d *doc) recoverySection(m Manifest) {
 
 		case indent == 0 && number != "":
 			// "N. text" -> the number in the gutter, the text hanging-indented.
-			d.ensureSpace(lineH + 1)
+			// Reserve space for the whole step block — the step line plus the
+			// indented command/continuation lines that belong to it (up to the
+			// next step, blank line, or paragraph) — so a page break never lands
+			// between an instruction and its command.
+			d.ensureSpace(d.stepBlockHeight(lines, i, stepNumW, cmdIndent, lineH))
 			y := d.pdf.GetY()
 
 			d.pdf.SetFont(fontBody, "B", 10)
@@ -768,6 +776,52 @@ func splitStep(s string) (number, rest string) {
 	}
 
 	return s[:i+1], strings.TrimSpace(s[i+1:])
+}
+
+// leadingSpaces returns the number of leading space/tab characters in s.
+func leadingSpaces(s string) int {
+	return len(s) - len(strings.TrimLeft(s, " \t"))
+}
+
+// wrappedHeight returns the rendered height of text wrapped to width in the body
+// or monospace recovery font. It sets the font it measures in (the caller resets
+// the font when it draws), and never reports less than a single line.
+func (d *doc) wrappedHeight(text string, width float64, mono bool, lineH float64) float64 {
+	if mono {
+		d.pdf.SetFont(fontMono, "", 8.5)
+	} else {
+		d.pdf.SetFont(fontBody, "", 10)
+	}
+
+	count := len(d.pdf.SplitLines([]byte(d.tr(text)), width))
+	if count < 1 {
+		count = 1
+	}
+
+	return float64(count) * lineH
+}
+
+// stepBlockHeight measures a recovery step and the indented lines that belong to
+// it — its wrapped command and continuation lines, up to the next step, blank
+// line, or paragraph — so the whole block can be kept together on one page.
+func (d *doc) stepBlockHeight(lines []string, start int, stepNumW, cmdIndent, lineH float64) float64 {
+	_, rest := splitStep(strings.TrimSpace(lines[start]))
+	height := d.wrappedHeight(rest, contentW-stepNumW, false, lineH)
+
+	for j := start + 1; j < len(lines); j++ {
+		indent := leadingSpaces(lines[j])
+		if strings.TrimSpace(lines[j]) == "" || indent == 0 {
+			break
+		}
+
+		if indent >= 8 {
+			height += d.wrappedHeight(strings.TrimSpace(lines[j]), contentW-stepNumW-cmdIndent, true, lineH)
+		} else {
+			height += d.wrappedHeight(strings.TrimSpace(lines[j]), contentW-stepNumW, false, lineH)
+		}
+	}
+
+	return height
 }
 
 // text, fill, and draw set the current text, fill, and draw colors.
