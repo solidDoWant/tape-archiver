@@ -110,14 +110,15 @@ recovery-binaries: ## Build the static recovery-binary set (age, par2, zstd, tar
 ##@ Container Images
 
 # Registry, version, and push toggle for the OCI worker images, following the
-# media-processor pattern. VERSION defaults to a git-derived tag; override for a
-# release (`make build-images VERSION=v1.2.3`). PUSH_ALL=true additionally tags
-# `:latest` and pushes every tag to the registry; the default (false) only builds
-# the images and loads them into the local Docker daemon — no publish. Registry
-# auth is assumed to be present in the Docker daemon (no `docker login` step
-# here), matching media-processor.
+# media-processor pattern. VERSION is a single, manually-bumped value — the one
+# place a release is versioned (it drives the image tags, the packaged Helm chart
+# version, and the release git tag); bump it by hand for a release. PUSH_ALL=true
+# additionally tags `:latest` and pushes every tag to the registry; the default
+# (false) only builds the images and loads them into the local Docker daemon — no
+# publish. Registry auth is assumed to be present in the Docker daemon (no
+# `docker login` step here), matching media-processor.
 CONTAINER_REGISTRY ?= ghcr.io/soliddowant
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION ?= 0.0.1-dev
 PUSH_ALL ?= false
 
 DATA_WORKER_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/data-worker
@@ -186,6 +187,30 @@ DATA_WORKER_UNIT := deploy/data-worker/tape-archiver-data-worker.service
 unit-lint: ## Verify the reference data-worker systemd unit (no running service needed).
 	systemd-analyze verify $(DATA_WORKER_UNIT)
 
+##@ Helm
+
+# Package (and optionally publish) the control-worker Helm chart, following the
+# media-processor pattern. The chart version and app version are both stamped from
+# VERSION at package time, so the packaged artifact is versioned in lockstep with the
+# worker images. HELM_PUSH defaults to PUSH_ALL: the default (false) only writes the
+# packaged .tgz under bin/helm/ — it never publishes; HELM_PUSH=true pushes it to the
+# OCI chart registry. Only the control worker has a chart; the data worker deploys via
+# a systemd unit + Docker container (SPEC §4.1).
+HELM_REGISTRY := $(CONTAINER_REGISTRY)/charts
+HELM_PUSH ?= $(PUSH_ALL)
+HELM_PACKAGE := $(BIN_DIR)/helm/tape-archiver-control-worker-$(VERSION).tgz
+# Chart inputs, excluding fetched subcharts under charts/ so a dependency update does
+# not spuriously re-trigger packaging.
+HELM_CHART_FILES := $(shell find $(CONTROL_WORKER_CHART) -type f ! -path "*/charts/*" 2>/dev/null)
+
+$(HELM_PACKAGE): $(HELM_CHART_FILES)
+	@mkdir -p "$(@D)"
+	helm package "$(CONTROL_WORKER_CHART)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
+	$(if $(filter true,$(HELM_PUSH)),helm push "$(HELM_PACKAGE)" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
+
+.PHONY: helm
+helm: $(HELM_PACKAGE) ## Package the control-worker Helm chart into bin/helm/ (PUSH_ALL=true also pushes it to the OCI chart registry).
+
 ##@ Build
 
 $(BIN_DIR)/worker: $(GO_SOURCE_FILES)
@@ -204,8 +229,28 @@ $(BIN_DIR)/tapectl: $(GO_SOURCE_FILES)
 build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl ## Build all binaries into bin/.
 
 .PHONY: clean
-clean: ## Remove build artifacts.
-	@rm -rf $(BIN_DIR)
+clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts).
+	@rm -rf $(BIN_DIR) $(CONTROL_WORKER_CHART)/charts
+
+##@ Release
+
+.PHONY: build-all
+build-all: build-images helm ## Build all release artifacts: both worker images and the packaged control-worker chart (pushes when PUSH_ALL=true).
+
+# Cut a release, mirroring media-processor: VERSION drives the tag `v$(VERSION)`. This
+# is a dry run by default — SAFETY_PREFIX is `echo` unless PUSH_ALL=true, so the tag,
+# pushes, and GitHub release are only printed. PUSH_ALL=true runs them for real. The
+# unprefixed `gh auth status` runs first (under `set -e`), so an unauthenticated `gh`
+# aborts the whole target before any tag is created. Requires the GitHub CLI (gh).
+.PHONY: release
+release: TAG = v$(VERSION)
+release: SAFETY_PREFIX = $(if $(filter true,$(PUSH_ALL)),,echo)
+release: build-all ## Cut a GitHub release for v$(VERSION). Dry run by default; set PUSH_ALL=true to tag, push, and publish. Requires gh.
+	@gh auth status
+	@$(SAFETY_PREFIX) git tag -a $(TAG) -m "Release $(TAG)"
+	@$(SAFETY_PREFIX) git push origin
+	@$(SAFETY_PREFIX) git push origin --tags
+	@$(SAFETY_PREFIX) gh release create $(TAG) --generate-notes --latest --verify-tag
 
 ##@ Local Dev
 

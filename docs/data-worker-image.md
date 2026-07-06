@@ -55,7 +55,7 @@ pattern):
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `CONTAINER_REGISTRY` | `ghcr.io/soliddowant` | registry/namespace prefix for the tag(s) |
-| `VERSION` | `git describe --tags --always --dirty` | the registry image tag |
+| `VERSION` | `0.0.1-dev` | the registry image tag (a single, manually-bumped value; the one place a release is versioned) |
 | `PUSH_ALL` | `false` | when `true`, also tag `:latest` and `docker push` every tag |
 
 The default (`PUSH_ALL=false`) only builds and loads locally — it never publishes.
