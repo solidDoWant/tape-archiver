@@ -46,6 +46,22 @@ helm template deploy/charts/tape-archiver-control-worker \
 `config.temporal.address` is required — rendering fails with a clear message when it is
 empty.
 
+## Packaging & release
+
+For a release, the chart is packaged into a versioned `.tgz` rather than installed from
+the source tree:
+
+```
+make helm                     # packages bin/helm/tape-archiver-control-worker-$(VERSION).tgz
+make helm PUSH_ALL=true       # also pushes it to oci://ghcr.io/soliddowant/charts
+```
+
+Both the chart `version` and `appVersion` are stamped from the Makefile's `VERSION` at
+package time — the single, manually-bumped value that also tags the worker images (see
+[control-worker-image.md](control-worker-image.md)). `make build-all` packages the chart
+alongside both worker images, and `make release` cuts the git tag and GitHub release for
+`v$(VERSION)` (a dry run unless `PUSH_ALL=true`).
+
 ## Configuration
 
 ### Temporal (`config.temporal`)

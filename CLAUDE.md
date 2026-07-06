@@ -72,6 +72,11 @@ as the project is implemented; keep this list current):
 - `make generate-schema` — regenerate the committed config JSON schema.
 - `make update-dependencies` — update deps, `go mod tidy`, refresh Nix vendor hashes.
 - `make build-images` — build worker OCI image(s) via Nix.
+- `make helm` — package the control-worker Helm chart into `bin/helm/`
+  (`PUSH_ALL=true` also pushes it to the OCI chart registry).
+- `make build-all` — build both worker images and package the chart in one command.
+- `make release` — cut the `v$(VERSION)` git tag + GitHub release (dry run unless
+  `PUSH_ALL=true`; requires an authenticated `gh`).
 - `make chart-lint` — fetch deps, lint, and render the control-worker Helm chart
   (`deploy/charts/`); no cluster required.
 - `make temporal-up` / `make temporal-down` — local Temporal for integration tests.
