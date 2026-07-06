@@ -13,10 +13,10 @@ import (
 
 // The Deliver phase (SPEC §4.3 phase 11) is the run's final step: it uploads the
 // PDF report the Report phase built to the Discord webhook named in the run config
-// (SPEC §11 success delivery). The recovery ISO is no longer delivered — the burned
-// recovery disc is its durable home (SPEC §10). This is the per-run success path,
-// distinct from the operational failure alert (which is env-configured and fires
-// from the workflow's deferred handler). It runs on the data worker, where the
+// (SPEC §11 success delivery). The report is the sole delivered artifact; the
+// recovery ISO travels on its burned disc (SPEC §10). This is the per-run success
+// path, distinct from the operational failure alert (which is env-configured and
+// fires from the workflow's deferred handler). It runs on the data worker, where the
 // report lives, so its bytes never cross a Temporal payload.
 //
 // When the run config names no webhook the webhook client is a no-op, so a run

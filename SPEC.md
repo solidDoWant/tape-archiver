@@ -228,8 +228,7 @@ staged and verified on disk** — eliminating any computation during the write w
     it; after Burn the **delivered** `report.pdf` is re-rendered from the full run state
     to record the discs (and any overwrite). Disabled by default: a run with no
     `opticalBurn` section completes exactly as without this phase.
-11. **Deliver.** Send the report to Discord via webhook (§11). The recovery ISO is not
-    delivered — the burned disc is its durable home (§10).
+11. **Deliver.** Send the PDF report to Discord via webhook (§11).
 
 ## 5. Run configuration
 
@@ -399,9 +398,8 @@ There are two distinct Discord notification paths:
 **Success delivery (per-run, configured in the run config).** At the end of a
 successful run the data worker delivers the PDF report to the Discord webhook named in
 the run config (§5 Delivery) — from the data worker, where it was built (§4.1). The
-recovery ISO is not delivered: the burned recovery disc is its durable home (§10), and
-it is built only when optical burning is enabled. Delivering the report alone also keeps
-the upload comfortably within the webhook's ~25 MB limit.
+recovery ISO travels on its burned disc (§10); the report is the single uploaded
+artifact, which keeps the upload comfortably within the webhook's ~25 MB limit.
 
 **Failure alert (operational, configured via env var).** A separate failure webhook,
 configured on the worker via the `DISCORD_FAILURE_WEBHOOK_URL` environment variable

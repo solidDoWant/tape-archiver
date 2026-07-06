@@ -7,8 +7,8 @@ no online services, no package manager, no original host. It is built by
 `pkg/recoverykit`, and **only when optical burning is enabled**
 ([`delivery.opticalBurn`](configuration.md#opticalburn)) — as the mountable image the
 Burn phase burns to each disc. The burned disc is the ISO's durable home, so a run
-without burning produces no ISO, and the ISO is never uploaded to Discord; only the PDF
-report is delivered (SPEC §11).
+without burning produces no ISO; the PDF report is the artifact delivered to Discord
+(SPEC §11).
 
 **Target media: M-DISC DVD.** Its inorganic recording layer is ISO/IEC 10995-tested and
 NIST-listed for 100+ year archival life, and it is readable in the large, long-lived
@@ -108,6 +108,5 @@ See [report.md](report.md) for the full rationale.
 - Contents are verified in tests by reading the built image back with the same pure-Go
   reader and asserting every artifact is present at its expected path with its exact
   bytes, so the test exercises the real image rather than trusting the writer.
-- The Report phase stages the image uncompressed as `recovery.iso` for the Burn phase to
-  burn; it is not compressed, and — since the disc is the ISO's durable home — it is not
-  delivered to Discord.
+- The Report phase stages the image as `recovery.iso` for the Burn phase to burn; the
+  burned disc is the ISO's durable home (SPEC §10, §11).
