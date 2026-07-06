@@ -114,6 +114,7 @@ func TestResolveK8sSources(t *testing.T) {
 			}},
 			want: []ResolvedArchive{{
 				SourceIndex: 1,
+				Label:       "db",
 				Compression: true,
 				Snapshots: []ResolvedSnapshot{{
 					ZFSPath:        "pool/pvc-1@snapshot-1",
@@ -136,6 +137,7 @@ func TestResolveK8sSources(t *testing.T) {
 			}},
 			want: []ResolvedArchive{{
 				SourceIndex: 0,
+				Label:       "app-web",
 				Compression: true,
 				Snapshots: []ResolvedSnapshot{
 					{ZFSPath: "pool/pvc-a@snapshot-a", Dataset: "pool/pvc-a", SnapshotName: "snapshot-a"},
@@ -233,6 +235,7 @@ func TestResolveAndCheck(t *testing.T) {
 			// 1000 * 1.05 * 1.10 = 1155.
 			want: []ResolvedArchive{{
 				SourceIndex:    0,
+				Label:          "raw",
 				Compression:    true,
 				Snapshots:      []ResolvedSnapshot{{ZFSPath: "pool/raw@snap"}},
 				EstimatedBytes: 1155,
@@ -300,6 +303,7 @@ func TestResolveAndCheck(t *testing.T) {
 			// 1000 * 1.05 * 1.20 = 1260.
 			want: []ResolvedArchive{{
 				SourceIndex:    0,
+				Label:          "raw",
 				Compression:    true,
 				Snapshots:      []ResolvedSnapshot{{ZFSPath: "pool/raw@snap"}},
 				EstimatedBytes: 1260,

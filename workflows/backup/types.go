@@ -21,6 +21,11 @@ type ResolvedArchive struct {
 	// SourceIndex is the position of the originating Source in Config.Sources,
 	// preserved so the resolved work list stays aligned with the run config.
 	SourceIndex int
+	// Label is the sanitized descriptive name for this archive's on-tape directory
+	// (archives/NNN-<label>/, SPEC §6): the source's optional label override, or a
+	// name derived from its identity. It is never relied on for uniqueness — the
+	// SourceIndex prefix disambiguates.
+	Label string
 	// Compression is whether the Prepare phase should zstd-compress this archive,
 	// resolved from the source's optional override (default-on, SPEC §8).
 	Compression bool

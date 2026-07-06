@@ -19,6 +19,7 @@ func TestBuildManifest(t *testing.T) {
 	archives := []TapeWriteArchive{
 		{
 			SourceIndex: 0,
+			Label:       "photos",
 			Slices: []StagedSlice{
 				{Path: "/staging/archive.000", SHA256: "aaa111", SizeBytes: 1024},
 				{Path: "/staging/archive.001", SHA256: "bbb222", SizeBytes: 512},
@@ -29,6 +30,7 @@ func TestBuildManifest(t *testing.T) {
 		},
 		{
 			SourceIndex: 2,
+			Label:       "plex-group-snap",
 			Slices: []StagedSlice{
 				{Path: "/staging/other.000", SHA256: "ddd444", SizeBytes: 2048},
 			},
@@ -46,19 +48,49 @@ func TestBuildManifest(t *testing.T) {
 	arch0 := got.Archives[0]
 	assert.Equal(t, 0, arch0.SourceIndex)
 	require.Len(t, arch0.Files, 2)
-	assert.Equal(t, "archives/000/archive.000", arch0.Files[0].TapePath)
+	assert.Equal(t, "archives/000-photos/archive.000", arch0.Files[0].TapePath)
 	assert.Equal(t, "aaa111", arch0.Files[0].SHA256)
 	assert.Equal(t, int64(1024), arch0.Files[0].SizeBytes)
-	assert.Equal(t, "archives/000/archive.001", arch0.Files[1].TapePath)
+	assert.Equal(t, "archives/000-photos/archive.001", arch0.Files[1].TapePath)
 	require.Len(t, arch0.PAR2Files, 1)
-	assert.Equal(t, "archives/000/archive.par2", arch0.PAR2Files[0].TapePath)
+	assert.Equal(t, "archives/000-photos/archive.par2", arch0.PAR2Files[0].TapePath)
 	assert.Equal(t, "ccc333", arch0.PAR2Files[0].SHA256)
 
 	arch2 := got.Archives[1]
 	assert.Equal(t, 2, arch2.SourceIndex)
 	require.Len(t, arch2.Files, 1)
-	assert.Equal(t, "archives/002/other.000", arch2.Files[0].TapePath)
+	assert.Equal(t, "archives/002-plex-group-snap/other.000", arch2.Files[0].TapePath)
 	assert.Empty(t, arch2.PAR2Files)
+}
+
+// TestBuildManifestSharedLabel proves that when two sources carry the same
+// descriptive label, the NNN source-index prefix keeps their on-tape directories
+// distinct so neither archive's manifest paths collide with the other's.
+func TestBuildManifestSharedLabel(t *testing.T) {
+	t.Parallel()
+
+	archives := []TapeWriteArchive{
+		{
+			SourceIndex: 0,
+			Label:       "archive",
+			Slices:      []StagedSlice{{Path: "/staging/archive.000", SHA256: "aaa", SizeBytes: 1}},
+		},
+		{
+			SourceIndex: 1,
+			Label:       "archive",
+			Slices:      []StagedSlice{{Path: "/staging/archive.000", SHA256: "bbb", SizeBytes: 1}},
+		},
+	}
+
+	got := buildManifest("TAPE01L8", 0, 0, archives)
+	require.Len(t, got.Archives, 2)
+
+	first := got.Archives[0].Files[0].TapePath
+	second := got.Archives[1].Files[0].TapePath
+
+	assert.Equal(t, "archives/000-archive/archive.000", first)
+	assert.Equal(t, "archives/001-archive/archive.000", second)
+	assert.NotEqual(t, first, second, "shared label must not collapse distinct archives onto one path")
 }
 
 func TestBuildManifestEmpty(t *testing.T) {
@@ -82,10 +114,10 @@ func TestWriteManifest(t *testing.T) {
 			{
 				SourceIndex: 0,
 				Files: []ManifestFile{
-					{TapePath: "archives/000/archive.000", SHA256: "abc123", SizeBytes: 100},
+					{TapePath: "archives/000-photos/archive.000", SHA256: "abc123", SizeBytes: 100},
 				},
 				PAR2Files: []ManifestFile{
-					{TapePath: "archives/000/archive.par2", SHA256: "def456", SizeBytes: 10},
+					{TapePath: "archives/000-photos/archive.par2", SHA256: "def456", SizeBytes: 10},
 				},
 			},
 		},
@@ -105,7 +137,7 @@ func TestWriteManifest(t *testing.T) {
 	require.Len(t, got.Archives, 1)
 	assert.Equal(t, 0, got.Archives[0].SourceIndex)
 	require.Len(t, got.Archives[0].Files, 1)
-	assert.Equal(t, "archives/000/archive.000", got.Archives[0].Files[0].TapePath)
+	assert.Equal(t, "archives/000-photos/archive.000", got.Archives[0].Files[0].TapePath)
 }
 
 func TestCopyTape(t *testing.T) {
@@ -127,6 +159,7 @@ func TestCopyTape(t *testing.T) {
 	archives := []TapeWriteArchive{
 		{
 			SourceIndex: 0,
+			Label:       "photos",
 			Slices: []StagedSlice{
 				{Path: slice0, SHA256: "ignored", SizeBytes: 14},
 				{Path: slice1, SHA256: "ignored", SizeBytes: 14},
@@ -139,8 +172,8 @@ func TestCopyTape(t *testing.T) {
 
 	require.NoError(t, copyTape(t.Context(), dst, archives))
 
-	// Verify the on-tape directory layout: archives/000/<files>
-	archDir := filepath.Join(dst, "archives", "000")
+	// Verify the on-tape directory layout: archives/000-<label>/<files>
+	archDir := filepath.Join(dst, "archives", "000-photos")
 	entries, err := os.ReadDir(archDir)
 	require.NoError(t, err)
 	require.Len(t, entries, 3)
@@ -171,20 +204,56 @@ func TestCopyTapeMultipleArchives(t *testing.T) {
 	require.NoError(t, os.WriteFile(file2, []byte("archive2"), 0o644))
 
 	archives := []TapeWriteArchive{
-		{SourceIndex: 0, Slices: []StagedSlice{{Path: file0}}},
-		{SourceIndex: 2, Slices: []StagedSlice{{Path: file2}}},
+		{SourceIndex: 0, Label: "photos", Slices: []StagedSlice{{Path: file0}}},
+		{SourceIndex: 2, Label: "videos", Slices: []StagedSlice{{Path: file2}}},
 	}
 
 	require.NoError(t, copyTape(t.Context(), dst, archives))
 
-	// Source index 0 → archives/000, source index 2 → archives/002
-	got0, err := os.ReadFile(filepath.Join(dst, "archives", "000", "a0.000"))
+	// Source index 0 → archives/000-photos, source index 2 → archives/002-videos
+	got0, err := os.ReadFile(filepath.Join(dst, "archives", "000-photos", "a0.000"))
 	require.NoError(t, err)
 	assert.Equal(t, "archive0", string(got0))
 
-	got2, err := os.ReadFile(filepath.Join(dst, "archives", "002", "a2.000"))
+	got2, err := os.ReadFile(filepath.Join(dst, "archives", "002-videos", "a2.000"))
 	require.NoError(t, err)
 	assert.Equal(t, "archive2", string(got2))
+}
+
+// TestCopyTapeSharedLabel proves that two sources whose labels are identical (by
+// override, by derivation, or by sanitizing to the same string) still land in
+// distinct on-tape directories — the NNN prefix disambiguates — so neither
+// overwrites the other on the mounted volume, even when their slice basenames match.
+func TestCopyTapeSharedLabel(t *testing.T) {
+	t.Parallel()
+
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	// Both archives use the identical slice basename (archive.000) and label, so a
+	// missing NNN prefix would make the second copy clobber the first.
+	file0 := filepath.Join(src, "s0", "archive.000")
+	require.NoError(t, os.MkdirAll(filepath.Dir(file0), 0o755))
+	require.NoError(t, os.WriteFile(file0, []byte("first-source"), 0o644))
+
+	file1 := filepath.Join(src, "s1", "archive.000")
+	require.NoError(t, os.MkdirAll(filepath.Dir(file1), 0o755))
+	require.NoError(t, os.WriteFile(file1, []byte("second-source"), 0o644))
+
+	archives := []TapeWriteArchive{
+		{SourceIndex: 0, Label: "archive", Slices: []StagedSlice{{Path: file0}}},
+		{SourceIndex: 1, Label: "archive", Slices: []StagedSlice{{Path: file1}}},
+	}
+
+	require.NoError(t, copyTape(t.Context(), dst, archives))
+
+	got0, err := os.ReadFile(filepath.Join(dst, "archives", "000-archive", "archive.000"))
+	require.NoError(t, err)
+	assert.Equal(t, "first-source", string(got0))
+
+	got1, err := os.ReadFile(filepath.Join(dst, "archives", "001-archive", "archive.000"))
+	require.NoError(t, err)
+	assert.Equal(t, "second-source", string(got1), "the shared-label archive must not be overwritten")
 }
 
 func TestCopyTapeCancelledContext(t *testing.T) {
@@ -213,6 +282,11 @@ func TestArchivesForTape(t *testing.T) {
 	t.Parallel()
 
 	state := &runState{
+		resolved: []ResolvedArchive{
+			{SourceIndex: 0, Label: "photos"},
+			{SourceIndex: 1, Label: "videos"},
+			{SourceIndex: 2, Label: "plex-group-snap"},
+		},
 		plan: TapePlan{
 			Copies: 1,
 			Tapes: []PlannedTape{
@@ -242,23 +316,26 @@ func TestArchivesForTape(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		tapeIndex int
-		wantLen   int
-		wantSI    []int
-		wantErr   require.ErrorAssertionFunc
+		name       string
+		tapeIndex  int
+		wantLen    int
+		wantSI     []int
+		wantLabels []string
+		wantErr    require.ErrorAssertionFunc
 	}{
 		{
-			name:      "tape 0 gets archives 0 and 1",
-			tapeIndex: 0,
-			wantLen:   2,
-			wantSI:    []int{0, 1},
+			name:       "tape 0 gets archives 0 and 1",
+			tapeIndex:  0,
+			wantLen:    2,
+			wantSI:     []int{0, 1},
+			wantLabels: []string{"photos", "videos"},
 		},
 		{
-			name:      "tape 1 gets archive 2",
-			tapeIndex: 1,
-			wantLen:   1,
-			wantSI:    []int{2},
+			name:       "tape 1 gets archive 2",
+			tapeIndex:  1,
+			wantLen:    1,
+			wantSI:     []int{2},
+			wantLabels: []string{"plex-group-snap"},
 		},
 		{
 			name:      "out-of-range tape index errors",
@@ -283,6 +360,7 @@ func TestArchivesForTape(t *testing.T) {
 
 			for i, si := range test.wantSI {
 				assert.Equal(t, si, got[i].SourceIndex)
+				assert.Equal(t, test.wantLabels[i], got[i].Label, "label must be threaded from the resolved work list")
 				assert.NotEmpty(t, got[i].Slices)
 				assert.NotEmpty(t, got[i].PAR2Files)
 			}

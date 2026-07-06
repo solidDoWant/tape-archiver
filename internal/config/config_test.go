@@ -126,6 +126,23 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "sources[0].zfsPath.name",
 		},
 		{
+			name: "source label override is allowed",
+			mutate: func(c *Config) {
+				label := "cold-storage"
+				c.Sources[0].Label = &label
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "source label set but blank",
+			mutate: func(c *Config) {
+				blank := "   "
+				c.Sources[0].Label = &blank
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].label",
+		},
+		{
 			name: "k8s no apiVersion",
 			mutate: func(c *Config) {
 				c.Sources[0].ZFSPath = nil

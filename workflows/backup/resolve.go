@@ -134,7 +134,7 @@ func (a *ResolveControlActivities) ResolveK8sSources(ctx context.Context, cfg co
 func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int, source config.Source) (ResolvedArchive, error) {
 	k8s := source.K8s
 	ref := k8ssnap.Ref{Namespace: k8s.Namespace, Name: k8s.Name, LabelSelector: k8s.LabelSelector}
-	archive := ResolvedArchive{SourceIndex: index, Compression: compressionEnabled(source)}
+	archive := ResolvedArchive{SourceIndex: index, Label: sourceLabel(source), Compression: compressionEnabled(source)}
 
 	if k8s.LabelSelector != "" {
 		group, err := resolver.ResolveGroup(ctx, ref)
@@ -267,6 +267,7 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 
 	return ResolvedArchive{
 		SourceIndex: index,
+		Label:       sourceLabel(source),
 		Compression: compressionEnabled(source),
 		Snapshots:   []ResolvedSnapshot{{ZFSPath: name}},
 	}, nil
