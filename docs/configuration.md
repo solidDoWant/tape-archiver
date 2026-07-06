@@ -245,6 +245,7 @@ alerting works even when config parsing fails.
 |----------|----------|-------------|
 | `ROLE` | yes | Selects which task queue the `worker` binary polls and which activities it registers: `control` (Kubernetes-side: snapshot resolution and bin-packing) or `data` (storage-host-side: tar/age/PAR2/checksum/LTFS/changer activities, plus report/ISO building and Discord delivery — these run on the data worker because the recovery binaries, pinned tools, staged files, and captured LTFS indexes all live there). Matching is case-insensitive. An empty or unrecognized value causes the worker to exit non-zero at startup. |
 | `LOG_LEVEL` | no | Logging verbosity for the worker: `debug`, `info`, `warn` (or `warning`), or `error`. Case-insensitive; defaults to `info`, and an unrecognized value also falls back to `info`. |
+| `WORKER_IDLE_EXIT_AFTER` | no | **Control worker only.** Go duration (e.g. `15m`); when set to a positive value, the control worker drains in-flight work and exits `0` once it has run no activity for this long, letting a KEDA-spawned Job scale back to zero — see [Control-worker idle-exit](#control-worker-idle-exit). Empty/unset (the default) disables it: the worker runs until `SIGINT`/`SIGTERM`. A negative or unparseable value fails startup. Ignored (inert) for the `data` role. |
 | `DISCORD_FAILURE_WEBHOOK_URL` | no | Discord webhook URL for run failure alerts. When absent, failure alerting is silently disabled. |
 | `TAPE_K8S_DATASET_PARENT` | no | democratic-csi's `datasetParentName` (e.g. `bulk-pool-01/k8s/democratic-csi/nfs/pvcs`), prepended to a relative CSI `snapshotHandle` to rebuild the absolute ZFS snapshot path during k8s resolution on the control worker. Only needed when a run names k8s sources; when absent, handles are treated as already absolute. |
 | `TAPE_STAGING_DIR` | yes (data worker) | Directory the Prepare phase stages prepared archives into — a plain subdirectory of an existing dataset on the storage host (e.g. `/mnt/bulk-pool-01/archive/.tape-staging`), bind-mounted into the data worker container. Each run isolates its output in a subdirectory keyed by run id. Required on the data worker; the Prepare activity fails when it is empty. Ignored by the control worker. |
@@ -275,3 +276,33 @@ it `GET`s `/readyz` on the local health server and exits `0` when ready, non-zer
 otherwise, so `docker inspect` health reflects readiness. It never starts a Temporal
 worker. It targets `HEALTH_ADDR` by default; an optional positional `host:port` argument
 overrides the target.
+
+### Control-worker idle-exit
+
+When `WORKER_IDLE_EXIT_AFTER` is set to a positive duration, the **control worker** exits
+once it has been idle for that window, so a KEDA-spawned `Job` can scale back to zero
+between runs (parent design: scale-to-zero for the control worker). It is disabled by
+default (unset/empty), in which case the worker runs until it receives `SIGINT`/`SIGTERM`,
+preserving the fixed-replica `Deployment` posture.
+
+Behavior:
+
+- **Graceful, never abrupt.** The idle timer triggers the *same* drain path as `SIGTERM`:
+  the worker stops polling and waits for in-flight tasks to finish before the process
+  exits `0`. It never terminates mid-task.
+- **Only activity work counts as busy.** The countdown advances only while no activity is
+  executing on the worker, and it restarts whenever an activity starts *or* finishes (so a
+  long activity does not force an instant exit on return). A workflow that is merely parked
+  waiting on a data-worker activity reads as idle — that is intended, so the control worker
+  can scale to zero during the hours-long data-side write. Resuming on respawn only replays
+  the recorded workflow history (activities are never re-run) and is measured to complete
+  in well under a second.
+- **Control role only.** For `ROLE=data` the setting is inert (logged and ignored); the
+  data worker's lifecycle is unchanged.
+
+Two Prometheus gauges make the behavior observable on `/metrics` when idle-exit is enabled:
+
+| Metric | Meaning |
+|--------|---------|
+| `tape_archiver_worker_idle_in_flight_tasks` | Activity tasks currently executing on the worker; the idle countdown only advances while this is `0`. |
+| `tape_archiver_worker_idle_seconds_until_exit` | Seconds until the worker self-exits on idle: the full idle window while any task is in flight, counting down to `0` once idle. |

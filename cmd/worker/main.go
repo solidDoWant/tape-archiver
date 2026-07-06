@@ -137,12 +137,28 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 
 	slog.Info("starting worker", "role", string(cfg.Role), "task_queue", queue)
 
-	w := worker.New(temporalClient, queue, workerOptions(cfg.Role))
+	options := workerOptions(cfg.Role)
+
+	// Idle-exit (control role only): when WORKER_IDLE_EXIT_AFTER is set, drain and
+	// exit once the worker has been idle for the window so a KEDA-spawned Job scales
+	// to zero (SPEC §4.1; #113). installIdleExit adds the tracking interceptor to
+	// options and returns an interrupt channel that fires on either an OS signal or
+	// the idle trigger; when disabled it returns interruptCh unchanged. idleCtx
+	// bounds the background idle loop to the lifetime of run.
+	idleCtx, cancelIdle := context.WithCancel(ctx)
+	defer cancelIdle()
+
+	workerInterruptCh, err := installIdleExit(idleCtx, cfg, &options, metricsProvider.PrometheusRegisterer(), interruptCh)
+	if err != nil {
+		return err
+	}
+
+	w := worker.New(temporalClient, queue, options)
 	registerActivities(w, cfg.Role, env, metricsProvider.PrometheusRegisterer())
 
-	// Run blocks until interruptCh delivers, then stops polling and waits for
+	// Run blocks until workerInterruptCh delivers, then stops polling and waits for
 	// in-flight tasks to finish before returning.
-	if err := w.Run(interruptCh); err != nil {
+	if err := w.Run(workerInterruptCh); err != nil {
 		return fmt.Errorf("run worker on %q task queue: %w", queue, err)
 	}
 
