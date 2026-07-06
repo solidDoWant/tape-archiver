@@ -85,4 +85,11 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	// (SPEC §4.3 phases 9–10, §9–§11).
 	w.RegisterActivity(newReportActivities(cfg.StagingDir, cfg.RecoveryBinariesDir))
 	w.RegisterActivity(newDeliverActivities())
+
+	// The per-disc optical burn/verify activities run here too: the burners are
+	// attached to the storage host and the recovery ISO is staged beside the run's
+	// tree (SPEC §10). They are stateless — every per-disc parameter (device,
+	// ISO/manifest path, AllowNonBlankDiscs) flows through the activity input — so
+	// nothing is wired in from DataConfig.
+	w.RegisterActivity(newBurnActivities())
 }
