@@ -348,11 +348,9 @@ type runState struct {
 	// completes; the Report phase uses the full list (barcodes, IndexXML) for the
 	// report and recovery ISO.
 	written []WrittenTape
-	// reportPath and isoPath are the on-disk paths of the artifacts the Report
-	// phase builds (SPEC §4.3 phase 9): the PDF report and the compressed recovery
-	// ISO, staged on the data worker. The Deliver phase uploads them.
+	// reportPath is the on-disk path of the PDF report the Report phase builds
+	// (SPEC §4.3 phase 9), staged on the data worker. The Deliver phase uploads it.
 	reportPath string
-	isoPath    string
 	// uncompressedISOPath is the on-disk path of the uncompressed recovery ISO 9660
 	// image the Report phase stages only when optical burning is enabled
 	// (delivery.opticalBurn). It is the mountable image the Burn phase consumes;

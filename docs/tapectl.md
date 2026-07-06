@@ -167,5 +167,5 @@ Abort signal sent to run backup.
 ```
 
 The tapes that wrote successfully before the failure are already ejected and recorded; the
-report and recovery ISO cover them. Sending `abort` to a run that is not paused on a
-Load/Write failure has no effect.
+report covers them (as does the recovery ISO, when optical burning is enabled). Sending
+`abort` to a run that is not paused on a Load/Write failure has no effect.

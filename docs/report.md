@@ -77,8 +77,8 @@ The report **intentionally** contains the age private identity
 holds the printed report — or the recovery ISO that embeds it — can always decrypt the
 archives, with no dependency on an external key store ~20 years later.
 
-The consequence, stated plainly: the report (and the ISO and the Discord delivery that
-carry it) contain the decryption secret and **must be handled accordingly**. Under this
+The consequence, stated plainly: the report (its Discord delivery, and the recovery ISO
+on its burned disc) contains the decryption secret and **must be handled accordingly**. Under this
 project's personal cold-storage threat model that trade-off is accepted. A finding of the
 private identity in the report is expected behavior, not a leak.
 

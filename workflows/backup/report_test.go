@@ -357,9 +357,9 @@ func TestVerifyEscrowIdentity(t *testing.T) {
 	})
 }
 
-// TestBuildReport exercises the whole activity body: identity verification, PDF
-// render, ISO assembly with static-binary fixtures, and zstd compression. It
-// produces both artifacts on disk.
+// TestBuildReport covers AC4: with optical burning disabled the activity produces
+// only the PDF report — no recovery ISO, compressed or uncompressed, and no disc
+// manifest — in the staging directory.
 func TestBuildReport(t *testing.T) {
 	t.Parallel()
 
@@ -385,31 +385,30 @@ func TestBuildReport(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, filepath.Join(outDir, reportFileName), output.ReportPath)
-	assert.Equal(t, filepath.Join(outDir, compressedISOFileName), output.ISOPath)
 
-	// Optical burning is disabled (no delivery.opticalBurn section), so no
-	// uncompressed ISO is staged: byte-for-byte the compressed-only behavior.
+	// Optical burning is disabled (no delivery.opticalBurn section), so no recovery
+	// ISO — compressed or uncompressed — and no disc manifest are produced.
 	assert.Empty(t, output.UncompressedISOPath, "no uncompressed ISO must be staged when burning is disabled")
 	assert.NoFileExists(t, filepath.Join(outDir, isoFileName), "the uncompressed ISO file must not exist when burning is disabled")
+	assert.NoFileExists(t, filepath.Join(outDir, "recovery.iso.zst"), "no compressed ISO must ever be produced")
 	assert.Empty(t, output.DiscManifestPath, "no disc-content manifest must be staged when burning is disabled")
 	assert.NoFileExists(t, filepath.Join(outDir, discManifestFileName), "the disc-content manifest must not exist when burning is disabled")
+
+	// Only the report is staged in the output directory.
+	entries, err := os.ReadDir(outDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "only the PDF report must be produced when burning is disabled")
+	assert.Equal(t, reportFileName, entries[0].Name())
 
 	pdf, err := os.ReadFile(output.ReportPath)
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(string(pdf), "%PDF-"), "report must be a PDF")
-
-	iso, err := os.ReadFile(output.ISOPath)
-	require.NoError(t, err)
-	assert.NotEmpty(t, iso)
-	// zstd magic number (little-endian 0xFD2FB528).
-	assert.Equal(t, []byte{0x28, 0xb5, 0x2f, 0xfd}, iso[:4], "ISO must be zstd-compressed")
 }
 
-// TestBuildReportStagesUncompressedISOWhenBurning checks that with optical burning
+// TestBuildReportStagesUncompressedISOWhenBurning covers AC5: with optical burning
 // enabled the Report phase stages the uncompressed recovery ISO beside the run
-// artifacts and records its path, still produces the compressed ISO for delivery,
-// and that the staged image is a valid ISO 9660 identical to the compressed one
-// decompressed (same recovery contents).
+// artifacts and records its path, the staged image is a valid ISO 9660, and no
+// compressed .zst ISO is produced.
 func TestBuildReportStagesUncompressedISOWhenBurning(t *testing.T) {
 	t.Parallel()
 
@@ -426,13 +425,6 @@ func TestBuildReportStagesUncompressedISOWhenBurning(t *testing.T) {
 	output, err := acts.buildReport(t.Context(), outDir, input)
 	require.NoError(t, err)
 
-	// The compressed ISO is still produced for Discord delivery.
-	assert.Equal(t, filepath.Join(outDir, compressedISOFileName), output.ISOPath)
-
-	compressed, err := os.ReadFile(output.ISOPath)
-	require.NoError(t, err)
-	assert.Equal(t, []byte{0x28, 0xb5, 0x2f, 0xfd}, compressed[:4], "compressed ISO must be zstd-compressed")
-
 	// The uncompressed ISO is staged and its path recorded for the Burn phase.
 	assert.Equal(t, filepath.Join(outDir, isoFileName), output.UncompressedISOPath)
 
@@ -440,9 +432,8 @@ func TestBuildReportStagesUncompressedISOWhenBurning(t *testing.T) {
 	require.NoError(t, err)
 	assertValidISO9660(t, staged)
 
-	// Decompressing the delivered compressed ISO yields byte-for-byte the staged
-	// uncompressed image: same ISO 9660 image, same recovery contents.
-	assert.Equal(t, staged, zstdDecompress(t, compressed), "the staged uncompressed ISO must match the compressed artifact decompressed")
+	// No compressed ISO is produced.
+	assert.NoFileExists(t, filepath.Join(outDir, "recovery.iso.zst"), "no compressed ISO must be produced")
 }
 
 // assertValidISO9660 checks that data is an ISO 9660 image: its Primary Volume
