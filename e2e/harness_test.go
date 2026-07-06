@@ -88,6 +88,22 @@ const (
 	// absolute ZFS path. It is the test pool root, so `<parent>/pvc-<uuid>` is a
 	// child dataset of the pool. Wired into the control worker as K8sDatasetParent.
 	datasetParent = "tape_test"
+
+	// scaledJobRelease is the separate Helm release used by the autoscaling tests to
+	// install the control worker in its KEDA ScaledJob shape, alongside (not on top
+	// of) the shared Deployment release. It is installed and uninstalled by the
+	// autoscaling test itself, not the shared harness.
+	scaledJobRelease = "ta-control-sj"
+
+	// kedaNamespace / kedaRelease / kedaChartVersion pin the KEDA operator install.
+	// 2.16 is the first KEDA release to ship the built-in Temporal scaler the
+	// control-worker ScaledJob depends on. KEDA is a hard prerequisite of the suite:
+	// installKeda fails the whole harness if the install fails, so the autoscaling
+	// path is genuinely covered rather than silently skipped.
+	kedaNamespace    = "keda"
+	kedaRelease      = "keda"
+	kedaChartVersion = "2.16.1"
+	kedaChartRef     = "oci://ghcr.io/kedacore/charts/keda"
 	// rbacName is the ClusterRole + binding granting the control worker's
 	// ServiceAccount read access to VolumeSnapshots (the chart omits this by
 	// design — it is the operator's responsibility).
@@ -235,6 +251,7 @@ func setupHarness() (*e2eHarness, error) {
 		{"build-tapectl", h.buildTapectl},
 		{"recovery-binaries", h.buildRecoveryBinaries},
 		{"kind-cluster", h.createCluster},
+		{"keda", h.installKeda},
 		{"load-control-image", h.loadControlImage},
 		{"snapshot-crds", h.installSnapshotCRDs},
 		{"temporal-on-kind-net", h.joinTemporalToNetwork},
@@ -321,6 +338,23 @@ func (h *e2eHarness) createCluster() error {
 	})
 
 	return nil
+}
+
+// installKeda installs the KEDA operator (with its CRDs, including ScaledJob and
+// TriggerAuthentication) into the kind cluster via its published OCI Helm chart. The
+// control-worker ScaledJob path and its Temporal scaler are KEDA features, so KEDA is
+// a hard prerequisite of the suite: a failed install fails the whole harness rather
+// than skipping the autoscaling tests, so the scale-to-zero path is genuinely covered.
+// KEDA is torn down with the cluster (createCluster's delete), so no separate cleanup
+// is registered.
+func (h *e2eHarness) installKeda() error {
+	_, err := execOut(h.repoRoot, h.kubeEnv(), "helm", "install", kedaRelease, kedaChartRef,
+		"--version", kedaChartVersion,
+		"--namespace", kedaNamespace, "--create-namespace",
+		"--wait", "--timeout", "5m",
+	)
+
+	return err
 }
 
 func (h *e2eHarness) loadControlImage() error {
@@ -612,6 +646,88 @@ func (h *e2eHarness) deployControlWorker() error {
 	})
 
 	return nil
+}
+
+// installScaledJobWorker installs the control worker in its KEDA ScaledJob shape as a
+// separate release (scaledJobRelease), alongside — not replacing — the shared
+// Deployment release. The overlay drives a fast scale-to-zero cycle observable in
+// seconds: a low KEDA pollingInterval and a short WORKER_IDLE_EXIT_AFTER so the Job
+// self-completes quickly once the control queue goes idle. keda.apiKey.value is a
+// dummy — the dev Temporal has no auth, but the chart requires a KEDA credential on
+// this path. It registers a t.Cleanup that uninstalls the release (which cascades KEDA's
+// spawned Jobs via their ownerReferences). Callers must first remove the shared
+// Deployment worker as a poller (scaleControlDeployment 0), so the KEDA-spawned worker
+// is the only one on the control queue and scale-from-zero is observable.
+func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
+	t.Helper()
+
+	chart := filepath.Join("deploy", "charts", "tape-archiver-control-worker")
+
+	// Vendor the bjw-s common dependency from the committed Chart.lock (offline);
+	// idempotent with deployControlWorker's earlier build.
+	_, err := execOut(h.repoRoot, nil, "helm", "dependency", "build", chart)
+	require.NoError(t, err, "helm dependency build")
+
+	imagePath := "resources.controllers.main.containers.main.image"
+
+	_, err = execOut(h.repoRoot, h.kubeEnv(), "helm", "install", scaledJobRelease, chart,
+		"--namespace", namespace, "--wait", "--timeout", "2m",
+		"--set", "config.temporal.address="+temporalAlias+":"+temporalPort,
+		"--set", "config.controlWorker.discordFailureWebhookUrl.value="+h.failureURL(),
+		"--set", "resources.controllers.main.type=scaledjob",
+		"--set", "config.temporal.keda.apiKey.value=dev",
+		"--set", "resources.controllers.main.keda.pollingInterval=5",
+		"--set-string", "resources.controllers.main.containers.main.env.WORKER_IDLE_EXIT_AFTER=20s",
+		"--set-string", imagePath+".repository="+controlRepo,
+		"--set-string", imagePath+".tag="+imageVersion,
+		"--set", imagePath+".pullPolicy=Never",
+	)
+	require.NoError(t, err, "helm install scaledjob worker")
+
+	t.Cleanup(func() {
+		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", scaledJobRelease,
+			"--namespace", namespace, "--wait", "--timeout", "2m")
+	})
+}
+
+// scaleControlDeployment scales the shared Deployment control worker (helmRelease) to
+// the given replica count and waits for the rollout to settle there. The autoscaling
+// tests scale it to 0 so the KEDA-spawned worker is the sole control-queue poller; the
+// multi-replica test scales it to 2 to run two concurrent pollers.
+func (h *e2eHarness) scaleControlDeployment(t *testing.T, replicas int) {
+	t.Helper()
+
+	_, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "scale", "deployment",
+		"-n", namespace, "-l", "app.kubernetes.io/instance="+helmRelease,
+		fmt.Sprintf("--replicas=%d", replicas))
+	require.NoErrorf(t, err, "scale control deployment to %d", replicas)
+
+	require.Eventuallyf(t, func() bool {
+		return h.runningControlPods(t, helmRelease) == replicas
+	}, 2*time.Minute, 2*time.Second, "control deployment must settle at %d running pod(s)", replicas)
+}
+
+// restoreControlReplicas scales the shared Deployment control worker back to its
+// harness default of one replica. Best-effort (no *testing.T), for use in a cleanup so
+// a later test still finds the baseline Deployment serving the control queue.
+func (h *e2eHarness) restoreControlReplicas() {
+	_, _ = execOut(h.repoRoot, h.kubeEnv(), "kubectl", "scale", "deployment",
+		"-n", namespace, "-l", "app.kubernetes.io/instance="+helmRelease, "--replicas=1")
+}
+
+// runningControlPods returns the number of Running-phase pods for the given control
+// worker release. It counts only Running pods, so a KEDA Job pod that has Completed
+// (Succeeded phase) after a self-exit reads as scaled-to-zero, which is exactly the
+// "no worker running" signal the autoscaling assertions turn on.
+func (h *e2eHarness) runningControlPods(t *testing.T, release string) int {
+	t.Helper()
+
+	out, err := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "get", "pods",
+		"-n", namespace, "-l", "app.kubernetes.io/instance="+release,
+		"--field-selector=status.phase=Running", "-o", "name")
+	require.NoErrorf(t, err, "list running control pods for %s", release)
+
+	return len(strings.Fields(out))
 }
 
 func (h *e2eHarness) startDataWorker() error {
