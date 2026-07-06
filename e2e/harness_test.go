@@ -49,6 +49,7 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/internal/testutil"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
@@ -93,8 +94,11 @@ const (
 	rbacName = "tape-archiver-e2e-snapshot-reader"
 )
 
-// orderedPhases is the full ten-phase sequence the backup workflow completes, in
-// order (SPEC §4.3). Built from the exported constants so it tracks any rename.
+// orderedPhases is the full phase sequence the backup workflow completes, in order
+// (SPEC §4.3). Built from the exported constants so it tracks any rename. The Burn
+// phase always runs — it is a no-op that still completes (and is recorded) when
+// optical burning is disabled — so it appears here between Report and Deliver for
+// every run, burning or not.
 var orderedPhases = []string{
 	backup.PhaseResolve,
 	backup.PhasePrepare,
@@ -105,6 +109,7 @@ var orderedPhases = []string{
 	backup.PhaseWrite,
 	backup.PhaseEject,
 	backup.PhaseReport,
+	backup.PhaseBurn,
 	backup.PhaseDeliver,
 }
 
@@ -130,7 +135,16 @@ type e2eHarness struct {
 	gatewayIP      string // host address reachable from the kind network
 	webhookURL     string // base URL, e.g. http://172.18.0.1:39000
 	rec            *recorder
-	cleanups       []func()
+
+	// opticalDevices are loop-device-backed pseudo-burners for the optical burn
+	// tests, created host-side and passed through to the data-worker container.
+	// Empty when losetup is unavailable, so the optical tests skip and the rest of
+	// the suite is unaffected. opticalBackings holds their backing files (detached
+	// on teardown alongside the loop devices).
+	opticalDevices  []string
+	opticalBackings []string
+
+	cleanups []func()
 }
 
 func TestMain(m *testing.M) {
@@ -227,6 +241,7 @@ func setupHarness() (*e2eHarness, error) {
 		{"mock-webhook", h.startWebhook},
 		{"clean-leftover-workflows", h.cleanLeftoverWorkflows},
 		{"staging-dir", h.createStagingDir},
+		{"optical-discs", h.setupOpticalDiscs},
 		{"deploy-control-worker", h.deployControlWorker},
 		{"snapshot-rbac", h.grantSnapshotRBAC},
 		{"data-worker-container", h.startDataWorker},
@@ -458,6 +473,70 @@ func (h *e2eHarness) createStagingDir() error {
 	return nil
 }
 
+// opticalDiscCount is how many loop-device pseudo-burners the harness provisions
+// for the optical burn tests. Two lets a single burn-set drive two copies in
+// parallel (TestBackupEndToEnd_OpticalBurn) with no operator disc-swap pause, and
+// the reclaim test reuses the first.
+const opticalDiscCount = 2
+
+// opticalDiscSize is the backing size of each loop-device pseudo-disc. The recovery
+// ISO is tens of MB (report, manifest, a handful of static recovery binaries); half
+// a gibibyte is ample while staying a sparse file that costs nothing until written.
+const opticalDiscSize = 512 << 20
+
+// setupOpticalDiscs provisions loop-device-backed pseudo-burners for the optical
+// burn tests and passes them into the data-worker container (startDataWorker). It
+// is the optical analogue of the mhvtl library: there is no faithful virtual
+// optical writer, so a loop device driven through xorriso's stdio pseudo-drive
+// stands in for a burner (the same mechanism pkg/optical and the burn integration
+// tests use). It is best-effort: when losetup is unavailable it logs and leaves the
+// device list empty, so the optical tests skip (requireOpticalDiscs) and the rest
+// of the suite is unaffected — make test-e2e stays green without optical support.
+func (h *e2eHarness) setupOpticalDiscs() error {
+	if _, err := exec.LookPath("losetup"); err != nil {
+		log.Printf("[e2e] optical-discs: losetup not on PATH; optical burn tests will skip")
+
+		return nil
+	}
+
+	dir, err := os.MkdirTemp("", "tape-archiver-e2e-optical-")
+	if err != nil {
+		return err
+	}
+
+	h.push(func() { _ = os.RemoveAll(dir) })
+
+	for i := 0; i < opticalDiscCount; i++ {
+		backing := filepath.Join(dir, fmt.Sprintf("disc-%d.img", i))
+		if err := os.WriteFile(backing, nil, 0o600); err != nil {
+			return err
+		}
+
+		if err := os.Truncate(backing, opticalDiscSize); err != nil {
+			return err
+		}
+
+		out, err := execStdout(h.repoRoot, nil, "losetup", "--find", "--show", backing)
+		if err != nil {
+			return fmt.Errorf("attach loop device for %s: %w", backing, err)
+		}
+
+		device := strings.TrimSpace(out)
+		if device == "" {
+			return fmt.Errorf("losetup returned no device for %s", backing)
+		}
+
+		h.opticalDevices = append(h.opticalDevices, device)
+		h.opticalBackings = append(h.opticalBackings, backing)
+
+		h.push(func() { _, _ = execOut(h.repoRoot, nil, "losetup", "--detach", device) })
+
+		log.Printf("[e2e] optical-discs: %s backed by %s", device, backing)
+	}
+
+	return nil
+}
+
 func (h *e2eHarness) startWebhook() error {
 	// The gateway of the kind bridge is the host's address on that network, i.e.
 	// the address in-cluster pods and the data container reach the host webhook at.
@@ -545,11 +624,21 @@ func (h *e2eHarness) startDataWorker() error {
 
 	args := []string{"run", "-d", "--name", "tape-archiver-e2e-data", "--network", kindNetwork}
 
-	for _, dev := range []string{
+	devices := []string{
 		envOr("MHVTL_CHANGER_DEV", "/dev/sch0"),
 		envOr("MHVTL_DRIVE0_DEV", "/dev/nst0"), envOr("MHVTL_DRIVE1_DEV", "/dev/nst1"),
 		"/dev/sg0", "/dev/sg1", "/dev/sg2", "/dev/fuse", "/dev/zfs",
-	} {
+	}
+
+	// The optical burn tests burn to these inside the data worker: the loop-device
+	// pseudo-burners provisioned by setupOpticalDiscs, plus a real burner named by
+	// OPTICAL_BURN_DEV for the opt-in real-hardware test (when present).
+	devices = append(devices, h.opticalDevices...)
+	if realBurner := os.Getenv(testutil.OpticalBurnDevEnv); realBurner != "" {
+		devices = append(devices, realBurner)
+	}
+
+	for _, dev := range devices {
 		if _, err := os.Stat(dev); err == nil {
 			args = append(args, "--device", dev)
 		}
@@ -758,12 +847,22 @@ func generateTestKeypair(t *testing.T) (identity, recipient string) {
 	return string(contents), recipient
 }
 
+// backupWorkflowID is the fixed, singleton workflow ID every backup run submits
+// under (SPEC §4.2 — the model is serial: one data worker, one storage host, one
+// staging area). It mirrors the same constant in cmd/tapectl (package main, so not
+// importable). Runs are mutually exclusive, so the suite (which runs serially,
+// -p 1) submits under this one ID and awaits/terminates it by name; the per-test
+// runID lives on only as the webhook-delivery bucket token in the run config URL.
+const backupWorkflowID = "backup"
+
 // submitRun submits a backup run through the tapectl CLI — the operator path — by
-// writing the config as JSON and invoking `tapectl run --config <file> --id
-// <runID>`. It inherits the process env (TEMPORAL_ADDRESS + the dialTemporal
-// isolation), and asserts the CLI echoes back the submitted workflow ID. The run
-// is then awaited via the Temporal client (tapectl only submits).
-func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config, runID string) {
+// writing the config as JSON and invoking `tapectl run --config <file>`. It
+// inherits the process env (TEMPORAL_ADDRESS + the dialTemporal isolation) and
+// asserts the CLI echoes back the singleton workflow ID. Because the workflow ID
+// is a singleton, a run left over from a prior test may still be closing; the
+// submit is retried until that run's ID frees (tapectl reports a conflict as "a
+// backup run is already in progress"), mirroring the tapectl integration test.
+func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config) {
 	t.Helper()
 
 	data, err := json.Marshal(cfg)
@@ -772,53 +871,72 @@ func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config, runID string) {
 	configPath := filepath.Join(t.TempDir(), "run-config.json")
 	require.NoError(t, os.WriteFile(configPath, data, 0o600))
 
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
+	deadline := time.Now().Add(90 * time.Second)
 
-	out, err := exec.CommandContext(ctx, h.tapectlPath, "run", "--config", configPath, "--id", runID).CombinedOutput()
-	require.NoErrorf(t, err, "tapectl run: %s", out)
-	require.Equal(t, runID, strings.TrimSpace(string(out)), "tapectl must echo the submitted workflow ID")
+	for {
+		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+		out, err := exec.CommandContext(ctx, h.tapectlPath, "run", "--config", configPath).CombinedOutput()
+
+		cancel()
+
+		if err == nil {
+			require.Equal(t, backupWorkflowID, strings.TrimSpace(string(out)),
+				"tapectl must echo the singleton workflow ID")
+
+			return
+		}
+
+		if strings.Contains(string(out), "already in progress") && time.Now().Before(deadline) {
+			time.Sleep(2 * time.Second)
+
+			continue
+		}
+
+		require.NoErrorf(t, err, "tapectl run: %s", out)
+	}
 }
 
-// resumeRun resumes a run paused in the Eject phase by invoking `tapectl resume`,
-// exercising the operator CLI path end to end (issue #67).
-func (h *e2eHarness) resumeRun(t *testing.T, runID string) {
+// resumeRun resumes the paused backup run by invoking `tapectl resume`, exercising
+// the operator CLI path end to end (issue #67). Runs are a singleton, so resume
+// takes no arguments and acts on backupWorkflowID.
+func (h *e2eHarness) resumeRun(t *testing.T) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, h.tapectlPath, "resume", runID).CombinedOutput()
+	out, err := exec.CommandContext(ctx, h.tapectlPath, "resume").CombinedOutput()
 	require.NoErrorf(t, err, "tapectl resume: %s", out)
 }
 
-// temporalRunID returns the Temporal RunID of a submitted workflow (its first
-// run). The staging directory is keyed by this, not the workflow ID.
-func temporalRunID(t *testing.T, c client.Client, workflowID string) string {
+// temporalRunID returns the Temporal RunID of the current backup run. The staging
+// directory is keyed by this, not the (singleton) workflow ID.
+func temporalRunID(t *testing.T, c client.Client) string {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	description, err := c.DescribeWorkflowExecution(ctx, workflowID, "")
-	require.NoError(t, err, "describe workflow %s", workflowID)
+	description, err := c.DescribeWorkflowExecution(ctx, backupWorkflowID, "")
+	require.NoError(t, err, "describe workflow %s", backupWorkflowID)
 
 	return description.GetWorkflowExecutionInfo().GetExecution().GetRunId()
 }
 
 func ptrFloat(f float64) *float64 { return &f }
 
-// terminateOnCleanup best-effort terminates the workflow when the test ends, so a
+// terminateOnCleanup best-effort terminates the backup run when the test ends, so a
 // panicked, timed-out, or otherwise-abandoned run does not linger on the shared
-// Temporal server and get re-serviced by the data worker on a later run.
-func terminateOnCleanup(t *testing.T, c client.Client, runID string) {
+// Temporal server — and, because the workflow ID is a singleton, so the next test
+// can submit its own run. Terminating an already-closed run is a harmless no-op.
+func terminateOnCleanup(t *testing.T, c client.Client) {
 	t.Helper()
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 15*time.Second)
 		defer cancel()
 
-		_ = c.TerminateWorkflow(ctx, runID, "", "e2e cleanup")
+		_ = c.TerminateWorkflow(ctx, backupWorkflowID, "", "e2e cleanup")
 	})
 }
 

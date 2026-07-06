@@ -77,11 +77,11 @@ func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
 	defer cancel()
 
-	h.submitRun(t, cfg, runID)
-	terminateOnCleanup(t, temporalClient, runID)
+	h.submitRun(t, cfg)
+	terminateOnCleanup(t, temporalClient)
 
 	var result backup.Result
-	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"k8s VolumeSnapshot run must complete successfully")
 
 	// A completed run means the k8s source resolved (VolumeSnapshot + Content read

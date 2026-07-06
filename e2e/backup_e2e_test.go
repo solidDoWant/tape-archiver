@@ -61,11 +61,11 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
 	defer cancel()
 
-	h.submitRun(t, cfg, runID)
-	terminateOnCleanup(t, temporalClient, runID)
+	h.submitRun(t, cfg)
+	terminateOnCleanup(t, temporalClient)
 
 	var result backup.Result
-	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"workflow must complete successfully")
 
 	// AC1: every phase ran to completion, in order.
@@ -78,7 +78,7 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	report := findUpload(t, uploads, "report.pdf")
 	iso := findUpload(t, uploads, "recovery.iso.zst")
 
-	assertReportContents(t, report, runID, string(fixture.barcode))
+	assertReportContents(t, report, backupWorkflowID, string(fixture.barcode))
 	assertRecoveryBinariesRun(t, iso)
 }
 
@@ -114,11 +114,11 @@ func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
 	defer cancel()
 
-	h.submitRun(t, cfg, runID)
-	terminateOnCleanup(t, temporalClient, runID)
+	h.submitRun(t, cfg)
+	terminateOnCleanup(t, temporalClient)
 
 	var result backup.Result
-	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"workflow must complete successfully")
 
 	// Every phase ran to completion, in order — the drive-set loop still reports
@@ -132,7 +132,7 @@ func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 	// Both physical copies were written across the two drive-sets, so the report
 	// lists both tape barcodes.
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
-	assert.Contains(t, report, runID, "report must name the run ID")
+	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
 
 	for _, barcode := range fixture.barcodes {
 		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
@@ -196,8 +196,8 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 20*time.Minute)
 	defer cancel()
 
-	h.submitRun(t, cfg, runID)
-	terminateOnCleanup(t, temporalClient, runID)
+	h.submitRun(t, cfg)
+	terminateOnCleanup(t, temporalClient)
 
 	// The run exports ioSlots tapes into the station, then the next eject fills it
 	// and pauses with the last tape unloaded back to its source slot (drive empty).
@@ -250,10 +250,10 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	require.NoError(t, changer.Transfer(runCtx, ioAddr, firstSlot), "operator clears one I/O slot")
 
 	// Resume through the operator CLI; the run exports the final tape and completes.
-	h.resumeRun(t, runID)
+	h.resumeRun(t)
 
 	var result backup.Result
-	require.NoError(t, temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, &result),
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"workflow must complete after the resume signal")
 
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
@@ -262,7 +262,7 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	require.Len(t, uploads, 2, "report and recovery ISO must both be delivered")
 
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
-	assert.Contains(t, report, runID, "report must name the run ID")
+	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
 
 	for _, barcode := range fixture.barcodes {
 		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
@@ -297,12 +297,12 @@ func uploadNames(uploads []upload) []string {
 // assertReportContents parses the delivered PDF and asserts it carries the run
 // ID, the archive manifest (a PAR2 recovery-set file name), the tape barcode, and
 // the age private identity (AC2).
-func assertReportContents(t *testing.T, reportPDF []byte, runID, barcode string) {
+func assertReportContents(t *testing.T, reportPDF []byte, workflowID, barcode string) {
 	t.Helper()
 
 	report := extractPDFText(t, reportPDF)
 
-	assert.Contains(t, report, runID, "report must name the run ID")
+	assert.Contains(t, report, workflowID, "report must name the run ID")
 	assert.Contains(t, report, barcode, "report must list the tape barcode")
 	assert.Contains(t, report, "AGE-SECRET-KEY", "report must embed the age private identity for escrow")
 	assert.Contains(t, report, ".par2", "report manifest must list the PAR2 recovery-set files")
