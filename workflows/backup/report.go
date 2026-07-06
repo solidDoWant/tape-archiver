@@ -88,8 +88,10 @@ on this disc.
     --deep-recovery, or the captured ltfs-index/<barcode>.schema extents).
 3.  Copy the tape's files to disk. Each archive lives under archives/NNN/; the
     per-tape manifest.json lists every file and its SHA-256.
-4.  Verify integrity against this disc's manifest.sha256:
-        bin/... (use a sha256 tool) — compare each file's digest.
+4.  Verify the copied files against manifest.sha256 with the system sha256sum
+    (coreutils, on any Linux host). From the directory holding the copied
+    archives/ tree:
+        sha256sum -c /path/to/disc/manifest.sha256
     If any archive slice or its PAR2 files are corrupt, repair with:
         bin/par2 repair archives/NNN/archive.par2
 5.  Concatenate an archive's slices in order to reconstruct its age stream:
