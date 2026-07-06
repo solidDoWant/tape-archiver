@@ -134,3 +134,11 @@ config:
 Once the pod is `Running`, it appears in the Temporal UI as a poller on the `control` task
 queue. The worker exits non-zero if it cannot dial or health-check the Temporal frontend at
 startup, so a pod that stays up (rather than crash-looping) confirms a live connection.
+
+## Autoscaling (scale-to-zero)
+
+The chart's default is the fixed-replica `Deployment` described above. The control worker
+can optionally **scale to zero** between runs via a KEDA `ScaledJob` plus a worker-side
+idle-exit, so nothing runs in the cluster when no run is in progress. Prerequisites
+(Temporal and KEDA minimums), the measured replay cost on respawn, and the
+`WORKER_IDLE_EXIT_AFTER` default are documented in [autoscaling.md](autoscaling.md).
