@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Role selects which task queue a worker polls and which set of activities it
@@ -54,6 +55,13 @@ type Config struct {
 	Role Role
 	// LogLevel is passed verbatim to logging.Setup (empty defaults to info).
 	LogLevel string
+	// IdleExitAfter is the control worker's idle window: once no activity task
+	// has run on this worker for this duration, it drains and exits 0 so a
+	// KEDA-spawned Job can scale back to zero (SPEC §4.1; parent #113). Zero
+	// disables idle-exit (the default), leaving the worker running until
+	// SIGINT/SIGTERM. It is honored only for the control role; the data worker
+	// (systemd on the storage host, no KEDA) ignores it.
+	IdleExitAfter time.Duration
 }
 
 // parseConfig reads the worker configuration from the environment.
@@ -63,10 +71,38 @@ func parseConfig() (Config, error) {
 		return Config{}, err
 	}
 
+	idleExitAfter, err := parseIdleExitAfter(os.Getenv("WORKER_IDLE_EXIT_AFTER"))
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
-		Role:     role,
-		LogLevel: os.Getenv("LOG_LEVEL"),
+		Role:          role,
+		LogLevel:      os.Getenv("LOG_LEVEL"),
+		IdleExitAfter: idleExitAfter,
 	}, nil
+}
+
+// parseIdleExitAfter parses the WORKER_IDLE_EXIT_AFTER idle window. An empty or
+// whitespace-only value yields a zero duration, which disables idle-exit. A
+// non-empty value must be a valid Go duration string (e.g. "15m"); a negative
+// duration is rejected since it has no meaningful idle-window interpretation.
+func parseIdleExitAfter(raw string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+
+	idleExitAfter, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("WORKER_IDLE_EXIT_AFTER must be a valid duration (got %q): %w", raw, err)
+	}
+
+	if idleExitAfter < 0 {
+		return 0, fmt.Errorf("WORKER_IDLE_EXIT_AFTER must not be negative (got %q)", raw)
+	}
+
+	return idleExitAfter, nil
 }
 
 // parseRole validates the ROLE environment variable. Matching is

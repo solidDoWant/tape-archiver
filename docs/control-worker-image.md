@@ -73,6 +73,12 @@ The entrypoint is `/bin/worker`; run configuration is supplied via the environme
 (including `DISCORD_FAILURE_WEBHOOK_URL`, SPEC §4.1, §11) and the Temporal workflow
 payload (SPEC §4.1, §5).
 
+Optionally set `WORKER_IDLE_EXIT_AFTER` (a Go duration, e.g. `15m`) so the control worker
+drains and exits `0` after an idle window, letting a KEDA-spawned `Job` scale back to
+zero; it is disabled by default. See
+[Control-worker idle-exit](configuration.md#control-worker-idle-exit) for the behavior and
+the exported gauges.
+
 ## Health check
 
 The image declares a `HEALTHCHECK` (`docker inspect --format '{{json .Config.Healthcheck}}'`)
