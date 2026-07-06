@@ -66,22 +66,26 @@ const (
 	unknownIdentity = "unknown"
 )
 
-// recoveryProcedure is the written, step-by-step recovery text embedded in both
-// the PDF report (SPEC §9) and the recovery ISO (SPEC §10). It refers only to the
-// tools staged on the disc under bin/ and the artifacts beside it, so it is
-// self-contained for a recoverer who has nothing but the disc and the tapes.
-const recoveryProcedure = `Tape Archiver — recovery procedure
+// recoveryProcedure is the concise, step-by-step recovery text rendered into the
+// PDF report (SPEC §9) so the laminated printout is self-contained even if the
+// disc is lost. The full procedure — including index-loss recovery and the
+// failure-scenario handling — ships on the recovery disc as recovery-procedure.md
+// (embedded by pkg/recoverykit from docs/recovery-procedure.md, SPEC §10); this
+// concise version points there for those cases. It refers only to the tools
+// staged on the disc under bin/ and the artifacts beside it.
+const recoveryProcedure = `Tape Archiver — recovery procedure (concise)
 
 You need only this disc and the physical tapes. All tools referenced below ship
 statically linked under bin/ on this disc; the age private identity is printed in
-report.pdf (and in the "Encryption key" section of this text's PDF).
+report.pdf (and in the "Encryption key" section of this text's PDF). The full
+procedure — index-loss recovery and failure handling — is in recovery-procedure.md
+on this disc.
 
 1.  Load a tape into a standalone LTO drive of the generation named in the report's
     build parameters (a newer generation that can read it also works).
 2.  Mount the tape's LTFS volume read-only:  ltfs -o ro <mountpoint>
-    If the on-tape LTFS index is damaged, restore it from this disc's
-    ltfs-index/<barcode>.schema backup before mounting (see the LTFS docs on this
-    disc), or read the tape with the index rollback options.
+    If the on-tape LTFS index is damaged, see recovery-procedure.md (ltfsck
+    --deep-recovery, or the captured ltfs-index/<barcode>.schema extents).
 3.  Copy the tape's files to disk. Each archive lives under archives/NNN/; the
     per-tape manifest.json lists every file and its SHA-256.
 4.  Verify integrity against this disc's manifest.sha256:
@@ -225,11 +229,10 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 	uncompressedISOPath := filepath.Join(outDir, isoFileName)
 
 	isoInput := recoverykit.Input{
-		Report:            pdf,
-		Manifest:          sha256Manifest,
-		TapeIndexes:       tapeIndexes(input.Written),
-		BinariesDir:       a.binariesDir,
-		RecoveryProcedure: recoveryProcedure,
+		Report:      pdf,
+		Manifest:    sha256Manifest,
+		TapeIndexes: tapeIndexes(input.Written),
+		BinariesDir: a.binariesDir,
 	}
 
 	discManifest, err := buildRecoveryISO(ctx, isoInput, uncompressedISOPath)

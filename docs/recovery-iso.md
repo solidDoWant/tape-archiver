@@ -30,8 +30,10 @@ The image holds, at these paths:
 - `report.pdf` — the PDF run report (SPEC §9). It embeds the contents manifest, the
   build parameters, the recovery procedure, and the age private identity.
 - `manifest.sha256` — the full SHA-256 manifest covering every on-tape file.
-- `recovery.txt` — the written, step-by-step recovery procedure (including LTFS read
-  instructions).
+- `recovery-procedure.md` — the full, step-by-step [recovery procedure](recovery-procedure.md),
+  including index-loss recovery and failure-scenario handling. It is embedded verbatim from
+  `docs/recovery-procedure.md` (a test asserts the two match); the PDF report additionally
+  carries a concise copy so the laminated printout is self-contained.
 - `ltfs-index/<barcode>.schema` — a backup copy of each tape's LTFS index, one per tape,
   named by the tape barcode. This lets the tape be read even if its on-tape index
   partition is damaged.

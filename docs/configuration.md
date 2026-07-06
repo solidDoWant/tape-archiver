@@ -144,6 +144,20 @@ re-drives **only** the failed tapes, never re-formatting a tape already written 
 responds within `writeFailureWaitTimeoutSeconds`, the run fails in that defined paused
 state (every tape in a drive, I/O slot, or storage slot) and is reported.
 
+Example (two-drive LTO-6 library, four blank slots, default 12-hour operator timeouts):
+
+```json
+{
+  "changer": "/dev/sch0",
+  "drives": ["/dev/nst0", "/dev/nst1"],
+  "blankSlots": [1, 2, 3, 4],
+  "tapeCapacityBytes": 2500000000000,
+  "ioWaitTimeoutSeconds": 43200,
+  "writeFailureWaitTimeoutSeconds": 43200,
+  "allowNonBlankTapes": false
+}
+```
+
 ---
 
 ## Redundancy
@@ -154,7 +168,7 @@ PAR2 redundancy policy. Exactly one of `targetPercentage` or `fillToCapacity` mu
 |-------|------|----------|-------------|
 | `targetPercentage` | `number` | no* | Fixed PAR2 redundancy as a percentage of the data size (≥ 0). |
 | `fillToCapacity` | `FillConfig` | no* | Expand PAR2 to fill each tape's remaining space down to a minimum floor. |
-| `sliceSizeBytes` | `integer` | yes | Fixed size of each encrypted data slice in bytes. The PAR2 block size is derived from this and the tape capacity. |
+| `sliceSizeBytes` | `integer` | yes | Fixed size of each encrypted data slice in bytes. The PAR2 block size is derived from this and the tape capacity. Must be > 0. |
 
 \* Exactly one of `targetPercentage` or `fillToCapacity` must be provided.
 
@@ -165,6 +179,18 @@ Configuration for fill-to-capacity mode.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `floor` | `number` | yes | Minimum PAR2 redundancy percentage (≥ 0). The PAR2 percentage will never be raised below this value even if tape capacity would allow it. |
+
+Example — fixed redundancy (10% PAR2, 4 GiB slices):
+
+```json
+{ "targetPercentage": 10, "sliceSizeBytes": 4294967296 }
+```
+
+Example — fill-to-capacity (expand PAR2 to fill each tape, never below a 5% floor):
+
+```json
+{ "fillToCapacity": { "floor": 5 }, "sliceSizeBytes": 4294967296 }
+```
 
 ---
 
@@ -181,6 +207,16 @@ those artifacts therefore carry the decryption secret and are delivered to Disco
 success, store and dispose of them accordingly. `identity` must be one of the private
 identities matching a configured `recipient`; the run refuses to build a report that
 escrows a key that cannot decrypt the archives.
+
+Example (one post-quantum recipient and its escrowed identity — placeholder keys, never
+real secrets):
+
+```json
+{
+  "recipients": ["age1pq1exampleonly0publicrecipientkeygoeshere000000000000000000"],
+  "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYDONOTUSE00000000000000000000000000"
+}
+```
 
 ---
 
@@ -233,6 +269,81 @@ burned. If no one responds within `burnWaitTimeoutSeconds` (default 12 h), the r
 that defined paused state and is reported. After all discs are burned, the delivered
 `report.pdf` is re-rendered so it records the burned discs and any overwrite — the copy
 inside the burned ISO predates the burn and cannot.
+
+Example (deliver the report to Discord and burn two recovery discs on one burner):
+
+```json
+{
+  "webhookUrl": "https://discord.com/api/webhooks/123456789/example-token",
+  "opticalBurn": {
+    "drives": ["/dev/sr0"],
+    "copies": 2,
+    "allowNonBlankDiscs": false,
+    "burnWaitTimeoutSeconds": 43200
+  }
+}
+```
+
+To leave optical burning off, omit `opticalBurn` entirely (or give it no `drives`):
+
+```json
+{ "webhookUrl": "https://discord.com/api/webhooks/123456789/example-token" }
+```
+
+---
+
+## Complete example configuration
+
+A full, illustrative run config exercising every top-level field — two tape copies, an
+LTO-6 library, one Kubernetes snapshot source and one raw ZFS source, fill-to-capacity
+PAR2 redundancy, post-quantum encryption, and Discord delivery with optical burning. The
+keys below are **placeholders**, not usable secrets.
+
+```json
+{
+  "copies": 2,
+  "feasibilityOverhead": 1.05,
+  "sources": [
+    {
+      "compression": true,
+      "k8s": {
+        "apiVersion": "snapshot.storage.k8s.io/v1",
+        "kind": "VolumeSnapshot",
+        "namespace": "plex",
+        "name": "plex-db-snap"
+      }
+    },
+    {
+      "compression": true,
+      "zfsPath": { "name": "bulk-pool-01/media@snap-20240101" }
+    }
+  ],
+  "library": {
+    "changer": "/dev/sch0",
+    "drives": ["/dev/nst0", "/dev/nst1"],
+    "blankSlots": [1, 2, 3, 4],
+    "tapeCapacityBytes": 2500000000000,
+    "ioWaitTimeoutSeconds": 43200,
+    "writeFailureWaitTimeoutSeconds": 43200,
+    "allowNonBlankTapes": false
+  },
+  "redundancy": {
+    "fillToCapacity": { "floor": 5 },
+    "sliceSizeBytes": 4294967296
+  },
+  "encryption": {
+    "recipients": ["age1pq1exampleonly0publicrecipientkeygoeshere000000000000000000"],
+    "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYDONOTUSE00000000000000000000000000"
+  },
+  "delivery": {
+    "webhookUrl": "https://discord.com/api/webhooks/123456789/example-token",
+    "opticalBurn": {
+      "drives": ["/dev/sr0"],
+      "copies": 2
+    }
+  }
+}
+```
 
 ---
 

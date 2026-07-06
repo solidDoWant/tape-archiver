@@ -555,21 +555,39 @@ The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
   LTO-6 tape's 2.5 TB native). The overhead factor covers
   `tar` headers/padding and `age` STREAM framing; `zstd` is assumed to yield no reduction
   (incompressible worst case) so the estimate never runs low. It defaults to **1.05** (5%,
-  a generous margin for many-small-file datasets) and is tunable per run via the
-  `feasibilityOverhead` config field. The PAR2 fraction is the target percentage, or the
+  a generous margin for many-small-file datasets; value chosen in issue #17) and is tunable
+  per run via the `feasibilityOverhead` config field. The PAR2 fraction is the target percentage, or the
   floor in fill-to-capacity mode. This is only the pre-check estimate; the authoritative
   size is the measured staged size from Prepare.
 - **LTFS implementation** — the reference open-source **LinearTape-Open `ltfs`**
-  (IBM-maintained, multi-vendor, Apache-2.0), pinned at **v2.4.8.4** and built from a Nix
+  (IBM-maintained, multi-vendor, Apache-2.0), pinned at **v2.4.8.4** (selected in issue #12)
+  and built from a Nix
   derivation (`nix/ltfs.nix`); the worker image and recovery disc ship the same version.
   The vendor-locked `hpe-ltfs` was rejected: it refuses non-HPE drives (so it cannot be
   tested against the mhvtl IBM-emulated drive), and the production LTO-6 drives are IBM.
   The reference `ltfs` drives the tape through its **`sg` backend (the `/dev/sg*` node)**,
   not the `nst` node — both are already passed through to the data worker (§4.1).
 
-Remaining open / future work:
+The last two open items are now resolved (issue #21), both as documented operator
+procedures in `docs/maintenance.md`:
 
-- Tape barcode *format* convention (any project prefix/sequence is cosmetic; the
-  canonical ID is whatever the library reads).
-- Recovery-disc re-burn/refresh cadence as a documented maintenance task.
+- **Tape barcode format convention** — `TA<NNNN>L<gen>` (project prefix `TA`, a
+  zero-padded sequence, then the standard LTO media-generation suffix, e.g.
+  `TA0001L6` for LTO-6). The prefix and sequence are cosmetic: the canonical
+  physical ID is whatever the library reads as the SCSI volume tag, and `mkltfs`
+  sets the LTFS volume name to that barcode (§6). Documented in
+  `docs/maintenance.md`.
+- **Recovery-disc re-burn / refresh cadence** — verify each burned disc's
+  readability against `manifest.sha256` **annually**, re-burn a fresh copy every
+  **5 years** or immediately on any read/verify failure, and always keep **≥2
+  copies** in separate locations. The disc is a redundancy layer, not a hard
+  dependency (§10). Documented in `docs/maintenance.md`.
+
+- **Index-loss recovery is a tested first-class path** (issue #21) — the captured
+  LTFS index shipped on the recovery disc (`ltfs-index/<barcode>.schema`) is a
+  complete byte-level extent map; an archive's bytes can be reconstructed from it
+  with raw SCSI `LOCATE`/`READ` and no LTFS mount (`pkg/ltfs` extent extractor +
+  `pkg/tape` raw reader), then PAR2-repaired, decrypted, and untarred. The full
+  operator procedure is `docs/recovery-procedure.md` (shipped on the disc), backed
+  by automated mhvtl recovery tests.
 
