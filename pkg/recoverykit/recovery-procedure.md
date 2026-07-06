@@ -42,20 +42,27 @@ works). Prefer the non-rewinding node (`/dev/nst0`) for the data path and note
 the paired SCSI generic node (`/dev/sg0`).
 
 **Tools that ship on the disc** under `bin/` — statically linked, run them
-directly, no installation:
+directly, no installation. These are the **exact binaries this run wrote with**,
+so there is nothing to version-match — just run them:
 
-| Tool | Version | Purpose |
-|------|---------|---------|
-| `bin/age` | 1.3.1 | decrypt archives (post-quantum recipients) |
-| `bin/par2` | 1.4.0 (par2cmdline-turbo) | verify and repair with the PAR2 recovery set |
-| `bin/zstd` | 1.5.7 | decompress (for compressed sources) |
-| `bin/tar` | 1.35 (GNU tar) | unpack the archive |
+| Tool | Purpose |
+|------|---------|
+| `bin/age` | decrypt archives (post-quantum recipients) |
+| `bin/par2` | verify and repair with the PAR2 recovery set |
+| `bin/zstd` | decompress (for compressed sources) |
+| `bin/tar` | unpack the archive |
+
+The exact `age`, `par2`, and `ltfs` versions this run used are recorded in the
+report's **Build parameters** section — the authoritative record, so this
+document does not restate version numbers that could drift from the shipped tools.
 
 **Tools the host must provide** (not on the disc — install from any
 distribution, or use the copies bundled in the data-worker image):
 
-- **`ltfs` 2.4.8.4** — mount the tape (normal path) and `ltfsck` (tier-1
-  index repair). Match the version in the report's build parameters.
+- **`ltfs`** — mount the tape (normal path) and `ltfsck` (tier-1 index repair).
+  Install the version named in the report's **Build parameters** section (or a
+  newer one that can read that format); `ltfs` is the one tool whose version must
+  match the tape.
 - **`mt` (`mt-st`)** and coreutils **`dd`**, **`cat`**, **`sha256sum`** — used by
   the [tier-2 index-loss](#tier-2--on-tape-index-unusable-captured-index-recovery)
   path to position the tape and read raw blocks.
