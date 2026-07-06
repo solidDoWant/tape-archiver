@@ -51,23 +51,23 @@ func TestBackupVerifyFault_NoTapeTouched(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 8*time.Minute)
 	defer cancel()
 
-	h.submitRun(t, cfg, runID)
-	terminateOnCleanup(t, temporalClient, runID)
+	h.submitRun(t, cfg)
+	terminateOnCleanup(t, temporalClient)
 
 	// Wait until Prepare has completed (its slices + recorded checksums exist on
 	// disk), then corrupt one slice before Verify recomputes it. Prepare keys the
 	// per-run staging subdirectory by the Temporal RunID (not the workflow ID).
-	waitForPhase(t, temporalClient, runID, backup.PhasePrepare, 4*time.Minute)
-	corruptStagedSlice(t, filepath.Join(h.stagingHostDir, temporalRunID(t, temporalClient, runID)))
+	waitForPhase(t, temporalClient, backup.PhasePrepare, 4*time.Minute)
+	corruptStagedSlice(t, filepath.Join(h.stagingHostDir, temporalRunID(t, temporalClient)))
 
 	// The run must fail, and the failure must be attributed to the Verify phase.
-	err := temporalClient.GetWorkflow(runCtx, runID, "").Get(runCtx, new(backup.Result))
+	err := temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, new(backup.Result))
 	require.Error(t, err, "run must fail after the injected checksum fault")
 	assert.Contains(t, err.Error(), backup.PhaseVerify, "failure must be attributed to the Verify phase")
 
-	// AC4: the control worker's failure webhook received an alert naming this run
-	// and the Verify phase.
-	assertFailureAlert(t, h, runID, backup.PhaseVerify)
+	// AC4: the control worker's failure webhook received an alert naming the run
+	// (the singleton workflow ID) and the Verify phase.
+	assertFailureAlert(t, h, backupWorkflowID, backup.PhaseVerify)
 
 	// AC4: no tape was loaded or written — Load never ran, so drive 0 is still
 	// empty and the blank tape is still in its storage slot.
@@ -77,13 +77,13 @@ func TestBackupVerifyFault_NoTapeTouched(t *testing.T) {
 // waitForPhase polls LastCompletedPhaseQuery until the workflow reports the given
 // phase as its last completed phase (or a later data-side phase), so the caller
 // can act within the window after it.
-func waitForPhase(t *testing.T, c client.Client, runID, phase string, timeout time.Duration) {
+func waitForPhase(t *testing.T, c client.Client, phase string, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		resp, err := c.QueryWorkflow(t.Context(), runID, "", backup.LastCompletedPhaseQuery)
+		resp, err := c.QueryWorkflow(t.Context(), backupWorkflowID, "", backup.LastCompletedPhaseQuery)
 		if err == nil {
 			var last string
 			require.NoError(t, resp.Get(&last))
@@ -149,18 +149,18 @@ func corruptStagedSlice(t *testing.T, dir string) {
 // assertFailureAlert asserts the mock failure webhook received exactly the alert
 // for this run, naming the run ID and the failing phase (the SendFailure format
 // is "Backup run <id> failed in phase <phase>: <err>").
-func assertFailureAlert(t *testing.T, h *e2eHarness, runID, phase string) {
+func assertFailureAlert(t *testing.T, h *e2eHarness, workflowID, phase string) {
 	t.Helper()
 
 	require.Eventually(t, func() bool {
 		for _, msg := range h.rec.failureMessages() {
-			if strings.Contains(msg, runID) && strings.Contains(msg, phase) {
+			if strings.Contains(msg, workflowID) && strings.Contains(msg, phase) {
 				return true
 			}
 		}
 
 		return false
-	}, 60*time.Second, 500*time.Millisecond, "failure webhook must receive an alert for run %s naming phase %s", runID, phase)
+	}, 60*time.Second, 500*time.Millisecond, "failure webhook must receive an alert for run %s naming phase %s", workflowID, phase)
 }
 
 // assertTapeUntouched asserts drive 0 is empty and the fixture's tape is still in
