@@ -28,9 +28,10 @@ import (
 // TestBackupEndToEnd runs the whole backup workflow through a real Temporal
 // server and real control + data workers, against mhvtl and the ephemeral ZFS
 // pool: it stages a real ZFS snapshot, packs it, generates PAR2, verifies,
-// writes it to a virtual tape, ejects it, builds the report and recovery ISO, and
-// delivers both to a local webhook. It asserts every one of the pipeline phases
-// (SPEC §4.3) completes in order and the run succeeds.
+// writes it to a virtual tape, ejects it, builds the report, and delivers it to a
+// local webhook (the run has no optical burning, so no recovery ISO is built). It
+// asserts every one of the pipeline phases (SPEC §4.3) completes in order and the
+// run succeeds.
 //
 // Covers issue #55 AC3 (all 10 phases execute in order, success) and AC4 (the
 // integration test passes against mhvtl + dev Temporal and skips when either —
@@ -152,8 +153,9 @@ func TestBackupEndToEnd(t *testing.T) {
 	// AC3: all pipeline phases ran to completion, in order.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all pipeline phases must complete in order")
 
-	// AC1/AC2: the Deliver phase uploaded both artifacts (report + compressed ISO).
-	assert.Equal(t, int32(2), uploads.Load(), "report and recovery ISO must both be delivered")
+	// The Deliver phase uploaded exactly one artifact — the report. The run has no
+	// optical burning configured, so no recovery ISO is built or delivered.
+	assert.Equal(t, int32(1), uploads.Load(), "only the report must be delivered")
 }
 
 // requireTemporalAddress skips the test when no Temporal server is configured.

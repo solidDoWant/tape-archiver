@@ -1,10 +1,14 @@
 # Recovery ISO (optical kit)
 
-Every run produces a single **ISO 9660 image** (SPEC §10): the self-contained optical
+A run produces a single **ISO 9660 image** (SPEC §10): the self-contained optical
 recovery kit. Together with the physical tapes it lets a future operator read, repair,
 decrypt, decompress, and unpack the archives with nothing but the disc and the tapes —
 no online services, no package manager, no original host. It is built by
-`pkg/recoverykit` and delivered alongside the report (SPEC §11).
+`pkg/recoverykit`, and **only when optical burning is enabled**
+([`delivery.opticalBurn`](configuration.md#opticalburn)) — as the mountable image the
+Burn phase burns to each disc. The burned disc is the ISO's durable home, so a run
+without burning produces no ISO; the PDF report is the artifact delivered to Discord
+(SPEC §11).
 
 **Target media: M-DISC DVD.** Its inorganic recording layer is ISO/IEC 10995-tested and
 NIST-listed for 100+ year archival life, and it is readable in the large, long-lived
@@ -87,9 +91,10 @@ support, which needs no separate plugin binary.
 
 The embedded `report.pdf` contains the age private identity (`AGE-SECRET-KEY-PQ-1…`).
 This is the documented key-escrow decision (SPEC §7): the holder of the disc can always
-decrypt the archives. The consequence, stated plainly: the recovery ISO (and the Discord
-delivery that carries it) contains the decryption secret and **must be handled
-accordingly**. See [report.md](report.md) for the full rationale.
+decrypt the archives. The consequence, stated plainly: the recovery ISO (and the burned
+disc) contains the decryption secret and **must be handled accordingly**. The delivered
+PDF report likewise carries the identity, so its Discord delivery is equally sensitive.
+See [report.md](report.md) for the full rationale.
 
 ## Implementation notes
 
@@ -103,6 +108,5 @@ accordingly**. See [report.md](report.md) for the full rationale.
 - Contents are verified in tests by reading the built image back with the same pure-Go
   reader and asserting every artifact is present at its expected path with its exact
   bytes, so the test exercises the real image rather than trusting the writer.
-- Compression of the `.iso` (SPEC §11) is handled by the Report phase, which zstd-
-  compresses the image as it is built and hands the compressed artifact to the Deliver
-  phase; `pkg/recoverykit` itself emits an uncompressed image.
+- The Report phase stages the image as `recovery.iso` for the Burn phase to burn; the
+  burned disc is the ISO's durable home (SPEC §10, §11).

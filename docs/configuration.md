@@ -186,11 +186,12 @@ escrows a key that cannot decrypt the archives.
 
 ## Delivery
 
-Delivery of run artifacts (PDF report and recovery ISO) to Discord on success.
+Delivery of the run's PDF report to Discord on success. The recovery ISO travels on its
+burned disc (SPEC §10), so the report is the single delivered artifact.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `webhookUrl` | `string` | yes | Discord incoming webhook URL for success delivery. |
+| `webhookUrl` | `string` | yes | Discord incoming webhook URL for success delivery. On success the PDF report is uploaded here. |
 | `opticalBurn` | `OpticalBurn` | no | Optionally burn the recovery disc to optical media as an extra redundancy layer (see below). Omit to leave optical burning off. |
 
 ### OpticalBurn

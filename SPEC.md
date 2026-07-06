@@ -89,11 +89,11 @@ where the data lives:
 - **Data worker (`data` queue) — runs as a container on `ubuntu-storage-host-01`.**
   Performs all bulk-data activities where the bytes already are, so they never cross
   the network: `tar`, `age`, PAR2 slicing, checksums, LTFS format/mount/write, and
-  library moves. It also builds the PDF report and the recovery ISO and delivers them
-  to Discord: the report/ISO inputs — the staged files, the recovery binaries staged
-  into the ISO, the pinned tool versions, and the captured LTFS indexes — all live
-  here, and delivering from here keeps the tens-of-MB ISO off the Temporal payload
-  path and out of the control image.
+  library moves. It also builds the PDF report — and, when optical burning is enabled,
+  the recovery ISO — and delivers the report to Discord: the report/ISO inputs — the
+  staged files, the recovery binaries staged into the ISO, the pinned tool versions, and
+  the captured LTFS indexes — all live here, and building from here keeps the tens-of-MB
+  ISO off the Temporal payload path and out of the control image.
 
 The data worker is a **Nix-built OCI image** (`streamLayeredImage`, per media-processor)
 run by systemd-managed Docker on the host. The image bundles pinned tooling — `ltfs`,
@@ -214,7 +214,8 @@ staged and verified on disk** — eliminating any computation during the write w
    remaining tapes into the freed slots. If the operator does not respond within
    `library.ioWaitTimeoutSeconds` (default 12h), the run fails in that defined state and is
    reported.
-9. **Report.** Build the PDF report (§9) and the recovery ISO (§10).
+9. **Report.** Build the PDF report (§9), and — only when `delivery.opticalBurn` is
+   configured — the recovery ISO (§10) as the mountable image the Burn phase consumes.
 10. **Burn (optional).** When `delivery.opticalBurn` is configured, burn the recovery
     disc from the staged uncompressed ISO (§10) and read each disc back to verify it.
     Copies are burned in successive **burn-sets** of at most `len(drives)` discs;
@@ -227,7 +228,7 @@ staged and verified on disk** — eliminating any computation during the write w
     it; after Burn the **delivered** `report.pdf` is re-rendered from the full run state
     to record the discs (and any overwrite). Disabled by default: a run with no
     `opticalBurn` section completes exactly as without this phase.
-11. **Deliver.** Send the report and ISO to Discord via webhook (§11).
+11. **Deliver.** Send the PDF report to Discord via webhook (§11).
 
 ## 5. Run configuration
 
@@ -257,7 +258,7 @@ The config defines, at minimum:
 - **Compression** — optional `zstd` before encryption, configurable per source,
   default on. Already-compressed sources (e.g. `media`) gain little but are unharmed.
 - **Encryption** — the age recipient(s) (`age1pq1…`) to encrypt to.
-- **Delivery** — the Discord webhook target and report/ISO options.
+- **Delivery** — the Discord webhook target (report delivery) and optical-burn options.
 
 ## 6. On-tape layout and formats
 
@@ -305,9 +306,10 @@ All formats are open and widely implemented, for 20-year recoverability.
   bundled on the recovery ISO.
 - **Key escrow (operator decision):** the **private identity is included** in the
   printed report and on the recovery ISO, so the holder of those artifacts can always
-  decrypt. Consequence to document plainly: the report and ISO delivered to Discord
-  therefore contain the decryption secret and must be handled accordingly. (Treated as
-  acceptable for this personal cold-storage threat model.) The identity is supplied in
+  decrypt. Consequence to document plainly: the report delivered to Discord (and the
+  recovery ISO on its burned disc) therefore contains the decryption secret and must be
+  handled accordingly. (Treated as acceptable for this personal cold-storage threat
+  model.) The identity is supplied in
   the run config (`encryption.identity`); it is **never used to encrypt** (that uses
   `encryption.recipients` only), and the Report phase fails the run if it is absent or
   if its derived public key is not one of the configured recipients — so the escrowed
@@ -355,11 +357,14 @@ printed and laminated as the durable offline index for the run.
 
 ## 10. Recovery ISO (optical)
 
-An ISO 9660 image (compressed) that is the self-contained recovery kit. Contains: the
-PDF report; the full SHA-256 manifest; a backup copy of each tape's LTFS index; and the
-**recovery tooling** — static `age`/`par2`/`zstd`/`tar` (and LTFS read instructions)
-plus their source and a written, step-by-step recovery procedure — so the tapes can be
-read, repaired, decrypted, decompressed, and unpacked with only the disc and the tapes.
+An ISO 9660 image that is the self-contained recovery kit. It is built **only when
+optical burning is enabled** (`delivery.opticalBurn`), as the mountable image the Burn
+phase burns to each disc — the burned disc is the ISO's durable home, so a run without
+burning produces no ISO. Contains: the PDF report; the full SHA-256 manifest; a backup
+copy of each tape's LTFS index; and the **recovery tooling** — static
+`age`/`par2`/`zstd`/`tar` (and LTFS read instructions) plus their source and a written,
+step-by-step recovery procedure — so the tapes can be read, repaired, decrypted,
+decompressed, and unpacked with only the disc and the tapes.
 The static tooling and its source are produced by `nix/recovery-binaries.nix` (flake
 output `recoveryBinaries`) from the same pinned nixpkgs the data-worker image uses, so
 the disc and the write path run identical tool versions (§2, §4.1).
@@ -391,11 +396,10 @@ Periodic re-burn/refresh remains a documented maintenance task.
 There are two distinct Discord notification paths:
 
 **Success delivery (per-run, configured in the run config).** At the end of a
-successful run the data worker delivers the report and the (compressed) ISO to the
-Discord webhook named in the run config (§5 Delivery) — from the data worker, where
-both artifacts were built (§4.1). Assumption: the compressed ISO
-fits the webhook upload limit (~25 MB); if a future run exceeds it, revisit (e.g. post
-the report plus a checksum and fetch the ISO from the pool). Out of scope for now.
+successful run the data worker delivers the PDF report to the Discord webhook named in
+the run config (§5 Delivery) — from the data worker, where it was built (§4.1). The
+recovery ISO travels on its burned disc (§10); the report is the single uploaded
+artifact, which keeps the upload comfortably within the webhook's ~25 MB limit.
 
 **Failure alert (operational, configured via env var).** A separate failure webhook,
 configured on the worker via the `DISCORD_FAILURE_WEBHOOK_URL` environment variable

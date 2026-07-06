@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,25 +14,26 @@ import (
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/workflow"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/solidDoWant/tape-archiver/internal/buildinfo"
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/agewrap"
-	"github.com/solidDoWant/tape-archiver/pkg/archive"
 	"github.com/solidDoWant/tape-archiver/pkg/recoverykit"
 	"github.com/solidDoWant/tape-archiver/pkg/report"
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// The Report phase (SPEC §4.3 phase 9) builds the two durable recovery artifacts:
-// the PDF report (§9) and the compressed recovery ISO (§10). It runs on the data
-// worker (SPEC §4.1) — not the control worker — because everything it consumes
-// lives there: the staged slice/PAR2 files, the pinned recovery binaries staged
-// into the ISO, the external tools whose versions the report records, and the zstd
-// compressor. The LTFS indexes travel in run state from the Write phase. Building
-// here also keeps the tens-of-MB ISO off the Temporal payload path and out of the
-// control image (which would otherwise have to duplicate the recovery binaries).
+// The Report phase (SPEC §4.3 phase 9) builds the run's durable recovery artifacts:
+// always the PDF report (§9), and — only when optical burning is enabled
+// (delivery.opticalBurn) — the recovery ISO (§10) as the mountable image the Burn
+// phase consumes. The burned disc is the ISO's durable home, so a run without
+// burning produces no ISO at all. It runs on the data worker (SPEC §4.1) — not the
+// control worker — because everything it consumes lives there: the staged
+// slice/PAR2 files, the pinned recovery binaries staged into the ISO, and the
+// external tools whose versions the report records. The LTFS indexes travel in run
+// state from the Write phase. Building here also keeps the tens-of-MB ISO off the
+// Temporal payload path and out of the control image (which would otherwise have to
+// duplicate the recovery binaries).
 //
 // Before building anything it enforces the key-escrow contract (SPEC §7): the run
 // config's private identity must be present and must be the identity for one of
@@ -45,19 +45,17 @@ import (
 // verified inputs.
 
 const (
-	// reportTimeout bounds the Report activity: rendering the PDF, assembling the
-	// ISO 9660 image, and zstd-compressing it, all over tens of MB. An hour is far
-	// more than enough while still bounding a hang.
+	// reportTimeout bounds the Report activity: rendering the PDF and assembling the
+	// ISO 9660 image, over tens of MB. An hour is far more than enough while still
+	// bounding a hang.
 	reportTimeout = 1 * time.Hour
 
-	// reportFileName, isoFileName, and compressedISOFileName are the staged
-	// artifact names under the run's staging directory. The PDF and the compressed
-	// ISO are always produced and delivered (SPEC §11); the uncompressed ISO is
-	// staged only when optical burning is enabled, as the mountable image the Burn
-	// phase (a later sub-issue of #98) consumes.
-	reportFileName        = "report.pdf"
-	isoFileName           = "recovery.iso"
-	compressedISOFileName = "recovery.iso.zst"
+	// reportFileName and isoFileName are the staged artifact names under the run's
+	// staging directory. The PDF report is always produced and delivered (SPEC §11);
+	// the uncompressed ISO is staged only when optical burning is enabled, as the
+	// mountable image the Burn phase consumes.
+	reportFileName = "report.pdf"
+	isoFileName    = "recovery.iso"
 	// discManifestFileName is the staged sha256sum manifest of the recovery ISO's
 	// contents, written beside the uncompressed ISO only when optical burning is
 	// enabled. The Burn phase verifies each burned disc against it (SPEC §10).
@@ -134,14 +132,12 @@ type ReportInput struct {
 	Discs []BurnResult
 }
 
-// ReportOutput is the Report activity's result: the on-disk paths of the two
-// delivered artifacts, which the Deliver phase uploads, plus the optional
-// uncompressed ISO staged for the Burn phase.
+// ReportOutput is the Report activity's result: the on-disk path of the PDF report
+// the Deliver phase uploads, plus the optional uncompressed ISO and disc manifest
+// staged for the Burn phase when optical burning is enabled.
 type ReportOutput struct {
-	// ReportPath is the staged PDF report (SPEC §9).
+	// ReportPath is the staged PDF report (SPEC §9), always produced and delivered.
 	ReportPath string
-	// ISOPath is the staged, zstd-compressed recovery ISO (SPEC §10, §11).
-	ISOPath string
 	// UncompressedISOPath is the staged uncompressed recovery ISO 9660 image, set
 	// only when optical burning is enabled (delivery.opticalBurn) — the mountable
 	// image the Burn phase burns. Empty when burning is disabled.
@@ -153,10 +149,11 @@ type ReportOutput struct {
 	DiscManifestPath string
 }
 
-// BuildReport builds the PDF report and compressed recovery ISO for the run
-// (SPEC §4.3 phase 9), staging both beside the run's prepared tree and returning
-// their paths. It fails if the escrow identity is missing or does not match a
-// configured recipient.
+// BuildReport builds the PDF report for the run (SPEC §4.3 phase 9), and — only
+// when optical burning is enabled — the recovery ISO (SPEC §10) as the mountable
+// image the Burn phase consumes. It stages the artifacts beside the run's prepared
+// tree and returns their paths. It fails if the escrow identity is missing or does
+// not match a configured recipient.
 func (a *ReportActivities) BuildReport(ctx context.Context, input ReportInput) (ReportOutput, error) {
 	if a.stagingRoot == "" {
 		return ReportOutput{}, fmt.Errorf("staging directory is not configured (set TAPE_STAGING_DIR on the data worker)")
@@ -192,15 +189,15 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 	}
 
 	if len(input.Written) == 0 {
-		return ReportOutput{}, fmt.Errorf("no tapes were written; cannot build a recovery ISO")
+		return ReportOutput{}, fmt.Errorf("no tapes were written; there is nothing to report")
 	}
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return ReportOutput{}, fmt.Errorf("create report output directory %q: %w", outDir, err)
 	}
 
-	// Render the PDF to memory so the same bytes are both written to disk and
-	// embedded in the ISO (SPEC §10) — no round-trip through the filesystem.
+	// Render the PDF to memory so the same bytes are both written to disk and (when
+	// burning) embedded in the ISO (SPEC §10) — no round-trip through the filesystem.
 	pdf, err := renderReportPDF(ctx, input)
 	if err != nil {
 		return ReportOutput{}, err
@@ -211,21 +208,21 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		return ReportOutput{}, fmt.Errorf("write PDF report to %q: %w", reportPath, err)
 	}
 
+	// The recovery ISO is built only when optical burning is enabled: the burned
+	// disc is the ISO's durable home (SPEC §10, §11), so a run without burning
+	// produces just the report.
+	if !input.Config.Delivery.OpticalBurn.Enabled() {
+		slog.Info("report: built recovery artifacts", "report", reportPath)
+
+		return ReportOutput{ReportPath: reportPath}, nil
+	}
+
 	sha256Manifest, err := buildSHA256Manifest(input)
 	if err != nil {
 		return ReportOutput{}, fmt.Errorf("build SHA-256 manifest: %w", err)
 	}
 
-	isoPath := filepath.Join(outDir, compressedISOFileName)
-
-	// Stage the uncompressed ISO alongside the compressed one only when optical
-	// burning is enabled: it is the mountable image the Burn phase consumes. When
-	// burning is disabled it is not staged and behavior is byte-for-byte the prior
-	// compressed-only build.
-	var uncompressedISOPath string
-	if input.Config.Delivery.OpticalBurn.Enabled() {
-		uncompressedISOPath = filepath.Join(outDir, isoFileName)
-	}
+	uncompressedISOPath := filepath.Join(outDir, isoFileName)
 
 	isoInput := recoverykit.Input{
 		Report:            pdf,
@@ -235,28 +232,24 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		RecoveryProcedure: recoveryProcedure,
 	}
 
-	discManifest, err := buildRecoveryISO(ctx, isoInput, isoPath, uncompressedISOPath)
+	discManifest, err := buildRecoveryISO(ctx, isoInput, uncompressedISOPath)
 	if err != nil {
 		return ReportOutput{}, err
 	}
 
-	// When burning is enabled, stage the disc-content manifest beside the
-	// uncompressed ISO so the Burn phase can verify each burned disc against it
-	// (SPEC §10). It lists the ISO's own files (report.pdf, manifest.sha256, …),
-	// distinct from the on-tape SHA-256 manifest embedded inside the ISO.
-	var discManifestPath string
-	if uncompressedISOPath != "" {
-		discManifestPath = filepath.Join(outDir, discManifestFileName)
-		if err := os.WriteFile(discManifestPath, discManifest.Bytes(), 0o644); err != nil {
-			return ReportOutput{}, fmt.Errorf("write disc-content manifest to %q: %w", discManifestPath, err)
-		}
+	// Stage the disc-content manifest beside the uncompressed ISO so the Burn phase
+	// can verify each burned disc against it (SPEC §10). It lists the ISO's own files
+	// (report.pdf, manifest.sha256, …), distinct from the on-tape SHA-256 manifest
+	// embedded inside the ISO.
+	discManifestPath := filepath.Join(outDir, discManifestFileName)
+	if err := os.WriteFile(discManifestPath, discManifest.Bytes(), 0o644); err != nil {
+		return ReportOutput{}, fmt.Errorf("write disc-content manifest to %q: %w", discManifestPath, err)
 	}
 
-	slog.Info("report: built recovery artifacts", "report", reportPath, "iso", isoPath, "uncompressedISO", uncompressedISOPath)
+	slog.Info("report: built recovery artifacts", "report", reportPath, "iso", uncompressedISOPath)
 
 	return ReportOutput{
 		ReportPath:          reportPath,
-		ISOPath:             isoPath,
 		UncompressedISOPath: uncompressedISOPath,
 		DiscManifestPath:    discManifestPath,
 	}, nil
@@ -351,74 +344,25 @@ func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) err
 	return nil
 }
 
-// buildRecoveryISO assembles the recovery ISO once and zstd-compresses it to
-// compressedPath in a single streaming pass. When uncompressedPath is non-empty
-// the raw ISO 9660 image is also staged there for the Burn phase: the ISO writer's
-// output is tee'd into both the staged uncompressed file and the compressor via an
-// io.MultiWriter, so the tens-of-MB image is assembled exactly once and never re-
-// built. When uncompressedPath is empty the raw stream is piped straight into the
-// compressor and nothing extra is staged (the prior compressed-only behavior).
-func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, compressedPath, uncompressedPath string) (recoverykit.Manifest, error) {
-	out, err := os.Create(compressedPath)
+// buildRecoveryISO assembles the recovery ISO 9660 image once and stages it at
+// isoPath for the Burn phase (SPEC §10). It returns the disc-content manifest
+// recoverykit.Build produces as it stages each file, which the Burn phase verifies
+// each burned disc against.
+func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, isoPath string) (recoverykit.Manifest, error) {
+	out, err := os.Create(isoPath)
 	if err != nil {
-		return nil, fmt.Errorf("create compressed ISO %q: %w", compressedPath, err)
+		return nil, fmt.Errorf("create recovery ISO %q: %w", isoPath, err)
 	}
 
 	defer func() { _ = out.Close() }()
 
-	group, groupCtx := errgroup.WithContext(ctx)
-
-	reader, writer := io.Pipe()
-
-	// buildTarget is where recoverykit.Build writes: the compressor pipe alone, or
-	// the compressor pipe plus the staged uncompressed image when burning is on.
-	buildTarget := io.Writer(writer)
-
-	var raw *os.File
-
-	if uncompressedPath != "" {
-		raw, err = os.Create(uncompressedPath)
-		if err != nil {
-			return nil, fmt.Errorf("create uncompressed ISO %q: %w", uncompressedPath, err)
-		}
-
-		defer func() { _ = raw.Close() }()
-
-		buildTarget = io.MultiWriter(writer, raw)
-	}
-
-	// discManifest is the disc-content manifest recoverykit.Build returns as it
-	// stages each file; the Burn phase verifies the burned disc against it.
-	var discManifest recoverykit.Manifest
-
-	group.Go(func() error {
-		var buildErr error
-
-		discManifest, buildErr = recoverykit.Build(groupCtx, isoInput, buildTarget)
-		_ = writer.CloseWithError(buildErr)
-
-		return buildErr
-	})
-
-	compressErr := archive.Compress(groupCtx, out, reader)
-	_ = reader.CloseWithError(compressErr)
-
-	if waitErr := group.Wait(); waitErr != nil {
-		return nil, fmt.Errorf("build recovery ISO: %w", waitErr)
-	}
-
-	if compressErr != nil {
-		return nil, fmt.Errorf("compress recovery ISO: %w", compressErr)
+	discManifest, err := recoverykit.Build(ctx, isoInput, out)
+	if err != nil {
+		return nil, fmt.Errorf("build recovery ISO: %w", err)
 	}
 
 	if err := out.Close(); err != nil {
-		return nil, fmt.Errorf("close compressed ISO %q: %w", compressedPath, err)
-	}
-
-	if raw != nil {
-		if err := raw.Close(); err != nil {
-			return nil, fmt.Errorf("close uncompressed ISO %q: %w", uncompressedPath, err)
-		}
+		return nil, fmt.Errorf("close recovery ISO %q: %w", isoPath, err)
 	}
 
 	return discManifest, nil
@@ -756,8 +700,8 @@ func ltoGeneration(capacityBytes int64) string {
 
 // reportPhase orchestrates the Report phase (SPEC §4.3 phase 9): it runs the
 // data-side BuildReport activity over the run state and records the artifact paths
-// in runState — the PDF and compressed ISO for the Deliver phase, and the
-// uncompressed ISO (when optical burning is enabled) for the Burn phase. RunID and
+// in runState — the PDF report for the Deliver phase, and (when optical burning is
+// enabled) the uncompressed ISO and disc manifest for the Burn phase. RunID and
 // Date are taken from the workflow so the artifact is stamped deterministically
 // across retries.
 func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
@@ -779,7 +723,6 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 	}
 
 	state.reportPath = output.ReportPath
-	state.isoPath = output.ISOPath
 	state.uncompressedISOPath = output.UncompressedISOPath
 	state.discManifestPath = output.DiscManifestPath
 
