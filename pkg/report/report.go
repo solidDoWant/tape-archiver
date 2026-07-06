@@ -690,7 +690,12 @@ func (d *doc) recoverySection(m Manifest) {
 
 	titleDone := false
 
-	lines := strings.Split(m.RecoveryProcedure, "\n")
+	// Re-flow the source text: the procedure is hard-wrapped at ~80 columns, so a
+	// prose paragraph arrives as several lines. Joining each paragraph back into
+	// one line lets MultiCell wrap it to the page naturally instead of preserving
+	// the source's arbitrary break points mid-sentence. Command lines are left
+	// untouched, one per line.
+	lines := normalizeRecovery(m.RecoveryProcedure)
 
 	for i := 0; i < len(lines); i++ {
 		raw := lines[i]
@@ -781,6 +786,74 @@ func splitStep(s string) (number, rest string) {
 // leadingSpaces returns the number of leading space/tab characters in s.
 func leadingSpaces(s string) int {
 	return len(s) - len(strings.TrimLeft(s, " \t"))
+}
+
+// normalizeRecovery re-flows the recovery procedure so each prose paragraph is a
+// single line, ready to be wrapped to the page. The source is hard-wrapped at
+// ~80 columns; preserving those breaks and re-wrapping each fragment produced
+// ragged, mid-sentence line breaks. It joins consecutive prose lines (a numbered
+// step and the soft-wrapped continuation lines that follow it) into one line,
+// preserving the paragraph's leading indent, and leaves blank lines and command
+// lines (indent >= 8) on their own so they render verbatim.
+func normalizeRecovery(text string) []string {
+	var out []string
+
+	var para strings.Builder
+
+	paraIndent := 0
+	titleDone := false
+
+	flush := func() {
+		if para.Len() == 0 {
+			return
+		}
+
+		out = append(out, strings.Repeat(" ", paraIndent)+para.String())
+		para.Reset()
+	}
+
+	for _, raw := range strings.Split(text, "\n") {
+		content := strings.TrimSpace(raw)
+		if content == "" {
+			flush()
+
+			out = append(out, "")
+
+			continue
+		}
+
+		indent := leadingSpaces(raw)
+		number, _ := splitStep(content)
+
+		switch {
+		case !titleDone:
+			titleDone = true
+
+			flush()
+
+			out = append(out, content)
+		case indent >= 8:
+			// Command line: keep it verbatim, on its own line.
+			flush()
+
+			out = append(out, raw)
+		case para.Len() > 0 && (indent != 0 || number == ""):
+			// A soft-wrapped continuation of the open paragraph.
+			para.WriteString(" ")
+			para.WriteString(content)
+		default:
+			// A numbered step, or the first line of a new prose paragraph.
+			flush()
+
+			paraIndent = indent
+
+			para.WriteString(content)
+		}
+	}
+
+	flush()
+
+	return out
 }
 
 // wrappedHeight returns the rendered height of text wrapped to width in the body
