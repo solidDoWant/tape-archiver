@@ -71,9 +71,11 @@ config:
     # material with the worker, point keda.apiKey.secretKeyRef / keda.tls.* at the same Secrets
     # used under config.temporal.apiKey / config.temporal.tls.
     #
-    # When type: scaledjob is enabled, keda.apiKey must be populated (value or secretKeyRef) or
-    # the chart fails at render time — without it the scaler cannot read the task-queue backlog
-    # and would never spawn a Job. With the default Deployment, this entire block is unused.
+    # keda.apiKey is optional: an authenticated Temporal frontend needs it (and any keda.tls.*),
+    # but an unauthenticated, plaintext frontend needs neither — leave keda empty and the scaler
+    # connects anonymously (the chart then emits no TriggerAuthentication). Note KEDA's Temporal
+    # scaler forces TLS whenever an API key is set, so a plaintext frontend must be configured
+    # with NO keda.apiKey. With the default Deployment, this entire block is unused.
     keda:
       # apiKey is the Temporal API key KEDA's scaler uses to query task-queue backlog. Setting
       # both value and secretKeyRef is rejected. value is intended for dev; production should use
@@ -170,10 +172,12 @@ resources:
     # Set main.type: scaledjob to opt into KEDA scale-to-zero: the chart renders a
     # keda.sh/v1alpha1 ScaledJob (job template = the control worker with
     # WORKER_IDLE_EXIT_AFTER defaulted to 15m so the Job self-completes) plus a per-release
-    # TriggerAuthentication, and NO Deployment. A control-queue backlog scales the worker
-    # 0 -> 1; it drains and exits after the idle window, scaling back to 0. This requires a
-    # separate KEDA credential under config.temporal.keda.* and KEDA >= 2.16 / Temporal
-    # server >= 1.24 in the cluster. The default (type absent) stays the fixed-replica
+    # TriggerAuthentication (only when a KEDA credential is configured), and NO Deployment. A
+    # control-queue backlog scales the worker 0 -> 1; it drains and exits after the idle window,
+    # scaling back to 0. This needs KEDA >= 2.17 (its bundled Temporal scaler) / Temporal server
+    # >= 1.24 in the cluster, and — for an authenticated Temporal — a separate KEDA credential
+    # under config.temporal.keda.* (an unauthenticated plaintext Temporal needs none). The
+    # default (type absent) stays the fixed-replica
     # Deployment; the default render is byte-identical to before this option existed.
     #
     # KEDA-level knobs live under main.keda.* (pollingInterval, maxReplicaCount [default 1],

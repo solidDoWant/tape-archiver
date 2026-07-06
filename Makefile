@@ -173,9 +173,12 @@ chart-lint: ## Fetch chart deps, lint, and render both control-worker chart shap
 		| grep -q '^kind: ScaledJob' || { echo "chart-lint: ScaledJob not rendered on the scaledjob path"; exit 1; }
 	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $(CHART_LINT_SCALEDJOB_ARGS) \
 		| grep -q '^kind: Deployment' && { echo "chart-lint: Deployment leaked onto the scaledjob path"; exit 1; } || true
-	# Enabling scaledjob without a KEDA credential must fail the render.
-	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) --set resources.controllers.main.type=scaledjob >/dev/null 2>&1 \
-		&& { echo "chart-lint: scaledjob without a KEDA credential should have failed to render"; exit 1; } || true
+	# Enabling scaledjob without a KEDA credential renders a plaintext ScaledJob (for an
+	# unauthenticated Temporal): it must succeed and emit NO TriggerAuthentication.
+	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) --set resources.controllers.main.type=scaledjob >/dev/null \
+		|| { echo "chart-lint: scaledjob without a KEDA credential must render (plaintext Temporal)"; exit 1; }
+	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) --set resources.controllers.main.type=scaledjob \
+		| grep -q '^kind: TriggerAuthentication' && { echo "chart-lint: plaintext scaledjob must not emit a TriggerAuthentication"; exit 1; } || true
 
 DATA_WORKER_UNIT := deploy/data-worker/tape-archiver-data-worker.service
 
