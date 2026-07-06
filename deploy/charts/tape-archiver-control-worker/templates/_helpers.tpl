@@ -66,9 +66,11 @@ metadata:
   {{- end }}
 spec:
   secretTargetRef:
+    {{- if $apiKeySecret.name }}
     - parameter: apiKey
       name: {{ $apiKeySecret.name }}
       key: {{ $apiKeySecret.key }}
+    {{- end }}
     {{- range $entry := $tlsSecrets }}
     - parameter: {{ $entry.parameter }}
       name: {{ $entry.name }}
@@ -88,7 +90,8 @@ Caller supplies a dict with keys "rootContext" (the chart root, post loader.init
 "controllerName", "controller" (the merged controller values), "endpoint" /
 "namespace" / "taskQueue" (the Temporal scaler target — the control worker polls the
 single "control" queue with queueTypes workflow), "authRefName" (the
-TriggerAuthentication name), and "kedaTLS" (a dict with optional "serverName" /
+TriggerAuthentication name, or "" for an unauthenticated/plaintext Temporal, in which
+case the trigger carries no authenticationRef), and "kedaTLS" (a dict with optional "serverName" /
 "unsafeSsl" scaler-side TLS metadata, already filtered for keda.tls.enabled upstream).
 
 KEDA-level fields (pollingInterval, maxReplicaCount, …) lift from controller.keda.* onto
@@ -189,8 +192,10 @@ spec:
         {{- if $kedaTLS.unsafeSsl }}
         unsafeSsl: "true"
         {{- end }}
+      {{- if $authRefName }}
       authenticationRef:
         name: {{ $authRefName }}
+      {{- end }}
   jobTargetRef:
     {{- if hasKey $jobCfg "parallelism" }}
     parallelism: {{ get $jobCfg "parallelism" }}

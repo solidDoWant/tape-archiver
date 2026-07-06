@@ -96,14 +96,14 @@ const (
 	scaledJobRelease = "ta-control-sj"
 
 	// kedaNamespace / kedaRelease / kedaChartVersion pin the KEDA operator install.
-	// 2.16 is the first KEDA release to ship the built-in Temporal scaler the
-	// control-worker ScaledJob depends on. KEDA is a hard prerequisite of the suite:
-	// installKeda fails the whole harness if the install fails, so the autoscaling
-	// path is genuinely covered rather than silently skipped.
+	// The built-in Temporal scaler the control-worker ScaledJob depends on ships with
+	// KEDA from 2.17 onward (it does not exist in 2.16). KEDA is a hard prerequisite of
+	// the suite: installKeda fails the whole harness if the install fails, so the
+	// autoscaling path is genuinely covered rather than silently skipped.
 	kedaNamespace    = "keda"
 	kedaRelease      = "keda"
 	kedaChartName    = "keda"
-	kedaChartVersion = "2.16.1"
+	kedaChartVersion = "2.18.3"
 	// kedaChartRepo is the KEDA chart's GitHub Pages Helm repository, used via
 	// helm's --repo flag so no global repo entry is added to the host. (KEDA also
 	// publishes an OCI chart at ghcr.io, but the Pages repo is the more broadly
@@ -658,12 +658,13 @@ func (h *e2eHarness) deployControlWorker() error {
 // separate release (scaledJobRelease), alongside — not replacing — the shared
 // Deployment release. The overlay drives a fast scale-to-zero cycle observable in
 // seconds: a low KEDA pollingInterval and a short WORKER_IDLE_EXIT_AFTER so the Job
-// self-completes quickly once the control queue goes idle. keda.apiKey.value is a
-// dummy — the dev Temporal has no auth, but the chart requires a KEDA credential on
-// this path. It registers a t.Cleanup that uninstalls the release (which cascades KEDA's
-// spawned Jobs via their ownerReferences). Callers must first remove the shared
-// Deployment worker as a poller (scaleControlDeployment 0), so the KEDA-spawned worker
-// is the only one on the control queue and scale-from-zero is observable.
+// self-completes quickly once the control queue goes idle. No config.temporal.keda.apiKey
+// is set: the dev Temporal is plaintext and unauthenticated, and KEDA's Temporal scaler
+// forces TLS whenever an API key is present — so an anonymous (no-apiKey) connection is
+// the only way it reaches this frontend. It registers a t.Cleanup that uninstalls the
+// release (which cascades KEDA's spawned Jobs via their ownerReferences). Callers must
+// first remove the shared Deployment worker as a poller (scaleControlDeployment 0), so the
+// KEDA-spawned worker is the only one on the control queue and scale-from-zero is observable.
 func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 	t.Helper()
 
@@ -694,7 +695,6 @@ func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 		"--set", "config.temporal.address="+temporalAlias+":"+temporalPort,
 		"--set", "config.controlWorker.discordFailureWebhookUrl.value="+h.failureURL(),
 		"--set", "resources.controllers.main.type=scaledjob",
-		"--set", "config.temporal.keda.apiKey.value=dev",
 		"--set", "resources.controllers.main.keda.pollingInterval=5",
 		"--set-string", "resources.controllers.main.containers.main.env.WORKER_IDLE_EXIT_AFTER=20s",
 		"--set-string", imagePath+".repository="+controlRepo,
@@ -1016,7 +1016,13 @@ func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config) {
 			return
 		}
 
-		if strings.Contains(string(out), "already in progress") && time.Now().Before(deadline) {
+		// Retry a run left over from a prior test whose singleton ID is still closing,
+		// and a transient failure to reach the shared dev Temporal (a brief dial
+		// timeout under load is not a real submit failure).
+		retryable := strings.Contains(string(out), "already in progress") ||
+			strings.Contains(string(out), "connect to Temporal") ||
+			strings.Contains(string(out), "dial Temporal")
+		if retryable && time.Now().Before(deadline) {
 			time.Sleep(2 * time.Second)
 
 			continue

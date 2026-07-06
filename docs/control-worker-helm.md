@@ -131,8 +131,9 @@ systemd-managed Docker on the storage host, outside Kubernetes and KEDA's reach.
 
 ### Cluster prerequisites
 
-- **KEDA `>= 2.16`** installed in the cluster (its bundled Temporal scaler). The chart
-  renders `keda.sh/v1alpha1` `ScaledJob` / `TriggerAuthentication` resources; installing and
+- **KEDA `>= 2.17`** installed in the cluster — the Temporal scaler is bundled with KEDA
+  from 2.17 onward. The chart renders `keda.sh/v1alpha1` `ScaledJob` (and a
+  `TriggerAuthentication` when a KEDA credential is configured) resources; installing and
   managing the KEDA operator and its CRDs is the operator's responsibility, not this chart's.
 - **Temporal server `>= 1.24`** — the scaler reads `ApproximateBacklogCount` from
   `DescribeTaskQueue`, which older servers leave at `0`, so KEDA would never scale up.
@@ -141,9 +142,15 @@ systemd-managed Docker on the storage host, outside Kubernetes and KEDA's reach.
 
 KEDA authenticates to Temporal with a **separate, least-privilege** credential — read-only
 `DescribeTaskQueue` — distinct from the worker's own `config.temporal.apiKey` / `tls.*`, so
-the scaler is never handed the worker's key. It is wired through a per-release
-`TriggerAuthentication`. Enabling `type: scaledjob` with **no** `config.temporal.keda.apiKey`
-is a render-time error. This block is unused on the default `Deployment` path.
+the scaler is never handed the worker's key. When set, it is wired through a per-release
+`TriggerAuthentication`.
+
+The credential is **optional**: an authenticated Temporal frontend needs
+`config.temporal.keda.apiKey` (and any `keda.tls.*`), but an **unauthenticated, plaintext**
+frontend needs neither — leave `config.temporal.keda` empty and the scaler connects
+anonymously (no `TriggerAuthentication` is emitted). Note that KEDA's Temporal scaler forces
+a TLS connection whenever an API key is set, so a plaintext frontend must be configured with
+**no** `keda.apiKey`. This block is unused on the default `Deployment` path.
 
 | Key | Default | Purpose |
 | --- | --- | --- |

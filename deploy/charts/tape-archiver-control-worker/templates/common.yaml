@@ -160,12 +160,16 @@ mTLS or CA verification.
   {{- $kedaTLSEntries = append $kedaTLSEntries (dict "parameter" "ca" "name" $kedaCACertSecretName "key" $kedaCACertSecretKey) -}}
 {{- end -}}
 
-{{/* On the scaledjob path a KEDA credential is mandatory — without it the scaler
-   cannot query the backlog and would never spawn a Job, so fail at render time
-   rather than deploy a ScaledJob that never scales. */}}
-{{- if and $isScaledJob (not $kedaAPIKeyValue) (not $kedaAPIKeySecretName) -}}
-  {{- fail "config.temporal.keda.apiKey is required when resources.controllers.main.type is \"scaledjob\" — set config.temporal.keda.apiKey.value or config.temporal.keda.apiKey.secretKeyRef" -}}
-{{- end -}}
+{{/* The KEDA credential is optional. An authenticated Temporal frontend needs
+   config.temporal.keda.apiKey (and any keda.tls.*); an unauthenticated, plaintext
+   frontend needs neither and the scaler connects anonymously. This matters because
+   KEDA's Temporal scaler forces a TLS connection whenever an API key is set, so a
+   plaintext frontend must be configured with NO keda.apiKey — otherwise the scaler
+   speaks TLS to a plaintext server and never reads the backlog. When neither an API
+   key nor TLS material is configured the chart emits no TriggerAuthentication and the
+   trigger carries no authenticationRef. */}}
+{{- $kedaHasAPIKey := or $kedaAPIKeyValue $kedaAPIKeySecretName -}}
+{{- $kedaNeedsAuth := or $kedaHasAPIKey (gt (len $kedaTLSEntries) 0) -}}
 
 {{/* ============================================================ */}}
 {{/* Control-worker env vars                                       */}}
@@ -446,20 +450,6 @@ mTLS or CA verification.
 {{- include "bjw-s.common.loader.init" . -}}
 
 {{- $fullName := include "bjw-s.common.lib.chart.names.fullname" . -}}
-{{- $authRefName := printf "%s-keda" $fullName -}}
-
-{{/* Resolve the Secret backing the KEDA API key: an operator-supplied Secret via
-   secretKeyRef, or a chart-managed Secret carrying the inline value. The
-   scaledjob-enabled + no-credential case already failed above. */}}
-{{- $kedaSecretName := "" -}}
-{{- $kedaSecretKey := "" -}}
-{{- if $kedaAPIKeySecretName -}}
-  {{- $kedaSecretName = $kedaAPIKeySecretName -}}
-  {{- $kedaSecretKey = $kedaAPIKeySecretKey -}}
-{{- else -}}
-  {{- $kedaSecretName = printf "%s-keda-temporal-apikey" $fullName -}}
-  {{- $kedaSecretKey = "apiKey" -}}
-{{- end -}}
 
 {{- $kedaTLS := dict -}}
 {{- if $kedaTLSServerName -}}
@@ -469,12 +459,31 @@ mTLS or CA verification.
   {{- $_ := set $kedaTLS "unsafeSsl" true -}}
 {{- end -}}
 
+{{/* Emit a TriggerAuthentication only when there is auth material to carry — an API
+   key and/or TLS cert references. A plaintext, unauthenticated Temporal needs neither,
+   so authRefName stays empty and the ScaledJob's trigger carries no authenticationRef.
+   Resolve the Secret backing the KEDA API key when one is set: an operator-supplied
+   Secret via secretKeyRef, or a chart-managed Secret carrying the inline value; left
+   empty for TLS-only auth so the TriggerAuthentication carries only the TLS authParams. */}}
+{{- $authRefName := "" -}}
+{{- $kedaSecretName := "" -}}
+{{- $kedaSecretKey := "" -}}
+{{- if $kedaNeedsAuth -}}
+{{- $authRefName = printf "%s-keda" $fullName -}}
+{{- if $kedaAPIKeySecretName -}}
+{{- $kedaSecretName = $kedaAPIKeySecretName -}}
+{{- $kedaSecretKey = $kedaAPIKeySecretKey -}}
+{{- else if $kedaAPIKeyValue -}}
+{{- $kedaSecretName = printf "%s-keda-temporal-apikey" $fullName -}}
+{{- $kedaSecretKey = "apiKey" -}}
+{{- end -}}
 {{- include "tape-archiver-control-worker.triggerAuthentication" (dict
   "rootContext" .
   "name" $authRefName
   "apiKeySecret" (dict "name" $kedaSecretName "key" $kedaSecretKey)
   "tlsSecrets" $kedaTLSEntries
 ) }}
+{{- end -}}
 
 {{/* Chart-managed Secret carrying the inline keda.apiKey.value (dev only). */}}
 {{- if $kedaAPIKeyValue }}
