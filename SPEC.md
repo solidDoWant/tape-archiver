@@ -83,9 +83,12 @@ it directly rather than for general portability.
 Temporal orchestrates each run. There are two workers on two task queues, split by
 where the data lives:
 
-- **Control worker (`control` queue) — runs in Kubernetes.** Lightweight, no bulk data.
-  Resolves the run config against the k8s API (snapshot discovery/validation), drives
-  the workflow, and bin-packs the plan.
+- **Control worker (`control` queue) — runs in Kubernetes (optionally on demand).**
+  Lightweight, no bulk data. Resolves the run config against the k8s API (snapshot
+  discovery/validation), drives the workflow, and bin-packs the plan. By default a
+  fixed-replica `Deployment`; the Helm chart can optionally deploy it as a KEDA `ScaledJob`
+  that scales to zero between runs and is woken `0 → 1` by a `control`-queue backlog, exiting
+  again after an idle window (`WORKER_IDLE_EXIT_AFTER`). See `docs/control-worker-helm.md`.
 - **Data worker (`data` queue) — runs as a container on `ubuntu-storage-host-01`.**
   Performs all bulk-data activities where the bytes already are, so they never cross
   the network: `tar`, `age`, PAR2 slicing, checksums, LTFS format/mount/write, and
