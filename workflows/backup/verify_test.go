@@ -1,10 +1,15 @@
 package backup
 
 import (
+	"context"
+	"errors"
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 )
 
 // verifyFixture builds a real staged tree on disk — staged archives, a Pack plan,
@@ -223,4 +228,100 @@ func TestVerifyFailureBlocksLoad(t *testing.T) {
 
 	// The Load phase's activity is never invoked once Verify fails.
 	env.AssertNotCalled(t, "loadActivity")
+}
+
+// TestVerifyRetriesTransientFailure covers AC1: a routine data-worker restart
+// mid-Verify — a retryable, non-application error — is retried and the run
+// proceeds to completion, rather than being capped at one attempt as the old
+// RetryPolicy{MaximumAttempts: 1} would have. The Verify activity fails once then
+// succeeds; with the heartbeat-based default policy the workflow must complete.
+func TestVerifyRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+	expectResolveEmpty(env)
+	expectReportDeliverSuccess(env)
+
+	env.OnActivity((&VerifyActivities{}).Verify, mock.Anything, mock.Anything).
+		Return(VerifiedPlan{}, errors.New("data worker restarted")).Once()
+	env.OnActivity((&VerifyActivities{}).Verify, mock.Anything, mock.Anything).
+		Return(VerifiedPlan{}, nil)
+
+	env.ExecuteWorkflow(Backup, validBackupConfig())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+}
+
+// TestVerifyCancellationStaysRetryable covers AC1's graceful-shutdown case: when
+// the activity context is cancelled over an otherwise intact staged tree — as a
+// data-worker shutdown does — the Verify activity returns a retryable error
+// wrapping context.Canceled, never a non-retryable ApplicationError, so the
+// rescheduled attempt re-runs the idempotent re-read.
+func TestVerifyCancellationStaysRetryable(t *testing.T) {
+	t.Parallel()
+
+	plan, staged, sets := verifyFixture(t)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := newVerifyActivities().Verify(ctx, VerifyInput{Plan: plan, Archives: staged, PAR2: sets})
+	require.ErrorIs(t, err, context.Canceled)
+
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		assert.False(t, appErr.NonRetryable(), "a cancelled context must stay retryable")
+	}
+}
+
+// TestVerifyClassifiesDeterministicFaultsNonRetryable covers AC2: a deterministic
+// verification fault — a corrupted slice, a missing file, or an over-capacity plan
+// — is surfaced by the Verify activity as a non-retryable ApplicationError, so the
+// default retry policy fails the run fast (before Load) instead of retrying a fault
+// that recurs on every attempt.
+func TestVerifyClassifiesDeterministicFaultsNonRetryable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// mutate breaks the fixture so verification fails deterministically.
+		mutate func(t *testing.T, plan *TapePlan, staged []StagedArchive, sets []PAR2Set)
+	}{
+		{
+			name: "checksum mismatch",
+			mutate: func(t *testing.T, _ *TapePlan, staged []StagedArchive, _ []PAR2Set) {
+				corruptFile(t, staged[0].Slices[0].Path)
+			},
+		},
+		{
+			name: "missing file",
+			mutate: func(t *testing.T, _ *TapePlan, staged []StagedArchive, _ []PAR2Set) {
+				require.NoError(t, os.Remove(staged[1].Slices[0].Path))
+			},
+		},
+		{
+			name: "over-capacity plan",
+			mutate: func(_ *testing.T, plan *TapePlan, _ []StagedArchive, _ []PAR2Set) {
+				plan.Tapes[0].UsableBytes = 1_000
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			plan, staged, sets := verifyFixture(t)
+
+			test.mutate(t, &plan, staged, sets)
+
+			_, err := newVerifyActivities().Verify(t.Context(), VerifyInput{Plan: plan, Archives: staged, PAR2: sets})
+			require.Error(t, err)
+
+			var appErr *temporal.ApplicationError
+			require.ErrorAs(t, err, &appErr)
+			assert.True(t, appErr.NonRetryable(), "a deterministic verification fault must be non-retryable")
+		})
+	}
 }

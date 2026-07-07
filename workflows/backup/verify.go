@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -63,7 +64,41 @@ type VerifyInput struct {
 // returns a non-nil error — and no VerifiedPlan — on any checksum mismatch,
 // missing file, or over-capacity tape.
 func (a *VerifyActivities) Verify(ctx context.Context, input VerifyInput) (VerifiedPlan, error) {
-	return verify(ctx, input.Plan, input.Archives, input.PAR2)
+	// Emit a liveness heartbeat while re-reading the staged tree so a data-worker
+	// restart mid-Verify is caught within activityHeartbeatTimeout rather than the
+	// 24h StartToClose (the same pattern PrepareArchives and GeneratePAR2 use).
+	var verified VerifiedPlan
+
+	err := withActivityHeartbeat(ctx, func() error {
+		var err error
+
+		verified, err = verify(ctx, input.Plan, input.Archives, input.PAR2)
+
+		return err
+	})
+	if err != nil {
+		return VerifiedPlan{}, classifyVerifyError(err)
+	}
+
+	return verified, nil
+}
+
+// classifyVerifyError maps a verify() failure to its Temporal retry semantics so a
+// routine worker restart is retried while a genuine verification failure still
+// aborts the run before Load. A context cancellation — a graceful data-worker
+// shutdown makes verifyFiles return ctx.Err() — is an infrastructure fault, not a
+// verification fault: it is returned unwrapped so it stays retryable and the
+// rescheduled attempt re-runs the idempotent re-read. Every other verify() failure
+// (checksum mismatch, missing file, unstaged or PAR2-less tree, or over-capacity
+// plan) is deterministic — the re-read and re-hash produce the same result on every
+// attempt — so it is wrapped non-retryable to fail the run fast, before Load, the
+// same fast-fail the old MaximumAttempts:1 policy provided.
+func classifyVerifyError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+
+	return temporal.NewNonRetryableApplicationError(err.Error(), "verify-failed", err)
 }
 
 // verify is the body of the Verify activity, split out so it can be exercised
@@ -160,11 +195,14 @@ func verifyPhase(ctx workflow.Context, _ config.Config, state *runState) error {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: verifyTimeout,
-		// A Verify failure aborts the run (see the doc comment): the staged bytes
-		// are re-read and re-hashed deterministically, so a checksum mismatch or
-		// capacity overflow will recur on every attempt. Without this, the default
-		// policy retries the permanent fault indefinitely and the run never fails.
-		RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
+		// A liveness heartbeat plus a short HeartbeatTimeout (the Prepare/PAR2
+		// pattern) lets a routine data-worker restart mid-Verify be caught and
+		// rescheduled within activityHeartbeatTimeout rather than stranding the run
+		// to the 24h StartToClose. Deterministic verification failures (checksum
+		// mismatch, missing file, over-capacity plan) still abort the run before
+		// Load: the Verify activity surfaces them as non-retryable ApplicationErrors,
+		// so the default retry policy does not retry the permanent fault.
+		HeartbeatTimeout: activityHeartbeatTimeout,
 	})
 
 	var activities *VerifyActivities
