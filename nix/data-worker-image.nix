@@ -19,6 +19,13 @@
   # First-party inputs threaded from the flake.
   worker,
   ltfs,
+  # The static recovery set (nix/recovery-binaries.nix): $out/bin holds the
+  # statically linked age/par2/zstd/tar the Report phase stages into the recovery
+  # ISO's /bin, and $out/src the matching upstream source archives it stages into
+  # /src. Baked into this image (at /recovery) rather than mounted, so the bytes
+  # the disc ships are the same store paths this image runs — the "cannot drift"
+  # guarantee is structural, not operator-dependent (SPEC §2/§4.1/§10).
+  recoveryBinaries,
   # External tooling — pinned by the shared nixpkgs.
   age,
   par2cmdline-turbo,
@@ -45,7 +52,10 @@ let
   # AC5: the image and the recovery disc must bundle identical tool versions.
   # Both come from the same pinned nixpkgs, so these already match; asserting it
   # turns "trust the pin" into a build-time guarantee. The static build (musl) of
-  # a tool carries the same upstream `version` as its dynamic counterpart.
+  # a tool carries the same upstream `version` as its dynamic counterpart. Because
+  # this image now also bundles `recoveryBinaries` (built from the same
+  # `pkgsStatic`), the assertion covers the exact bytes the disc ships, not just a
+  # sibling artifact an operator populates out of band.
   versionMatches = {
     age = age.version == pkgsStatic.age.version;
     par2 = par2cmdline-turbo.version == pkgsStatic.par2cmdline-turbo.version;
@@ -108,9 +118,18 @@ dockerTools.streamLayeredImage {
   # mount point for the /mnt/bulk-pool-01 bind mount, the staging parent, and a
   # world-writable /tmp. Devices (/dev/nst*, /dev/sch0, /dev/sg*, /dev/fuse) are
   # passed through at run time, not baked in.
+  #
+  # The recovery set is copied to /recovery/{bin,src} (the paths the env vars
+  # below point at) — copied, not symlinked into the store-path graph, so the
+  # Report phase reads the tools through a stable, image-internal path. `install`
+  # (rather than `cp -r` from the read-only store) sets explicit modes: binaries
+  # stay executable (0555, as recovery-binaries.nix produces), source archives are
+  # plain read-only files (0444).
   extraCommands = ''
-    mkdir -p mnt/bulk-pool-01 tmp
+    mkdir -p mnt/bulk-pool-01 tmp recovery/bin recovery/src
     chmod 1777 tmp
+    install -m0555 -t recovery/bin ${recoveryBinaries}/bin/*
+    install -m0444 -t recovery/src ${recoveryBinaries}/src/*
   '';
 
   config = {
@@ -118,6 +137,11 @@ dockerTools.streamLayeredImage {
     Env = [
       "PATH=/bin"
       "SSL_CERT_FILE=${cacert}/etc/ssl/certs/ca-bundle.crt"
+      # The recovery set the Report phase stages onto the ISO, baked in above so it
+      # cannot drift from this image's tooling (SPEC §2/§4.1/§10). Operators may
+      # override to relocate it, but the default needs no bind mount or populate step.
+      "TAPE_RECOVERY_BINARIES_DIR=/recovery/bin"
+      "TAPE_RECOVERY_SOURCES_DIR=/recovery/src"
     ];
     # Container health via the worker's own `healthcheck` self-probe: the minimal
     # image ships no curl/wget, so the binary probes its local /readyz endpoint

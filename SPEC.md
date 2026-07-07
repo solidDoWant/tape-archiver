@@ -417,7 +417,11 @@ step-by-step recovery procedure — so the tapes can be read, repaired, decrypte
 decompressed, and unpacked with only the disc and the tapes.
 The static tooling and its source are produced by `nix/recovery-binaries.nix` (flake
 output `recoveryBinaries`) from the same pinned nixpkgs the data-worker image uses, so
-the disc and the write path run identical tool versions (§2, §4.1).
+the disc and the write path run identical tool versions (§2, §4.1). The data-worker image
+**bundles this set** at `/recovery/{bin,src}` (the `TAPE_RECOVERY_BINARIES_DIR` /
+`TAPE_RECOVERY_SOURCES_DIR` defaults) rather than mounting it, so the bytes a run stages
+onto the disc are the same store paths the image runs — the version match is structural,
+not an operator-populated artifact that could drift.
 
 **Target media: M-DISC DVD.** Its inorganic recording layer is ISO/IEC 10995-tested and
 NIST-listed for 100+ year archival life, and — unlike recordable Blu-ray, whose media

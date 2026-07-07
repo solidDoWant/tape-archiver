@@ -15,6 +15,15 @@ recovery tooling can never drift. This equality is asserted at build time
 (`nix/data-worker-image.nix`), so a `nixpkgs` bump that changed a version would fail the
 build rather than silently diverge from the disc.
 
+The image also **bakes the static recovery set itself in** at `/recovery/{bin,src}` (the
+`recoveryBinaries` derivation's `bin/` binaries and `src/` source archives) and defaults
+`TAPE_RECOVERY_BINARIES_DIR`/`TAPE_RECOVERY_SOURCES_DIR` there. The Report phase stages
+these onto the recovery ISO, so shipping them inside the image — rather than via a mounted,
+operator-populated directory — makes the disc bytes the same store paths the image runs:
+the drift guarantee above becomes structural, and the data worker needs no recovery-set
+bind mount or `make recovery-binaries` populate step. Override the two variables only to
+relocate the set.
+
 ## Bundled tooling and pinned versions
 
 Versions are pinned by the flake's `nixpkgs` revision and recorded as image labels

@@ -32,10 +32,10 @@ Type=simple
 Environment=TAPE_ARCHIVER_IMAGE=ghcr.io/soliddowant/tape-archiver/data-worker:REPLACE_WITH_PINNED_TAG
 
 # All run configuration lives in the env file, never hardcoded in this unit.
-# ROLE=data, the Temporal connection, TAPE_STAGING_DIR, and
-# TAPE_RECOVERY_BINARIES_DIR are supplied there and passed through with
-# --env-file. EnvironmentFile makes ${TAPE_ARCHIVER_STOP_TIMEOUT} (below)
-# overridable from the same file.
+# ROLE=data, the Temporal connection, and TAPE_STAGING_DIR are supplied there and
+# passed through with --env-file (the recovery set is baked into the image, so no
+# TAPE_RECOVERY_*_DIR need be set). EnvironmentFile makes
+# ${TAPE_ARCHIVER_STOP_TIMEOUT} (below) overridable from the same file.
 EnvironmentFile=/etc/tape-archiver/data-worker.env
 
 # The pool bind mount only propagates the on-demand .zfs/snapshot/<snap>/

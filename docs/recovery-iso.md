@@ -83,12 +83,13 @@ It emits two disc-staging directories, siblings under `$out`:
 
 - `bin/{age,par2,zstd,tar}` — the statically linked binaries. This is the directory a
   run points `recoverykit.Build` at (`BinariesDir`, wired from the data worker's
-  `TAPE_RECOVERY_BINARIES_DIR`); `recoverykit` stages its top-level regular files into
-  the ISO's `bin/`.
+  `TAPE_RECOVERY_BINARIES_DIR`, which the image defaults to the baked-in `/recovery/bin`);
+  `recoverykit` stages its top-level regular files into the ISO's `bin/`.
 - `src/<tool>-<version>.*` — each tool's upstream source archive (SPEC §2, §10 "…plus
   their source"). This is the directory a run points `recoverykit.Build` at
-  (`SourcesDir`, wired from the data worker's `TAPE_RECOVERY_SOURCES_DIR`); `recoverykit`
-  stages its top-level regular files verbatim into the ISO's `src/`. These are archives,
+  (`SourcesDir`, wired from the data worker's `TAPE_RECOVERY_SOURCES_DIR`, which the image
+  defaults to the baked-in `/recovery/src`); `recoverykit` stages its top-level regular
+  files verbatim into the ISO's `src/`. These are archives,
   not executables, so they are not linkage-checked, but the build fails if the directory
   is empty — a disc that ships binaries but no source cannot rebuild the tools decades
   out on hardware the binaries do not run on (SPEC §2).
@@ -97,7 +98,11 @@ It emits two disc-staging directories, siblings under `$out`:
 is Go and links static with CGO disabled. All four are drawn from the **same pinned
 nixpkgs** as the rest of the project — the single shared source of truth — so the
 data-worker OCI image, which bundles the same tools for the write path, ships identical
-versions ("must match the recovery disc", SPEC §2/§4.1/§10). The derivation's install
+versions ("must match the recovery disc", SPEC §2/§4.1/§10). The image bakes this static
+set itself in at `/recovery/{bin,src}` (not a mounted or operator-populated directory), so
+the bytes a run stages onto the disc are the same store paths the image runs — the
+"cannot drift" guarantee is structural, not a version assertion an out-of-band artifact
+could still violate. The derivation's install
 check re-proves, at build time, the same predicate `recoverykit.Build` enforces at run
 time (no `PT_INTERP`, no `DT_NEEDED`) and that each binary runs standalone at its pinned
 version — including `age`'s native post-quantum (`age1pq1…`, hybrid ML-KEM-768)
