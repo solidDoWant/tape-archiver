@@ -476,7 +476,10 @@ There are two distinct Discord notification paths:
 successful run the data worker delivers the PDF report to the Discord webhook named in
 the run config (§5 Delivery) — from the data worker, where it was built (§4.1). The
 recovery ISO travels on its burned disc (§10); the report is the single uploaded
-artifact, which keeps the upload comfortably within the webhook's ~25 MB limit.
+artifact, which keeps the upload comfortably within the webhook's ~25 MB limit. The
+report upload is bounded by the Deliver activity's timeout (the request context), not by
+a fixed client-wide HTTP timeout, so a multi-megabyte report can upload over a slow
+uplink for the full activity budget rather than being aborted after a few seconds.
 
 **Failure alert (operational, configured via env var).** A separate failure webhook,
 configured on the worker via the `DISCORD_FAILURE_WEBHOOK_URL` environment variable
@@ -492,6 +495,14 @@ This is implemented with Temporal's standard on-failure pattern: a deferred hand
 the backup workflow runs the alert activity on a `workflow.NewDisconnectedContext` so it
 fires even when the workflow is cancelled. The alert uses the same `pkg/webhook` client
 as success delivery.
+
+Operational alert text is shortened to fit Discord's 2000-character content limit: the
+variable error/reason summary is trimmed (with a `[…truncated; see logs]` marker) so the
+actionable text — the run id and the exact `tapectl resume` / `tapectl abort`
+instructions — always survives, and a final cap guarantees the message is never rejected
+with HTTP 400 and dropped. The full, untruncated error is always preserved verbatim in
+Temporal history and the structured logs; the alert is a best-effort pointer to that
+authoritative record, not the record itself.
 
 **Operator-pause alert (operational, same failure webhook).** When the Eject phase fills
 the I/O station and pauses for the operator (§4.3 phase 8), it posts a message on the same

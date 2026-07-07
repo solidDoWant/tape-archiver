@@ -19,10 +19,42 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
+	"unicode/utf8"
 )
 
-const defaultTimeout = 10 * time.Second
+const (
+	// maxContentLength is Discord's hard limit on a webhook message's content
+	// field, in Unicode code points. Content over this is rejected with HTTP 400.
+	maxContentLength = 2000
+
+	// maxSummaryLength budgets the variable error/reason text embedded in an
+	// operational alert, leaving ample headroom under maxContentLength for the
+	// fixed boilerplate — the resume/abort instructions in particular — plus the
+	// run id and any tape/slot lists, so a giant error tail cannot push the
+	// actionable text past Discord's limit.
+	maxSummaryLength = 1500
+
+	// truncationMarker is appended to any text truncate shortens, pointing the
+	// operator at the authoritative full error (Temporal history and logs).
+	truncationMarker = " […truncated; see logs]"
+)
+
+// truncate returns s unchanged when its rune count is at most max, otherwise it
+// keeps a leading prefix and appends truncationMarker so the result's rune count
+// is at most max. It counts Unicode code points, not bytes, because Discord's
+// content limit is measured in code points.
+func truncate(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+
+	markerLen := utf8.RuneCountInString(truncationMarker)
+	if max <= markerLen {
+		return string([]rune(s)[:max])
+	}
+
+	return string([]rune(s)[:max-markerLen]) + truncationMarker
+}
 
 // Message is a Discord webhook message payload. Only the content field is used;
 // it is rendered as the message body.
@@ -44,8 +76,13 @@ type Client struct {
 // unconditionally and never nil-check.
 func New(url string) *Client {
 	return &Client{
-		url:        url,
-		httpClient: &http.Client{Timeout: defaultTimeout},
+		url: url,
+		// No client-wide Timeout: Go's http.Client.Timeout caps the entire
+		// request lifecycle, including the body upload, so a fixed value would
+		// always undercut the caller's context deadline (e.g. the Deliver
+		// activity's 30-minute bound for a multi-megabyte report). The request
+		// context passed to every send is the sole timeout.
+		httpClient: &http.Client{},
 	}
 }
 
@@ -56,6 +93,12 @@ func (c *Client) Send(ctx context.Context, msg Message) error {
 	if c.url == "" {
 		return nil
 	}
+
+	// Backstop: no content-bearing message may exceed Discord's 2000-code-point
+	// limit regardless of how long the interpolated fields are, or Discord
+	// rejects it with HTTP 400 and the alert is lost. SendFile uses a multipart
+	// body, not content, so it is unaffected.
+	msg.Content = truncate(msg.Content, maxContentLength)
 
 	body, err := json.Marshal(msg)
 	if err != nil {
@@ -129,6 +172,8 @@ func (c *Client) SendFailure(ctx context.Context, runID, phase string, runErr er
 		errSummary = runErr.Error()
 	}
 
+	errSummary = truncate(errSummary, maxSummaryLength)
+
 	msg := Message{
 		Content: fmt.Sprintf("Backup run %s failed in phase %q: %s", runID, phase, errSummary),
 	}
@@ -199,6 +244,8 @@ func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, af
 		errSummary = "unknown error"
 	}
 
+	errSummary = truncate(errSummary, maxSummaryLength)
+
 	msg := Message{
 		Content: fmt.Sprintf(
 			"Backup run %s paused: %s failed for one drive-set. Remove the affected tape(s) [%s], "+
@@ -238,6 +285,8 @@ func (c *Client) SendBurnPause(ctx context.Context, runID string, devices []stri
 	if reason == "" {
 		reason = "unknown reason"
 	}
+
+	reason = truncate(reason, maxSummaryLength)
 
 	msg := Message{
 		Content: fmt.Sprintf(
