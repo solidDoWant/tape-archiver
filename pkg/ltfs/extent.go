@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"net/url"
 	"path"
 	"sort"
@@ -200,6 +201,12 @@ func (idx *Index) ExtractFile(ctx context.Context, name string, r BlockReader) (
 		return nil, fmt.Errorf("file %q not found in LTFS index", name)
 	}
 
+	// A corrupt index can declare a length larger than the addressable range;
+	// make would panic, so reject it up front naming the length field.
+	if file.Length > math.MaxInt {
+		return nil, fmt.Errorf("file %q declares length %d exceeding the addressable maximum %d", name, file.Length, math.MaxInt)
+	}
+
 	out := make([]byte, file.Length)
 
 	for _, extent := range file.Extents {
@@ -208,9 +215,12 @@ func (idx *Index) ExtractFile(ctx context.Context, name string, r BlockReader) (
 			return nil, fmt.Errorf("read extent of %q at partition %s block %d: %w", name, extent.Partition, extent.StartBlock, err)
 		}
 
-		end := extent.FileOffset + uint64(len(data))
-		if end > file.Length {
-			return nil, fmt.Errorf("extent of %q at file offset %d overruns declared length %d", name, extent.FileOffset, file.Length)
+		// Overflow-safe overrun check: extent.FileOffset + len(data) can wrap a
+		// uint64 for a corrupt fileoffset, so compare each term against the
+		// remaining space instead of summing. Either failure means the extent
+		// does not fit the file, and copying it would panic the slice index.
+		if extent.FileOffset > file.Length || uint64(len(data)) > file.Length-extent.FileOffset {
+			return nil, fmt.Errorf("extent of %q at fileoffset %d overruns declared length %d", name, extent.FileOffset, file.Length)
 		}
 
 		copy(out[extent.FileOffset:], data)
@@ -223,6 +233,14 @@ func (idx *Index) ExtractFile(ctx context.Context, name string, r BlockReader) (
 // it has at least ByteOffset+ByteCount bytes, then returns exactly the extent's
 // [ByteOffset, ByteOffset+ByteCount) slice.
 func readExtent(ctx context.Context, r BlockReader, extent Extent) ([]byte, error) {
+	// A corrupt index can hold byteoffset/bytecount values whose sum overflows
+	// a uint64. That wrap would make the read loop stop early and the final
+	// buf[ByteOffset:ByteOffset+ByteCount] slice panic, so reject it before any
+	// tape work, naming both fields.
+	if extent.ByteCount > math.MaxUint64-extent.ByteOffset {
+		return nil, fmt.Errorf("extent byte range overflows: byteoffset %d + bytecount %d", extent.ByteOffset, extent.ByteCount)
+	}
+
 	if err := r.Locate(ctx, extent.Partition, extent.StartBlock); err != nil {
 		return nil, err
 	}
@@ -292,7 +310,9 @@ func (n xmlName) decode() string {
 		return n.Value
 	}
 
-	if decoded, err := url.QueryUnescape(n.Value); err == nil {
+	// PathUnescape, not QueryUnescape: LTFS names are %XX path-escaped, so a
+	// literal "+" must stay "+" (QueryUnescape would turn it into a space).
+	if decoded, err := url.PathUnescape(n.Value); err == nil {
 		return decoded
 	}
 
