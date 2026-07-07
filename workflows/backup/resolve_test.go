@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,7 +39,16 @@ func (f fakeResolver) ResolveGroup(_ context.Context, ref k8ssnap.Ref) (k8ssnap.
 		return k8ssnap.Group{}, f.err
 	}
 
-	return f.resolveGroup[ref.LabelSelector], nil
+	group := f.resolveGroup[ref.LabelSelector]
+
+	// Mirror the real Resolver: a selector matching zero snapshots is an error,
+	// not an empty group, so the workflow's surfacing path is exercised faithfully.
+	if len(group.Members) == 0 {
+		return k8ssnap.Group{}, fmt.Errorf("label selector %q matched no VolumeSnapshots (namespace %q)",
+			ref.LabelSelector, ref.Namespace)
+	}
+
+	return group, nil
 }
 
 // fakePool is a poolInspector serving canned ZFS properties and sizes keyed by
@@ -230,6 +240,26 @@ func TestResolveK8sSourcesClusterWide(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, resolver.gotRef.Namespace, "empty namespace must pass through to ResolveGroup for cluster-wide resolution")
 	assert.Equal(t, "backup=nightly", resolver.gotRef.LabelSelector)
+}
+
+// TestResolveK8sSourcesEmptyGroupFails asserts that a label-selector group
+// matching zero VolumeSnapshots fails the run at Resolve (before any data is
+// staged or written to tape), with an error identifying both the source and its
+// selector (issue #132 AC1).
+func TestResolveK8sSourcesEmptyGroupFails(t *testing.T) {
+	t.Parallel()
+
+	activities := &ResolveControlActivities{
+		// resolveGroup has no entry for "app=gone", so the fake resolver mirrors
+		// the real Resolver and returns an empty-match error.
+		newResolver: func() (snapshotResolver, error) { return fakeResolver{}, nil },
+	}
+
+	_, err := activities.ResolveK8sSources(t.Context(),
+		config.Config{Sources: []config.Source{k8sGroupSource("app=gone")}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sources[0]")
+	assert.Contains(t, err.Error(), "app=gone")
 }
 
 // TestResolveK8sSourcesResolverBuildFailure asserts a k8s source whose resolver
