@@ -43,6 +43,7 @@ func registerDataActivities(w worker.Worker, env envvar.Config, metricsReg prome
 	backup.RegisterData(w, backup.DataConfig{
 		StagingDir:          env.StagingDir,
 		RecoveryBinariesDir: env.RecoveryBinariesDir,
+		RecoverySourcesDir:  env.RecoverySourcesDir,
 		MetricsRegisterer:   metricsReg,
 	})
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kdomanski/iso9660"
@@ -19,8 +20,31 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/recoverykit"
 )
 
-// completeInput returns a valid Input with two tapes and the four recovery
-// binaries, each a statically linked ELF fixture.
+// sourceArchives are the fixture recovery-tool source archives staged into the
+// disc's src/, mapping each on-disc src file name to its exact bytes. They mirror
+// nix/recovery-binaries.nix's $out/src/<tool>-<version>.* naming.
+var sourceArchives = map[string][]byte{
+	"age-1.3.1.tar.gz":  []byte("fixture age source\n"),
+	"par2-1.0.0.tar.gz": []byte("fixture par2 source\n"),
+	"zstd-1.5.6.tar.gz": []byte("fixture zstd source\n"),
+	"tar-1.35.tar.gz":   []byte("fixture tar source\n"),
+}
+
+// sourcesDir writes the fixture source archives into a temp directory and returns
+// its path, satisfying recoverykit.Build's requirement that the disc ship source.
+func sourcesDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	for name, content := range sourceArchives {
+		writeFile(t, filepath.Join(dir, name), content)
+	}
+
+	return dir
+}
+
+// completeInput returns a valid Input with two tapes, the four recovery binaries
+// (each a statically linked ELF fixture), and the tools' source archives.
 func completeInput(t *testing.T) recoverykit.Input {
 	t.Helper()
 
@@ -37,6 +61,7 @@ func completeInput(t *testing.T) recoverykit.Input {
 			{Barcode: "TAPE0002L8", Index: []byte(`<ltfsindex><generationnumber>2</generationnumber></ltfsindex>`)},
 		},
 		BinariesDir: binDir,
+		SourcesDir:  sourcesDir(t),
 	}
 }
 
@@ -80,13 +105,52 @@ func TestBuild_RoundTrip(t *testing.T) {
 		assert.Equalf(t, content, got, "content mismatch for %s", name)
 	}
 
-	assert.Lenf(t, files, len(want), "unexpected extra files in ISO: %v", keys(files))
+	// The tools' source archives are staged into src/ under names the ISO writer
+	// mangles (dots become '_'); rather than duplicate the mangling here, verify
+	// them by content: every file under src/ must be one of the fixture archives
+	// and every fixture archive must appear exactly once (AC3).
+	srcFiles := make(map[string][]byte)
+
+	for name, content := range files {
+		if strings.HasPrefix(name, "src/") {
+			srcFiles[name] = content
+		}
+	}
+
+	assert.Lenf(t, srcFiles, len(sourceArchives), "every source archive must be staged under src/: %v", keys(srcFiles))
+
+	seenSources := make(map[string]bool)
+
+	for name, content := range srcFiles {
+		matched := ""
+
+		for origin, want := range sourceArchives {
+			if bytes.Equal(content, want) {
+				matched = origin
+				break
+			}
+		}
+
+		require.NotEmptyf(t, matched, "src file %s does not match any fixture source archive", name)
+		assert.Falsef(t, seenSources[matched], "source archive %s staged more than once", matched)
+		seenSources[matched] = true
+
+		// The staged src file must be recorded in the manifest at its exact
+		// read-back path with the correct digest (AC3).
+		sum := sha256.Sum256(content)
+		assert.Equalf(t, hex.EncodeToString(sum[:]), manifest[name],
+			"manifest digest mismatch for %s", name)
+	}
+
+	totalFiles := len(want) + len(sourceArchives)
+
+	assert.Lenf(t, files, totalFiles, "unexpected extra files in ISO: %v", keys(files))
 
 	// The returned disc-content manifest must name exactly the read-back paths of
 	// the burned disc, each with its content's SHA-256, so the Burn phase's
 	// read-back verification (pkg/optical.Verify) compares equal against the
 	// mounted disc.
-	assert.Lenf(t, manifest, len(want), "manifest must list exactly the on-disc files")
+	assert.Lenf(t, manifest, totalFiles, "manifest must list exactly the on-disc files")
 
 	for name, content := range want {
 		sum := sha256.Sum256(content)
@@ -143,6 +207,7 @@ func TestBuild_Validation(t *testing.T) {
 		"empty index":       {func(in *recoverykit.Input) { in.TapeIndexes[0].Index = nil }, "is empty"},
 		"colliding barcode": {func(in *recoverykit.Input) { in.TapeIndexes[1].Barcode = "tape0001l8" }, "collide"},
 		"no binaries dir":   {func(in *recoverykit.Input) { in.BinariesDir = "" }, "binaries directory is required"},
+		"no sources dir":    {func(in *recoverykit.Input) { in.SourcesDir = "" }, "sources directory is required"},
 	}
 
 	for name, test := range tests {
@@ -170,6 +235,103 @@ func TestBuild_EmptyBinariesDirFails(t *testing.T) {
 	_, err := recoverykit.Build(t.Context(), in, io.Discard)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no recovery binaries found")
+}
+
+// TestBuild_MangledBarcodeIndexesRoundTrip proves AC1: for a barcode carrying
+// characters the ISO 9660 writer mangles — an interior dot, a space, a non-d1
+// character, or more characters than the on-disc name budget allows — the tape's
+// LTFS index is found on the read-back image at exactly the path the returned
+// manifest records, so post-burn verification (pkg/optical.Verify) succeeds. It
+// reads the real image back with the pinned writer's reader, so readbackPath is
+// proven against the actual writer rather than trusted.
+func TestBuild_MangledBarcodeIndexesRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	barcodes := map[string]string{
+		"interior dot":       "TAPE.01",
+		"embedded space":     "TAPE 01",
+		"non-d1 punctuation": "TAPE#01",
+		"over name budget":   "TAPE0001L8-VERY-LONG-BARCODE-1234567890",
+		"standard label":     "TAPE0001L8",
+	}
+
+	for name, barcode := range barcodes {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			index := []byte(`<ltfsindex><generationnumber>7</generationnumber></ltfsindex>`)
+
+			in := completeInput(t)
+			in.TapeIndexes = []recoverykit.TapeIndex{{Barcode: barcode, Index: index}}
+
+			var buf bytes.Buffer
+
+			manifest, err := recoverykit.Build(t.Context(), in, &buf)
+			require.NoError(t, err)
+
+			files := readISO(t, buf.Bytes())
+
+			// The manifest must record exactly one LTFS index backup, at the name the
+			// writer actually produced on disc.
+			var indexKey string
+
+			for key := range manifest {
+				if strings.HasPrefix(key, "ltfs-index/") {
+					require.Emptyf(t, indexKey, "expected one ltfs-index entry; found %q and %q", indexKey, key)
+					indexKey = key
+				}
+			}
+
+			require.NotEmptyf(t, indexKey, "manifest records no ltfs-index entry for barcode %q", barcode)
+
+			// The index must be present on the read-back image at exactly the
+			// manifest path, with its exact bytes and matching digest.
+			got, ok := files[indexKey]
+			require.Truef(t, ok, "LTFS index for barcode %q not found at manifest path %q; read-back paths: %v", barcode, indexKey, keys(files))
+			assert.Equalf(t, index, got, "LTFS index content mismatch for barcode %q", barcode)
+
+			sum := sha256.Sum256(index)
+			assert.Equalf(t, hex.EncodeToString(sum[:]), manifest[indexKey], "manifest digest mismatch for barcode %q", barcode)
+		})
+	}
+}
+
+// TestBuild_RejectsMangledBarcodeCollision proves AC2: two distinct barcodes whose
+// on-disc index file names collide (here '.' and ' ' both fold toward '_', so both
+// mangle to ltfs-index/tape_01.schema) fail the build with an error naming both
+// barcodes, and no image is written — rather than silently dropping one tape's
+// index. This is broader than a case-fold collision, which the old check missed.
+func TestBuild_RejectsMangledBarcodeCollision(t *testing.T) {
+	t.Parallel()
+
+	in := completeInput(t)
+	in.TapeIndexes = []recoverykit.TapeIndex{
+		{Barcode: "TAPE.01", Index: []byte("<ltfsindex>1</ltfsindex>")},
+		{Barcode: "TAPE 01", Index: []byte("<ltfsindex>2</ltfsindex>")},
+	}
+
+	var buf bytes.Buffer
+
+	_, err := recoverykit.Build(t.Context(), in, &buf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "collide")
+	assert.Contains(t, err.Error(), "TAPE.01")
+	assert.Contains(t, err.Error(), "TAPE 01")
+	assert.Zerof(t, buf.Len(), "no image must be written when two barcodes collide")
+}
+
+// TestBuild_EmptySourcesDirFails proves AC3's loud-failure edge: a sources
+// directory with no archives is rejected rather than silently producing a disc
+// missing the tools' source (which SPEC §2/§10 require).
+func TestBuild_EmptySourcesDirFails(t *testing.T) {
+	t.Parallel()
+
+	in := completeInput(t)
+	in.SourcesDir = t.TempDir()
+
+	_, err := recoverykit.Build(t.Context(), in, io.Discard)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no recovery source archives found")
 }
 
 // TestRecoveryProcedureDocMatchesCanonical guards against drift: the disc ships

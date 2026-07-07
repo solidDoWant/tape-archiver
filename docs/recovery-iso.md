@@ -39,9 +39,19 @@ The image holds, at these paths:
   partition is damaged.
 - `bin/<name>` — the static recovery binaries (`age`, `par2`, `zstd`, `tar`) staged from
   a configurable source directory.
+- `src/<tool>-<version>.*` — each recovery tool's upstream **source archive** (SPEC §2,
+  §10 — "…plus their source"), staged from a configurable source directory so the tools
+  can be rebuilt from source on future hardware the pinned static binaries do not run on.
+  Unlike `bin/`, these are archives rather than executables, so they are not
+  linkage-checked; the build fails loudly if the directory is empty or yields no files.
 
-File names are stored as ISO 9660 level-2 identifiers (lowercased, no Rock Ridge), which
-the short, fixed artifact names above survive unchanged.
+File names are stored as ISO 9660 level-2 identifiers (no Rock Ridge): the mount
+lowercases them, folds characters outside the identifier set to `_`, joins interior dots,
+and truncates to the level-2 length caps. The short, fixed artifact names above survive
+unchanged, but the tape-barcode index names (`ltfs-index/<barcode>.schema`) and source
+archive names carry arbitrary characters, so `recoverykit` records each in the
+disc-content manifest under the exact name the read-back presents — reproducing that
+transformation — so post-burn verification always compares equal (issue #153).
 
 ## Recovery binaries must be statically linked
 
@@ -69,23 +79,30 @@ output `recoveryBinaries`), built with:
 make recovery-binaries      # nix build .#recoveryBinaries
 ```
 
-It emits one disc-staging directory:
+It emits two disc-staging directories, siblings under `$out`:
 
 - `bin/{age,par2,zstd,tar}` — the statically linked binaries. This is the directory a
   run points `recoverykit.Build` at (`BinariesDir`, wired from the data worker's
-  `TAPE_RECOVERY_BINARIES_DIR`); `recoverykit` stages its top-level regular files into
-  the ISO's `bin/`.
-- `src/<tool>-<version>.*` — each tool's upstream source archive (SPEC §10 "…plus their
-  source"), staged for later inclusion on the disc. It is a separate top-level directory
-  alongside `bin/`, not a subdirectory of it; `recoverykit` stages only the top-level
-  regular files in `bin/`, so `src/` is never scanned and never trips the ELF-only
-  linkage check.
+  `TAPE_RECOVERY_BINARIES_DIR`, which the image defaults to the baked-in `/recovery/bin`);
+  `recoverykit` stages its top-level regular files into the ISO's `bin/`.
+- `src/<tool>-<version>.*` — each tool's upstream source archive (SPEC §2, §10 "…plus
+  their source"). This is the directory a run points `recoverykit.Build` at
+  (`SourcesDir`, wired from the data worker's `TAPE_RECOVERY_SOURCES_DIR`, which the image
+  defaults to the baked-in `/recovery/src`); `recoverykit` stages its top-level regular
+  files verbatim into the ISO's `src/`. These are archives,
+  not executables, so they are not linkage-checked, but the build fails if the directory
+  is empty — a disc that ships binaries but no source cannot rebuild the tools decades
+  out on hardware the binaries do not run on (SPEC §2).
 
 `par2cmdline-turbo`, `zstd`, and `gnutar` are built with Nix `pkgsStatic` (musl); `age`
 is Go and links static with CGO disabled. All four are drawn from the **same pinned
 nixpkgs** as the rest of the project — the single shared source of truth — so the
 data-worker OCI image, which bundles the same tools for the write path, ships identical
-versions ("must match the recovery disc", SPEC §2/§4.1/§10). The derivation's install
+versions ("must match the recovery disc", SPEC §2/§4.1/§10). The image bakes this static
+set itself in at `/recovery/{bin,src}` (not a mounted or operator-populated directory), so
+the bytes a run stages onto the disc are the same store paths the image runs — the
+"cannot drift" guarantee is structural, not a version assertion an out-of-band artifact
+could still violate. The derivation's install
 check re-proves, at build time, the same predicate `recoverykit.Build` enforces at run
 time (no `PT_INTERP`, no `DT_NEEDED`) and that each binary runs standalone at its pinned
 version — including `age`'s native post-quantum (`age1pq1…`, hybrid ML-KEM-768)

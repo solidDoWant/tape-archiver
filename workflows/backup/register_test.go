@@ -75,6 +75,7 @@ func TestRegisterData(t *testing.T) {
 	RegisterData(rw, DataConfig{
 		StagingDir:          "/mnt/bulk-pool-01/archive/.tape-staging",
 		RecoveryBinariesDir: "/opt/recovery-bin",
+		RecoverySourcesDir:  "/opt/recovery-src",
 	})
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase

@@ -80,3 +80,22 @@ func RecoveryBinariesDir(t *testing.T) string {
 
 	return dir
 }
+
+// RecoverySourcesDir creates a temp directory populated with a fixture upstream
+// source archive per recovery tool (named <tool>-<version>.tar.gz, mirroring
+// nix/recovery-binaries.nix's $out/src) and returns its path. It satisfies
+// recoverykit.Build's requirement that the recovery ISO ship the tools' source
+// (SPEC §2, §10) without shipping real archives; the contents are opaque bytes —
+// unlike the binaries, sources are not linkage-checked.
+func RecoverySourcesDir(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	for _, name := range recoveryBinaries {
+		archive := filepath.Join(dir, name+"-1.0.0.tar.gz")
+		require.NoError(t, os.WriteFile(archive, []byte("fixture "+name+" source archive\n"), 0o644))
+	}
+
+	return dir
+}

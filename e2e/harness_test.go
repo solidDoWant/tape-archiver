@@ -17,7 +17,7 @@
 //	 └─ temporal container (joined to the kind network, alias "temporal")
 //	host:
 //	 ├─ data-worker container  --network kind, tape-device + /dev/zfs passthrough,
-//	 │     pool bind mount, recovery-binaries mount → temporal:7233
+//	 │     pool bind mount (recovery set baked into the image) → temporal:7233
 //	 └─ this test process: blank-tape prep, run submission, and one shared mock
 //	      webhook (reachable from the cluster via the kind bridge gateway IP)
 //
@@ -79,9 +79,6 @@ const (
 	// ample host directory, bind-mounted here and readable by the host test
 	// process for the AC4 slice corruption.
 	containerStagingDir = "/staging"
-	// containerRecoveryBin is where the static recovery-binary set is mounted in
-	// the data container (TAPE_RECOVERY_BINARIES_DIR).
-	containerRecoveryBin = "/recovery-bin"
 
 	// datasetParent is democratic-csi's datasetParentName for the k8s-source test:
 	// the CSI snapshotHandle's volume component is joined under it to rebuild the
@@ -149,7 +146,6 @@ type e2eHarness struct {
 	repoRoot       string
 	kubeconfig     string
 	tapectlPath    string // built tapectl binary used to submit runs (the operator path)
-	recoveryBinDir string // host path to the static recovery binaries (…/bin)
 	stagingHostDir string // host staging dir bind-mounted into the data container
 	temporalCID    string
 	dataCID        string
@@ -254,7 +250,6 @@ func setupHarness() (*e2eHarness, error) {
 	}{
 		{"build-images", h.buildImages},
 		{"build-tapectl", h.buildTapectl},
-		{"recovery-binaries", h.buildRecoveryBinaries},
 		{"kind-cluster", h.createCluster},
 		{"keda", h.installKeda},
 		{"load-control-image", h.loadControlImage},
@@ -304,20 +299,6 @@ func (h *e2eHarness) buildTapectl() error {
 	}
 
 	h.push(func() { _ = os.Remove(h.tapectlPath) })
-
-	return nil
-}
-
-func (h *e2eHarness) buildRecoveryBinaries() error {
-	out, err := execStdout(h.repoRoot, nil, "nix", "build", "--no-link", "--print-out-paths", ".#recoveryBinaries")
-	if err != nil {
-		return err
-	}
-
-	h.recoveryBinDir = filepath.Join(strings.TrimSpace(out), "bin")
-	if _, statErr := os.Stat(filepath.Join(h.recoveryBinDir, "age")); statErr != nil {
-		return fmt.Errorf("recovery binaries missing at %s: %w", h.recoveryBinDir, statErr)
-	}
 
 	return nil
 }
@@ -779,12 +760,12 @@ func (h *e2eHarness) startDataWorker() error {
 		"--cap-add", "SYS_RAWIO", // changer / sg_raw / LTFS issue raw SCSI via SG_IO
 		"-v", poolMount+":"+poolMount+":rshared", // ZFS source + .zfs/snapshot automounts
 		"-v", h.stagingHostDir+":"+containerStagingDir, // staged archives + PAR2 (ample host dir)
-		"-v", h.recoveryBinDir+":"+containerRecoveryBin+":ro",
+		// The recovery set is baked into the image at /recovery/{bin,src} with the
+		// TAPE_RECOVERY_*_DIR env vars pre-set, so the container needs no mount here.
 		"-e", "ROLE=data",
 		"-e", "TEMPORAL_ADDRESS="+temporalAlias+":"+temporalPort,
 		"-e", "TEMPORAL_NAMESPACE="+namespace,
 		"-e", "TAPE_STAGING_DIR="+containerStagingDir,
-		"-e", "TAPE_RECOVERY_BINARIES_DIR="+containerRecoveryBin,
 		dataRepo+":"+imageVersion,
 	)
 

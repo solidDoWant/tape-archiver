@@ -54,3 +54,19 @@ func TestParse_withoutRecoveryBinariesDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, cfg.RecoveryBinariesDir)
 }
+
+func TestParse_withRecoverySourcesDir(t *testing.T) {
+	t.Setenv("TAPE_RECOVERY_SOURCES_DIR", "/opt/recovery-src")
+
+	cfg, err := Parse()
+	require.NoError(t, err)
+	assert.Equal(t, "/opt/recovery-src", cfg.RecoverySourcesDir)
+}
+
+func TestParse_withoutRecoverySourcesDir(t *testing.T) {
+	t.Setenv("TAPE_RECOVERY_SOURCES_DIR", "")
+
+	cfg, err := Parse()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.RecoverySourcesDir)
+}
