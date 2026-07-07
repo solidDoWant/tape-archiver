@@ -192,12 +192,12 @@ func TestMeasureWriteHealthReportsThroughputWhenScrapeFails(t *testing.T) {
 	cancel()
 
 	health, err := activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
-		Device:      "/dev/does-not-exist",
-		Barcode:     "TAPE0001L6",
-		StagedBytes: 6_000_000_000,
-		Elapsed:     60 * time.Second,
-		FloorMBps:   50,
-		FloorKnown:  true,
+		Device:       "/dev/does-not-exist",
+		Barcode:      "TAPE0001L6",
+		BytesWritten: 6_000_000_000,
+		Elapsed:      60 * time.Second,
+		FloorMBps:    50,
+		FloorKnown:   true,
 	})
 
 	require.NoError(t, err, "a scrape failure must not fail the run")
@@ -222,12 +222,12 @@ func TestMeasureWriteHealthRecordsMetrics(t *testing.T) {
 
 	// 2.4 GB in 60 s = 40 MB/s: below a 50 MB/s floor.
 	_, err := activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
-		Device:      "/dev/does-not-exist",
-		Barcode:     "TAPE0002L6",
-		StagedBytes: 2_400_000_000,
-		Elapsed:     60 * time.Second,
-		FloorMBps:   50,
-		FloorKnown:  true,
+		Device:       "/dev/does-not-exist",
+		Barcode:      "TAPE0002L6",
+		BytesWritten: 2_400_000_000,
+		Elapsed:      60 * time.Second,
+		FloorMBps:    50,
+		FloorKnown:   true,
 	})
 	require.NoError(t, err)
 
@@ -276,9 +276,11 @@ func TestReportWriteHealthMapping(t *testing.T) {
 	assert.False(t, mapped.Healthy, "repositions make the tape unhealthy")
 }
 
-// TestStagedBytes asserts the throughput numerator sums only the archive slice
-// bytes (StagedArchive.SizeBytes), excluding PAR2 recovery files (issue #70).
-func TestStagedBytes(t *testing.T) {
+// TestTapeWrittenBytes asserts the throughput numerator sums every byte physically
+// written to the tape in the measured window — the archive slices AND the PAR2
+// recovery files — so it matches the WriteTree → FinalizeTape denominator (copyTape
+// writes both). Slice-only counting understated the rate by the PAR2 fraction (#146).
+func TestTapeWrittenBytes(t *testing.T) {
 	t.Parallel()
 
 	archives := []TapeWriteArchive{
@@ -287,9 +289,53 @@ func TestStagedBytes(t *testing.T) {
 			PAR2Files: []StagedSlice{{SizeBytes: 9_000}},
 		},
 		{
-			Slices: []StagedSlice{{SizeBytes: 3_000}},
+			Slices:    []StagedSlice{{SizeBytes: 3_000}},
+			PAR2Files: []StagedSlice{{SizeBytes: 300}, {SizeBytes: 700}},
 		},
 	}
 
-	assert.Equal(t, int64(6_000), stagedBytes(archives), "PAR2 bytes are excluded from staged bytes")
+	// slices 1_000 + 2_000 + 3_000 = 6_000; PAR2 9_000 + 300 + 700 = 10_000.
+	assert.Equal(t, int64(16_000), tapeWrittenBytes(archives),
+		"PAR2 bytes are included — they are copied inside the measured write window")
+}
+
+// TestWriteHealthNotFalseFlaggedByPAR2Window is the AC3 regression: a fill-to-capacity
+// tape whose write window includes copying PAR2 at maximum parity, streamed at or above
+// the generation floor for ALL bytes written, must NOT read below-floor, and the
+// reported throughput must reflect the true sustained rate. The old slice-only numerator
+// divided by the PAR2-inclusive window understated the rate (up to ~2x in fill mode) and
+// false-flagged a healthy drive.
+func TestWriteHealthNotFalseFlaggedByPAR2Window(t *testing.T) {
+	t.Parallel()
+
+	// LTO-9 floor is 180 MB/s. Fill-to-capacity at maximum parity: PAR2 ≈ the slice
+	// bytes, so counting slices only would halve the measured rate.
+	const floor = 180.0
+
+	sliceBytes := int64(18_000_000_000_000) // ~full LTO-9 native capacity of slices
+	par2Bytes := int64(18_000_000_000_000)  // maximum parity in fill mode
+
+	archives := []TapeWriteArchive{{
+		Slices:    []StagedSlice{{SizeBytes: sliceBytes}},
+		PAR2Files: []StagedSlice{{SizeBytes: par2Bytes}},
+	}}
+
+	written := tapeWrittenBytes(archives)
+	require.Equal(t, sliceBytes+par2Bytes, written)
+
+	// The drive streamed all 36 TB in 150_000 s = 240 MB/s — comfortably above the
+	// 180 MB/s floor. Elapsed is the true write-window span (slices + PAR2 copied).
+	elapsed := 150_000 * time.Second
+
+	health := evaluateWriteHealth(written, elapsed, tape.LogPageResult{}, floor, true)
+
+	assert.InDelta(t, 240.0, health.ThroughputMBps, 0.001, "throughput reflects all bytes written to tape")
+	assert.False(t, health.BelowFloor, "a drive above its floor for all written bytes must not be flagged below-floor")
+
+	// Prove the old slice-only numerator would have false-flagged this healthy drive:
+	// 18 TB ÷ 150_000 s = 120 MB/s, spuriously below the 180 MB/s floor.
+	slicesOnly := evaluateWriteHealth(sliceBytes, elapsed, tape.LogPageResult{}, floor, true)
+	assert.InDelta(t, 120.0, slicesOnly.ThroughputMBps, 0.001)
+	assert.True(t, slicesOnly.BelowFloor,
+		"slice-only counting mismeasures the fill-to-capacity window as below floor — the bug this fixes")
 }

@@ -19,8 +19,9 @@ import (
 // After a tape's write window closes (WriteTree → FinalizeTape, i.e. unmount and the
 // deferred LTFS index sync have settled), the MeasureWriteHealth activity scrapes the
 // drive's SCSI log pages (repositions from page 0x24, TapeAlert flags from page 0x2e)
-// via pkg/tape.LogPageReader, and computes sustained write throughput as the tape's
-// staged bytes divided by the write-window elapsed time measured by the workflow.
+// via pkg/tape.LogPageReader, and computes sustained write throughput as the bytes
+// written to the tape (archive slices + PAR2 recovery files) divided by the
+// write-window elapsed time measured by the workflow.
 
 // bytesPerMB is the decimal megabyte (1e6 bytes) used for throughput, matching how
 // drive/tape rates are conventionally quoted (MB/s, not MiB/s).
@@ -72,7 +73,8 @@ type WriteHealth struct {
 	// MeasureWriteHealth activity could not run at all; the run still succeeds.
 	Measured bool
 	// ThroughputMBps is the sustained write throughput over the tape's write
-	// window: staged bytes / elapsed seconds, in MB/s (decimal, 1 MB = 1e6 B).
+	// window: bytes written to tape (slices + PAR2) / elapsed seconds, in MB/s
+	// (decimal, 1 MB = 1e6 B).
 	ThroughputMBps float64
 	// FloorMBps is the speed-matching floor ThroughputMBps was compared against,
 	// derived from the tape generation. Zero and meaningless when FloorKnown is false.
@@ -99,12 +101,13 @@ func (h WriteHealth) Healthy() bool {
 	return h.Measured && h.FloorKnown && !h.BelowFloor && h.Repositions == 0 && len(h.TapeAlertFlags) == 0
 }
 
-// evaluateWriteHealth computes the write-health verdict from the tape's staged size,
-// its write-window elapsed time, and the scraped log pages. It is pure so the flag
-// logic is unit-testable without hardware. Throughput is only meaningful for a
-// positive elapsed time; a non-positive elapsed yields a zero throughput that is not
-// flagged below-floor (the rate could not be measured, not that it was slow).
-func evaluateWriteHealth(stagedBytes int64, elapsed time.Duration, logs tape.LogPageResult, floorMBps float64, floorKnown bool) WriteHealth {
+// evaluateWriteHealth computes the write-health verdict from the bytes written to the
+// tape (slices + PAR2), its write-window elapsed time, and the scraped log pages. It
+// is pure so the flag logic is unit-testable without hardware. Throughput is only
+// meaningful for a positive elapsed time; a non-positive elapsed yields a zero
+// throughput that is not flagged below-floor (the rate could not be measured, not that
+// it was slow).
+func evaluateWriteHealth(bytesWritten int64, elapsed time.Duration, logs tape.LogPageResult, floorMBps float64, floorKnown bool) WriteHealth {
 	health := WriteHealth{
 		Measured:    true,
 		FloorMBps:   floorMBps,
@@ -120,7 +123,7 @@ func evaluateWriteHealth(stagedBytes int64, elapsed time.Duration, logs tape.Log
 
 	seconds := elapsed.Seconds()
 	if seconds > 0 {
-		health.ThroughputMBps = float64(stagedBytes) / bytesPerMB / seconds
+		health.ThroughputMBps = float64(bytesWritten) / bytesPerMB / seconds
 		if floorKnown {
 			health.BelowFloor = health.ThroughputMBps < floorMBps
 		}
@@ -163,7 +166,7 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "throughput_mbps",
-			Help:      "Sustained write throughput over the tape's write window, in MB/s (staged bytes / elapsed).",
+			Help:      "Sustained write throughput over the tape's write window, in MB/s (bytes written to tape (slices + PAR2) / elapsed).",
 		}, []string{"barcode"}),
 		repositions: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "tape_archiver",
@@ -253,9 +256,10 @@ type MeasureWriteHealthInput struct {
 	Device string
 	// Barcode identifies the tape in the report and metric labels.
 	Barcode tape.Barcode
-	// StagedBytes is the tape's staged size (sum of StagedArchive.SizeBytes for its
-	// archives) — the numerator of the throughput.
-	StagedBytes int64
+	// BytesWritten is the total bytes physically written to the tape in the measured
+	// window — the archive slices plus the PAR2 recovery files — the numerator of
+	// the throughput.
+	BytesWritten int64
 	// Elapsed is the write-window wall-clock the workflow measured around the
 	// WriteTree → FinalizeTape span — the denominator of the throughput.
 	Elapsed time.Duration
@@ -284,7 +288,7 @@ func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input Me
 		logs = tape.LogPageResult{}
 	}
 
-	health := evaluateWriteHealth(input.StagedBytes, input.Elapsed, logs, input.FloorMBps, input.FloorKnown)
+	health := evaluateWriteHealth(input.BytesWritten, input.Elapsed, logs, input.FloorMBps, input.FloorKnown)
 
 	a.metrics.record(string(input.Barcode), health)
 

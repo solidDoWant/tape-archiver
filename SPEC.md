@@ -481,8 +481,9 @@ modified to pass — the code is fixed instead.
 - The write phase must feed each drive above its **speed-matching floor (~50 MB/s for
   LTO-6)** continuously, with no back-hitch. This is enforced by design (everything is
   staged before writing) and **measured on every run**: after each tape's write window
-  closes, the run records that tape's sustained write throughput (staged bytes ÷
-  write-window elapsed), its reposition/back-hitch count (SCSI log page `0x24`), and any
+  closes, the run records that tape's sustained write throughput (bytes written to tape
+  — archive slices + PAR2 recovery files — ÷ write-window elapsed), its
+  reposition/back-hitch count (SCSI log page `0x24`), and any
   TapeAlert flags (log page `0x2e`) in the PDF report (§9) and as Prometheus gauges, and
   flags any tape that streamed below the floor or back-hitched. The floor is the tape
   **generation's** speed-matching floor (the write format governs the drive's

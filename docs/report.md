@@ -46,8 +46,10 @@ successfully.
 Each tape row records:
 
 - **Throughput (MB/s)** — sustained write throughput over the write window, computed as
-  the tape's staged size (the archive data, in decimal MB) divided by the write-window
-  elapsed time.
+  the total bytes written to the tape (archive slices + PAR2 recovery files, in decimal
+  MB) divided by the write-window elapsed time. Both slices and PAR2 are copied inside
+  the measured window, so counting every written byte matches the numerator to the
+  denominator and reflects the drive's actual sustained rate.
 - **Floor** — the speed-matching floor the throughput is compared against. It is a
   property of the **tape generation being written** (the write format determines the
   drive's speed-matching range), derived from the configured native capacity
