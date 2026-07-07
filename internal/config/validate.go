@@ -2,8 +2,30 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
+
+// The PAR2 engine accepts only whole redundancy percentages in the inclusive
+// range [1, 100] (SPEC §8). The config gate enforces that contract directly so
+// out-of-range or fractional values are rejected up front rather than being
+// silently clamped or rounded downstream.
+const (
+	minRedundancyPercent = 1
+	maxRedundancyPercent = 100
+)
+
+// validateRedundancyPercent rejects a redundancy percentage that is not a whole
+// number in [1, 100]. The value is a float because the config surface accepts
+// JSON numbers, but the PAR2 engine only honors integers, so a fractional value
+// would leave the feasibility pre-check and the Pack reservation disagreeing.
+func validateRedundancyPercent(field string, value float64) error {
+	if value < minRedundancyPercent || value > maxRedundancyPercent || value != math.Trunc(value) {
+		return fmt.Errorf("%s: must be an integer in [%d, %d], got %v", field, minRedundancyPercent, maxRedundancyPercent, value)
+	}
+
+	return nil
+}
 
 // Validate checks all Config fields for correctness. It returns the first
 // error found, with a message that names the offending field.
@@ -188,10 +210,14 @@ func (r Redundancy) validate() error {
 		return fmt.Errorf("redundancy: one of targetPercentage or fillToCapacity must be set")
 	case hasPercent && hasFill:
 		return fmt.Errorf("redundancy: targetPercentage and fillToCapacity are mutually exclusive")
-	case hasPercent && *r.TargetPercentage < 0:
-		return fmt.Errorf("redundancy.targetPercentage: must be >= 0, got %v", *r.TargetPercentage)
-	case hasFill && r.FillToCapacity.Floor < 0:
-		return fmt.Errorf("redundancy.fillToCapacity.floor: must be >= 0, got %v", r.FillToCapacity.Floor)
+	case hasPercent:
+		if err := validateRedundancyPercent("redundancy.targetPercentage", *r.TargetPercentage); err != nil {
+			return err
+		}
+	case hasFill:
+		if err := validateRedundancyPercent("redundancy.fillToCapacity.floor", r.FillToCapacity.Floor); err != nil {
+			return err
+		}
 	}
 
 	if r.SliceSizeBytes <= 0 {

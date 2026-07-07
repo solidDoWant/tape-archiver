@@ -78,7 +78,10 @@
     "FillConfig": {
       "properties": {
         "floor": {
-          "type": "number"
+          "type": "number",
+          "multipleOf": 1,
+          "maximum": 100,
+          "minimum": 1
         }
       },
       "additionalProperties": false,
@@ -189,7 +192,10 @@
     "Redundancy": {
       "properties": {
         "targetPercentage": {
-          "type": "number"
+          "type": "number",
+          "multipleOf": 1,
+          "maximum": 100,
+          "minimum": 1
         },
         "fillToCapacity": {
           "$ref": "#/$defs/FillConfig"

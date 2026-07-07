@@ -177,7 +177,7 @@ PAR2 redundancy policy. Exactly one of `targetPercentage` or `fillToCapacity` mu
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `targetPercentage` | `number` | no* | Fixed PAR2 redundancy as a percentage of the data size (≥ 0). |
+| `targetPercentage` | `number` | no* | Fixed PAR2 redundancy as a percentage of the data size. Must be a whole number in the inclusive range 1–100 (the range the PAR2 engine supports); out-of-range or fractional values are rejected up front. |
 | `fillToCapacity` | `FillConfig` | no* | Expand PAR2 to fill each tape's remaining space down to a minimum floor. |
 | `sliceSizeBytes` | `integer` | yes | Fixed size of each encrypted data slice in bytes. The PAR2 block size is derived from this and the tape capacity. Must be > 0. Additionally bounded relative to the resolved source size: a value so small that the run's total slice count would grow an activity payload past Temporal's ~2 MB limit is rejected up front during the Resolve phase, before any staging, with an error naming `sliceSizeBytes` and a suggested minimum. See [Slice size and payload bound](#slice-size-and-payload-bound). |
 
@@ -189,7 +189,7 @@ Configuration for fill-to-capacity mode.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `floor` | `number` | yes | Minimum PAR2 redundancy percentage (≥ 0). The PAR2 percentage will never be raised below this value even if tape capacity would allow it. |
+| `floor` | `number` | yes | Minimum PAR2 redundancy percentage. Must be a whole number in the inclusive range 1–100 (the range the PAR2 engine supports); out-of-range or fractional values are rejected up front. The PAR2 percentage will never be raised below this value even if tape capacity would allow it. |
 
 Example — fixed redundancy (10% PAR2, 4 GiB slices):
 
