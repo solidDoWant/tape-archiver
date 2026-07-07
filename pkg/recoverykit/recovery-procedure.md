@@ -131,18 +131,27 @@ file** out of an archive:
 4. **Verify and repair with PAR2.** `par2 repair` checks every slice against the
    recovery set and reconstructs the exact original bytes when damage is within
    the PAR2 redundancy (as an independent cross-check you can also `sha256sum -c`
-   against the disc's `manifest.sha256` or the tape's `manifest.json`):
+   against the disc's `manifest.sha256` or the tape's `manifest.json`). The `-p`
+   flag purges PAR2's own artifacts once the repair succeeds — the `.par2`
+   volume files and any `archive.NNN.1` pre-repair backups it makes of a damaged
+   slice — leaving only the clean slice files so the reassembly glob in step 5
+   matches them and nothing else (this only touches the writable staging copy;
+   the tape is untouched, so you can always re-stage and retry):
 
    ```
-   bin/par2 repair /scratch/NNN/archive.par2
+   bin/par2 repair -p /scratch/NNN/archive.par2
    ```
 
 5. **Reassemble the encrypted archive** by concatenating its slice files in
    numeric order (`manifest.json` lists them; they are named `archive.000`,
-   `archive.001`, …):
+   `archive.001`, …). Every slice in one archive shares a single zero-padded
+   suffix width — three digits by default, widened to fit the archive's slice
+   count (e.g. `archive.0000` … `archive.1004` once there are more than 1000
+   slices) — so the glob below expands in numeric order. `manifest.json` remains
+   authoritative if you ever need to confirm the order:
 
    ```
-   cat /scratch/NNN/archive.[0-9][0-9][0-9] > /scratch/archive.age
+   cat /scratch/NNN/archive.[0-9]* > /scratch/archive.age
    ```
 
 6. **Decrypt** with the escrowed identity:

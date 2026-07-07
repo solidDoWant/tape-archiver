@@ -3,8 +3,10 @@ package archive_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -109,6 +111,61 @@ func TestSplit(t *testing.T) {
 			assert.Len(t, remaining, len(paths))
 		})
 	}
+}
+
+// TestSplitUniformWidthBeyond999 exercises Split past the 999-slice boundary
+// where the suffix width rolls from three to four digits. It proves the fix for
+// issue #138: every slice in the archive shares a single uniform suffix width,
+// so lexical filename order equals numeric slice order and the recovery
+// procedure's documented reassembly glob (archive.[0-9]*) reconstructs the input
+// byte-for-byte. Slice size 1 over 1005 bytes yields 1005 slices (indices
+// 0…1004), forcing a four-digit uniform pad. Without the fix, mixed three/four
+// digit names (archive.999, archive.1000) sort archive.1000 before archive.101,
+// scrambling the stream.
+func TestSplitUniformWidthBeyond999(t *testing.T) {
+	t.Parallel()
+
+	const sliceCount = 1005 // > 999, forcing a four-digit uniform suffix
+
+	data := make([]byte, sliceCount)
+	for index := range data {
+		data[index] = byte(index % 251) // non-repeating pattern across slices
+	}
+
+	dir := t.TempDir()
+
+	paths, err := archive.Split(t.Context(), bytes.NewReader(data), 1, dir, "archive")
+	require.NoError(t, err)
+	require.Len(t, paths, sliceCount)
+
+	// Every returned path carries a uniform four-digit suffix.
+	for index, path := range paths {
+		assert.Equal(t, filepath.Join(dir, fmt.Sprintf("archive.%04d", index)), path)
+	}
+
+	// AC2: sorting the filenames lexically yields the same order Split returns.
+	sorted := append([]string(nil), paths...)
+	sort.Strings(sorted)
+	assert.Equal(t, paths, sorted, "lexical filename order must equal slice order")
+
+	// AC1: the documented recovery reassembly — the shell's lexical expansion of
+	// `cat archive.[0-9]*`, mirrored by filepath.Glob's lexical match order —
+	// reconstructs the input byte-for-byte.
+	matches, err := filepath.Glob(filepath.Join(dir, "archive.[0-9]*"))
+	require.NoError(t, err)
+	require.Len(t, matches, sliceCount)
+
+	var reconstructed []byte
+
+	for _, match := range matches {
+		slice, readErr := os.ReadFile(match)
+		require.NoError(t, readErr)
+
+		reconstructed = append(reconstructed, slice...)
+	}
+
+	assert.True(t, bytes.Equal(data, reconstructed),
+		"documented archive.[0-9]* reassembly must reconstruct the input")
 }
 
 // TestSplitCancelledMidSlice confirms Split stops when the context is cancelled
