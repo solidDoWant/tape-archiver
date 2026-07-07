@@ -287,7 +287,11 @@ All formats are open and widely implemented, for 20-year recoverability.
     identity (a raw ZFS source's dataset last component, a named k8s resource's name,
     or a label selector), sanitized to `[a-z0-9._-]` and bounded in length. The slice
     and PAR2 basenames inside are unchanged (`archive.NNN`, `archive*.par2`), so the
-    recovery globs still match. Each directory contains: the fixed-size
+    recovery globs still match. The `NNN` slice suffix is zero-padded to a uniform
+    width per archive — three digits by default, widened to fit the slice count (e.g.
+    four digits once an archive exceeds 1000 slices) — so lexical filename order always
+    equals numeric slice order and the recovery glob (`archive.[0-9]*`) reassembles them
+    correctly regardless of count. Each directory contains: the fixed-size
     `age`-encrypted, optionally `zstd`-compressed `tar` slice files; and the PAR2
     recovery set covering those slices.
   - `manifest.json` — top-level checksum manifest at the LTFS root, written **last**

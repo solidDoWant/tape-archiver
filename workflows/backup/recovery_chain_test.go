@@ -159,7 +159,10 @@ func recoverArchive(t *testing.T, dir, identityPath string, repair bool) []byte 
 	t.Helper()
 
 	if repair {
-		runRecoveryCmd(t, dir, "par2", "repair", "archive.par2")
+		// -p matches the documented step 4: purge PAR2's artifacts (volume files
+		// and any archive.NNN.1 pre-repair backups) after a successful repair so
+		// the documented archive.[0-9]* reassembly glob matches only clean slices.
+		runRecoveryCmd(t, dir, "par2", "repair", "-p", "archive.par2")
 	}
 
 	slices := parSlices(t, dir)
@@ -240,7 +243,7 @@ func runRecoveryCmd(t *testing.T, dir, name string, args ...string) {
 func parSlices(t *testing.T, dir string) []string {
 	t.Helper()
 
-	matches, err := filepath.Glob(filepath.Join(dir, "archive.[0-9][0-9][0-9]"))
+	matches, err := filepath.Glob(filepath.Join(dir, "archive.[0-9]*"))
 	require.NoError(t, err)
 	require.NotEmpty(t, matches)
 
