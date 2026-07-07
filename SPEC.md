@@ -397,8 +397,14 @@ failure. By default a non-blank disc is refused and the run pauses rather than
 overwriting it; `delivery.opticalBurn.allowNonBlankDiscs` opts into reclaiming a used
 disc, but **only rewritable media (DVD±RW / BD-RE) can be reclaimed** — write-once media
 (DVD-R, **M-DISC**, CD-R, BD-R) cannot be erased, so a non-blank write-once disc always
-pauses for the operator regardless of the opt-in. Any deliberate overwrite is recorded in
-the delivered report. Leaving `opticalBurn` unset keeps burning a manual operator step.
+pauses for the operator regardless of the opt-in. The opt-in also **never reclaims a disc
+this run itself already burned and verified**: a non-blank rewritable disc found in a burner
+that has already produced a verified copy this run is that copy still loaded (a duplicated or
+skipped pause, or a forgotten disc swap), not a prior-run leftover, so the run pauses for a
+fresh blank rather than blanking it — otherwise it would silently destroy a copy the report
+counts, losing configured redundancy (§2 principle 3). Any deliberate overwrite (only ever a
+genuine prior-run disc) is recorded in the delivered report. Leaving `opticalBurn` unset keeps
+burning a manual operator step.
 Periodic re-burn/refresh remains a documented maintenance task.
 
 ## 11. Notifications (Discord)
@@ -444,6 +450,16 @@ best-effort — a delivery failure is logged, never raised. The operator either 
 affected tapes for fresh blanks and resumes, or aborts; if neither happens within
 `library.writeFailureWaitTimeoutSeconds` (default 12 h) the run fails in that defined
 paused state and is reported.
+
+**Resume signals are matched to the pause that is waiting.** Every operator pause — the
+Eject I/O-station pause, the write-path pause, and the optical-burn pause — resumes only on
+a resume signal sent *after* it began (i.e. after the operator has seen its alert). A resume
+already buffered when a pause begins is stale — a double `tapectl resume`, or one that raced
+an auto-resume (the Eject poll can resume on the access bit while a signal is still in
+flight) — and is discarded at the pause's entry, so it can never instantly satisfy a later
+pause. Without this, a surplus resume could skip a between-burn-set disc-swap pause and blank
+a just-verified recovery disc. A buffered *abort* is never discarded: aborting is always a
+safe, reported, no-further-data outcome.
 
 ## 12. Dry-run and the virtual library
 

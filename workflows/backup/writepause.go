@@ -132,6 +132,8 @@ func waitForOperator(ctx workflow.Context, cfg config.Config, phase string, affe
 // the configured wait-timeout elapses (SPEC §4.3). Unlike the Eject pause there
 // is no station state to poll, so resume is always an explicit operator signal.
 func waitForWritePathCleared(ctx workflow.Context, cfg config.Config) pauseOutcome {
+	drainStaleResumeSignals(ctx)
+
 	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	abortCh := workflow.GetSignalChannel(ctx, OperatorAbortSignal)
 	timeoutTimer := workflow.NewTimer(ctx, cfg.Library.EffectiveWriteFailureWaitTimeout())
@@ -156,6 +158,25 @@ func waitForWritePathCleared(ctx workflow.Context, cfg config.Config) pauseOutco
 	selector.Select(ctx)
 
 	return outcome
+}
+
+// drainStaleResumeSignals discards every OperatorResumeSignal already buffered at
+// the moment an operator pause begins, so a stale resume — a double `tapectl
+// resume`, or one that raced an Eject auto-resume — cannot instantly satisfy this
+// pause (issue #154). Temporal buffers unconsumed signals indefinitely, and
+// `tapectl resume` signals unconditionally with no pause-state check, so without
+// this drain a surplus signal from an earlier pause leaks forward and blanks a
+// just-verified disc between burn-sets. A resume for THIS pause can only be sent
+// after the operator sees its alert (fired just before the wait), so it always
+// arrives after entry and is never drained. Only the resume channel is drained: a
+// buffered abort is a deliberate, safe, reported no-data-loss outcome and is left
+// to satisfy the wait rather than silently discarded. The drain is a deterministic
+// ReceiveAsync loop (no history event), so it is a no-op on any pause with no
+// stale signal and never changes the behavior of a single, correctly-timed resume.
+func drainStaleResumeSignals(ctx workflow.Context) {
+	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
+	for resumeCh.ReceiveAsync(nil) {
+	}
 }
 
 // notifyWritePathPause runs the best-effort write-path pause alert activity on the

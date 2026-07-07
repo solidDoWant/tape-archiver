@@ -226,6 +226,75 @@ func TestWritePathPauseSignalResume(t *testing.T) {
 	assert.Equal(t, []int{2, 1}, ejectCounts, "first eject frees both tapes; resume ejects only the retried one")
 }
 
+// TestWritePathStaleResumeSignalDoesNotSatisfyLaterPause covers issue #154 AC1 for
+// the write path: a surplus resume buffered during one pause must not instantly
+// satisfy a later pause. /dev/sg1 fails to format on its first two attempts; during
+// the first write-failure pause the operator sends TWO resume signals. The first
+// resumes and re-drives the failed tape, which fails again and pauses a second time;
+// with the drain the surplus signal is discarded at that pause's entry, so it waits
+// and — no fresh action arriving — times out. Without the drain the stale signal
+// would resume it and the third format attempt would succeed.
+func TestWritePathStaleResumeSignalDoesNotSatisfyLaterPause(t *testing.T) {
+	cfg := twoDriveConfig(300)
+	env := newWritePauseEnv(t)
+	expectHealthyWriteExceptFormat(env)
+
+	var (
+		mu           sync.Mutex
+		formatsByDev = map[string]int{}
+		pauseAlerts  int
+	)
+
+	// /dev/sg1 fails its first two format attempts (so the run pauses twice); it
+	// would only succeed on a third attempt that a drained stale signal must prevent.
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			formatsByDev[input.Device]++
+
+			if input.Device == "/dev/sg1" && formatsByDev[input.Device] <= 2 {
+				return errors.New("mkltfs: drive reported a hard write error")
+			}
+
+			return nil
+		})
+
+	mockLoadFromSet(env, cfg)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ WritePathPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			pauseAlerts++
+
+			return nil
+		})
+
+	// During the first write-failure pause the operator double-sends resume. The
+	// first clears that pause; the surplus must not leak forward to the second.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 30*time.Second)
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err, "the surplus resume must not satisfy the second pause; it times out")
+	assert.Contains(t, err.Error(), "did not resume or abort")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 2, pauseAlerts, "both write-failure pauses alert the operator")
+	assert.Equal(t, 2, formatsByDev["/dev/sg1"], "the failed tape is retried once; the drained signal blocks a third attempt")
+}
+
 // TestWritePathPauseAbort covers AC3: an operator abort ends the run in a defined,
 // reported state with no further tapes written (no resume retry).
 func TestWritePathPauseAbort(t *testing.T) {

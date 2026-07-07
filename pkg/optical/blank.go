@@ -22,12 +22,36 @@ func (d *Disc) Blank(ctx context.Context) error {
 		return err
 	}
 
-	if !info.rewritable {
-		return fmt.Errorf("optical: cannot blank %s: medium is write-once (%s), not rewritable", d.device, info.state)
+	if err := blankable(info); err != nil {
+		return fmt.Errorf("optical: cannot blank %s: %w", d.device, err)
 	}
 
 	if _, err := runXorriso(ctx, "-outdev", d.driveAddress(), "-blank", "as_needed"); err != nil {
 		return fmt.Errorf("optical: blanking %s: %w", d.device, err)
+	}
+
+	return nil
+}
+
+// blankable reports whether the probed medium may be reclaimed with `-blank`,
+// returning a descriptive error when it may not. It is pure (no device I/O) so the
+// refusal Blank documents is unit-testable without real media. Two media are
+// refused, matching Blank's contract:
+//
+//   - write-once media (M-DISC DVD-R, DVD+R, CD-R, BD-R): they cannot be reclaimed
+//     at all, so blanking one would fail or silently no-op and leave the caller
+//     believing the disc is reusable;
+//   - finalized media (a closed disc, StateFinalized): closed to any further write,
+//     including a rewritable disc closed after burning — `parseMediaReport`
+//     classifies a closed DVD-RW as StateFinalized with rewritable=true, so the
+//     rewritability check alone would wrongly admit it.
+func blankable(info mediaInfo) error {
+	if !info.rewritable {
+		return fmt.Errorf("medium is write-once (%s), not rewritable", info.state)
+	}
+
+	if info.state == StateFinalized {
+		return fmt.Errorf("medium is finalized (%s) and can no longer be written or reclaimed", info.state)
 	}
 
 	return nil
