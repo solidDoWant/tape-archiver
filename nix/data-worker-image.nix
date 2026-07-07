@@ -115,9 +115,11 @@ dockerTools.streamLayeredImage {
   ];
 
   # LTFS is FUSE-based and the write path needs writable scratch: create the
-  # mount point for the /mnt/bulk-pool-01 bind mount, the staging parent, and a
-  # world-writable /tmp. Devices (/dev/nst*, /dev/sch0, /dev/sg*, /dev/fuse) are
-  # passed through at run time, not baked in.
+  # generic /mnt mount root that the pool bind mount lands under, and a
+  # world-writable /tmp. The actual bind target (e.g. /mnt/bulk-pool-01) is
+  # deploy-site-specific and is auto-created under /mnt by Docker at run time, so
+  # it is deliberately not baked in — the image carries no site path. Devices
+  # (/dev/nst*, /dev/sch0, /dev/sg*, /dev/fuse) are passed through at run time too.
   #
   # The recovery set is copied to /recovery/{bin,src} (the paths the env vars
   # below point at) — copied, not symlinked into the store-path graph, so the
@@ -126,7 +128,7 @@ dockerTools.streamLayeredImage {
   # stay executable (0555, as recovery-binaries.nix produces), source archives are
   # plain read-only files (0444).
   extraCommands = ''
-    mkdir -p mnt/bulk-pool-01 tmp recovery/bin recovery/src
+    mkdir -p mnt tmp recovery/bin recovery/src
     chmod 1777 tmp
     install -m0555 -t recovery/bin ${recoveryBinaries}/bin/*
     install -m0444 -t recovery/src ${recoveryBinaries}/src/*
