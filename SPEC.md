@@ -204,7 +204,10 @@ staged and verified on disk** — eliminating any computation during the write w
    Writing is a pure sequential disk→tape copy whose sustained rate is monitored. The LTFS
    index is therefore written **once**, at unmount during Eject, rather than periodically
    during the write — see §14. A per-tape checksum/manifest file is written last; the
-   LTFS index is read back after unmount and captured for the ISO.
+   LTFS index is read back after unmount and captured for the ISO. The captured index is
+   verified to belong to *this* mount cycle (it must postdate the mount); a stale leftover
+   from a prior format of the same barcode, or a missing capture, fails the run rather than
+   shipping a previous format's index.
 8. **Eject.** Unmount/unload each written tape in the set and transfer it to an I/O
    station slot for physical removal, freeing its drive for the next set. Each tape is
    unloaded from its drive to its source storage slot *before* the I/O transfer, so a
