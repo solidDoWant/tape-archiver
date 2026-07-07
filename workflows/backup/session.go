@@ -409,7 +409,19 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 	}
 
 	defer func() {
-		teardownCtx := workflow.WithActivityOptions(sessionCtx, workflow.ActivityOptions{
+		// Dispatch teardown on a disconnected context so the activity is still
+		// scheduled onto the data worker when the workflow is being cancelled —
+		// the very case this defer exists for. Dispatching on sessionCtx (which
+		// chains to the workflow context) would fail ExecuteActivity immediately
+		// with a CanceledError on cancellation, so the mounts would leak. This
+		// mirrors notifyFailure's cancellation-surviving pattern in failure.go.
+		// NewDisconnectedContext preserves the session binding, so the activity
+		// still lands on the same data worker that holds the in-process
+		// MountRegistry.
+		disconnected, cancel := workflow.NewDisconnectedContext(sessionCtx)
+		defer cancel()
+
+		teardownCtx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
 			TaskQueue:           DataTaskQueue,
 			StartToCloseTimeout: teardownTimeout,
 		})

@@ -216,6 +216,85 @@ func TestRunTapePathPassesAllowNonBlankTapes(t *testing.T) {
 	}
 }
 
+// TestRunTapePathTeardownRunsOnCancellation verifies that when the workflow is
+// cancelled mid-Write — while a WriteTree activity is still holding a live LTFS
+// mount — the deferred TeardownSession activity is nonetheless dispatched to and
+// executed on the data worker, so the session's mounts are released (issue #133
+// AC1). Before the fix the teardown was dispatched on the cancelled session
+// context, which the SDK fails immediately without ever scheduling the activity,
+// leaking the mount. The workflow-cancel here reproduces that path, and the test
+// fails (teardown never runs) against the pre-fix dispatch.
+func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	env := newTapePathEnv(t)
+
+	var mu sync.Mutex
+
+	var loadSetSizes []int
+
+	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
+
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
+
+	// WriteTree signals it is in flight, then blocks until its activity context
+	// is cancelled — modelling a live mount held open when the operator cancels
+	// the run mid-write. Its return arrives after cancellation, so writePhase
+	// unwinds into the deferred teardown while the workflow is being cancelled.
+	writeInFlight := make(chan struct{})
+
+	var closeOnce sync.Once
+
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(
+		func(ctx context.Context, _ WriteTreeInput) error {
+			closeOnce.Do(func() { close(writeInFlight) })
+			<-ctx.Done()
+
+			return ctx.Err()
+		})
+	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
+		[]byte("<ltfsindex></ltfsindex>"), nil)
+	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+		WriteHealth{}, nil)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+
+	// Spy on TeardownSession: recording the call proves the activity was
+	// dispatched and executed on the (session-pinned) data worker after
+	// cancellation — the exact behavior the pre-fix code skipped.
+	var teardownCalled bool
+
+	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(
+		func(context.Context, TeardownInput) error {
+			mu.Lock()
+			teardownCalled = true
+			mu.Unlock()
+
+			return nil
+		})
+
+	// Cancel once WriteTree is in flight (holding the mount). CancelWorkflow
+	// posts onto the test env's callback channel, so it is safe to invoke from
+	// this goroutine while ExecuteWorkflow drives the workflow.
+	go func() {
+		<-writeInFlight
+		env.CancelWorkflow()
+	}()
+
+	plan, staged, par2 := seededPlan(1, 1)
+
+	env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+		Cfg: tapePathConfig(1, 1, 1), Plan: plan, Staged: staged, PAR2: par2,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.True(t, teardownCalled,
+		"TeardownSession must run on the data worker after cancellation so the session's live mounts are released")
+}
+
 // TestRunTapePathMultipleDriveSets drives a plan that needs several drive-sets
 // from both extra logical tapes and extra copies, and asserts every (tape, copy)
 // pair is written and ejected with concurrency bounded by the drive count
@@ -359,7 +438,20 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 		[]byte("<ltfsindex></ltfsindex>"), nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
-	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+
+	// AC2 (issue #133): teardown still runs on an ordinary write-phase failure
+	// (no cancellation). Record the call so the guarantee is locked, not merely
+	// mocked away.
+	teardownCalls := 0
+
+	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(
+		func(context.Context, TeardownInput) error {
+			mu.Lock()
+			teardownCalls++
+			mu.Unlock()
+
+			return nil
+		})
 	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
 
 	ejectCalls := 0
@@ -398,6 +490,7 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 
 	assert.Len(t, loadSetSizes, 1, "only the failing set may be loaded; no later set is loaded")
 	assert.Equal(t, 1, ejectCalls, "the failed set's tape is ejected so its drive frees and its slot empties")
+	assert.Positive(t, teardownCalls, "teardown must still run on an ordinary write-phase failure (issue #133 AC2)")
 }
 
 // TestRunTapePathResumeNeverReformatsCompletedTapes covers issue #92 AC5 across
