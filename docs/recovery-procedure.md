@@ -130,17 +130,38 @@ file** out of an archive:
 
 4. **Verify and repair with PAR2.** `par2 repair` checks every slice against the
    recovery set and reconstructs the exact original bytes when damage is within
-   the PAR2 redundancy (as an independent cross-check you can also `sha256sum -c`
-   against the disc's `manifest.sha256` or the tape's `manifest.json`). The `-p`
-   flag purges PAR2's own artifacts once the repair succeeds — the `.par2`
-   volume files and any `archive.NNN.1` pre-repair backups it makes of a damaged
-   slice — leaving only the clean slice files so the reassembly glob in step 5
-   matches them and nothing else (this only touches the writable staging copy;
-   the tape is untouched, so you can always re-stage and retry):
+   the PAR2 redundancy. The `-p` flag purges PAR2's own artifacts once the repair
+   succeeds — the `.par2` volume files and any `archive.NNN.1` pre-repair backups
+   it makes of a damaged slice — leaving only the clean slice files so the
+   reassembly glob in step 5 matches them and nothing else (this only touches the
+   writable staging copy; the tape is untouched, so you can always re-stage and
+   retry):
 
    ```
    bin/par2 repair -p /scratch/NNN/archive.par2
    ```
+
+   As an independent SHA-256 cross-check you have two manifests. The tape's own
+   `manifest.json` lists each file's digest relative to the archive, so it checks
+   straight from the local copy. The disc's `manifest.sha256` is a single file
+   spanning **every** tape, and each of its lines is prefixed with the source
+   tape's barcode — `<barcode>/archives/NNN-<label>/<file>`. To use it, lay the
+   copied files out under a directory named for that barcode (matching the
+   manifest's paths) and run `sha256sum -c` from the parent of the barcode
+   directory. Because one manifest covers all tapes, filter to the tape you have
+   copied (works on any coreutils):
+
+   ```
+   mkdir -p /scratch/verify/<barcode>
+   cp -r /mnt/tape/archives /scratch/verify/<barcode>/
+   cd /scratch/verify
+   grep '  <barcode>/' /path/to/disc/manifest.sha256 | sha256sum -c -
+   ```
+
+   Without the `grep` filter, `sha256sum -c /path/to/disc/manifest.sha256` also
+   checks lines for tapes you have not copied and reports them as missing (a
+   non-zero exit); on modern coreutils `sha256sum -c --ignore-missing` verifies
+   everything copied so far in one pass.
 
 5. **Reassemble the encrypted archive** by concatenating its slice files in
    numeric order (`manifest.json` lists them; they are named `archive.000`,

@@ -87,17 +87,27 @@ on this disc.
 2.  Mount the tape's LTFS volume read-only:  ltfs -o ro <mountpoint>
     If the on-tape LTFS index is damaged, see recovery-procedure.md (ltfsck
     --deep-recovery, or the captured ltfs-index/<barcode>.schema extents).
-3.  Copy the tape's files to disk. Each archive lives under archives/NNN-<label>/
-    (NNN is the source index; <label> is a descriptive name); the per-tape
-    manifest.json lists every file and its SHA-256.
+3.  Copy the tape's files to disk into a directory named for the tape's barcode
+    (printed on the tape and in the report), preserving the archives/ tree, so
+    the layout matches manifest.sha256 (see step 4). Each archive then lives
+    under <barcode>/archives/NNN-<label>/ (NNN is the source index; <label> is a
+    descriptive name); the per-tape manifest.json lists every file and its
+    SHA-256. For example, for tape TAPE01L6:
+        mkdir -p TAPE01L6 && cp -r <mountpoint>/archives TAPE01L6/
 4.  Verify the copied files against manifest.sha256 with the system sha256sum
-    (coreutils, on any Linux host). From the directory holding the copied
-    archives/ tree:
+    (coreutils, on any Linux host). Every line is <barcode>/archives/NNN-<label>/<file>,
+    so run it from the parent directory holding the barcode-named tape directories:
         sha256sum -c /path/to/disc/manifest.sha256
+    One manifest covers every tape, so if you have copied only some tapes the
+    not-yet-copied lines report as missing (a non-zero exit). To verify a single
+    tape, filter its lines by barcode (works on any coreutils):
+        grep '  TAPE01L6/' /path/to/disc/manifest.sha256 | sha256sum -c -
+    (On modern coreutils, sha256sum -c --ignore-missing /path/to/disc/manifest.sha256
+    verifies everything copied so far in one pass.)
     If any archive slice or its PAR2 files are corrupt, repair with:
-        bin/par2 repair archives/NNN-<label>/archive.par2
+        bin/par2 repair <barcode>/archives/NNN-<label>/archive.par2
 5.  Concatenate an archive's slices in order to reconstruct its age stream:
-        cat archives/NNN-<label>/archive.000 archives/NNN-<label>/archive.001 ... > archive.age
+        cat <barcode>/archives/NNN-<label>/archive.000 <barcode>/archives/NNN-<label>/archive.001 ... > archive.age
 6.  Decrypt with the escrowed identity (save it to identity.txt first):
         bin/age -d -i identity.txt -o archive.tar.zst archive.age
 7.  If the archive was compressed, decompress it:

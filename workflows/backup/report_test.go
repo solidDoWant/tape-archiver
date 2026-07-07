@@ -2,6 +2,8 @@ package backup
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -313,6 +315,107 @@ func TestBuildSHA256Manifest(t *testing.T) {
 	assert.Contains(t, text, "cc  TAPE02L6/archives/000-archive/archive.par2")
 	// Sorted output.
 	assert.True(t, sortedStrings(lines), "manifest lines must be sorted")
+}
+
+// TestRecoveryProcedureSHA256Layout proves the recovery instructions' verification
+// step actually works: it builds a real manifest.sha256, lays the copied files out
+// exactly as the concise procedure (report.go recoveryProcedure) and the operator
+// doc describe — <barcode>/archives/NNN-<label>/<file>, relative to a copy root —
+// and runs the system sha256sum against it. It covers the full-copy case and the
+// documented single-tape (grep-by-barcode) partial-copy case.
+func TestRecoveryProcedureSHA256Layout(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("sha256sum"); err != nil {
+		t.Skip("sha256sum not available")
+	}
+
+	// Content keyed by on-tape file basename. Both physical tapes carry the same
+	// files (copies), so one content map covers every manifest line.
+	contents := map[string][]byte{
+		"archive.000":  []byte("slice zero contents"),
+		"archive.001":  []byte("slice one contents"),
+		"archive.par2": []byte("par2 recovery set"),
+	}
+
+	digest := func(content []byte) string {
+		sum := sha256.Sum256(content)
+		return hex.EncodeToString(sum[:])
+	}
+
+	input := reportTestInput(t)
+	input.Staged[0].Slices = []StagedSlice{
+		{Path: "/stage/000/archive.000", SHA256: digest(contents["archive.000"]), SizeBytes: int64(len(contents["archive.000"]))},
+		{Path: "/stage/000/archive.001", SHA256: digest(contents["archive.001"]), SizeBytes: int64(len(contents["archive.001"]))},
+	}
+	input.PAR2[0].Files = []StagedSlice{
+		{Path: "/stage/000/archive.par2", SHA256: digest(contents["archive.par2"]), SizeBytes: int64(len(contents["archive.par2"]))},
+	}
+
+	manifest, err := buildSHA256Manifest(input)
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimRight(string(manifest), "\n"), "\n")
+
+	// writeLayout materializes the manifest's paths under root (a copy root), so
+	// each file sits at <root>/<barcode>/archives/NNN-<label>/<file> — the layout
+	// the instructions tell a recoverer to create. keep selects which tapes' files
+	// to write, modelling a full vs. partial copy.
+	writeLayout := func(root string, keep func(relPath string) bool) {
+		for _, line := range lines {
+			parts := strings.SplitN(line, "  ", 2)
+			require.Len(t, parts, 2, "manifest line %q is not <digest>  <path>", line)
+
+			relPath := parts[1]
+			if !keep(relPath) {
+				continue
+			}
+
+			content, ok := contents[filepath.Base(relPath)]
+			require.True(t, ok, "no content for on-tape file %q", relPath)
+
+			full := filepath.Join(root, relPath)
+			require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+			require.NoError(t, os.WriteFile(full, content, 0o644))
+		}
+	}
+
+	runCheck := func(root string, checklist []byte) error {
+		cmd := exec.Command("sha256sum", "-c", "-")
+		cmd.Dir = root
+		cmd.Stdin = bytes.NewReader(checklist)
+
+		return cmd.Run()
+	}
+
+	// Full copy: every tape's files are present, so the whole manifest verifies.
+	allRoot := t.TempDir()
+	writeLayout(allRoot, func(string) bool { return true })
+	assert.NoError(t, runCheck(allRoot, manifest),
+		"files laid out per the recovery instructions must verify against the full manifest")
+
+	// Partial copy: only TAPE01L6's files present. Checking the full manifest
+	// fails on the not-yet-copied tape's lines — the exact confusion the fixed
+	// instructions warn about — but the documented per-tape barcode filter verifies
+	// the copied tape.
+	partialRoot := t.TempDir()
+	writeLayout(partialRoot, func(relPath string) bool {
+		return strings.HasPrefix(relPath, "TAPE01L6/")
+	})
+	assert.Error(t, runCheck(partialRoot, manifest),
+		"the full manifest must fail when only some tapes have been copied")
+
+	var filtered []string
+
+	for _, line := range lines {
+		if strings.Contains(line, "  TAPE01L6/") {
+			filtered = append(filtered, line)
+		}
+	}
+
+	require.NotEmpty(t, filtered, "expected at least one line for the copied tape")
+	assert.NoError(t, runCheck(partialRoot, []byte(strings.Join(filtered, "\n")+"\n")),
+		"filtering the manifest to the copied tape's barcode must verify the partial copy")
 }
 
 func sortedStrings(lines []string) bool {
