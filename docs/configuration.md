@@ -111,6 +111,11 @@ An explicit ZFS dataset or snapshot by name.
 |-------|------|----------|-------------|
 | `name` | `string` | yes | ZFS dataset or snapshot name, e.g. `bulk-pool-01/archive@snap-20240101` or `bulk-pool-01/media`. |
 
+A bare dataset name (no `@`) is archived from the dataset's live mountpoint. The dataset
+must be mounted: if it is not, the run fails during Prepare — before any tape is written —
+rather than archiving whatever directory shadows the (unmounted) mountpoint, which would
+silently certify a stale or empty archive.
+
 ---
 
 ## Library

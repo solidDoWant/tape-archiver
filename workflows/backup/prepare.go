@@ -72,6 +72,20 @@ func (zfsLocator) SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (s
 	}
 
 	if snapName == "" {
+		// A raw dataset source archives the dataset's live mountpoint directly.
+		// An unmounted dataset's mountpoint can survive as an ordinary "shadow"
+		// directory, so archiving it would silently certify empty or stale
+		// contents (issue #135). Reading the mounted property in Prepare fails
+		// the run here, before any tape is written (SPEC §4.3).
+		mounted, err := zfs.Mounted(ctx, dataset)
+		if err != nil {
+			return "", fmt.Errorf("check mount state for %q: %w", dataset, err)
+		}
+
+		if !mounted {
+			return "", fmt.Errorf("raw ZFS dataset %q is not mounted; refusing to archive its (shadow) mountpoint %q", dataset, mount)
+		}
+
 		return mount, nil
 	}
 

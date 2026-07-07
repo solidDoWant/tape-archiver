@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -94,6 +95,43 @@ func SkipIfPoolUnavailable(t *testing.T) {
 	if info, err := os.Stat(mount); err != nil || !info.IsDir() {
 		t.Skipf("ZFS pool not available at %s"+
 			" (run 'make zpool-up' or set %s)", mount, EnvPoolMount)
+	}
+}
+
+// CreateEphemeralDataset creates a throwaway child dataset named <PoolDataset>/name
+// on the test pool and returns its full ZFS name. It is for tests that need to
+// manipulate a dataset's mount state without touching the shared payload dataset.
+// A t.Cleanup destroys it (recursively) at test end, and any leftover from a
+// previous run is destroyed first. When zfs cannot create the dataset — e.g. an
+// unprivileged run outside "make test-integration" — the test is skipped rather
+// than failed.
+func CreateEphemeralDataset(t *testing.T, name string) string {
+	t.Helper()
+
+	dataset := PoolDataset(t) + "/" + name
+
+	// Clear any leftover from an interrupted prior run so create is deterministic.
+	_ = exec.CommandContext(t.Context(), "zfs", "destroy", "-r", dataset).Run()
+
+	if out, err := exec.CommandContext(t.Context(), "zfs", "create", dataset).CombinedOutput(); err != nil {
+		t.Skipf("cannot create ephemeral dataset %q (privileged zfs required; run 'make test-integration'): %v: %s",
+			dataset, err, strings.TrimSpace(string(out)))
+	}
+
+	t.Cleanup(func() {
+		_ = exec.Command("zfs", "destroy", "-r", dataset).Run()
+	})
+
+	return dataset
+}
+
+// UnmountDataset unmounts the given ZFS dataset, failing the test on error. It is
+// paired with CreateEphemeralDataset to exercise the unmounted-dataset paths.
+func UnmountDataset(t *testing.T, dataset string) {
+	t.Helper()
+
+	if out, err := exec.CommandContext(t.Context(), "zfs", "unmount", dataset).CombinedOutput(); err != nil {
+		t.Fatalf("zfs unmount %q: %v: %s", dataset, err, strings.TrimSpace(string(out)))
 	}
 }
 

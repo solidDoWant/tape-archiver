@@ -99,6 +99,50 @@ func Mountpoint(ctx context.Context, dataset string) (string, error) {
 	return mountpoint, nil
 }
 
+// Mounted reports whether the given ZFS filesystem dataset is currently mounted,
+// by reading its "mounted" property. The Prepare phase uses it to refuse a raw
+// dataset source whose dataset is not mounted: an unmounted dataset's mountpoint
+// can survive as an ordinary "shadow" directory, and archiving that directory
+// would silently certify empty or stale contents (SPEC.md §6).
+//
+// It runs "zfs get -Hp -o value mounted <dataset>": -H drops the header, -p
+// prints the raw value, and -o value selects just the value column. Pass a
+// filesystem dataset ("pool/dataset"), not a snapshot — snapshots report "-" for
+// mounted, which parseMounted rejects.
+func Mounted(ctx context.Context, dataset string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "zfs", "get", "-Hp", "-o", "value", "mounted", dataset)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return false, fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return false, fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	return parseMounted(out)
+}
+
+// parseMounted maps the value of the ZFS "mounted" property to a boolean. ZFS
+// reports "yes" for a mounted filesystem and "no" for an unmounted one; anything
+// else (an empty value, or the "-" a snapshot or volume reports) is not a
+// filesystem mount state and yields an error rather than a silent false.
+func parseMounted(out []byte) (bool, error) {
+	switch value := strings.TrimSpace(string(out)); value {
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected zfs mounted value %q", value)
+	}
+}
+
 // UserProperties returns the ZFS user properties set on the given dataset or
 // snapshot (e.g. bulk-pool-01/.../pvc-<uuid>@snapshot-<uuid>), keyed by the full
 // property name. User properties are the colon-namespaced properties (e.g.

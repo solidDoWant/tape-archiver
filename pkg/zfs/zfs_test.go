@@ -157,6 +157,62 @@ func TestParseHolds(t *testing.T) {
 	}
 }
 
+func TestParseMounted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		out       string
+		want      bool
+		assertErr require.ErrorAssertionFunc
+	}{
+		{
+			name: "mounted",
+			out:  "yes\n",
+			want: true,
+		},
+		{
+			name: "unmounted",
+			out:  "no\n",
+			want: false,
+		},
+		{
+			name: "value with surrounding whitespace",
+			out:  "  yes  \n",
+			want: true,
+		},
+		{
+			name:      "snapshot dash value",
+			out:       "-\n",
+			assertErr: require.Error,
+		},
+		{
+			name:      "empty output",
+			out:       "",
+			assertErr: require.Error,
+		},
+		{
+			name:      "garbage value",
+			out:       "maybe\n",
+			assertErr: require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if test.assertErr == nil {
+				test.assertErr = require.NoError
+			}
+
+			got, err := parseMounted([]byte(test.out))
+			test.assertErr(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
 func TestParseLogicalReferenced(t *testing.T) {
 	t.Parallel()
 

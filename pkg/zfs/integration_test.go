@@ -74,6 +74,34 @@ func TestMountpointIntegration(t *testing.T) {
 	require.Error(t, err, "a non-existent dataset should error")
 }
 
+// TestMountedIntegration verifies Mounted reads a dataset's mount state via "zfs
+// get". A non-existent dataset errors. An ephemeral child dataset reports mounted
+// while mounted and unmounted after "zfs unmount", proving the property tracks
+// the real mount state the Prepare phase relies on (issue #135).
+func TestMountedIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	mounted, err := zfs.Mounted(t.Context(), testutil.PoolDataset(t))
+	require.NoError(t, err)
+	assert.True(t, mounted, "the mounted test dataset should report mounted")
+
+	_, err = zfs.Mounted(t.Context(), testutil.PoolDataset(t)+"/tape-archiver-nonexistent")
+	require.Error(t, err, "a non-existent dataset should error")
+
+	dataset := testutil.CreateEphemeralDataset(t, "tape-archiver-mounted-test")
+
+	mounted, err = zfs.Mounted(t.Context(), dataset)
+	require.NoError(t, err)
+	assert.True(t, mounted, "a freshly created dataset should be mounted")
+
+	testutil.UnmountDataset(t, dataset)
+
+	mounted, err = zfs.Mounted(t.Context(), dataset)
+	require.NoError(t, err)
+	assert.False(t, mounted, "an unmounted dataset should report not mounted")
+}
+
 // TestLogicalReferencedIntegration verifies LogicalReferenced returns the
 // dataset's logicalreferenced byte count via "zfs get". When the harness
 // reports the staged payload size (TAPE_TEST_MIN_BYTES), the value must be at
