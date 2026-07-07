@@ -148,7 +148,10 @@ staged and verified on disk** — eliminating any computation during the write w
    and validate raw ZFS snapshot/dataset paths. Run a cheap
    feasibility pre-check from `zfs` properties (`logicalreferenced`, inflated by a small
    `tar` overhead and the configured PAR2 %) purely to reject any single archive that
-   cannot fit on one tape *before* doing real work. This is an estimate, not the plan.
+   cannot fit on one tape *before* doing real work. The same pre-check also rejects a
+   `sliceSizeBytes` so small for the resolved source size that the run's total slice
+   count would grow an activity payload past Temporal's ~2 MB limit, naming the field
+   and a suggested minimum. This is an estimate, not the plan.
 2. **Prepare.** For each archive: `tar` the snapshot contents → optional `zstd`
    compression → `age`-encrypt → split into fixed-size slices → compute SHA-256
    checksums. All output is staged to disk and its exact size measured.

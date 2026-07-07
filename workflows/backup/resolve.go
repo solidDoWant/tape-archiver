@@ -203,10 +203,12 @@ func newResolveDataActivities() *ResolveDataActivities {
 // ResolveAndCheck completes the work list on the data side (SPEC §4.3 phase 1):
 // it validates raw ZFS sources exist, verifies each control-resolved k8s snapshot
 // exists and is democratic-csi-managed, then sizes every archive and rejects any
-// whose estimate exceeds one tape's capacity. The estimate inflates
-// logicalreferenced by the configured overhead factor and PAR2 % purely for this
-// pre-check; it is never the authoritative plan (that is the measured Prepare
-// size). It returns the full work list in config-source order.
+// whose estimate exceeds one tape's capacity. It also rejects a sliceSizeBytes so
+// small for the resolved source size that the run's slice count would grow an
+// activity payload past Temporal's ~2 MB limit (checkPayloadBound). The estimate
+// inflates logicalreferenced by the configured overhead factor and PAR2 % purely
+// for these pre-checks; it is never the authoritative plan (that is the measured
+// Prepare size). It returns the full work list in config-source order.
 func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input ResolveDataInput) ([]ResolvedArchive, error) {
 	cfg := input.Config
 	overhead := cfg.EffectiveFeasibilityOverhead()
@@ -243,7 +245,84 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 		resolved = append(resolved, archive)
 	}
 
+	if err := checkPayloadBound(resolved, cfg.Redundancy.SliceSizeBytes); err != nil {
+		return nil, err
+	}
+
 	return resolved, nil
+}
+
+const (
+	// temporalPayloadLimitBytes is Temporal's default gRPC blob-size limit for a
+	// single activity payload (~2 MiB). This repo does not override it — there is
+	// no custom DataConverter or gRPC message-size option in
+	// pkg/temporalclient/client.go's buildOptions — so the SDK default governs. A
+	// change that raises it there must revisit this bound.
+	temporalPayloadLimitBytes = 2 * 1024 * 1024
+
+	// perStagedSliceBytes is a conservative upper estimate of one StagedSlice
+	// entry's serialized cost in an activity payload: an absolute Path, a 64-char
+	// hex SHA256, an int64 SizeBytes, plus JSON field names, quoting, and
+	// punctuation. Measured cost is ~200 B; this rounds up with headroom for long
+	// paths (StagedSlice in types.go).
+	perStagedSliceBytes = 256
+
+	// payloadBoundBudgetBytes is the slice-metadata budget the whole-run slice
+	// count must fit within: half the Temporal limit, reserving the other half for
+	// the non-slice framing of each payload (StagedArchive / PlannedTape fields)
+	// and for the PAR2 file entries the same payloads also carry.
+	payloadBoundBudgetBytes = temporalPayloadLimitBytes / 2
+)
+
+// checkPayloadBound rejects a run whose estimated whole-run slice count would push
+// an activity payload past Temporal's blob-size limit (SPEC §4.3 phase 1). The
+// PrepareArchives result carries every archive's []StagedSlice in one payload, and
+// the same metadata re-ships through Pack, GeneratePAR2, Verify, the per-tape
+// WriteTreeInput, and Report; bounding the whole-run slice count bounds them all.
+//
+// The count is derived from each archive's inflated EstimatedBytes, so it
+// over-estimates and never under-bounds the payload (matching feasibilityEstimate).
+// The error names redundancy.sliceSizeBytes and the source-size relationship and
+// suggests a minimum, so a too-small slice on a large source fails here — before
+// any staging — instead of as a generic payload-too-large error after up to 24 h of
+// staging.
+func checkPayloadBound(resolved []ResolvedArchive, sliceSizeBytes int64) error {
+	if sliceSizeBytes <= 0 {
+		// Guarded upstream by config.Validate (redundancy.sliceSizeBytes must be
+		// > 0); avoid a divide-by-zero here if that ever changes.
+		return nil
+	}
+
+	var totalEstimated, sliceCount int64
+
+	for _, archive := range resolved {
+		totalEstimated += archive.EstimatedBytes
+		sliceCount += ceilDiv(archive.EstimatedBytes, sliceSizeBytes)
+	}
+
+	payloadBytes := sliceCount * perStagedSliceBytes
+	if payloadBytes <= payloadBoundBudgetBytes {
+		return nil
+	}
+
+	// Suggest the smallest slice size that keeps the whole-run count within budget,
+	// leaving room for the per-archive ceiling rounding (up to one extra slice per
+	// archive).
+	maxSlices := int64(payloadBoundBudgetBytes / perStagedSliceBytes)
+
+	headroom := maxSlices - int64(len(resolved))
+	if headroom < 1 {
+		headroom = 1
+	}
+
+	suggestedSliceSize := ceilDiv(totalEstimated, headroom)
+
+	return fmt.Errorf(
+		"redundancy.sliceSizeBytes (%d bytes) is too small for the estimated source size (%d bytes): "+
+			"it would produce ~%d slices whose activity metadata (~%d bytes) exceeds the safe Temporal "+
+			"payload budget (%d bytes, half the ~2 MB limit); increase sliceSizeBytes to at least %d bytes",
+		sliceSizeBytes, totalEstimated, sliceCount, payloadBytes, int64(payloadBoundBudgetBytes), suggestedSliceSize,
+	)
 }
 
 // resolveDataSource produces the data-side ResolvedArchive for one source: it
