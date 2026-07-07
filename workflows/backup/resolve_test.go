@@ -191,6 +191,47 @@ func TestResolveK8sSources(t *testing.T) {
 	}
 }
 
+// capturingResolver records the Ref passed to ResolveGroup so a test can assert
+// the resolved reference (notably an empty, cluster-wide Namespace) is plumbed
+// through unchanged.
+type capturingResolver struct {
+	gotRef k8ssnap.Ref
+}
+
+func (c *capturingResolver) Resolve(_ context.Context, _ k8ssnap.Ref) (k8ssnap.Snapshot, error) {
+	return k8ssnap.Snapshot{}, nil
+}
+
+func (c *capturingResolver) ResolveGroup(_ context.Context, ref k8ssnap.Ref) (k8ssnap.Group, error) {
+	c.gotRef = ref
+
+	return k8ssnap.Group{}, nil
+}
+
+// TestResolveK8sSourcesClusterWide asserts a labelSelector source with the namespace
+// omitted resolves end to end, passing an empty Namespace through to ResolveGroup so
+// resolution spans all namespaces (cluster-wide; SPEC §5). This proves the reconciled
+// contract works, not just that the config validates (AC1).
+func TestResolveK8sSourcesClusterWide(t *testing.T) {
+	t.Parallel()
+
+	resolver := &capturingResolver{}
+	activities := &ResolveControlActivities{
+		newResolver: func() (snapshotResolver, error) { return resolver, nil },
+	}
+
+	clusterWide := config.Source{K8s: &config.K8sRef{
+		APIVersion:    "snapshot.storage.k8s.io/v1",
+		Kind:          "VolumeSnapshot",
+		LabelSelector: "backup=nightly",
+	}}
+
+	_, err := activities.ResolveK8sSources(t.Context(), config.Config{Sources: []config.Source{clusterWide}})
+	require.NoError(t, err)
+	assert.Empty(t, resolver.gotRef.Namespace, "empty namespace must pass through to ResolveGroup for cluster-wide resolution")
+	assert.Equal(t, "backup=nightly", resolver.gotRef.LabelSelector)
+}
+
 // TestResolveK8sSourcesResolverBuildFailure asserts a k8s source whose resolver
 // cannot be built fails the run before any data is staged (AC2).
 func TestResolveK8sSourcesResolverBuildFailure(t *testing.T) {

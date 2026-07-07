@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/invopop/jsonschema"
+)
 
 // DefaultIOWaitTimeout is how long the Eject phase waits for an operator to clear
 // the import/export station when it fills, before the run fails (SPEC §4.3 phase
@@ -80,6 +84,17 @@ type K8sRef struct {
 	Namespace     string `json:"namespace"`
 	Name          string `json:"name,omitempty"`
 	LabelSelector string `json:"labelSelector,omitempty"`
+}
+
+// JSONSchemaExtend encodes the conditional namespace requirement that struct tags
+// cannot express: namespace is required only for a single named snapshot, not for a
+// labelSelector (an empty namespace with a labelSelector selects across all
+// namespaces — cluster-wide; SPEC §5). Since name and labelSelector are mutually
+// exclusive and exactly one must be set, "name present" implies namespace required.
+func (K8sRef) JSONSchemaExtend(schema *jsonschema.Schema) {
+	schema.Required = []string{"apiVersion", "kind"}
+	schema.If = &jsonschema.Schema{Required: []string{"name"}}
+	schema.Then = &jsonschema.Schema{Required: []string{"namespace"}}
 }
 
 // ZFSPathSource is an explicit ZFS snapshot or dataset on the pool.

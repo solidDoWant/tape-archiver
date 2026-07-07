@@ -74,11 +74,15 @@ Exactly one of `name` or `labelSelector` must be set.
 |-------|------|----------|-------------|
 | `apiVersion` | `string` | yes | API group and version, e.g. `snapshot.storage.k8s.io/v1` or `groupsnapshot.storage.k8s.io/v1alpha1`. |
 | `kind` | `string` | yes | Resource kind, e.g. `VolumeSnapshot` or `VolumeGroupSnapshot`. A `VolumeGroupSnapshot` is archived as a single tar stream (one subdirectory per member volume). |
-| `namespace` | `string` | yes | Kubernetes namespace containing the resource. |
+| `namespace` | `string` | no† | Kubernetes namespace containing the resource. |
 | `name` | `string` | no* | Name of a specific resource. |
-| `labelSelector` | `string` | no* | Label selector matching one or more resources within `namespace` (e.g. `app=myapp`). |
+| `labelSelector` | `string` | no* | Label selector matching one or more resources (e.g. `app=myapp`). Matches within `namespace` when set; when `namespace` is omitted, it matches across all namespaces (cluster-wide, SPEC §5). |
 
 \* Exactly one of `name` or `labelSelector` must be provided.
+
+† `namespace` is required for a single `name` (a named snapshot has no cluster-wide
+meaning). It is optional with a `labelSelector`: omit it to select matching resources
+across all namespaces.
 
 Resolution of k8s snapshot references to ZFS dataset paths happens at runtime in the
 resolve activity — this config only carries the reference.
@@ -91,7 +95,13 @@ Example entries:
 
 { "apiVersion": "groupsnapshot.storage.k8s.io/v1alpha1", "kind": "VolumeGroupSnapshot",
   "namespace": "plex", "labelSelector": "app=plex" }
+
+{ "apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshot",
+  "labelSelector": "backup=nightly" }
 ```
+
+The third entry omits `namespace`, so its `labelSelector` matches `VolumeSnapshot`
+resources across all namespaces (cluster-wide).
 
 ### ZFSPathSource
 

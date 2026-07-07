@@ -88,6 +88,16 @@
       ]
     },
     "K8sRef": {
+      "if": {
+        "required": [
+          "name"
+        ]
+      },
+      "then": {
+        "required": [
+          "namespace"
+        ]
+      },
       "properties": {
         "apiVersion": {
           "type": "string"
@@ -109,8 +119,7 @@
       "type": "object",
       "required": [
         "apiVersion",
-        "kind",
-        "namespace"
+        "kind"
       ]
     },
     "Library": {
