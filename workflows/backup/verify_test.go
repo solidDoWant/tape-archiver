@@ -211,15 +211,41 @@ func TestVerifyFailsWhenPlannedTreeExceedsCapacity(t *testing.T) {
 // TestVerifyFailureBlocksLoad covers AC2/AC3's "no tape is loaded" guarantee at
 // the workflow level: when the Verify phase fails, the run aborts before the Load
 // phase ever runs.
+//
+// The test is constructed so that a regression which swallowed the Verify failure
+// *would* reach the Load phase: Pack is mocked to return a non-empty plan and the
+// run is given a real library (one drive, one blank slot, a changer), so the tape
+// path yields exactly one drive-set and Load becomes reachable. Load is then routed
+// through OnActivity to flip a captured flag if it is ever dispatched — so the test
+// observes directly whether Load ran, rather than asserting on an unmocked name.
 func TestVerifyFailureBlocksLoad(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
 
-	// Resolve to an empty plan so the phases before Verify no-op on a valid config,
-	// then fail the Verify phase.
+	// A valid config is required by the entry-point validation gate, but resolve it
+	// to nothing so the run stages no sources without touching a real pool.
 	expectResolveEmpty(env)
+
+	// A non-empty plan makes planDriveSets yield a drive-set, so Load is reachable
+	// once the run passes Verify. Generate PAR2 stays a no-op: the run stages no
+	// sources, so the staged tree is empty and generatePAR2 returns early.
+	plan, _, _ := seededPlan(1, 1)
+	env.OnActivity((&PackActivities{}).Pack, mock.Anything, mock.Anything).
+		Return(plan, nil)
+
+	// Fail the Verify phase.
 	failPhase(t, env, PhaseVerify)
+
+	// Observe Load directly: it flips loadCalled and errors if it is ever invoked.
+	loadCalled := false
+
+	env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ LoadInput) ([]LoadedTape, error) {
+			loadCalled = true
+
+			return nil, errors.New("Load invoked after Verify failed")
+		})
 
 	env.ExecuteWorkflow(Backup, validBackupConfig())
 
@@ -227,7 +253,7 @@ func TestVerifyFailureBlocksLoad(t *testing.T) {
 	require.Error(t, env.GetWorkflowError())
 
 	// The Load phase's activity is never invoked once Verify fails.
-	env.AssertNotCalled(t, "loadActivity")
+	assert.False(t, loadCalled, "Load ran after Verify failed")
 }
 
 // TestVerifyRetriesTransientFailure covers AC1: a routine data-worker restart
