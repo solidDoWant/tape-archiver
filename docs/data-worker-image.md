@@ -92,7 +92,9 @@ must provide:
 - **`/dev/fuse` + `CAP_SYS_ADMIN`** — LTFS is FUSE-based and cannot mount without them.
 - **Bind mount of `/mnt/bulk-pool-01`** with `shared`/`rslave` mount propagation, so the
   ZFS snapshot views (`.zfs/snapshot/<snap>/`) and the staging directory are visible
-  inside the container. The image pre-creates the `/mnt/bulk-pool-01` mount point.
+  inside the container. The image pre-creates the generic `/mnt` mount root; Docker
+  auto-creates the actual bind-mount target (e.g. `/mnt/bulk-pool-01`) under it at run
+  time, so no site-specific path is baked into the image.
 - **Staging** happens in a plain subdirectory of an existing dataset
   (`bulk-pool-01/archive/.tape-staging/`); the worker never runs `zfs create`.
 - **`/dev/zfs` passthrough.** The data-side Resolve/Verify/Prepare activities read ZFS
