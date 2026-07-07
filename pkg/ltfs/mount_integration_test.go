@@ -4,6 +4,7 @@ package ltfs_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -56,6 +57,40 @@ func loadFormattedVolume(t *testing.T) *ltfs.Volume {
 	require.NoError(t, volume.Format(t.Context(), barcode), "format tape")
 
 	return volume
+}
+
+// TestMountRejectsPreexistingMountNoDrive proves AC2's observable behavior
+// through the public Volume.Mount API without a tape drive: it bind-mounts a
+// directory onto itself so the path is a genuine mount point, then calls
+// Volume.Mount there. The pre-start guard must reject it with a descriptive
+// error before touching the (irrelevant) device — so this covers the AC even
+// when the mhvtl drive is wedged. It skips cleanly where privileged mounts are
+// unavailable.
+func TestMountRejectsPreexistingMountNoDrive(t *testing.T) {
+	testutil.SkipIfLTFSUnavailable(t)
+
+	mountpoint := filepath.Join(t.TempDir(), "mnt")
+	require.NoError(t, os.MkdirAll(mountpoint, 0o755))
+
+	// Bind-mount the directory onto itself: a real mount boundary with no tape.
+	if out, err := exec.CommandContext(t.Context(), "mount", "--bind", mountpoint, mountpoint).CombinedOutput(); err != nil {
+		t.Skipf("cannot create a bind mount (needs privilege): %v: %s", err, out)
+	}
+
+	t.Cleanup(func() {
+		_ = exec.CommandContext(context.WithoutCancel(t.Context()), "umount", mountpoint).Run()
+	})
+
+	// The device is never touched because the guard fires first; a bogus path is
+	// therefore fine and keeps the test independent of any tape hardware.
+	volume := ltfs.NewVolume("/dev/null")
+
+	mount, err := volume.Mount(t.Context(), mountpoint, filepath.Join(t.TempDir(), "work"))
+	require.Error(t, err, "Mount over a pre-existing mount must fail, not report success")
+	assert.Nil(t, mount, "no Mount handle for a rejected mount")
+	assert.Contains(t, err.Error(), "already in use",
+		"error must identify the pre-existing mount")
+	assert.Contains(t, err.Error(), mountpoint, "error must name the mountpoint")
 }
 
 // TestUnmountIdempotent covers AC1 against mhvtl: a second Unmount after the ltfs
