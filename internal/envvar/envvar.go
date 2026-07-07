@@ -24,6 +24,12 @@ type Config struct {
 	// stages into the recovery ISO (SPEC.md §10). Required on the data worker; the
 	// Report activity fails when it is empty or a binary is not static.
 	RecoveryBinariesDir string
+	// RecoverySourcesDir is the directory on the data worker holding the recovery
+	// tools' upstream source archives the Report phase stages into the recovery
+	// ISO's src/ (SPEC.md §2, §10 — "…plus their source"). It is the sibling $out/src
+	// of RecoveryBinariesDir's $out/bin from nix/recovery-binaries.nix. Required on
+	// the data worker; the Report activity fails when it is empty or yields no files.
+	RecoverySourcesDir string
 }
 
 // Parse reads operational configuration from environment variables.
@@ -33,5 +39,6 @@ func Parse() (Config, error) {
 		K8sDatasetParent:         os.Getenv("TAPE_K8S_DATASET_PARENT"),
 		StagingDir:               os.Getenv("TAPE_STAGING_DIR"),
 		RecoveryBinariesDir:      os.Getenv("TAPE_RECOVERY_BINARIES_DIR"),
+		RecoverySourcesDir:       os.Getenv("TAPE_RECOVERY_SOURCES_DIR"),
 	}, nil
 }

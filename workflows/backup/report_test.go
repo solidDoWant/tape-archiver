@@ -169,7 +169,7 @@ func TestBuildReportStagesDiscManifest(t *testing.T) {
 	input.Config.Encryption = config.Encryption{Recipients: []string{recipient}, Identity: identity}
 	input.Config.Delivery.OpticalBurn = &config.OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 1}
 
-	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t), testutil.RecoverySourcesDir(t))
 
 	outDir := t.TempDir()
 
@@ -209,7 +209,7 @@ func TestRebuildDeliveredReport(t *testing.T) {
 	input := reportTestInput(t)
 	input.Config.Encryption = config.Encryption{Recipients: []string{recipient}, Identity: identity}
 
-	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t), testutil.RecoverySourcesDir(t))
 	outDir := t.TempDir()
 
 	// Pre-burn build: the delivered report predates the burn, so it records no discs.
@@ -379,7 +379,7 @@ func TestBuildReport(t *testing.T) {
 	}
 	input.PAR2[0].Files = []StagedSlice{{Path: filepath.Join(stageDir, "archive.par2"), SHA256: "cc", SizeBytes: 3}}
 
-	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t), testutil.RecoverySourcesDir(t))
 
 	outDir := t.TempDir()
 
@@ -420,7 +420,7 @@ func TestBuildReportStagesUncompressedISOWhenBurning(t *testing.T) {
 	input.Config.Encryption = config.Encryption{Recipients: []string{recipient}, Identity: identity}
 	input.Config.Delivery.OpticalBurn = &config.OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 1}
 
-	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t), testutil.RecoverySourcesDir(t))
 
 	outDir := t.TempDir()
 
@@ -461,7 +461,7 @@ func TestBuildReportRejectsBadIdentity(t *testing.T) {
 	input := reportTestInput(t)
 	input.Config.Encryption = config.Encryption{Recipients: []string{"age1pq1wrong"}, Identity: identity}
 
-	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t))
+	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t), testutil.RecoverySourcesDir(t))
 
 	outDir := t.TempDir()
 

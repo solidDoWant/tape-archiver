@@ -76,7 +76,7 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	// identity and at least one written tape), so a test that runs them to
 	// completion mocks them via expectReportDeliverSuccess; failure tests either
 	// target an earlier phase or fail Report explicitly.
-	env.RegisterActivity(newReportActivities(t.TempDir(), t.TempDir()))
+	env.RegisterActivity(newReportActivities(t.TempDir(), t.TempDir(), t.TempDir()))
 	env.RegisterActivity(newDeliverActivities())
 	env.RegisterActivity(&FailureActivities{})
 

@@ -109,15 +109,17 @@ on this disc.
 
 // ReportActivities hosts the data-side Report activity. stagingRoot is where the
 // run's artifacts are written (beside its staged tree); binariesDir holds the
-// static recovery binaries staged into the ISO (SPEC §10).
+// static recovery binaries and sourcesDir the tools' source archives, both staged
+// into the ISO (SPEC §10).
 type ReportActivities struct {
 	stagingRoot string
 	binariesDir string
+	sourcesDir  string
 }
 
 // newReportActivities returns the production data-side Report activity.
-func newReportActivities(stagingRoot, binariesDir string) *ReportActivities {
-	return &ReportActivities{stagingRoot: stagingRoot, binariesDir: binariesDir}
+func newReportActivities(stagingRoot, binariesDir, sourcesDir string) *ReportActivities {
+	return &ReportActivities{stagingRoot: stagingRoot, binariesDir: binariesDir, sourcesDir: sourcesDir}
 }
 
 // ReportInput is the payload for the Report activity: the run config and the full
@@ -168,6 +170,10 @@ func (a *ReportActivities) BuildReport(ctx context.Context, input ReportInput) (
 
 	if a.binariesDir == "" {
 		return ReportOutput{}, fmt.Errorf("recovery binaries directory is not configured (set TAPE_RECOVERY_BINARIES_DIR on the data worker)")
+	}
+
+	if a.sourcesDir == "" {
+		return ReportOutput{}, fmt.Errorf("recovery sources directory is not configured (set TAPE_RECOVERY_SOURCES_DIR on the data worker)")
 	}
 
 	outDir := filepath.Join(a.stagingRoot, activity.GetInfo(ctx).WorkflowExecution.RunID)
@@ -236,6 +242,7 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		Manifest:    sha256Manifest,
 		TapeIndexes: tapeIndexes(input.Written),
 		BinariesDir: a.binariesDir,
+		SourcesDir:  a.sourcesDir,
 	}
 
 	discManifest, err := buildRecoveryISO(ctx, isoInput, uncompressedISOPath)

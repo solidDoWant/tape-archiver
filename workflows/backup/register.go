@@ -34,6 +34,11 @@ type DataConfig struct {
 	// ISO (TAPE_RECOVERY_BINARIES_DIR, SPEC §10). Required; the Report activity
 	// fails when empty or when a binary is not statically linked.
 	RecoveryBinariesDir string
+	// RecoverySourcesDir is the directory holding the recovery tools' upstream
+	// source archives the Report phase stages into the recovery ISO's src/
+	// (TAPE_RECOVERY_SOURCES_DIR, SPEC §2, §10). Required; the Report activity fails
+	// when empty or when it yields no source archives.
+	RecoverySourcesDir string
 	// MetricsRegisterer is the Prometheus registry the data worker's write-health
 	// gauges register against (SPEC §14). It is the same registry that backs the
 	// worker's /metrics endpoint; nil when metrics are disabled, in which case
@@ -83,7 +88,7 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	// staged files, recovery binaries, and pinned tools that live here, and
 	// delivering from here keeps the tens-of-MB ISO off the Temporal payload path
 	// (SPEC §4.3 phases 9–10, §9–§11).
-	w.RegisterActivity(newReportActivities(cfg.StagingDir, cfg.RecoveryBinariesDir))
+	w.RegisterActivity(newReportActivities(cfg.StagingDir, cfg.RecoveryBinariesDir, cfg.RecoverySourcesDir))
 	w.RegisterActivity(newDeliverActivities())
 
 	// The per-disc optical burn/verify activities run here too: the burners are
