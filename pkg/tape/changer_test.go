@@ -157,9 +157,10 @@ func statusPage(elementType byte, pvoltag bool, descs ...[]byte) []byte {
 	return page
 }
 
-// elementStatus wraps pages in the status data header. Its internal fields are
-// cosmetic here — the decoder walks pages by length from elementStatusHeaderLen
-// on — so only the header size matters.
+// elementStatus wraps pages in the status data header, setting the header's
+// 24-bit "byte count of report available" to the actual body length so the
+// response looks like a complete (non-truncated) report, which is what
+// decodeElementStatus now checks.
 func elementStatus(pages ...[]byte) []byte {
 	header := make([]byte, elementStatusHeaderLen)
 
@@ -167,6 +168,9 @@ func elementStatus(pages ...[]byte) []byte {
 	for _, p := range pages {
 		body = append(body, p...)
 	}
+
+	header[elementStatusReportOffset], header[elementStatusReportOffset+1], header[elementStatusReportOffset+2] =
+		byte(len(body)>>16), byte(len(body)>>8), byte(len(body))
 
 	return append(header, body...)
 }
@@ -243,6 +247,39 @@ func TestDecodeElementStatusShort(t *testing.T) {
 
 	_, err := decodeElementStatus([]byte{0x00, 0x01}, testAddressing())
 	require.Error(t, err)
+}
+
+// TestDecodeElementStatusTruncatedReport reproduces a report larger than the
+// transfer buffer: the data header claims 196608 report bytes while the storage
+// page advertises 3 descriptors but only 1 fits in what was transferred. The
+// decoder must reject this as truncated rather than surface a 1-of-3 inventory.
+func TestDecodeElementStatusTruncatedReport(t *testing.T) {
+	t.Parallel()
+
+	// A storage page header that advertises 3 descriptors but carries only 1.
+	page := make([]byte, elementStatusPageHeaderLen)
+	page[0] = elementTypeStorage
+	page[pageDescLenOffset], page[pageDescLenOffset+1] = byte(testDescLen>>8), byte(testDescLen)
+
+	advertised := 3 * testDescLen
+	page[pageByteCountOffset], page[pageByteCountOffset+1], page[pageByteCountOffset+2] =
+		byte(advertised>>16), byte(advertised>>8), byte(advertised)
+	page = append(page, descriptor(1000, flagFullAccess, withVolumeTag("TA0001L6"))...)
+
+	// Data header claiming 196608 report bytes — far more than was transferred.
+	data := make([]byte, elementStatusHeaderLen)
+
+	claimed := 196608 // 0x030000
+	data[elementStatusReportOffset], data[elementStatusReportOffset+1], data[elementStatusReportOffset+2] =
+		byte(claimed>>16), byte(claimed>>8), byte(claimed)
+	data = append(data, page...)
+
+	inv, err := decodeElementStatus(data, testAddressing())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "truncated")
+	assert.Empty(t, inv.Slots, "no partial slots surfaced")
+	assert.Empty(t, inv.Drives, "no partial drives surfaced")
+	assert.Empty(t, inv.IOSlots, "no partial I/O slots surfaced")
 }
 
 // --- friendly ↔ raw address mapping --------------------------------------

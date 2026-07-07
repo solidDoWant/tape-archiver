@@ -39,7 +39,10 @@ const (
 	readElementAllElements = 0xFFFF
 	// elementStatusBufSize bounds the READ ELEMENT STATUS transfer. It is far
 	// larger than any supported library's report (the production 3573-TL and the
-	// mhvtl L700 are well under 4 KiB), so the response is never truncated.
+	// mhvtl L700 are well under 4 KiB), so a truncated response is not expected.
+	// decodeElementStatus enforces this rather than assuming it: it compares the
+	// report's declared byte count against the bytes transferred and rejects any
+	// response that would have overrun this buffer.
 	elementStatusBufSize = 128 * 1024
 	// modeSenseBufSize bounds the MODE SENSE transfer; the 0x1D page plus header
 	// is 24 bytes.

@@ -81,6 +81,11 @@ const (
 const (
 	// elementStatusHeaderLen is the length of the element status data header.
 	elementStatusHeaderLen = 8
+	// elementStatusReportOffset is the offset of the "byte count of report
+	// available" field (24-bit) within the element status data header. It counts
+	// the report bytes that follow the header, and equals the bytes transferred
+	// after the header when — and only when — the response was not truncated.
+	elementStatusReportOffset = 5
 	// elementStatusPageHeaderLen is the length of each element status page header.
 	elementStatusPageHeaderLen = 8
 )
@@ -220,11 +225,28 @@ func parseElementAddressing(data []byte) (*elementAddressing, error) {
 // Status Page per element type; each page has an 8-byte header (type code, a
 // PVOLTAG flag, the per-descriptor length, and the total descriptor byte count)
 // followed by fixed-length element descriptors.
+//
+// The device may truncate its report to the transfer buffer without signalling
+// an error, in which case the descriptor walk would stop early and yield a
+// partial Inventory. To catch that, the header's 24-bit "byte count of report
+// available" is compared against the report bytes actually transferred (after
+// the header); a report claiming more than was transferred is rejected as
+// truncated rather than decoded into a partial inventory.
 func decodeElementStatus(data []byte, addressing *elementAddressing) (Inventory, error) {
 	var inv Inventory
 
 	if len(data) < elementStatusHeaderLen {
 		return inv, fmt.Errorf("read element status: short response (%d bytes)", len(data))
+	}
+
+	// The report byte count covers the bytes after the 8-byte header. If it
+	// exceeds what was transferred, the library truncated its report to the
+	// transfer buffer and the pages below are incomplete — refuse to decode a
+	// partial inventory rather than plan moves from wrong state.
+	if reportByteCount := be24(data, elementStatusReportOffset); reportByteCount > len(data)-elementStatusHeaderLen {
+		return Inventory{}, fmt.Errorf(
+			"read element status: truncated report (%d report bytes claimed, %d transferred)",
+			reportByteCount, len(data)-elementStatusHeaderLen)
 	}
 
 	// Walk the element status pages that follow the status data header.
