@@ -182,8 +182,8 @@ write window.
 4. **Generate PAR2.** For each archive, generate its per-archive PAR2 recovery set.
    Fixed-percentage mode sizes it directly; fill-to-capacity mode raises the percentage
    uniformly to consume each tape's remaining space down to a configured floor. The
-   PAR2 block size is computed from tape capacity to stay within PAR2's 32,768 recovery
-   block limit. Output is staged and checksummed.
+   PAR2 block size is derived from the archive's data size to stay within PAR2's 32,768
+   source-block limit. Output is staged and checksummed.
 5. **Verify.** Re-read all staged files and verify checksums; confirm each planned
    tape's complete tree is present and within capacity. A run cannot proceed to write
    on any verification failure.
@@ -381,8 +381,8 @@ Two complementary, independent mechanisms — the report explains both so a futu
 recoverer understands what protects against what:
 
 - **PAR2 (within a tape):** protects against *localized* media decay — bad blocks, a
-  damaged segment. Recoverable up to the configured redundancy. Block size is computed
-  from tape capacity so as not to exceed PAR2's hard limit of 32,768 recovery blocks.
+  damaged segment. Recoverable up to the configured redundancy. Block size is derived
+  from the archive's data size so as not to exceed PAR2's hard limit of 32,768 source blocks.
   Using otherwise-wasted tape capacity for additional parity is encouraged
   (fill-to-capacity mode). The PAR2 engine accepts only whole redundancy
   percentages in the inclusive range [1, 100]; the config gate enforces that

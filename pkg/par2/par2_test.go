@@ -14,9 +14,9 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/par2"
 )
 
-// maxRecoveryBlocks mirrors PAR2's hard limit (SPEC §8); the recovery set must
+// maxSourceBlocks mirrors PAR2's hard limit (SPEC §8); the recovery set must
 // never exceed it.
-const maxRecoveryBlocks = 32768
+const maxSourceBlocks = 32768
 
 // dataBlocksPattern extracts the source block count from `par2 verify -v`
 // output ("There are a total of N data blocks.").
@@ -88,7 +88,7 @@ func TestGenerate(t *testing.T) {
 			// par2 verifies the set against the intact data, and the source block
 			// count stays within PAR2's hard limit (SPEC §8).
 			blockCount := par2Verify(t, recoverySetPath)
-			assert.LessOrEqual(t, blockCount, maxRecoveryBlocks,
+			assert.LessOrEqual(t, blockCount, maxSourceBlocks,
 				"source block count must not exceed PAR2's 32,768-block limit")
 
 			// Corrupt a region of the first slice, then repair: par2 must restore
