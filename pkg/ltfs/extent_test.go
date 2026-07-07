@@ -250,6 +250,103 @@ func TestExtractFilePercentEncodedName(t *testing.T) {
 	assert.Equal(t, "ok", string(got))
 }
 
+func TestExtractFilePercentEncodedNamePlus(t *testing.T) {
+	t.Parallel()
+
+	// LTFS names are %XX path-escaped, not form-encoded: a literal "+" must
+	// survive decoding unchanged while %XX escapes still decode. A form decode
+	// would corrupt the "+" into a space and the recoverer's lookup would miss.
+	const encoded = `<ltfsindex version="2.4.0">
+  <generationnumber>1</generationnumber>
+  <directory>
+    <name>vol</name>
+    <contents>
+      <file>
+        <name percentencoded="true">a+b%20c.txt</name>
+        <length>2</length>
+        <extentinfo>
+          <extent>
+            <partition>b</partition><startblock>1</startblock>
+            <byteoffset>0</byteoffset><bytecount>2</bytecount><fileoffset>0</fileoffset>
+          </extent>
+        </extentinfo>
+      </file>
+    </contents>
+  </directory>
+</ltfsindex>`
+
+	index, err := ltfs.ParseIndex([]byte(encoded))
+	require.NoError(t, err)
+
+	_, ok := index.Lookup("a+b c.txt")
+	require.True(t, ok, "literal + must be preserved and %20 decoded to a space")
+
+	tape := &fakeTape{blocks: map[string]map[uint64][]byte{"b": {1: []byte("ok")}}}
+	got, err := index.ExtractFile(t.Context(), "a+b c.txt", tape)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", string(got))
+}
+
+func TestExtractFileOutOfRange(t *testing.T) {
+	t.Parallel()
+
+	// buildIndex renders a one-file, one-extent index so each case can drive a
+	// single field out of range while the others stay valid.
+	buildIndex := func(length, byteOffset, byteCount, fileOffset string) string {
+		return fmt.Sprintf(`<ltfsindex version="2.4.0">
+  <generationnumber>1</generationnumber>
+  <directory>
+    <name>vol</name>
+    <contents>
+      <file>
+        <name>corrupt.bin</name>
+        <length>%s</length>
+        <extentinfo>
+          <extent>
+            <partition>b</partition><startblock>1</startblock>
+            <byteoffset>%s</byteoffset><bytecount>%s</bytecount><fileoffset>%s</fileoffset>
+          </extent>
+        </extentinfo>
+      </file>
+    </contents>
+  </directory>
+</ltfsindex>`, length, byteOffset, byteCount, fileOffset)
+	}
+
+	const maxUint64 = "18446744073709551615"
+
+	tests := []struct {
+		name  string
+		index string
+		field string
+	}{
+		{name: "length exceeds addressable maximum", index: buildIndex(maxUint64, "0", "2", "0"), field: "length"},
+		{name: "fileoffset overruns declared length", index: buildIndex("2", "0", "2", maxUint64), field: "fileoffset"},
+		{name: "byteoffset overflows byte range", index: buildIndex("2", maxUint64, "5", "0"), field: "byteoffset"},
+		{name: "bytecount overflows byte range", index: buildIndex("2", "5", maxUint64, "0"), field: "bytecount"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			index, err := ltfs.ParseIndex([]byte(test.index))
+			require.NoError(t, err)
+
+			tape := &fakeTape{blocks: map[string]map[uint64][]byte{"b": {1: []byte("ok")}}}
+
+			var got []byte
+
+			require.NotPanics(t, func() {
+				got, err = index.ExtractFile(t.Context(), "corrupt.bin", tape)
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.field)
+			assert.Nil(t, got)
+		})
+	}
+}
+
 func TestExtractFileShortRead(t *testing.T) {
 	t.Parallel()
 
