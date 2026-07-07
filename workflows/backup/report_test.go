@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
@@ -341,14 +342,20 @@ func TestVerifyEscrowIdentity(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("empty identity fails", func(t *testing.T) {
+	// AC1: an empty escrow identity is a deterministic misconfiguration; the error
+	// must be non-retryable so the Report phase fails promptly (and the SPEC §11
+	// alert fires) instead of retrying the activity forever.
+	t.Run("empty identity fails non-retryably", func(t *testing.T) {
 		t.Parallel()
 		err := verifyEscrowIdentity(t.Context(), config.Encryption{Recipients: []string{recipient}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "empty")
+		assertNonRetryable(t, err)
 	})
 
-	t.Run("unmatched recipient fails", func(t *testing.T) {
+	// AC1: a rotated or wrong identity that derives to a non-configured recipient
+	// is likewise deterministic; the mismatch must fail non-retryably.
+	t.Run("unmatched recipient fails non-retryably", func(t *testing.T) {
 		t.Parallel()
 		err := verifyEscrowIdentity(t.Context(), config.Encryption{
 			Recipients: []string{"age1pq1someoneelse"},
@@ -356,7 +363,18 @@ func TestVerifyEscrowIdentity(t *testing.T) {
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not among the configured")
+		assertNonRetryable(t, err)
 	})
+}
+
+// assertNonRetryable asserts err is a Temporal ApplicationError marked
+// non-retryable, so the server-default unlimited retry policy does not loop on it.
+func assertNonRetryable(t *testing.T, err error) {
+	t.Helper()
+
+	var appErr *temporal.ApplicationError
+	require.ErrorAs(t, err, &appErr, "error must be a Temporal ApplicationError")
+	assert.True(t, appErr.NonRetryable(), "error must be marked non-retryable")
 }
 
 // TestBuildReport covers AC4: with optical burning disabled the activity produces

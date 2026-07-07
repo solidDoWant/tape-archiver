@@ -493,6 +493,79 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	assert.Positive(t, teardownCalls, "teardown must still run on an ordinary write-phase failure (issue #133 AC2)")
 }
 
+// TestRunTapePathFinalizeRetryBounded covers issue #152 AC4: when FinalizeTape
+// fails persistently (e.g. an LTFS index write that keeps failing after the volume
+// detached — a permanent media error), the bounded retry policy surfaces the
+// failure to the operator promptly instead of retrying the unmount until the
+// 24-hour session timeout. The failing FinalizeTape is attempted a bounded number
+// of times (MaximumAttempts=3), then the tape is treated as a write failure and
+// the run pauses for the operator.
+func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
+	t.Parallel()
+
+	const (
+		drives = 1
+		tapes  = 1
+		copies = 1
+	)
+
+	env := newTapePathEnv(t)
+	env.RegisterActivity(&FailureActivities{})
+
+	var (
+		mu               sync.Mutex
+		loadSetSizes     []int
+		finalizeAttempts int
+	)
+
+	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
+
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+
+	// FinalizeTape fails on every attempt, simulating a persistent unmount/index
+	// failure. Count the attempts to prove the retry policy is bounded rather than
+	// the Temporal-default unlimited.
+	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ FinalizeInput) ([]byte, error) {
+			mu.Lock()
+			finalizeAttempts++
+			mu.Unlock()
+
+			return nil, fmt.Errorf("unmount LTFS volume on /dev/sg0: persistent media error")
+		})
+
+	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+		WriteHealth{}, nil)
+	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+		EjectResult{}, nil)
+
+	// The operator aborts the paused run.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorAbortSignal, nil)
+	}, 30*time.Second)
+
+	plan, staged, par2 := seededPlan(tapes, copies)
+
+	env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+		Cfg:    tapePathConfig(drives, tapes, copies),
+		Plan:   plan,
+		Staged: staged,
+		PAR2:   par2,
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError(), "a persistent finalize failure must fail the run")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 3, finalizeAttempts,
+		"FinalizeTape must be bounded to MaximumAttempts=3 so a persistent unmount failure surfaces promptly instead of retrying until the session timeout")
+}
+
 // TestRunTapePathResumeNeverReformatsCompletedTapes covers issue #92 AC5 across
 // drive-sets: with two sets, the first completes and one tape in the second fails.
 // On resume only that failed tape is re-driven — the first set's tapes (a

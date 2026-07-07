@@ -49,7 +49,14 @@ type DeliverInput struct {
 func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) error {
 	client := webhook.New(input.WebhookURL)
 
-	if err := client.SendFile(ctx, input.ReportPath); err != nil {
+	// Emit liveness heartbeats during the multipart upload so a hard data-worker
+	// death mid-Deliver is detected within activityHeartbeatTimeout (2 min) rather
+	// than only after the 30-minute deliverTimeout. The HeartbeatTimeout on the
+	// activity options requires these heartbeats — without them Temporal would fail
+	// the (otherwise non-heartbeating) activity spuriously.
+	if err := withActivityHeartbeat(ctx, func() error {
+		return client.SendFile(ctx, input.ReportPath)
+	}); err != nil {
 		return fmt.Errorf("deliver report %q: %w", input.ReportPath, err)
 	}
 
@@ -63,6 +70,7 @@ func deliverPhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: deliverTimeout,
+		HeartbeatTimeout:    activityHeartbeatTimeout,
 	})
 
 	var activities *DeliverActivities

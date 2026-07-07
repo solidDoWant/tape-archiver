@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/buildinfo"
@@ -342,16 +343,35 @@ func (a *ReportActivities) rebuildReport(ctx context.Context, outDir string, inp
 // age-keygen (present on the data worker) to derive the recipient.
 func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) error {
 	if strings.TrimSpace(encryption.Identity) == "" {
-		return fmt.Errorf("encryption.identity is empty; the age private identity must be provided to escrow into the report and ISO (SPEC §7)")
+		// An empty escrow identity is a deterministic misconfiguration: every retry
+		// re-reads the same empty config and fails identically. Mark it non-retryable
+		// so the Report phase fails fast and the SPEC §11 failure alert fires, instead
+		// of looping under the server-default unlimited retry policy until the run's
+		// timeout (matches prepare.go / session.go / burn.go convention).
+		return temporal.NewNonRetryableApplicationError(
+			"encryption.identity is empty; the age private identity must be provided to escrow into the report and ISO (SPEC §7)",
+			"escrow-identity-invalid",
+			nil,
+		)
 	}
 
 	derived, err := agewrap.RecipientFromIdentity(ctx, encryption.Identity)
 	if err != nil {
+		// Left retryable: RecipientFromIdentity shells out to age-keygen, so a
+		// transient exec failure should still retry.
 		return fmt.Errorf("derive recipient from the escrowed identity: %w", err)
 	}
 
 	if !slices.Contains(encryption.Recipients, derived) {
-		return fmt.Errorf("the escrowed identity's public key (%s) is not among the configured encryption.recipients; it could not decrypt the archives", derived)
+		// The escrowed identity derives to a key that is not among the configured
+		// recipients — a deterministic config error (a rotated or wrong identity):
+		// every retry re-derives the same key and fails identically. Non-retryable so
+		// the run fails promptly with the mismatch and the failure alert fires.
+		return temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("the escrowed identity's public key (%s) is not among the configured encryption.recipients; it could not decrypt the archives", derived),
+			"escrow-identity-invalid",
+			nil,
+		)
 	}
 
 	return nil
