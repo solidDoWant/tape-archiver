@@ -105,7 +105,7 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 			return nil, fmt.Errorf("drive %d: resolve SCSI generic node for %s: %w", i, stDev, err)
 		}
 
-		blank, err := blankCheckWhenReady(ctx, drive)
+		blank, err := blankCheckWhenReady(ctx, drive, driveReadyTimeout, driveReadyPoll)
 		if err != nil {
 			return nil, fmt.Errorf("drive %d: blank check for tape %s: %w", i, barcode, err)
 		}
@@ -150,14 +150,27 @@ const (
 	driveReadyPoll = 1 * time.Second
 )
 
+// blankChecker is the single drive capability blankCheckWhenReady needs: report
+// whether the loaded tape is blank. *tape.Drive satisfies it in production; a
+// fake in tests drives the NOT-READY retry loop deterministically without a real
+// drive or mhvtl.
+type blankChecker interface {
+	IsBlank(ctx context.Context) (bool, error)
+}
+
 // blankCheckWhenReady runs the blank check, retrying while a freshly loaded
 // drive is still becoming ready. After a load the drive is not ready instantly,
 // so the blank-check rewind can transiently fail with NOT READY; polling until
 // the drive answers keeps a slow-loading drive from aborting the run. The wait
-// is bounded by driveReadyTimeout and honours ctx cancellation; a genuine media
-// or hardware fault persists and surfaces as the final error.
-func blankCheckWhenReady(ctx context.Context, drive *tape.Drive) (bool, error) {
-	deadline := time.Now().Add(driveReadyTimeout)
+// is bounded by timeout and honours ctx cancellation; a genuine media or
+// hardware fault persists and surfaces as the final error.
+//
+// timeout and poll are parameters so tests can exercise the retry loop and its
+// bounds deterministically with tiny durations; production passes the
+// driveReadyTimeout / driveReadyPoll consts, so the run-time cadence is
+// unchanged.
+func blankCheckWhenReady(ctx context.Context, drive blankChecker, timeout, poll time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
 
 	for {
 		blank, err := drive.IsBlank(ctx)
@@ -172,7 +185,7 @@ func blankCheckWhenReady(ctx context.Context, drive *tape.Drive) (bool, error) {
 		select {
 		case <-ctx.Done():
 			return false, err
-		case <-time.After(driveReadyPoll):
+		case <-time.After(poll):
 		}
 	}
 }

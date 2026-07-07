@@ -1,7 +1,10 @@
 package backup
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -239,6 +242,142 @@ func TestReconcileLoad(t *testing.T) {
 			}
 		})
 	}
+}
+
+// errNotReady stands in for the SCSI NOT READY / BECOMING READY error a real
+// drive returns while it is still threading and calibrating a freshly loaded
+// tape — the transient failure blankCheckWhenReady must poll through.
+var errNotReady = errors.New("SCSI NOT READY - becoming ready")
+
+// fakeBlankChecker is a deterministic blankChecker for exercising
+// blankCheckWhenReady's NOT-READY retry loop without a real drive or mhvtl. Its
+// first notReadyN calls report a not-ready error, then it returns the blank
+// verdict; with alwaysErr set it never becomes ready. It records calls so a test
+// can prove the loop actually retried rather than returning the first error.
+type fakeBlankChecker struct {
+	notReadyN int   // number of leading calls that return the not-ready error
+	blank     bool  // verdict returned once the drive is "ready"
+	alwaysErr bool  // drive never becomes ready — every call returns the error
+	err       error // error returned while not ready (defaults to errNotReady)
+	calls     int   // total IsBlank invocations, for retry assertions
+}
+
+func (f *fakeBlankChecker) IsBlank(context.Context) (bool, error) {
+	f.calls++
+
+	notReadyErr := f.err
+	if notReadyErr == nil {
+		notReadyErr = errNotReady
+	}
+
+	if f.alwaysErr || f.calls <= f.notReadyN {
+		return false, notReadyErr
+	}
+
+	return f.blank, nil
+}
+
+func TestBlankCheckWhenReady(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		fake      *fakeBlankChecker
+		wantBlank bool
+		wantCalls int
+	}{
+		{
+			name:      "ready immediately reports blank",
+			fake:      &fakeBlankChecker{notReadyN: 0, blank: true},
+			wantBlank: true,
+			wantCalls: 1,
+		},
+		{
+			name:      "ready immediately reports non-blank",
+			fake:      &fakeBlankChecker{notReadyN: 0, blank: false},
+			wantBlank: false,
+			wantCalls: 1,
+		},
+		{
+			// AC1: transient NOT READY, then the correct blank verdict once ready.
+			// wantCalls proves the loop retried through every not-ready error rather
+			// than returning the first one (the "first error returned immediately"
+			// regression would return after a single call with an error).
+			name:      "blank after transient NOT READY",
+			fake:      &fakeBlankChecker{notReadyN: 3, blank: true},
+			wantBlank: true,
+			wantCalls: 4,
+		},
+		{
+			// AC1: same retry loop must also surface a correct non-blank verdict.
+			name:      "non-blank after transient NOT READY",
+			fake:      &fakeBlankChecker{notReadyN: 3, blank: false},
+			wantBlank: false,
+			wantCalls: 4,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Tiny poll keeps the retry loop fast; a generous timeout ensures the
+			// drive becomes ready well before the deadline.
+			blank, err := blankCheckWhenReady(t.Context(), test.fake, time.Minute, time.Millisecond)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantBlank, blank)
+			assert.Equal(t, test.wantCalls, test.fake.calls,
+				"retry loop must poll through every NOT-READY error before returning the verdict")
+		})
+	}
+}
+
+// TestBlankCheckWhenReadyDeadlineExpires covers the deadline bound: a drive that
+// never becomes ready must surface its last error once the timeout elapses,
+// having retried at least once first. A regression that inverts the deadline
+// check would either return on the first error (calls == 1) or loop forever
+// (tripping the go test timeout).
+func TestBlankCheckWhenReadyDeadlineExpires(t *testing.T) {
+	t.Parallel()
+
+	driveErr := errors.New("persistent hardware fault")
+	fake := &fakeBlankChecker{alwaysErr: true, err: driveErr}
+
+	blank, err := blankCheckWhenReady(t.Context(), fake, 40*time.Millisecond, 5*time.Millisecond)
+
+	require.ErrorIs(t, err, driveErr)
+	assert.False(t, blank)
+	assert.GreaterOrEqual(t, fake.calls, 2,
+		"must retry at least once before the deadline, not return the first error")
+}
+
+// TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll covers the poll
+// select's ctx.Done() arm: while parked between retries, a cancelled context
+// must end the wait promptly and surface the drive's last error. The poll is
+// large so its timer cannot fire within the test — only the ctx.Done() arm can
+// unblock the select. A regression that drops that arm would wait out the full
+// poll (caught by the elapsed-time bound below).
+func TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	driveErr := errors.New("NOT READY during pause")
+	fake := &fakeBlankChecker{alwaysErr: true, err: driveErr}
+
+	// Cancel once the loop is parked in the poll select (well after the first,
+	// microsecond-scale IsBlank call and the pre-poll guard).
+	time.AfterFunc(20*time.Millisecond, cancel)
+
+	start := time.Now()
+	blank, err := blankCheckWhenReady(ctx, fake, time.Minute, 30*time.Second)
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, driveErr)
+	assert.False(t, blank)
+	assert.Less(t, elapsed, 5*time.Second,
+		"must return promptly via the ctx.Done() select arm, not wait out the poll interval")
 }
 
 // tapesFor builds a plan with tapeCount logical tapes and the given copy count.
