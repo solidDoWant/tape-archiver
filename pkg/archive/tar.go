@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	slashpath "path"
 	"path/filepath"
@@ -18,20 +19,29 @@ import (
 
 // Tar writes a tar archive of the contents of srcDir to w. Entry names are
 // relative to srcDir, so extracting the archive reproduces srcDir's contents
-// without the srcDir path prefix. Regular files, directories, and symlinks are
-// included, with their mode bits preserved.
+// without the srcDir path prefix.
+//
+// The archive captures regular files, directories, and symlinks, preserving
+// their mode bits, ownership, and modification time. Hardlinked regular files
+// are stored once (the first sighting) and reproduced as tar hardlink entries;
+// sparse files are stored in GNU sparse 1.0 form so their holes are not written
+// out. File types that a portable file-by-file tar cannot carry and that hold no
+// recoverable data — sockets, devices, and named pipes (FIFOs) — are skipped
+// with a warning rather than failing the run. Extended attributes, POSIX ACLs,
+// and file capabilities are NOT captured (SPEC §6); a tar-level restore does not
+// reproduce them.
 //
 // Tar streams: it never stages the archive to disk. Filesystem-level tar (not
 // zfs send) is the deliberate, longest-lived source format (SPEC §6), and this
 // is the first stage of the per-archive prepare pipeline (SPEC §4.3).
 func Tar(ctx context.Context, w io.Writer, srcDir string) error {
-	tw := tar.NewWriter(w)
+	writer := newTarWriter(w)
 
-	if err := tarTree(ctx, tw, srcDir, ""); err != nil {
+	if err := writer.tree(ctx, srcDir, ""); err != nil {
 		return fmt.Errorf("tar %s: %w", srcDir, err)
 	}
 
-	if err := tw.Close(); err != nil {
+	if err := writer.tw.Close(); err != nil {
 		return fmt.Errorf("tar %s: close: %w", srcDir, err)
 	}
 
@@ -59,24 +69,60 @@ type Member struct {
 // Like Tar, it streams and never stages to disk; it is the multi-member form of
 // the prepare pipeline's first stage (SPEC §4.3).
 func TarMembers(ctx context.Context, w io.Writer, members []Member) error {
-	tw := tar.NewWriter(w)
+	writer := newTarWriter(w)
 
 	for _, member := range members {
-		if err := tarTree(ctx, tw, member.Dir, member.Subdir); err != nil {
+		if err := writer.tree(ctx, member.Dir, member.Subdir); err != nil {
 			return fmt.Errorf("tar member %s: %w", member.Subdir, err)
 		}
 	}
 
-	if err := tw.Close(); err != nil {
+	if err := writer.tw.Close(); err != nil {
 		return fmt.Errorf("tar members: close: %w", err)
 	}
 
 	return nil
 }
 
-// tarTree walks srcDir and writes each entry to tw with its name relative to
-// srcDir, prefixed by prefix (the member subdirectory, empty for a single tree).
-func tarTree(ctx context.Context, tw *tar.Writer, srcDir, prefix string) error {
+// tarWriter carries the shared state for writing one archive: the archive/tar
+// writer, the underlying stream (used to emit hand-rolled sparse members that
+// the standard writer cannot produce), and the archive-wide hardlink index.
+type tarWriter struct {
+	tw  *tar.Writer
+	raw io.Writer
+	// links maps an already-written file's {device, inode} identity to its
+	// in-archive name so later sightings become hardlink entries. It spans the
+	// whole archive; distinct source datasets have distinct device numbers, so
+	// links never falsely cross unrelated members.
+	links map[fileID]string
+}
+
+func newTarWriter(w io.Writer) *tarWriter {
+	return &tarWriter{
+		tw:    tar.NewWriter(w),
+		raw:   w,
+		links: make(map[fileID]string),
+	}
+}
+
+// fileID identifies an inode within a device. It is the key used to detect
+// hardlinks: two paths with the same fileID name the same on-disk file.
+type fileID struct {
+	dev uint64
+	ino uint64
+}
+
+// sparseRegion is one allocated data extent of a sparse file: length bytes of
+// real data starting at offset. The gaps between regions (and any tail up to the
+// logical size) are holes that read back as zeros.
+type sparseRegion struct {
+	offset int64
+	length int64
+}
+
+// tree walks srcDir and writes each entry with its name relative to srcDir,
+// prefixed by prefix (the member subdirectory, empty for a single tree).
+func (w *tarWriter) tree(ctx context.Context, srcDir, prefix string) error {
 	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -86,16 +132,15 @@ func tarTree(ctx context.Context, tw *tar.Writer, srcDir, prefix string) error {
 			return err
 		}
 
-		return writeTarEntry(ctx, tw, srcDir, prefix, path, entry)
+		return w.writeEntry(ctx, srcDir, prefix, path, entry)
 	})
 }
 
-// writeTarEntry writes a single filesystem entry to tw, with a name relative to
-// srcDir and prefixed by prefix. With no prefix the root directory itself is
-// skipped so the archive holds only its contents (Tar); with a prefix the root
-// maps to the member subdirectory entry so empty members are preserved
-// (TarMembers).
-func writeTarEntry(ctx context.Context, tw *tar.Writer, srcDir, prefix, path string, entry fs.DirEntry) error {
+// writeEntry writes a single filesystem entry, with a name relative to srcDir
+// and prefixed by prefix. With no prefix the root directory itself is skipped so
+// the archive holds only its contents (Tar); with a prefix the root maps to the
+// member subdirectory entry so empty members are preserved (TarMembers).
+func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix, path string, entry fs.DirEntry) error {
 	rel, err := filepath.Rel(srcDir, path)
 	if err != nil {
 		return err
@@ -114,8 +159,21 @@ func writeTarEntry(ctx context.Context, tw *tar.Writer, srcDir, prefix, path str
 		return err
 	}
 
+	mode := info.Mode()
+
+	// Sockets, devices, and named pipes (FIFOs) cannot be represented by a
+	// portable file-by-file tar and carry no recoverable data. Skip them with a
+	// warning so a stale socket in a snapshot (e.g. a database datadir) does not
+	// abort the whole run.
+	if mode&(fs.ModeSocket|fs.ModeDevice|fs.ModeCharDevice|fs.ModeNamedPipe) != 0 {
+		slog.WarnContext(ctx, "skipping non-archivable entry",
+			"path", path, "type", mode.Type().String())
+
+		return nil
+	}
+
 	link := ""
-	if info.Mode()&fs.ModeSymlink != 0 {
+	if mode&fs.ModeSymlink != 0 {
 		link, err = os.Readlink(path)
 		if err != nil {
 			return err
@@ -140,37 +198,83 @@ func writeTarEntry(ctx context.Context, tw *tar.Writer, srcDir, prefix, path str
 		header.Name += "/"
 	}
 
-	if err := tw.WriteHeader(header); err != nil {
+	if !mode.IsRegular() {
+		return w.writeHeaderOnly(header)
+	}
+
+	// A regular file with more than one link is stored once. The first sighting
+	// records the in-archive name and writes the body; later sightings of the
+	// same inode become hardlink entries pointing at it, so the archive is not
+	// enlarged by a second full copy.
+	if id, ok := hardlinkID(info); ok {
+		if target, seen := w.links[id]; seen {
+			header.Typeflag = tar.TypeLink
+			header.Linkname = target
+			header.Size = 0
+
+			return w.writeHeaderOnly(header)
+		}
+
+		w.links[id] = header.Name
+	}
+
+	return w.writeRegularFile(ctx, header, path)
+}
+
+// writeHeaderOnly writes a header that carries no file body (directory, symlink,
+// or hardlink entry).
+func (w *tarWriter) writeHeaderOnly(header *tar.Header) error {
+	if err := w.tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("write header %s: %w", header.Name, err)
 	}
 
-	if !info.Mode().IsRegular() {
-		return nil
-	}
-
-	return copyFileContents(ctx, tw, path)
+	return nil
 }
 
-// copyFileContents streams the contents of the file at path into tw. The copy
-// honors ctx cancellation per read buffer so a single large file does not block
-// cancellation. It closes the file explicitly so a close error on the read side
+// writeRegularFile writes the header and body for a regular file at path. Sparse
+// files are encoded so their holes are not written out; all other files stream
+// contiguously. It closes the file explicitly so a close error on the read side
 // is not silently dropped.
-func copyFileContents(ctx context.Context, tw *tar.Writer, path string) error {
+func (w *tarWriter) writeRegularFile(ctx context.Context, header *tar.Header, path string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 
-	_, copyErr := io.Copy(tw, ctxReader{ctx: ctx, r: file})
-
+	writeErr := w.writeRegularBody(ctx, header, file, path)
 	closeErr := file.Close()
 
-	if copyErr != nil {
-		return fmt.Errorf("copy %s: %w", path, copyErr)
+	if writeErr != nil {
+		return writeErr
 	}
 
 	if closeErr != nil {
 		return fmt.Errorf("close %s: %w", path, closeErr)
+	}
+
+	return nil
+}
+
+// writeRegularBody writes header then copies file's contents. When the file is
+// sparse it is emitted as a GNU sparse 1.0 entry; otherwise the contents stream
+// contiguously. The copy honors ctx cancellation per read buffer so a single
+// large file does not block cancellation.
+func (w *tarWriter) writeRegularBody(ctx context.Context, header *tar.Header, file *os.File, path string) error {
+	regions, sparse, err := sparseDataRegions(file, header.Size)
+	if err != nil {
+		return fmt.Errorf("probe %s: %w", path, err)
+	}
+
+	if sparse {
+		return w.writeSparseEntry(ctx, header, file, regions)
+	}
+
+	if err := w.writeHeaderOnly(header); err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(w.tw, ctxReader{ctx: ctx, r: file}); err != nil {
+		return fmt.Errorf("copy %s: %w", path, err)
 	}
 
 	return nil
