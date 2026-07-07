@@ -4,7 +4,7 @@ The **control worker** runs in Kubernetes and orchestrates runs on the `control`
 queue: it drives the backup workflow, discovers ZFS snapshots via the Kubernetes API, and
 posts failure notifications to Discord (`DISCORD_FAILURE_WEBHOOK_URL`). It never touches
 bulk data or tape hardware — that is the data worker's job (SPEC §4.1: "Lightweight, no
-bulk data"). It is the same `cmd/worker` binary as the data worker; the `role` env var
+bulk data"). It is the same `cmd/worker` binary as the data worker; the `ROLE` env var
 selects the `control` task queue at run time.
 
 The image is built reproducibly with Nix (`pkgs.dockerTools.streamLayeredImage`, per

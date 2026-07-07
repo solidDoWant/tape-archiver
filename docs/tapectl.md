@@ -113,10 +113,11 @@ it is reported as `none`.
 
 ## `tapectl resume`
 
-Resume the paused backup run. It resumes either operator-in-the-loop pause (SPEC §4.3): the
-Eject phase paused because the import/export station filled (phase 8), or the tape path
-paused because a Load or Write failed for one drive-set (phases 6–8). Runs are a singleton
-(SPEC §4.2), so it takes no arguments.
+Resume the paused backup run. It resumes any of the operator-in-the-loop pauses (SPEC §4.3):
+the Eject phase paused because the import/export station filled (phase 8), the tape path
+paused because a Load or Write failed for one drive-set (phases 6–8), or the Burn phase
+paused to load fresh blank discs or on a burn failure/verify mismatch/refused non-blank disc
+(phase 10). Runs are a singleton (SPEC §4.2), so it takes no arguments.
 
 ```
 tapectl resume
@@ -168,4 +169,6 @@ Abort signal sent to run backup.
 
 The tapes that wrote successfully before the failure are already ejected and recorded; the
 report covers them (as does the recovery ISO, when optical burning is enabled). Sending
-`abort` to a run that is not paused on a Load/Write failure has no effect.
+`abort` during a Burn-phase pause also acts: it ends the run with no further discs burned
+(the discs that already verified are kept). Outside a Load/Write pause or a Burn-phase
+pause, `abort` has no effect.

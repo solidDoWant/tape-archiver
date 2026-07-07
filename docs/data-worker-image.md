@@ -4,7 +4,7 @@ The **data worker** runs as a container on the storage host (`ubuntu-storage-hos
 and performs every bulk-data activity where the bytes already live — `tar`, `age`, PAR2,
 checksums, LTFS format/mount/write, and library moves — plus building the PDF report (and
 the recovery ISO when optical burning is enabled) and delivering the report to Discord
-(SPEC §4.1, §4.3). It is the same `cmd/worker` binary as the control worker; the `role`
+(SPEC §4.1, §4.3). It is the same `cmd/worker` binary as the control worker; the `ROLE`
 env var selects the `data` task queue at run time.
 
 The image is built reproducibly with Nix (`pkgs.dockerTools.streamLayeredImage`, per

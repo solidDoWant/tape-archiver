@@ -111,7 +111,7 @@ Common Make targets (see the [`Makefile`](Makefile) for the full list):
 | `make test` | Unit tests with `-race`. |
 | `make test-integration` | Integration tests against `mhvtl` + dev Temporal. |
 | `make test-e2e` | End-to-end tests. |
-| `make benchmark` | Write-rate / shoe-shining benchmarks (real hardware). |
+| `make benchmark` | Write-rate / shoe-shining benchmarks (real hardware) — **not yet implemented** (stub; exits non-zero). |
 | `make generate-schema` | Regenerate the committed config JSON schema. |
 | `make build-images` | Build the worker OCI image(s) via Nix. |
 | `make helm` | Package the control-worker Helm chart. |
