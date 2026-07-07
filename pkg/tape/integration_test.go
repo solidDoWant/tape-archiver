@@ -207,8 +207,11 @@ func TestTransferToIO(t *testing.T) {
 	assert.False(t, inv.Slots[0].Full, "source slot should be empty after transfer")
 }
 
-// TestLogPages verifies that sg_logs can be queried against the mhvtl drive
-// and that TapeAlert flags are parsed without error.
+// TestLogPages verifies that sg_logs can be queried against the mhvtl drive and
+// that both TapeAlert flags (page 0x2e) and the reposition counter (page 0x30,
+// total_suspended_writes) are parsed. The mhvtl IBM LTO-6 drive supports page
+// 0x30, so the reposition counter must actually be measured (not silently zero):
+// a fresh drive reports it measured and at zero.
 func TestLogPages(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 
@@ -224,4 +227,7 @@ func TestLogPages(t *testing.T) {
 
 	assert.NotEmpty(t, result.TapeAlert.Flags, "should have parsed TapeAlert flags")
 	assert.False(t, result.TapeAlert.AnySet(), "no TapeAlert flags should be set on a fresh virtual drive")
+
+	assert.True(t, result.RepositionsMeasured, "the LTO-6 drive supports page 0x30, so repositions must be measured, not silently zero")
+	assert.Zero(t, result.Repositions, "a fresh virtual drive should not have back-hitched")
 }

@@ -1,0 +1,20 @@
+{
+    "json_format_version": [
+        1,
+        0
+    ],
+    "utility_invoked": {
+        "name": "sg_logs",
+        "version_date": "2.35 20230622",
+        "argv": [
+            "sg_logs",
+            "--page=0x38",
+            "--json",
+            "/dev/sg1"
+        ]
+    },
+    "exit_status": {
+        "i": 5,
+        "meaning": "Illegal request"
+    }
+}

@@ -1,0 +1,72 @@
+{
+    "json_format_version": [
+        1,
+        0
+    ],
+    "utility_invoked": {
+        "name": "sg_logs",
+        "version_date": "2.35 20230622",
+        "argv": [
+            "sg_logs",
+            "--page=0x30",
+            "--json",
+            "/dev/sg1"
+        ]
+    },
+    "tape_usage_log_page": {
+        "ds": 0,
+        "spf": 0,
+        "page_code": 48,
+        "subpage_code": 0,
+        "tape_usage_log_parameters": [
+            {
+                "parameter_code": 1,
+                "thread_count": 3
+            },
+            {
+                "parameter_code": 2,
+                "total_data_sets_written": 0
+            },
+            {
+                "parameter_code": 3,
+                "total_write_retries": 0
+            },
+            {
+                "parameter_code": 4,
+                "total_unrecovered_write_errors": 0
+            },
+            {
+                "parameter_code": 5,
+                "total_suspended_writes": 0
+            },
+            {
+                "parameter_code": 6,
+                "total_fatal_suspended_writes": 0
+            },
+            {
+                "parameter_code": 7,
+                "total_data_sets_read": 0
+            },
+            {
+                "parameter_code": 8,
+                "total_read_retries": 0
+            },
+            {
+                "parameter_code": 9,
+                "total_unrecovered_read_errors": 0
+            },
+            {
+                "parameter_code": 10,
+                "total_suspended_reads": 0
+            },
+            {
+                "parameter_code": 11,
+                "total_fatal_suspended_reads": 0
+            }
+        ]
+    },
+    "exit_status": {
+        "i": 0,
+        "meaning": "no errors"
+    }
+}

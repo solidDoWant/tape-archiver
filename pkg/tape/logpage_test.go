@@ -76,34 +76,42 @@ func TestParseTapeAlert(t *testing.T) {
 	}
 }
 
-func TestParseRepositions(t *testing.T) {
+// TestParseTapeUsage exercises the reposition parse path against real captured
+// output of the pinned sg_logs 2.35 (page 0x30, --json). The backhitch fixture is
+// a real drive capture with total_suspended_writes set non-zero; the test fails
+// if the parser cannot extract that non-zero count. The unsupported fixture is
+// valid sg_logs JSON that lacks the Tape usage page, proving "not measured" is
+// observable and distinct from a measured zero.
+func TestParseTapeUsage(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		// input is the sg_logs output to parse.
-		input string
-		want  int64
+		name         string
+		fixture      string
+		wantCount    int64
+		wantMeasured bool
+		wantErr      require.ErrorAssertionFunc
 	}{
 		{
-			name:  "no repositions field",
-			input: "Sequential-Access Device page  [0x24]:\n  Thread count = 0\n",
-			want:  0,
+			name:         "clean drive: measured zero",
+			fixture:      "testdata/sg_logs_tapeusage_clean.json",
+			wantCount:    0,
+			wantMeasured: true,
+			wantErr:      require.NoError,
 		},
 		{
-			name:  "repositions field present",
-			input: "Sequential-Access Device page  [0x24]:\n  Repositions = 42\n",
-			want:  42,
+			name:         "back-hitched drive: non-zero count",
+			fixture:      "testdata/sg_logs_tapeusage_backhitch.json",
+			wantCount:    137,
+			wantMeasured: true,
+			wantErr:      require.NoError,
 		},
 		{
-			name:  "back-hitch spelling variant",
-			input: "Back-hitches = 7\n",
-			want:  7,
-		},
-		{
-			name:  "empty output",
-			input: "",
-			want:  0,
+			name:         "page unsupported: not measured",
+			fixture:      "testdata/sg_logs_tapeusage_unsupported.json",
+			wantCount:    0,
+			wantMeasured: false,
+			wantErr:      require.NoError,
 		},
 	}
 
@@ -111,7 +119,30 @@ func TestParseRepositions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, parseRepositions(tc.input))
+			data, err := os.ReadFile(tc.fixture)
+			require.NoError(t, err, "read fixture")
+
+			count, measured, err := parseTapeUsage(string(data))
+			tc.wantErr(t, err)
+
+			if err != nil {
+				return
+			}
+
+			assert.Equal(t, tc.wantCount, count, "reposition count")
+			assert.Equal(t, tc.wantMeasured, measured, "measured")
 		})
 	}
+}
+
+// TestParseTapeUsageMalformed asserts a malformed JSON body is surfaced as an
+// error (a page the drive answered but could not be decoded is a real fault), not
+// silently reported as a measured zero.
+func TestParseTapeUsageMalformed(t *testing.T) {
+	t.Parallel()
+
+	count, measured, err := parseTapeUsage("{not json")
+	require.Error(t, err)
+	assert.Zero(t, count)
+	assert.False(t, measured)
 }

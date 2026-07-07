@@ -58,12 +58,16 @@ Each tape row records:
   vendor-dependent). A capacity that maps to no known generation renders the floor as
   `n/a` — the throughput is still reported, but no below-floor verdict is made rather
   than judging against a guessed number.
-- **Repositions** — the drive's back-hitch count from SCSI log page `0x24`. A drive that
-  does not support the page reports zero.
-- **Status** — `healthy` when the tape streamed at or above a known floor with zero
-  repositions and no TapeAlert flags; otherwise the specific flags: `below floor`,
-  `N repositions`, the active `TapeAlert` flag descriptions from log page `0x2e`, and/or
-  `floor unknown for this LTO generation` when no floor is recorded for the generation.
+- **Repositions** — the drive's back-hitch count (`total_suspended_writes`) from the SCSI
+  Tape usage log page `0x30` (LTO-5/6). A drive that does not support the page renders
+  `n/m` (not measured) rather than a zero, so an unread counter is never mistaken for a
+  measured-zero clean write.
+- **Status** — `healthy` when the tape streamed at or above a known floor with a measured
+  reposition count of zero and no TapeAlert flags; otherwise the specific flags:
+  `below floor`, `N repositions`, `reposition counter not supported` when the drive does
+  not support page `0x30`, the active `TapeAlert` flag descriptions from log page `0x2e`,
+  and/or `floor unknown for this LTO generation` when no floor is recorded for the
+  generation.
 
 A tape that carries no measurement (e.g. a virtual/dry-run tape, which does not reflect
 real throughput) renders as `not measured`.

@@ -130,8 +130,13 @@ type WriteHealth struct {
 	FloorKnown bool
 	// BelowFloor is true when the throughput fell below a known FloorMBps.
 	BelowFloor bool
-	// Repositions is the drive's back-hitch count (SCSI log page 0x24).
+	// Repositions is the drive's back-hitch count (total_suspended_writes, SCSI
+	// Tape usage log page 0x30). Meaningful only when RepositionsMeasured is true.
 	Repositions int64
+	// RepositionsMeasured is true when the reposition counter was read from the
+	// drive (it supports page 0x30). When false the counter was not measured and
+	// the report must not imply a clean back-hitch verdict from it.
+	RepositionsMeasured bool
 	// TapeAlertFlags are the active TapeAlert flags (SCSI log page 0x2e), if any.
 	TapeAlertFlags []string
 	// Healthy is true when the tape streamed cleanly: at or above the floor, with no
@@ -621,7 +626,14 @@ func (d *doc) writeHealthSection(m Manifest) {
 			}
 
 			thr = fmt.Sprintf("%.1f", health.ThroughputMBps)
-			repos = strconv.FormatInt(health.Repositions, 10)
+
+			// "n/m" (not measured) distinguishes a drive that does not support the
+			// reposition counter (page 0x30) from a measured zero, so the row never
+			// implies a clean back-hitch verdict from an unread counter (SPEC §14).
+			repos = "n/m"
+			if health.RepositionsMeasured {
+				repos = strconv.FormatInt(health.Repositions, 10)
+			}
 		}
 
 		d.tableRow([]rowCell{
@@ -655,7 +667,10 @@ func writeHealthStatus(health *WriteHealth) string {
 		flags = append(flags, fmt.Sprintf("below floor (%.1f < %.0f MB/s)", health.ThroughputMBps, health.FloorMBps))
 	}
 
-	if health.Repositions > 0 {
+	switch {
+	case !health.RepositionsMeasured:
+		flags = append(flags, "reposition counter not supported")
+	case health.Repositions > 0:
 		flags = append(flags, fmt.Sprintf("%d repositions", health.Repositions))
 	}
 

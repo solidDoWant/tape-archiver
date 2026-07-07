@@ -101,7 +101,16 @@ func (r TapeAlertResult) AnySet() bool {
 // LogPageResult holds drive health indicators scraped from sg_logs.
 type LogPageResult struct {
 	TapeAlert TapeAlertResult
-	// Repositions is the number of back-hitches (tape repositions) since the
-	// last reset, from sequential-access log page 0x24. Zero when unavailable.
+	// Repositions is the number of write suspensions (back-hitches / tape
+	// repositions) since the last reset, read as total_suspended_writes
+	// (parameter code 5) from the Tape usage log page (0x30, LTO-5/6). It is
+	// meaningful only when RepositionsMeasured is true; when that is false the
+	// counter could not be read (the drive does not support page 0x30) and this
+	// value is a zero placeholder, not a measured zero.
 	Repositions int64
+	// RepositionsMeasured is true when the reposition counter was actually read
+	// from page 0x30. It distinguishes "measured as zero" (true, Repositions==0)
+	// from "not measured" (false), so an unread counter can never certify a clean
+	// streaming write.
+	RepositionsMeasured bool
 }
