@@ -92,6 +92,40 @@ slots, not on any particular library model.
 
 ---
 
+## Clearing a leaked source-snapshot hold
+
+For the duration of a run, tape-archiver pins each of its ZFS source snapshots with a
+`zfs hold` so an external prune (`zfs destroy`) cannot delete a snapshot mid-run (SPEC
+§4.3). The hold is tagged `tape-archiver-hold-<run-id>` — reconstructable from the run
+alone, with no cross-run state (SPEC §4.2) — and is **released automatically on every
+run exit**: success, failure, or cancellation.
+
+A hard **Terminate** of a run (as opposed to a cancel) skips the workflow's cleanup, so
+it can leave a hold behind. A leaked hold is harmless — it never blocks a future run,
+whose hold carries a different run-id tag — but it keeps the affected snapshot
+undestroyable until cleared, which can defeat an external snapshot-pruning policy. It is
+fully observable and clearable by hand; there is no hidden state to reconcile:
+
+1. **List the holds** on a snapshot you expect to be prunable:
+
+   ```
+   zfs holds bulk-pool-01/archive@daily-2026-06-28
+   ```
+
+   A leaked hold shows a `tape-archiver-hold-<run-id>` tag whose run is no longer active
+   (cross-check the run id in Temporal).
+
+2. **Release it** once you have confirmed the run is truly gone:
+
+   ```
+   zfs release tape-archiver-hold-<run-id> bulk-pool-01/archive@daily-2026-06-28
+   ```
+
+Only release a hold whose run has ended — releasing an in-flight run's hold removes the
+very protection this feature provides.
+
+---
+
 ## Barcode label convention
 
 The library-read **barcode is the canonical physical tape ID** (SPEC §6): the SCSI volume

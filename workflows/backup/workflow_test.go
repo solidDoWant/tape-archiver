@@ -47,6 +47,10 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 
 	env.RegisterActivity(&ResolveControlActivities{})
 	env.RegisterActivity(&ResolveDataActivities{})
+	// The source-snapshot hold runs after Resolve; register its activities so the
+	// test env can dispatch them. With no sources the work list is empty and the
+	// workflow dispatches neither hold nor release.
+	env.RegisterActivity(newHoldActivities())
 	// The Prepare phase is run-orchestrated like Resolve; register its activity
 	// with a real staging root so a run with no sources stages nothing and the
 	// activity does not reject an empty staging directory.

@@ -116,6 +116,47 @@ func TestParseUserProperties(t *testing.T) {
 	}
 }
 
+func TestParseHolds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		out  string
+		want []string
+	}{
+		{
+			name: "single hold",
+			out:  "bulk-pool-01/archive@daily\ttape-archiver-hold-abc123\tTue Jun 28 12:00 2026\n",
+			want: []string{"tape-archiver-hold-abc123"},
+		},
+		{
+			name: "multiple holds on one snapshot",
+			out: "bulk-pool-01/archive@daily\ttape-archiver-hold-abc123\tTue Jun 28 12:00 2026\n" +
+				"bulk-pool-01/archive@daily\tzrepl_replication\tWed Jun 29 09:30 2026\n",
+			want: []string{"tape-archiver-hold-abc123", "zrepl_replication"},
+		},
+		{
+			name: "no holds (empty output)",
+			out:  "",
+			want: nil,
+		},
+		{
+			name: "trailing newline only",
+			out:  "\n",
+			want: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := parseHolds([]byte(test.out))
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
 func TestParseLogicalReferenced(t *testing.T) {
 	t.Parallel()
 

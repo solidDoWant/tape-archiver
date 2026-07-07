@@ -26,6 +26,13 @@ const (
 	PhaseDeliver      = "Deliver"
 )
 
+// PhaseHold labels the source-snapshot hold that runs between Resolve and Prepare
+// (SPEC §4.3). It is not one of the numbered pipeline phases above: it never
+// enters CompletedPhases or the LastCompletedPhaseQuery, and exists only so the
+// failure alert can tell an operator the run stopped while pinning its source
+// snapshots.
+const PhaseHold = "Hold"
+
 // defaultActivityTimeout bounds each phase activity for the scaffold. It is a
 // deliberately generous placeholder; each phase sub-issue sets a timeout (and
 // retry policy) suited to its real work — Write runs for hours, Resolve for
@@ -170,6 +177,25 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 
 		state.lastCompletedPhase = currentPhase.name
 		result.CompletedPhases = append(result.CompletedPhases, currentPhase.name)
+
+		// Immediately after Resolve produces the work list, pin every resolved
+		// source snapshot with a run-scoped `zfs hold` for the run's duration, and
+		// register its release on every exit path (SPEC §4.3). A hold failure fails
+		// the run here, before any staging: the hold exists to guarantee the
+		// snapshot is pinned before hours of Prepare work, so proceeding unprotected
+		// would defeat it. The release is deferred once (Resolve runs once) so it
+		// fires at workflow return on success, failure, and cancellation.
+		if currentPhase.name == PhaseResolve {
+			failingPhase = PhaseHold
+
+			if err = holdSnapshots(ctx, state); err != nil {
+				err = fmt.Errorf("phase %s: %w", PhaseHold, err)
+
+				return Result{}, err
+			}
+
+			defer releaseSnapshots(ctx, state)
+		}
 	}
 
 	return result, nil

@@ -167,6 +167,121 @@ func UserProperty(ctx context.Context, dataset, property string) (string, error)
 	return strings.TrimSpace(string(out)), nil
 }
 
+// Hold places a ZFS user hold tagged tag on the given snapshot (e.g.
+// bulk-pool-01/archive@daily-2026-06-28), pinning it against destruction: a
+// snapshot with any hold cannot be removed by `zfs destroy` until every hold is
+// released. A backup run holds each of its source snapshots for the run's
+// duration so external pruning cannot delete a snapshot mid-run (SPEC.md §4.3).
+//
+// It runs "zfs hold <tag> <snapshot>". The operation is idempotent: when the tag
+// is already present on the snapshot zfs exits non-zero reporting "tag already
+// exists", which is treated as success so an activity retry that re-holds is a
+// harmless no-op.
+func Hold(ctx context.Context, tag, snapshot string) error {
+	cmd := exec.CommandContext(ctx, "zfs", "hold", tag, snapshot)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if strings.Contains(msg, "tag already exists") {
+			return nil
+		}
+
+		if msg != "" {
+			return fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	return nil
+}
+
+// Release removes the ZFS user hold tagged tag from the given snapshot,
+// unpinning it so it can be destroyed once no other holds remain. A run releases
+// its holds on every exit path (success, failure, cancellation) so a completed
+// run never leaves a snapshot pinned (SPEC.md §4.3).
+//
+// It runs "zfs release <tag> <snapshot>". It is tolerant of an already-absent
+// hold: when zfs exits non-zero reporting "no such tag" (the hold was never
+// placed, or was already released) that is treated as success, so releasing on
+// an exit path where the hold was never taken is a harmless no-op.
+func Release(ctx context.Context, tag, snapshot string) error {
+	cmd := exec.CommandContext(ctx, "zfs", "release", tag, snapshot)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if strings.Contains(msg, "no such tag") {
+			return nil
+		}
+
+		if msg != "" {
+			return fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	return nil
+}
+
+// Holds returns the user-hold tags currently placed on the given snapshot, so a
+// caller can confirm a hold is present (or gone). An unheld snapshot yields an
+// empty list, not an error.
+//
+// It runs "zfs holds -H <snapshot>": -H drops the header and emits tab-delimited
+// fields (NAME, TAG, TIMESTAMP) one line per hold. The tags are extracted by the
+// pure parseHolds helper.
+func Holds(ctx context.Context, snapshot string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "zfs", "holds", "-H", snapshot)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return nil, fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	return parseHolds(out), nil
+}
+
+// parseHolds extracts the hold tags from "zfs holds -H" output. Each line is
+// "<snapshot>\t<tag>\t<timestamp>"; -H tab-delimits the three columns, so the tag
+// is field 2. The timestamp column may itself contain spaces, but never a tab, so
+// splitting on tab isolates the tag cleanly. Lines with fewer than two fields
+// (none expected) are skipped, and empty output yields an empty list.
+func parseHolds(out []byte) []string {
+	var tags []string
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+
+		tags = append(tags, fields[1])
+	}
+
+	return tags
+}
+
 // parseUserProperties extracts the user properties from "zfs get -H -o
 // property,value all" output. Each line is "<property>\t<value>"; a property is a
 // user property when its name contains a colon (the ZFS namespace separator).
