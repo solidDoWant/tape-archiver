@@ -221,6 +221,7 @@ func TestResolveAndCheck(t *testing.T) {
 		overhead    *float64
 		capacity    int64
 		assertErr   require.ErrorAssertionFunc
+		errContains string
 		want        []ResolvedArchive
 	}{
 		{
@@ -348,6 +349,23 @@ func TestResolveAndCheck(t *testing.T) {
 			capacity:   testTapeCapacity,
 			assertErr:  require.Error,
 		},
+		{
+			// A 500 GB source fits on one tape (estimate 577.5 GB < 2.5 TB capacity),
+			// so the capacity check passes — but a 1 MB slice size yields ~577k
+			// slices, whose activity metadata blows past the Temporal payload bound.
+			// The run must fail here, in Resolve, before any staging, naming the
+			// offending config field.
+			name:    "rejects a slice size that would grow the payload past the Temporal limit",
+			sources: []config.Source{zfsSource("pool/big@snap")},
+			pool: fakePool{
+				properties: map[string]map[string]string{"pool/big@snap": {}},
+				sizes:      map[string]int64{"pool/big@snap": 500_000_000_000},
+			},
+			redundancy:  config.Redundancy{TargetPercentage: floatPtr(10), SliceSizeBytes: 1_000_000},
+			capacity:    testTapeCapacity,
+			assertErr:   require.Error,
+			errContains: "redundancy.sliceSizeBytes",
+		},
 	}
 
 	for _, test := range tests {
@@ -368,6 +386,10 @@ func TestResolveAndCheck(t *testing.T) {
 
 			got, err := activities.ResolveAndCheck(t.Context(), ResolveDataInput{Config: cfg, K8sArchives: test.k8sArchives})
 			test.assertErr(t, err)
+
+			if test.errContains != "" {
+				require.ErrorContains(t, err, test.errContains)
+			}
 
 			if err == nil {
 				assert.Equal(t, test.want, got)
@@ -404,6 +426,103 @@ func TestFeasibilityEstimateRoundsUp(t *testing.T) {
 	// 1000 * 1.05 * 1.10 = 1155 exactly; 333 * 1.05 * 1.0 = 349.65 -> 350.
 	assert.Equal(t, int64(1155), feasibilityEstimate(1000, 1.05, 0.10))
 	assert.Equal(t, int64(350), feasibilityEstimate(333, 1.05, 0))
+}
+
+func TestCheckPayloadBound(t *testing.T) {
+	t.Parallel()
+
+	// archive is a ResolvedArchive carrying only the field the bound reads.
+	archive := func(estimatedBytes int64) ResolvedArchive {
+		return ResolvedArchive{EstimatedBytes: estimatedBytes}
+	}
+
+	tests := []struct {
+		name           string
+		resolved       []ResolvedArchive
+		sliceSizeBytes int64
+		assertErr      require.ErrorAssertionFunc
+	}{
+		{
+			// Budget is half of 2 MiB = 1048576 bytes; at 256 B/slice that is 4096
+			// slices. A 1 MiB estimate at a 256 B slice size is exactly 4096 slices,
+			// landing on the budget — it must pass.
+			name:           "estimate exactly on the budget passes",
+			resolved:       []ResolvedArchive{archive(1024 * 1024)},
+			sliceSizeBytes: 256,
+			assertErr:      require.NoError,
+		},
+		{
+			// One byte more of source pushes to 4097 slices, one over the budget.
+			name:           "estimate one slice over the budget is rejected",
+			resolved:       []ResolvedArchive{archive(1024*1024 + 1)},
+			sliceSizeBytes: 256,
+			assertErr:      require.Error,
+		},
+		{
+			// A comfortably-sized config (1 GiB slices on a modest source) is far
+			// under the budget (AC2).
+			name:           "comfortably-sized slice is not rejected",
+			resolved:       []ResolvedArchive{archive(3 * 1024 * 1024 * 1024)},
+			sliceSizeBytes: 1 << 30,
+			assertErr:      require.NoError,
+		},
+		{
+			// A too-small slice on a large source is rejected up front (AC1):
+			// 500 GB at 100 MiB slices is ~4769 slices, over the 4096 budget.
+			name:           "tiny slice on a large source is rejected",
+			resolved:       []ResolvedArchive{archive(500_000_000_000)},
+			sliceSizeBytes: 100 * 1024 * 1024,
+			assertErr:      require.Error,
+		},
+		{
+			// The whole-run count is summed across archives: two archives that each
+			// fit alone can jointly exceed the budget.
+			name:           "slice counts sum across archives",
+			resolved:       []ResolvedArchive{archive(600_000), archive(600_000)},
+			sliceSizeBytes: 256,
+			assertErr:      require.Error,
+		},
+		{
+			// A non-positive slice size is guarded upstream by config.Validate; the
+			// bound must not divide by zero.
+			name:           "non-positive slice size is a no-op",
+			resolved:       []ResolvedArchive{archive(1 << 40)},
+			sliceSizeBytes: 0,
+			assertErr:      require.NoError,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			test.assertErr(t, checkPayloadBound(test.resolved, test.sliceSizeBytes))
+		})
+	}
+}
+
+// TestCheckPayloadBoundNamesFieldAndSuggests asserts the rejection message is
+// actionable: it names redundancy.sliceSizeBytes and suggests a minimum slice size
+// that, when applied, actually clears the bound (AC1).
+func TestCheckPayloadBoundNamesFieldAndSuggests(t *testing.T) {
+	t.Parallel()
+
+	// A 500 GB source at a 1 MB slice size is ~500k slices, whose metadata far
+	// exceeds the budget.
+	resolved := []ResolvedArchive{{EstimatedBytes: 500_000_000_000}}
+	sliceSizeBytes := int64(1_000_000)
+
+	err := checkPayloadBound(resolved, sliceSizeBytes)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "redundancy.sliceSizeBytes")
+	assert.ErrorContains(t, err, "increase sliceSizeBytes to at least")
+
+	// The suggested minimum must clear the bound. Recompute it the same way the
+	// helper does and confirm the bound passes at that size.
+	maxSlices := int64((2 * 1024 * 1024 / 2) / 256)
+	headroom := maxSlices - int64(len(resolved))
+	suggested := (resolved[0].EstimatedBytes + headroom - 1) / headroom
+	require.NoError(t, checkPayloadBound(resolved, suggested))
 }
 
 // TestResolveFailureAbortsBeforePrepare asserts that when Resolve fails, the run

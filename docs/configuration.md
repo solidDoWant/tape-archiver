@@ -169,7 +169,7 @@ PAR2 redundancy policy. Exactly one of `targetPercentage` or `fillToCapacity` mu
 |-------|------|----------|-------------|
 | `targetPercentage` | `number` | no* | Fixed PAR2 redundancy as a percentage of the data size (≥ 0). |
 | `fillToCapacity` | `FillConfig` | no* | Expand PAR2 to fill each tape's remaining space down to a minimum floor. |
-| `sliceSizeBytes` | `integer` | yes | Fixed size of each encrypted data slice in bytes. The PAR2 block size is derived from this and the tape capacity. Must be > 0. |
+| `sliceSizeBytes` | `integer` | yes | Fixed size of each encrypted data slice in bytes. The PAR2 block size is derived from this and the tape capacity. Must be > 0. Additionally bounded relative to the resolved source size: a value so small that the run's total slice count would grow an activity payload past Temporal's ~2 MB limit is rejected up front during the Resolve phase, before any staging, with an error naming `sliceSizeBytes` and a suggested minimum. See [Slice size and payload bound](#slice-size-and-payload-bound). |
 
 \* Exactly one of `targetPercentage` or `fillToCapacity` must be provided.
 
@@ -192,6 +192,22 @@ Example — fill-to-capacity (expand PAR2 to fill each tape, never below a 5% fl
 ```json
 { "fillToCapacity": { "floor": 5 }, "sliceSizeBytes": 4294967296 }
 ```
+
+### Slice size and payload bound
+
+Every staged slice carries a small metadata record (path, SHA-256, size) that rides
+inside Temporal activity payloads throughout the run. Temporal caps a single payload
+at roughly 2 MB, so the run's total slice count is bounded: `sliceSizeBytes` too small
+for the resolved source size would produce so many slices that a payload would exceed
+that limit only after up to a day of staging.
+
+To surface this as a configuration error instead of a late, generic
+payload-too-large failure, the Resolve phase estimates the whole-run slice count from
+the resolved source size and rejects a too-small `sliceSizeBytes` **before any
+staging begins**. The error names `sliceSizeBytes`, states the source-size
+relationship, and suggests a minimum value. A comfortably-sized slice (for example,
+1 GiB slices on a few-terabyte source) is never affected. Raising `sliceSizeBytes`
+per the suggestion resolves it.
 
 ---
 
