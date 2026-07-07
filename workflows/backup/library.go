@@ -89,12 +89,21 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 
 	loaded := make([]LoadedTape, setSize)
 
+	// claimed records the storage slots consumed by relocations of unexpected
+	// tapes earlier in this Load. The inventory is read once before the loop, so
+	// each iteration works from that stale snapshot; without this set, two drives
+	// both holding unexpected tapes would be offered the same free slot and the
+	// second MOVE MEDIUM would fail destination-full. Threading it through
+	// reconcileLoad → findFreeStorageSlot excludes already-claimed slots
+	// deterministically, with no extra changer reads.
+	claimed := make(map[int]bool)
+
 	for i, assignment := range input.Tapes {
 		stDev := assignment.Drive
 		targetSlot := assignment.BlankSlot
 		driveAddr := inv.Drives[i].Address
 
-		barcode, err := reconcileLoad(ctx, changer, inv, i, driveAddr, targetSlot)
+		barcode, err := reconcileLoad(ctx, changer, inv, i, driveAddr, targetSlot, claimed)
 		if err != nil {
 			return nil, fmt.Errorf("load drive %d (slot %d): %w", i, targetSlot, err)
 		}
@@ -203,7 +212,12 @@ func blankCheckWhenReady(ctx context.Context, drive blankChecker, timeout, poll 
 //
 // The blank check always runs after this function, so non-blank tapes are caught
 // regardless of which path was taken.
-func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventory, driveIndex, driveAddr, targetSlot int) (tape.Barcode, error) {
+//
+// claimed carries the storage slots already consumed by relocations earlier in
+// the same Load; findFreeStorageSlot excludes them so two drives with unexpected
+// tapes never target the same free slot. When this call relocates a tape, it
+// records the chosen slot in claimed for subsequent drives.
+func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventory, driveIndex, driveAddr, targetSlot int, claimed map[int]bool) (tape.Barcode, error) {
 	if driveIndex >= len(inv.Drives) {
 		return "", fmt.Errorf("drive index %d out of range (library has %d drives)", driveIndex, len(inv.Drives))
 	}
@@ -220,11 +234,15 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 		// slot), then load the blank. A tape with an active LTFS mount asserts
 		// SCSI PREVENT MEDIUM REMOVAL, so the unload will fail with a clear
 		// hardware error and the run aborts rather than force-yanking a live tape.
-		relocateSlot := findFreeStorageSlot(inv, de.SourceSlot)
+		relocateSlot := findFreeStorageSlot(inv, de.SourceSlot, claimed)
 		if relocateSlot == -1 {
 			return "", fmt.Errorf("drive has unexpected tape %s (from slot %d) and no free storage slot to relocate it",
 				de.Barcode, de.SourceSlot)
 		}
+
+		// Claim the slot before the move so a later drive in this Load cannot be
+		// offered it from the same stale inventory snapshot.
+		claimed[relocateSlot] = true
 
 		if err := changer.Unload(ctx, relocateSlot, driveAddr); err != nil {
 			return "", fmt.Errorf("relocate unexpected tape %s (from slot %d) to slot %d: %w",
@@ -246,16 +264,20 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 }
 
 // findFreeStorageSlot returns the address of an empty storage slot, preferring
-// preferSlot if it is empty. Returns -1 if no empty storage slot exists.
-func findFreeStorageSlot(inv tape.Inventory, preferSlot int) int {
+// preferSlot if it is empty. Slots already claimed by an earlier relocation in
+// the same Load are treated as occupied and skipped (including the preferred
+// slot), so successive relocations never target the same slot from one stale
+// inventory snapshot. A nil claimed map means nothing is claimed. Returns -1 if
+// no free, unclaimed storage slot exists.
+func findFreeStorageSlot(inv tape.Inventory, preferSlot int, claimed map[int]bool) int {
 	for _, slot := range inv.Slots {
-		if slot.Address == preferSlot && !slot.Full {
+		if slot.Address == preferSlot && !slot.Full && !claimed[slot.Address] {
 			return slot.Address
 		}
 	}
 
 	for _, slot := range inv.Slots {
-		if !slot.Full {
+		if !slot.Full && !claimed[slot.Address] {
 			return slot.Address
 		}
 	}
