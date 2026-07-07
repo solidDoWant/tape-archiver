@@ -1,9 +1,11 @@
 package backup
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
@@ -92,13 +94,67 @@ func expectReportDeliverSuccess(env *testsuite.TestWorkflowEnvironment) {
 		Return(nil)
 }
 
+// validBackupConfig returns a run config that passes config.Validate, mirroring
+// internal/config's validConfig. The entry-point validation gate rejects an
+// invalid payload, so the workflow-orchestration tests — which assert phase
+// sequencing, not archive content — must submit a valid config.
+func validBackupConfig() config.Config {
+	targetPercentage := 10.0
+
+	return config.Config{
+		Sources: []config.Source{
+			{ZFSPath: &config.ZFSPathSource{Name: "bulk-pool-01/archive@snap-20240101"}},
+		},
+		Copies: 2,
+		Library: config.Library{
+			Changer:           "/dev/sch0",
+			Drives:            []string{"/dev/nst0", "/dev/nst1"},
+			BlankSlots:        []int{1, 2},
+			TapeCapacityBytes: 2_500_000_000_000,
+		},
+		Redundancy: config.Redundancy{
+			TargetPercentage: &targetPercentage,
+			SliceSizeBytes:   1 << 30,
+		},
+		Encryption: config.Encryption{
+			Recipients: []string{"age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"},
+			Identity:   "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREALIDENTITY000000000000000000000000000000000",
+		},
+		Delivery: config.Delivery{
+			WebhookURL: "https://discord.com/api/webhooks/123/abc",
+		},
+	}
+}
+
+// expectResolveEmpty mocks the Resolve phase to yield an empty work list. With a
+// valid config the real Resolve data activity would shell out to zfs per source;
+// resolving to nothing instead lets the downstream data phases (Prepare, Pack,
+// Generate PAR2, Verify) and the tape path run as no-ops on empty input — exactly
+// the behavior the pipeline had on the pre-validation empty-config path — without
+// touching zfs, tar, or the tape library.
+func expectResolveEmpty(env *testsuite.TestWorkflowEnvironment) {
+	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
+		Return([]ResolvedArchive(nil), nil)
+	env.OnActivity((&ResolveDataActivities{}).ResolveAndCheck, mock.Anything, mock.Anything).
+		Return([]ResolvedArchive(nil), nil)
+}
+
+// expectAllPhasesSucceed mocks every phase that cannot no-op on an empty work
+// list, so a valid config drives all phases to completion without real zfs/tar/
+// tape work: Resolve yields an empty plan (expectResolveEmpty) and Report/Deliver
+// succeed. The intervening data phases and the tape path no-op on the empty plan.
+func expectAllPhasesSucceed(env *testsuite.TestWorkflowEnvironment) {
+	expectResolveEmpty(env)
+	expectReportDeliverSuccess(env)
+}
+
 func TestBackupRunsAllPhasesInOrder(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
-	expectReportDeliverSuccess(env)
+	expectAllPhasesSucceed(env)
 
-	env.ExecuteWorkflow(Backup, config.Config{})
+	env.ExecuteWorkflow(Backup, validBackupConfig())
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
@@ -130,13 +186,22 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 
 			env := newBackupEnv(t)
 
-			if test.failAt != "" {
+			switch test.failAt {
+			case "":
+				expectAllPhasesSucceed(env)
+			case PhaseResolve:
+				// failPhase mocks the Resolve activity itself to fail, so no
+				// empty-resolve baseline is needed (nor allowed — it would double-
+				// mock the same activity).
 				failPhase(t, env, test.failAt)
-			} else {
-				expectReportDeliverSuccess(env)
+			default:
+				// Resolve to an empty plan so the phases before the failing one
+				// no-op, then fail the target phase.
+				expectResolveEmpty(env)
+				failPhase(t, env, test.failAt)
 			}
 
-			env.ExecuteWorkflow(Backup, config.Config{})
+			env.ExecuteWorkflow(Backup, validBackupConfig())
 
 			require.True(t, env.IsWorkflowCompleted())
 
@@ -148,6 +213,65 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 			require.Equal(t, test.want, got)
 		})
 	}
+}
+
+// failIfPrepareRuns registers the Prepare activity to fail the test if it is ever
+// invoked, proving no staging work happens. It is the observable proxy for "before
+// any staging (Prepare) work is performed": Prepare is the first phase that reads
+// or writes bulk data.
+func failIfPrepareRuns(t *testing.T, env *testsuite.TestWorkflowEnvironment) {
+	t.Helper()
+
+	env.OnActivity((&PrepareActivities{}).PrepareArchives, mock.Anything, mock.Anything).
+		Return(func(_ context.Context, _ PrepareInput) ([]StagedArchive, error) {
+			t.Error("Prepare ran despite an invalid config")
+
+			return nil, nil
+		})
+}
+
+// TestBackupRejectsInvalidConfig covers AC1: a Backup started directly through
+// Temporal with a config that client-side validation would reject (here copies =
+// 0) fails with a config validation error before any staging (Prepare) work runs.
+func TestBackupRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+	failIfPrepareRuns(t, env)
+
+	invalid := validBackupConfig()
+	invalid.Copies = 0
+
+	env.ExecuteWorkflow(Backup, invalid)
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "invalid config")
+	assert.ErrorContains(t, err, "copies")
+}
+
+// TestBackupRejectsZeroSources covers AC2: a Backup started with zero sources
+// fails validation rather than completing as a success that wrote nothing.
+func TestBackupRejectsZeroSources(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+	failIfPrepareRuns(t, env)
+
+	invalid := validBackupConfig()
+	invalid.Sources = nil
+
+	env.ExecuteWorkflow(Backup, invalid)
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	// The run errors instead of completing as a no-op "success".
+	err := env.GetWorkflowError()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "invalid config")
+	assert.ErrorContains(t, err, "sources")
 }
 
 // failPhase mocks the named phase to fail through its activity. Every phase is

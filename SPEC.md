@@ -138,9 +138,14 @@ are visible. The worker stages into a plain subdirectory of an existing dataset 
 
 ### 4.3 Backup pipeline (workflow phases)
 
-A run proceeds through these phases. Phases up to and including Verify produce nothing
-on tape; **no data is written to tape until the complete contents of every tape are
-staged and verified on disk** — eliminating any computation during the write window.
+A run proceeds through these phases. The workflow first **validates the run config at
+entry** (before Resolve): a run submitted directly through the Temporal UI/CLI bypasses
+the client-side validation, so an invalid payload (no sources, `copies` &lt; 1, …) is
+rejected up front as a config error rather than failing late — or completing as a
+silently vacuous backup that wrote nothing (§4.2). Phases up to and including Verify
+produce nothing on tape; **no data is written to tape until the complete contents of
+every tape are staged and verified on disk** — eliminating any computation during the
+write window.
 
 1. **Resolve.** Expand the config into a concrete work list: resolve k8s
    `VolumeSnapshot`/snapshot-group references to ZFS snapshots (cross-checked against

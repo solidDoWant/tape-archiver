@@ -11,8 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-
-	"github.com/solidDoWant/tape-archiver/internal/config"
 )
 
 // TestNotifyFailureActivity covers the failure-alert activity in isolation: it
@@ -132,10 +130,12 @@ func TestWorkflowFailureSendsAlert(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
+	// Resolve to an empty plan so every phase before Report no-ops on a valid
+	// config, then fail at the Report phase: it always dispatches its activity
+	// regardless of the plan content, making it reliable for exercising the
+	// deferred failure-alert handler.
+	expectResolveEmpty(env)
 
-	// Fail at the Report phase: it always dispatches its activity regardless of
-	// the plan content, making it reliable for testing the deferred failure-alert
-	// handler with a zero-value config.
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
 		Return(ReportOutput{}, errors.New("boom"))
 
@@ -148,7 +148,7 @@ func TestWorkflowFailureSendsAlert(t *testing.T) {
 			return nil
 		})
 
-	env.ExecuteWorkflow(Backup, config.Config{})
+	env.ExecuteWorkflow(Backup, validBackupConfig())
 
 	require.True(t, env.IsWorkflowCompleted())
 
@@ -172,13 +172,15 @@ func TestFailureAlertErrorDoesNotMask(t *testing.T) {
 	env := newBackupEnv(t)
 
 	// Fail at the Report phase — same rationale as TestWorkflowFailureSendsAlert.
+	expectResolveEmpty(env)
+
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
 		Return(ReportOutput{}, errors.New("boom"))
 
 	env.OnActivity((&FailureActivities{}).NotifyFailure, mock.Anything, mock.Anything).
 		Return(errors.New("alert delivery failed"))
 
-	env.ExecuteWorkflow(Backup, config.Config{})
+	env.ExecuteWorkflow(Backup, validBackupConfig())
 
 	require.True(t, env.IsWorkflowCompleted())
 

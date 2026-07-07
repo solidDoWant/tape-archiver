@@ -424,7 +424,7 @@ func TestResolveFailureAbortsBeforePrepare(t *testing.T) {
 			return nil, nil
 		})
 
-	env.ExecuteWorkflow(Backup, config.Config{})
+	env.ExecuteWorkflow(Backup, validBackupConfig())
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.ErrorContains(t, env.GetWorkflowError(), "phase Resolve")

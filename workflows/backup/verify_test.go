@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/solidDoWant/tape-archiver/internal/config"
 )
 
 // verifyFixture builds a real staged tree on disk — staged archives, a Pack plan,
@@ -213,9 +211,12 @@ func TestVerifyFailureBlocksLoad(t *testing.T) {
 
 	env := newBackupEnv(t)
 
+	// Resolve to an empty plan so the phases before Verify no-op on a valid config,
+	// then fail the Verify phase.
+	expectResolveEmpty(env)
 	failPhase(t, env, PhaseVerify)
 
-	env.ExecuteWorkflow(Backup, config.Config{})
+	env.ExecuteWorkflow(Backup, validBackupConfig())
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.Error(t, env.GetWorkflowError())
