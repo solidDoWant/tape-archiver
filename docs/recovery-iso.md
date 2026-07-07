@@ -76,8 +76,10 @@ It emits one disc-staging directory:
   `TAPE_RECOVERY_BINARIES_DIR`); `recoverykit` stages its top-level regular files into
   the ISO's `bin/`.
 - `src/<tool>-<version>.*` — each tool's upstream source archive (SPEC §10 "…plus their
-  source"), staged for later inclusion on the disc. It lives in a subdirectory, which
-  `recoverykit` skips, so it never trips the ELF-only linkage check on `bin/`.
+  source"), staged for later inclusion on the disc. It is a separate top-level directory
+  alongside `bin/`, not a subdirectory of it; `recoverykit` stages only the top-level
+  regular files in `bin/`, so `src/` is never scanned and never trips the ELF-only
+  linkage check.
 
 `par2cmdline-turbo`, `zstd`, and `gnutar` are built with Nix `pkgsStatic` (musl); `age`
 is Go and links static with CGO disabled. All four are drawn from the **same pinned

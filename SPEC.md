@@ -262,8 +262,8 @@ The config defines, at minimum:
     single tar** (one subdirectory per member volume), giving cross-volume consistency.
   - **Raw ZFS paths:** explicit ZFS snapshot or dataset paths on the pool not visible
     to k8s (e.g. `bulk-pool-01/archive`, `bulk-pool-01/media`).
-- **Copies (N)** — number of identical physical tape copies to produce (default 2, the
-  drive count). Up to `len(Drives)` copies write in parallel; a copy count exceeding the
+- **Copies (N)** — number of identical physical tape copies to produce (required; must
+  be at least 1, with no default). Up to `len(Drives)` copies write in parallel; a copy count exceeding the
   drive count is written across successive drive-sets (§4.3 steps 6–8). The library must
   hold one blank tape per physical tape written (logical tapes × copies).
 - **Library** — device targets (real `/dev/sch0` + `/dev/nstX`, or a virtual library
