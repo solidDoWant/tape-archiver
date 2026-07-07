@@ -196,17 +196,22 @@ func (p *Provider) WaitForScrape(ctx context.Context) error {
 }
 
 // NewFromEnv creates a Provider using standard environment variables.
-// METRICS_ADDR sets the Prometheus /metrics HTTP listen address; when unset,
-// defaultAddr is used instead. Pass "" as defaultAddr to keep the endpoint
-// disabled when METRICS_ADDR is unset. METRICS_SCRAPE_WAIT_TIMEOUT (a Go
-// duration string) bounds Provider.WaitForScrape.
+// METRICS_ADDR sets the Prometheus /metrics HTTP listen address. It distinguishes
+// unset from explicitly empty: when METRICS_ADDR is unset, defaultAddr is used;
+// when it is set to the empty string, the endpoint is disabled (no HTTP server,
+// nil registry) regardless of defaultAddr. Pass "" as defaultAddr to keep the
+// endpoint disabled when METRICS_ADDR is also unset.
+// METRICS_SCRAPE_WAIT_TIMEOUT (a Go duration string) bounds
+// Provider.WaitForScrape.
 //
 // The returned shutdown func must be deferred by the caller. It stops the
 // metrics HTTP server with a 10-second deadline and writes any error to
 // stderr.
 func NewFromEnv(defaultAddr string) (*Provider, func(), error) {
-	addr := os.Getenv("METRICS_ADDR")
-	if addr == "" {
+	// LookupEnv distinguishes unset (fall back to defaultAddr) from an explicit
+	// empty value (disable the endpoint), mirroring health.NewFromEnv.
+	addr, set := os.LookupEnv("METRICS_ADDR")
+	if !set {
 		addr = defaultAddr
 	}
 
