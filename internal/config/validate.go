@@ -61,6 +61,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("encryption.recipients: at least one recipient is required")
 	}
 
+	// A blank/whitespace-only recipient element is rejected here so a run is not
+	// staged and written for hours only to fail when the first archive is
+	// encrypted in pkg/agewrap. Recipient syntax (the age1pq1 key format) stays
+	// enforced at pkg/agewrap; this is a non-blank check only.
+	for i, recipient := range c.Encryption.Recipients {
+		if strings.TrimSpace(recipient) == "" {
+			return fmt.Errorf("encryption.recipients[%d]: must not be empty", i)
+		}
+	}
+
 	// The identity is escrowed into the report and ISO for every run (SPEC §7);
 	// require it here so a run that would only fail at the Report phase — after
 	// hours of staging and writing — is rejected up front. The Report phase

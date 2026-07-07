@@ -416,6 +416,26 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "encryption.recipients",
 		},
 		{
+			name:        "blank encryption recipient",
+			mutate:      func(c *Config) { c.Encryption.Recipients = []string{""} },
+			wantErr:     require.Error,
+			errContains: "encryption.recipients[0]",
+		},
+		{
+			name:        "whitespace-only encryption recipient",
+			mutate:      func(c *Config) { c.Encryption.Recipients = []string{"   "} },
+			wantErr:     require.Error,
+			errContains: "encryption.recipients[0]",
+		},
+		{
+			name: "blank encryption recipient at index 1",
+			mutate: func(c *Config) {
+				c.Encryption.Recipients = []string{"age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4", "  "}
+			},
+			wantErr:     require.Error,
+			errContains: "encryption.recipients[1]",
+		},
+		{
 			name:        "no encryption identity",
 			mutate:      func(c *Config) { c.Encryption.Identity = "" },
 			wantErr:     require.Error,
