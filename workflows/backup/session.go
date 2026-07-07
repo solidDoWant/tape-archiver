@@ -96,12 +96,22 @@ func writeSessionTimeout(capacityBytes int64) time.Duration {
 // Keys are device paths (e.g. /dev/sg0); one entry per tape drive in flight.
 type MountRegistry struct {
 	mu     sync.Mutex
-	mounts map[string]*ltfs.Mount
+	mounts map[string]*mountEntry
+}
+
+// mountEntry is a registry slot for one live LTFS mount. unmounted records that
+// a FinalizeTape attempt already unmounted the volume (writing the deferred LTFS
+// index to tape); a later retry of the same tape uses it to skip re-Unmounting a
+// detached mount and go straight to re-reading the idempotent captured index. The
+// entry outlives the unmount so the retry is not misdiagnosed as a lost mount.
+type mountEntry struct {
+	mount     *ltfs.Mount
+	unmounted bool
 }
 
 // newMountRegistry returns an empty MountRegistry.
 func newMountRegistry() *MountRegistry {
-	return &MountRegistry{mounts: make(map[string]*ltfs.Mount)}
+	return &MountRegistry{mounts: make(map[string]*mountEntry)}
 }
 
 // Put stores mount under the given device key, replacing any previous entry.
@@ -109,7 +119,7 @@ func (r *MountRegistry) Put(device string, mount *ltfs.Mount) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.mounts[device] = mount
+	r.mounts[device] = &mountEntry{mount: mount}
 }
 
 // Get retrieves the mount for the given device key. The boolean is false if no
@@ -118,9 +128,39 @@ func (r *MountRegistry) Get(device string) (*ltfs.Mount, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	m, ok := r.mounts[device]
+	entry, ok := r.mounts[device]
+	if !ok {
+		return nil, false
+	}
 
-	return m, ok
+	return entry.mount, true
+}
+
+// getEntry retrieves the mount and its unmounted state for the given device key.
+// ok is false if no mount is registered for that device. FinalizeTape uses the
+// unmounted flag to make its retry idempotent across the unmount boundary.
+func (r *MountRegistry) getEntry(device string) (mount *ltfs.Mount, unmounted bool, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.mounts[device]
+	if !ok {
+		return nil, false, false
+	}
+
+	return entry.mount, entry.unmounted, true
+}
+
+// MarkUnmounted records that the mount for device has been unmounted, so a later
+// FinalizeTape retry skips the Unmount and re-reads the captured index instead of
+// re-driving a correctly finalized tape. It is a no-op if the key is not present.
+func (r *MountRegistry) MarkUnmounted(device string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if entry, ok := r.mounts[device]; ok {
+		entry.unmounted = true
+	}
 }
 
 // Delete removes the mount for the given device key. It is a no-op if the key
@@ -146,14 +186,23 @@ func (r *MountRegistry) Teardown(ctx context.Context) error {
 
 	var errs []error
 
-	for device, mount := range r.mounts {
-		if err := mount.Unmount(ctx); err != nil {
+	for device, entry := range r.mounts {
+		// An entry already marked unmounted has had its LTFS index written and the
+		// FUSE process detached by a prior FinalizeTape attempt; there is nothing
+		// left to unmount or kill, so just drop it.
+		if entry.unmounted {
+			delete(r.mounts, device)
+
+			continue
+		}
+
+		if err := entry.mount.Unmount(ctx); err != nil {
 			// Unmount failed; forcibly kill the ltfs process so it does not
 			// linger. os.ErrProcessDone means the process already exited on
 			// its own (harmless — the FUSE kernel driver auto-cleans the
 			// mount when its server process dies); any other Kill error is
 			// included in the returned error.
-			if killErr := mount.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+			if killErr := entry.mount.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w; kill: %v", device, err, killErr))
 			} else {
 				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w", device, err))
@@ -281,31 +330,25 @@ func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) e
 // single deferred index write (SPEC §14), then reads the captured index back
 // from the work directory. It removes the mount from the registry on success.
 //
-// FinalizeTape is safely retriable because it checks ctx.Err() at entry: a
-// cancelled context (e.g. from a prior failed attempt) causes an early return
-// without touching the mount, leaving it alive in the registry for the next
-// attempt. A data-worker restart between WriteTree and FinalizeTape loses the
-// in-memory mount — that tape is re-written on the next run (SPEC §14).
+// FinalizeTape is safely retriable because the registry tracks each mount's
+// unmount state (mountEntry.unmounted). A retry after a successful Unmount whose
+// ReadIndex failed finds the entry still present and already unmounted, so it
+// skips re-Unmounting the detached volume and re-reads the idempotent captured
+// index rather than re-driving a correctly finalized tape (SPEC §14). Only a
+// data-worker restart between WriteTree and FinalizeTape drops the entry entirely;
+// that genuinely lost mount is the sole mount-lost case, and that tape is
+// re-written on the next run (SPEC §14). writePhase bounds the retries so a
+// persistent Unmount failure surfaces to the operator promptly.
 func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput) ([]byte, error) {
-	// Early-exit on a cancelled context so the mount is untouched and remains
-	// in the registry for the retry. This is what makes FinalizeTape retriable
-	// without re-running WriteTree.
-	if err := ctx.Err(); err != nil {
-		return nil, temporal.NewApplicationError(
-			fmt.Sprintf("finalize %s: context cancelled before unmount", input.Device),
-			"retryable",
-			err,
-		)
-	}
-
-	mount, ok := a.registry.Get(input.Device)
+	mount, unmounted, ok := a.registry.getEntry(input.Device)
 	if !ok {
-		// A missing mount is terminal, not transient: the only way it is absent
-		// here (after WriteTree parked it in the same process) is a data-worker
-		// restart that wiped the in-memory registry. No retry can recreate it —
-		// that tape is re-written on the next run (SPEC §14). Mark the error
-		// non-retryable so the Write phase fails fast instead of retrying the
-		// unrecoverable state until the session timeout.
+		// A missing entry is terminal, not transient: the only way it is absent
+		// here (after WriteTree parked it in the same process, and since a failed
+		// FinalizeTape keeps the entry) is a data-worker restart that wiped the
+		// in-memory registry. No retry can recreate it — that tape is re-written
+		// on the next run (SPEC §14). Mark the error non-retryable so the Write
+		// phase fails fast instead of retrying the unrecoverable state until the
+		// session timeout.
 		return nil, temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("finalize %s: no live mount in registry (data-worker restarted between write and finalize?)", input.Device),
 			"mount-lost",
@@ -313,17 +356,29 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 		)
 	}
 
-	if err := mount.Unmount(ctx); err != nil {
-		return nil, fmt.Errorf("unmount LTFS volume on %s: %w", input.Device, err)
+	// Unmount only once. On a retry after a prior attempt already unmounted
+	// (index written to tape) but failed to read the index back, the entry is
+	// still present and marked unmounted; skip straight to re-reading the
+	// idempotent captured index so the finalized tape is not re-driven and the
+	// detached FUSE mount is not unmounted a second time.
+	if !unmounted {
+		if err := mount.Unmount(ctx); err != nil {
+			// Keep the entry (not yet unmounted) so a retry re-attempts the
+			// Unmount; writePhase's bounded retry policy surfaces a persistent
+			// failure promptly instead of looping until the session timeout.
+			return nil, fmt.Errorf("unmount LTFS volume on %s: %w", input.Device, err)
+		}
+
+		a.registry.MarkUnmounted(input.Device)
 	}
 
 	index, err := mount.ReadIndex(ctx)
 	if err != nil {
 		// Index write succeeded (Unmount returned nil) but reading it back
-		// failed. Remove from registry to avoid a stale entry — the mount is
-		// gone — but propagate the error so the Write phase knows.
-		a.registry.Delete(input.Device)
-
+		// failed. Keep the entry — marked unmounted — so the retry re-reads the
+		// captured index without re-Unmounting a detached mount or misdiagnosing
+		// a lost mount. Do not delete: deleting would send the retry down the
+		// mount-lost branch and re-drive a correctly finalized tape (SPEC §14).
 		return nil, fmt.Errorf("read captured LTFS index for %s: %w", input.Device, err)
 	}
 
@@ -500,11 +555,17 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		StartToCloseTimeout: perTapeTimeout,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	}
-	// FinalizeTape uses the default retry policy: its ctx.Err() guard makes
-	// it safe to retry without re-running WriteTree.
+	// FinalizeTape is safe to retry without re-running WriteTree: the registry
+	// tracks each mount's unmount state, so a retry after a successful Unmount
+	// re-reads the idempotent captured index instead of re-driving the tape.
+	// Bound the attempts so a persistent Unmount failure (e.g. an LTFS index
+	// write that fails permanently after fusermount already detached — a media
+	// error) surfaces to the operator promptly instead of looping until the
+	// session timeout.
 	retryOpts := workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: perTapeTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 	}
 
 	type driveResult struct {

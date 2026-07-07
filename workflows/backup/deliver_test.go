@@ -1,15 +1,23 @@
 package backup
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
+
+	"github.com/solidDoWant/tape-archiver/internal/config"
 )
 
 // uploadRecorder is an httptest handler that records the base filename of each
@@ -106,4 +114,40 @@ func TestDeliverReportFailureFails(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "deliver report")
+}
+
+// deliverPhaseTestWorkflow drives deliverPhase so its activity scheduling options
+// can be inspected in the test env.
+func deliverPhaseTestWorkflow(ctx workflow.Context, cfg config.Config) error {
+	return deliverPhase(ctx, cfg, &runState{reportPath: "/stage/report.pdf"})
+}
+
+// TestDeliverPhaseSetsHeartbeatTimeout covers AC2: the Deliver activity is
+// scheduled with the shared data-activity HeartbeatTimeout, so a data worker that
+// dies hard mid-Deliver is detected within that window (2 min) rather than only
+// after the 30-minute deliverTimeout. Temporal enforces the detection window from
+// the activity's HeartbeatTimeout, so asserting it is set is the observable that
+// guarantees the fast detection.
+func TestDeliverPhaseSetsHeartbeatTimeout(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterWorkflow(deliverPhaseTestWorkflow)
+	env.RegisterActivity(newDeliverActivities())
+
+	var gotHeartbeatTimeout time.Duration
+
+	env.OnActivity((&DeliverActivities{}).Deliver, mock.Anything, mock.Anything).Return(
+		func(ctx context.Context, _ DeliverInput) error {
+			gotHeartbeatTimeout = activity.GetInfo(ctx).HeartbeatTimeout
+
+			return nil
+		})
+
+	env.ExecuteWorkflow(deliverPhaseTestWorkflow, config.Config{})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	assert.Equal(t, activityHeartbeatTimeout, gotHeartbeatTimeout,
+		"Deliver must carry the data-activity HeartbeatTimeout so a dead worker is detected within minutes, not after the 30-minute deliverTimeout")
 }
