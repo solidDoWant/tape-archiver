@@ -191,14 +191,15 @@ func TestResolveGroup(t *testing.T) {
 		assert.Equal(t, "snapshot-22222222-2349-4611-8b2f-67388602233b", group.Members[1].SnapshotName)
 	})
 
-	t.Run("empty match yields an empty group", func(t *testing.T) {
+	t.Run("empty match errors identifying the selector", func(t *testing.T) {
 		t.Parallel()
 
 		resolver := NewResolver(&fakeSnapshotClient{}, testParent)
 
-		group, err := resolver.ResolveGroup(t.Context(), Ref{LabelSelector: "app=none"})
-		require.NoError(t, err)
-		assert.Empty(t, group.Members)
+		_, err := resolver.ResolveGroup(t.Context(), Ref{Namespace: "app", LabelSelector: "app=none"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "app=none")
+		assert.Contains(t, err.Error(), "app")
 	})
 
 	t.Run("one unresolvable member fails the group", func(t *testing.T) {

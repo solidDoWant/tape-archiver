@@ -94,12 +94,21 @@ func (r *Resolver) Resolve(ctx context.Context, ref Ref) (Snapshot, error) {
 // ResolveGroup resolves every VolumeSnapshot matching ref.LabelSelector into a
 // Group with one member per snapshot. An empty ref.Namespace selects across all
 // namespaces (SPEC.md §5; issue #13 AC2). Each match must resolve, so a single
-// failure fails the group.
+// failure fails the group. A selector that matches zero VolumeSnapshots is an
+// error, not an empty group: a zero-member group has no meaningful archive, and
+// silently backing up nothing would violate the no-silent-data-loss invariant
+// (SPEC.md §2). Failing here, in Resolve (SPEC.md §4.3 phase 1), aborts the run
+// before any data is staged or written to tape.
 func (r *Resolver) ResolveGroup(ctx context.Context, ref Ref) (Group, error) {
 	volumeSnapshots, err := r.client.ListVolumeSnapshots(ctx, ref.Namespace, ref.LabelSelector)
 	if err != nil {
 		return Group{}, fmt.Errorf("list VolumeSnapshots (namespace %q, selector %q): %w",
 			ref.Namespace, ref.LabelSelector, err)
+	}
+
+	if len(volumeSnapshots) == 0 {
+		return Group{}, fmt.Errorf("label selector %q matched no VolumeSnapshots (namespace %q)",
+			ref.LabelSelector, ref.Namespace)
 	}
 
 	group := Group{Members: make([]Snapshot, 0, len(volumeSnapshots))}
