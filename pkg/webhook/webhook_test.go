@@ -2,7 +2,9 @@ package webhook_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime"
@@ -14,6 +16,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -336,6 +340,110 @@ func TestSendFailureLogsDeliveryFailure(t *testing.T) {
 	assert.Contains(t, logged, "failed to deliver webhook failure alert")
 	assert.Contains(t, logged, "run-456")
 	assert.Contains(t, logged, "Verify")
+}
+
+// TestSendFileBoundedByContextNotFixedTimeout proves the upload's timeout is the
+// caller's request context (AC1), not a fixed client-wide cap: against a server
+// that delays its response, the call succeeds when the context deadline exceeds
+// the delay and fails with a deadline error when it does not. This exercises the
+// removal of the former fixed 10 s http.Client.Timeout without waiting 10 s.
+func TestSendFileBoundedByContextNotFixedTimeout(t *testing.T) {
+	t.Parallel()
+
+	const serverDelay = 200 * time.Millisecond
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+
+		time.Sleep(serverDelay)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	path := filepath.Join(t.TempDir(), "report.pdf")
+	require.NoError(t, os.WriteFile(path, []byte("report bytes"), 0o600))
+
+	client := webhook.New(server.URL)
+
+	t.Run("succeeds when context deadline exceeds server delay", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), serverDelay*5)
+		defer cancel()
+
+		require.NoError(t, client.SendFile(ctx, path))
+	})
+
+	t.Run("fails with deadline error when context deadline is below server delay", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), serverDelay/4)
+		defer cancel()
+
+		err := client.SendFile(ctx, path)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+}
+
+// TestAlertContentTruncatedToDiscordLimit proves an alert whose error summary
+// alone exceeds Discord's 2000-character content limit is still accepted (AC2):
+// the server receives exactly one request, the delivered content is within the
+// limit, and the actionable text (run id / resume-abort instructions) survives
+// the truncation rather than being pushed out by the giant error tail.
+func TestAlertContentTruncatedToDiscordLimit(t *testing.T) {
+	t.Parallel()
+
+	longSummary := strings.Repeat("x", 5000)
+
+	tests := []struct {
+		name        string
+		send        func(client *webhook.Client, ctx context.Context)
+		mustContain []string
+	}{
+		{
+			name: "SendFailure",
+			send: func(client *webhook.Client, ctx context.Context) {
+				client.SendFailure(ctx, "run-123", "Write", errors.New(longSummary))
+			},
+			mustContain: []string{"run-123"},
+		},
+		{
+			name: "SendWritePathPause",
+			send: func(client *webhook.Client, ctx context.Context) {
+				client.SendWritePathPause(ctx, "run-123", "Write", []string{"TA0002L6"}, []int{101}, longSummary)
+			},
+			mustContain: []string{"run-123", "tapectl resume", "tapectl abort"},
+		},
+		{
+			name: "SendBurnPause",
+			send: func(client *webhook.Client, ctx context.Context) {
+				client.SendBurnPause(ctx, "run-123", []string{"/dev/sr0"}, longSummary)
+			},
+			mustContain: []string{"run-123", "tapectl resume", "tapectl abort"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server, cap := newServer(t, http.StatusNoContent)
+
+			client := webhook.New(server.URL)
+			test.send(client, t.Context())
+
+			require.Equal(t, int32(1), cap.hits.Load())
+
+			var payload struct {
+				Content string `json:"content"`
+			}
+			require.NoError(t, json.Unmarshal(cap.body, &payload))
+
+			assert.LessOrEqual(t, utf8.RuneCountInString(payload.Content), 2000,
+				"content must be within Discord's 2000-character limit")
+
+			for _, substr := range test.mustContain {
+				assert.Contains(t, payload.Content, substr)
+			}
+		})
+	}
 }
 
 func TestSendFailureNilError(t *testing.T) {
