@@ -48,10 +48,13 @@ type snapshotResolver interface {
 
 // poolInspector reads ZFS properties from the pool. It is the seam the zfs
 // package functions are wrapped behind, injected so the data activity is
-// unit-testable without a pool. Its UserProperties method also satisfies
-// k8ssnap.PropertyReader, so it doubles as the reader for ownership verification.
+// unit-testable without a pool. Its UserProperty method also satisfies
+// k8ssnap.PropertyReader, so it doubles as the reader for ownership verification;
+// UserProperties remains for the raw-source existence check only (zfs exits
+// non-zero for an absent dataset — its returned map is never trusted for values).
 type poolInspector interface {
 	UserProperties(ctx context.Context, dataset string) (map[string]string, error)
+	UserProperty(ctx context.Context, dataset, property string) (string, error)
 	LogicalReferenced(ctx context.Context, dataset string) (int64, error)
 }
 
@@ -61,6 +64,10 @@ type zfsPool struct{}
 
 func (zfsPool) UserProperties(ctx context.Context, dataset string) (map[string]string, error) {
 	return zfs.UserProperties(ctx, dataset)
+}
+
+func (zfsPool) UserProperty(ctx context.Context, dataset, property string) (string, error) {
+	return zfs.UserProperty(ctx, dataset, property)
 }
 
 func (zfsPool) LogicalReferenced(ctx context.Context, dataset string) (int64, error) {
