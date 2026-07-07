@@ -22,22 +22,69 @@ const (
 	// sessionCreationTimeout is how long workflow.CreateSession waits for a
 	// data worker to accept the session before failing.
 	sessionCreationTimeout = 10 * time.Minute
-	// sessionExecutionTimeout bounds the entire Write phase session — the sum
-	// of all Format + WriteTree + Finalize activities across all tape copies.
-	// At LTO speeds a single tape can take hours; 24 h is a safe ceiling.
-	sessionExecutionTimeout = 24 * time.Hour
 	// teardownTimeout bounds TeardownSession: it only needs to unmount/kill
 	// any live mounts, which should complete in well under a minute.
 	teardownTimeout = 5 * time.Minute
-	// writeTapeTimeout bounds a single tape's Format → WriteTree → FinalizeTape
-	// chain. Streaming terabytes to LTO tape takes many hours; 24 h per tape is
-	// a generous but realistic ceiling.
-	writeTapeTimeout = 24 * time.Hour
+	// writeTimeoutSafetyFactor scales the theoretical floor-speed write duration
+	// (capacity ÷ speed-matching floor) into the per-tape activity ceiling. A
+	// factor of 2 absorbs mount/format/finalize overhead and rate variance while
+	// keeping the ceiling bounded — a legitimate streaming write finishes well
+	// under it, but a genuinely wedged drive is still killed.
+	writeTimeoutSafetyFactor = 2
+	// defaultWriteTapeTimeout bounds a single tape's Format → WriteTree →
+	// FinalizeTape chain when the configured capacity maps to no known LTO
+	// generation (so no floor is available to derive the ceiling from). It is a
+	// generous fixed fallback that still bounds a hang rather than leaving the
+	// activity unbounded.
+	defaultWriteTapeTimeout = 48 * time.Hour
+	// writeSessionHeadroom is the slack added on top of the per-tape ceiling to
+	// bound the whole Write-phase session. Within one drive's chain the session
+	// wall time is the per-tape WriteTree ceiling plus the serial non-streaming
+	// activities that bracket it — FormatTape before, FinalizeTape (unmount +
+	// single index sync) and MeasureWriteHealth after, plus the deferred
+	// TeardownSession. Budgeting a fixed 2 h for those guarantees the session is
+	// strictly larger than the per-tape ceiling, so a full-length write always
+	// leaves room to finalize (tapes in a set write in parallel, so the session
+	// bounds the max per-drive chain, not the sum across copies).
+	writeSessionHeadroom = 2 * time.Hour
 	// writeHealthTimeout bounds the post-write MeasureWriteHealth activity. It only
 	// scrapes two SCSI log pages via sg_logs, which completes in seconds; a few
 	// minutes is a generous ceiling that still bounds a hang.
 	writeHealthTimeout = 5 * time.Minute
 )
+
+// perTapeWriteTimeout returns the StartToClose ceiling for a single tape's
+// Format → WriteTree → FinalizeTape chain, derived from the configured native
+// capacity and the tape generation's speed-matching floor. capacity ÷ floor is
+// the longest a legitimate streaming write can take — the drive cannot legally
+// stream slower than its floor — so scaling that by writeTimeoutSafetyFactor
+// yields a ceiling a healthy write finishes well under while still bounding a
+// wedged drive. When the capacity maps to no known generation (no floor) or is
+// non-positive, it falls back to the fixed defaultWriteTapeTimeout rather than
+// leaving the activity unbounded. Derived from stable config, so it is
+// replay-deterministic.
+func perTapeWriteTimeout(capacityBytes int64) time.Duration {
+	floorMBps, known := writeHealthFloor(capacityBytes)
+	if !known || capacityBytes <= 0 || floorMBps <= 0 {
+		return defaultWriteTapeTimeout
+	}
+
+	// floorMBps is a decimal-MB/s rate; floorMBps × bytesPerMB is bytes/s.
+	floorSeconds := float64(capacityBytes) / (floorMBps * bytesPerMB)
+
+	return time.Duration(floorSeconds * writeTimeoutSafetyFactor * float64(time.Second))
+}
+
+// writeSessionTimeout returns the ExecutionTimeout for the whole Write-phase
+// session: the per-tape ceiling plus writeSessionHeadroom for the serial
+// non-streaming activities (format, finalize, measure, teardown) that bracket
+// WriteTree within one drive's chain. It is strictly greater than
+// perTapeWriteTimeout by construction, so a full-length WriteTree never starves
+// FinalizeTape's index write. Tapes in a set write in parallel, so this bounds
+// the max per-drive chain, not the sum across copies.
+func writeSessionTimeout(capacityBytes int64) time.Duration {
+	return perTapeWriteTimeout(capacityBytes) + writeSessionHeadroom
+}
 
 // MountRegistry is a concurrency-safe, process-global registry of live LTFS
 // mounts. WriteTree parks a mount here after the volume is mounted so
@@ -395,14 +442,21 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 	// data task queue before creating it. Without this the session is created on
 	// the control queue, whose worker has no session support, and the internal
 	// session-creation activity is never picked up (the run stalls).
+	// Derive the Write-phase timeouts from the configured capacity and the tape
+	// generation's speed-matching floor once, up front (stable config ⇒
+	// replay-deterministic). The per-tape ceiling bounds each activity's
+	// StartToClose; the session ExecutionTimeout adds headroom so a full-length
+	// WriteTree still leaves room to finalize.
+	perTapeTimeout := perTapeWriteTimeout(cfg.Library.TapeCapacityBytes)
+
 	sessionBaseCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
-		StartToCloseTimeout: writeTapeTimeout,
+		StartToCloseTimeout: perTapeTimeout,
 	})
 
 	sessionCtx, err := workflow.CreateSession(sessionBaseCtx, &workflow.SessionOptions{
 		CreationTimeout:  sessionCreationTimeout,
-		ExecutionTimeout: sessionExecutionTimeout,
+		ExecutionTimeout: writeSessionTimeout(cfg.Library.TapeCapacityBytes),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("create Write phase session: %w", err)
@@ -443,14 +497,14 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 	// produces a stale registry entry).
 	noRetryOpts := workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
-		StartToCloseTimeout: writeTapeTimeout,
+		StartToCloseTimeout: perTapeTimeout,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	}
 	// FinalizeTape uses the default retry policy: its ctx.Err() guard makes
 	// it safe to retry without re-running WriteTree.
 	retryOpts := workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
-		StartToCloseTimeout: writeTapeTimeout,
+		StartToCloseTimeout: perTapeTimeout,
 	}
 
 	type driveResult struct {
@@ -584,12 +638,12 @@ func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWri
 
 	var health WriteHealth
 	if err := workflow.ExecuteActivity(healthCtx, acts.MeasureWriteHealth, MeasureWriteHealthInput{
-		Device:      lt.SGDevice,
-		Barcode:     lt.Barcode,
-		StagedBytes: stagedBytes(archives),
-		Elapsed:     elapsed,
-		FloorMBps:   floorMBps,
-		FloorKnown:  floorKnown,
+		Device:       lt.SGDevice,
+		Barcode:      lt.Barcode,
+		BytesWritten: tapeWrittenBytes(archives),
+		Elapsed:      elapsed,
+		FloorMBps:    floorMBps,
+		FloorKnown:   floorKnown,
 	}).Get(healthCtx, &health); err != nil {
 		workflow.GetLogger(gctx).Warn("write-health measurement failed; tape recorded without it",
 			"drive", lt.DriveIndex, "barcode", lt.Barcode, "error", err)
@@ -600,15 +654,22 @@ func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWri
 	return health
 }
 
-// stagedBytes sums the staged archive data on a tape — the slice bytes only, which is
-// exactly StagedArchive.SizeBytes (PAR2 recovery bytes are excluded, per issue #70).
-// It is the numerator of the sustained write throughput.
-func stagedBytes(archives []TapeWriteArchive) int64 {
+// tapeWrittenBytes sums every byte physically copied to the tape inside the
+// measured write window — the archive slices plus the PAR2 recovery files
+// (copyTape writes both, write.go). It is the numerator of the sustained write
+// throughput, matching the WriteTree → FinalizeTape denominator so the rate is
+// not understated by the PAR2 fraction. The tiny mount/manifest/index overhead
+// is negligible and unavoidable window cost.
+func tapeWrittenBytes(archives []TapeWriteArchive) int64 {
 	var total int64
 
 	for _, archive := range archives {
 		for _, slice := range archive.Slices {
 			total += slice.SizeBytes
+		}
+
+		for _, par2 := range archive.PAR2Files {
+			total += par2.SizeBytes
 		}
 	}
 
