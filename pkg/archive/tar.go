@@ -15,6 +15,7 @@ import (
 	"os"
 	slashpath "path"
 	"path/filepath"
+	"strings"
 )
 
 // Tar writes a tar archive of the contents of srcDir to w. Entry names are
@@ -69,6 +70,16 @@ type Member struct {
 // Like Tar, it streams and never stages to disk; it is the multi-member form of
 // the prepare pipeline's first stage (SPEC §4.3).
 func TarMembers(ctx context.Context, w io.Writer, members []Member) error {
+	// Validate the whole member set before writing a single byte. A duplicate
+	// Subdir would produce colliding tar paths, and standard tar extraction is
+	// last-entry-wins, so the earlier member's files would be silently dropped at
+	// restore — invisible at write and verify time. Rejecting up front, before the
+	// writer emits anything, means a bad member list yields no partial archive
+	// rather than a clean-verifying archive that loses data (SPEC §5).
+	if err := validateMembers(members); err != nil {
+		return err
+	}
+
 	writer := newTarWriter(w)
 
 	for _, member := range members {
@@ -79,6 +90,35 @@ func TarMembers(ctx context.Context, w io.Writer, members []Member) error {
 
 	if err := writer.tw.Close(); err != nil {
 		return fmt.Errorf("tar members: close: %w", err)
+	}
+
+	return nil
+}
+
+// validateMembers enforces the Member.Subdir contract across the whole set
+// before any bytes are written: each Subdir must be a single non-empty path
+// element (no slashes), and no two members may share a Subdir. A violation
+// returns an error naming the offending Subdir and the member source directories
+// involved, so a caller whose name derivation collides fails loudly here rather
+// than staging a clean-verifying archive that silently drops a member's contents
+// on extraction.
+func validateMembers(members []Member) error {
+	firstIndex := make(map[string]int, len(members))
+
+	for index, member := range members {
+		switch {
+		case member.Subdir == "":
+			return fmt.Errorf("tar members: members[%d] (%q) has an empty subdirectory; each member needs a single-path-element subdirectory", index, member.Dir)
+		case strings.Contains(member.Subdir, "/"):
+			return fmt.Errorf("tar members: members[%d] subdirectory %q (%q) must be a single path element, not a path", index, member.Subdir, member.Dir)
+		}
+
+		if prior, ok := firstIndex[member.Subdir]; ok {
+			return fmt.Errorf("tar members: duplicate member subdirectory %q (members[%d] %q and members[%d] %q); members would collide on extraction",
+				member.Subdir, prior, members[prior].Dir, index, member.Dir)
+		}
+
+		firstIndex[member.Subdir] = index
 	}
 
 	return nil

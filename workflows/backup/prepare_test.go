@@ -193,6 +193,53 @@ func TestPrepareGroupArchive(t *testing.T) {
 	}, readTarFiles(t, tarBytes))
 }
 
+// TestPrepareGroupArchiveDuplicateMember verifies a group whose members derive
+// the same in-archive subdirectory (two snapshots of one PVC — the collision
+// reachable under a valid label-selector config) fails during Prepare, before any
+// tape is written, with an error identifying the colliding members. Prepare runs
+// entirely to disk before the write window (SPEC §4.3), so this abort is on the
+// no-tape side (AC2).
+func TestPrepareGroupArchiveDuplicateMember(t *testing.T) {
+	t.Parallel()
+
+	_, recipient := generateKeypair(t)
+
+	dirA := writeTree(t, map[string]string{"data.txt": "from snapshot a"})
+	dirB := writeTree(t, map[string]string{"data.txt": "from snapshot b"})
+
+	// Two VolumeSnapshots of the same PVC in one namespace: memberName derives the
+	// identical PVC subdirectory for both, so their trees would collide on tar.
+	groupArchive := ResolvedArchive{
+		SourceIndex: 0,
+		Snapshots: []ResolvedSnapshot{
+			{ZFSPath: "pool/a@snap", PVC: "shared-pvc"},
+			{ZFSPath: "pool/b@snap", PVC: "shared-pvc"},
+		},
+	}
+
+	activities := &PrepareActivities{
+		stagingRoot: t.TempDir(),
+		locator: fakeLocator{dirs: map[string]string{
+			"pool/a@snap": dirA,
+			"pool/b@snap": dirB,
+		}},
+	}
+
+	input := PrepareInput{
+		Config: config.Config{
+			Encryption: config.Encryption{Recipients: []string{recipient}},
+			Redundancy: config.Redundancy{SliceSizeBytes: 1 << 20},
+		},
+		Archives: []ResolvedArchive{groupArchive},
+	}
+
+	staged, err := activities.prepare(t.Context(), t.TempDir(), input)
+	require.Error(t, err, "colliding group members must fail Prepare before any tape is written")
+	assert.Contains(t, err.Error(), "shared-pvc", "the error must identify the colliding member subdirectory")
+	assert.Contains(t, err.Error(), "sources[0]", "the error must identify the failing archive")
+	assert.Empty(t, staged, "no archive may be staged when a member collision is detected")
+}
+
 // TestPrepareMultipleArchives verifies each resolved archive is staged into its
 // own directory and recorded in order.
 func TestPrepareMultipleArchives(t *testing.T) {
