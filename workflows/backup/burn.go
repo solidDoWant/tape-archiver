@@ -55,6 +55,17 @@ type BurnDiscInput struct {
 	// instead of pausing the run. It never forces a write-once overwrite. The state
 	// detection itself always runs; this only changes the non-blank outcome.
 	AllowNonBlankDiscs bool
+	// DriveHasVerifiedCopy is true when this run already burned and verified a copy
+	// in this burner (state.burnedDiscs records it). When set, AllowNonBlankDiscs no
+	// longer reclaims a non-blank rewritable disc found in the drive: it is this
+	// run's own just-verified copy still loaded (a skipped/duplicated pause or a
+	// forgotten disc swap), not a prior-run leftover, so reclaiming it would blank a
+	// copy the report already counts — a silent loss of the configured redundancy
+	// (SPEC §2 principle 3, issue #154). The disc pauses for an operator swap
+	// instead. AllowNonBlankDiscs still reclaims a non-blank disc in a drive that has
+	// NOT yet produced a copy this run — the opt-in's actual purpose (a genuine
+	// prior-run disc).
+	DriveHasVerifiedCopy bool
 }
 
 // BurnResult is the BurnDisc activity's result, carrying the provenance the report
@@ -106,18 +117,26 @@ const (
 // no device I/O — so the "never silently overwrite" decision that ACs 3–5 turn on
 // is unit-tested exhaustively without optical hardware (mirroring optical.verifyTree).
 //
-//   - StateBlank                                  → burnWrite
-//   - StateNonBlankRewritable + allowNonBlank      → burnReclaimWrite
-//   - StateNonBlankRewritable + !allowNonBlank     → burnPause
-//   - StateAppendableWriteOnce / StateFinalized    → burnPause (write-once: the flag
-//     never forces an overwrite, so a used write-once disc always pauses)
-//   - StateUnknown                                 → error (no/unreadable medium)
-func decideBurn(state optical.DiscState, allowNonBlank bool) (burnAction, error) {
+//   - StateBlank                                              → burnWrite
+//   - StateNonBlankRewritable + allowNonBlank + !driveHasCopy → burnReclaimWrite
+//   - StateNonBlankRewritable + driveHasVerifiedCopy          → burnPause (this run's
+//     own just-verified copy is still loaded; never reclaim it — issue #154)
+//   - StateNonBlankRewritable + !allowNonBlank                → burnPause
+//   - StateAppendableWriteOnce / StateFinalized               → burnPause (write-once:
+//     the flag never forces an overwrite, so a used write-once disc always pauses)
+//   - StateUnknown                                            → error (no/unreadable medium)
+func decideBurn(state optical.DiscState, allowNonBlank, driveHasVerifiedCopy bool) (burnAction, error) {
 	switch state {
 	case optical.StateBlank:
 		return burnWrite, nil
 	case optical.StateNonBlankRewritable:
-		if allowNonBlank {
+		// Never blank a disc in a drive that already produced a verified copy this
+		// run: that non-blank disc is this run's own copy, not a prior-run leftover,
+		// so reclaiming it would destroy a copy the report already counts (issue
+		// #154). It pauses for an operator swap even with the opt-in set. A blank
+		// disc in the same drive is unaffected (handled by StateBlank above), so a
+		// correctly-swapped fresh blank in a reused drive still burns normally.
+		if allowNonBlank && !driveHasVerifiedCopy {
 			return burnReclaimWrite, nil
 		}
 
@@ -158,13 +177,13 @@ func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (Bur
 		return BurnResult{}, fmt.Errorf("read state of disc in %s: %w", input.Device, err)
 	}
 
-	action, err := decideBurn(state, input.AllowNonBlankDiscs)
+	action, err := decideBurn(state, input.AllowNonBlankDiscs, input.DriveHasVerifiedCopy)
 	if err != nil {
 		return BurnResult{}, fmt.Errorf("optical burn to %s: %w", input.Device, err)
 	}
 
 	if action == burnPause {
-		return BurnResult{}, discNotWritableError(input.Device, state, input.AllowNonBlankDiscs)
+		return BurnResult{}, discNotWritableError(input.Device, state, input.AllowNonBlankDiscs, input.DriveHasVerifiedCopy)
 	}
 
 	result := BurnResult{Device: input.Device}
@@ -199,13 +218,17 @@ func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (Bur
 }
 
 // discNotWritableError builds the typed, non-retryable operator-pause error for a
-// disc that cannot be written, naming the drive and the reason (a rewritable disc that
-// needs the opt-in, or a write-once disc the opt-in can never overwrite).
-func discNotWritableError(device string, state optical.DiscState, allowNonBlank bool) error {
+// disc that cannot be written, naming the drive and the reason: a copy this run
+// already burned and verified is still loaded (issue #154), a rewritable disc that
+// needs the opt-in, or a write-once disc the opt-in can never overwrite.
+func discNotWritableError(device string, state optical.DiscState, allowNonBlank, driveHasVerifiedCopy bool) error {
 	var reason string
 
-	switch state {
-	case optical.StateNonBlankRewritable:
+	switch {
+	case state == optical.StateNonBlankRewritable && driveHasVerifiedCopy:
+		reason = "a copy this run already burned and verified is still loaded in this drive;" +
+			" load a fresh blank disc so this copy is a distinct disc, not an overwrite of the last one"
+	case state == optical.StateNonBlankRewritable:
 		reason = fmt.Sprintf("disc is non-blank (%s) and Delivery.OpticalBurn.AllowNonBlankDiscs is not set;"+
 			" load a blank disc to continue", state)
 	default:

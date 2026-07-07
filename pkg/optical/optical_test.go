@@ -123,6 +123,63 @@ func TestParseMediaReport(t *testing.T) {
 	}
 }
 
+// TestBlankable covers issue #154 AC3: Blank's documented refusal of both
+// write-once AND finalized media must be enforced by the pure blankable guard, so
+// the seam's stated contract holds for any caller. It feeds a mediaInfo directly,
+// exercising the decision without real optical media (the physical write-once
+// round-trip stays in TestBlankRefusesWriteOnceMedium).
+func TestBlankable(t *testing.T) {
+	tests := []struct {
+		name      string
+		info      mediaInfo
+		assertErr require.ErrorAssertionFunc
+		errSubstr string
+	}{
+		{
+			name:      "non-blank rewritable is blankable",
+			info:      mediaInfo{state: StateNonBlankRewritable, rewritable: true},
+			assertErr: require.NoError,
+		},
+		{
+			name:      "blank rewritable is blankable (no-op reclaim)",
+			info:      mediaInfo{state: StateBlank, rewritable: true},
+			assertErr: require.NoError,
+		},
+		{
+			name:      "write-once appendable is refused",
+			info:      mediaInfo{state: StateAppendableWriteOnce, rewritable: false},
+			assertErr: require.Error,
+			errSubstr: "write-once",
+		},
+		{
+			// The documentation gap the issue reports: a closed DVD-RW probes as
+			// finalized yet rewritable, so the rewritability check alone would admit
+			// it. blankable must refuse it to match the doc.
+			name:      "finalized rewritable is refused (issue #154)",
+			info:      mediaInfo{state: StateFinalized, rewritable: true},
+			assertErr: require.Error,
+			errSubstr: "finalized",
+		},
+		{
+			name:      "finalized write-once is refused",
+			info:      mediaInfo{state: StateFinalized, rewritable: false},
+			assertErr: require.Error,
+			errSubstr: "write-once",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := blankable(test.info)
+			test.assertErr(t, err)
+
+			if test.errSubstr != "" {
+				assert.ErrorContains(t, err, test.errSubstr)
+			}
+		})
+	}
+}
+
 func TestParseManifest(t *testing.T) {
 	const digestA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 

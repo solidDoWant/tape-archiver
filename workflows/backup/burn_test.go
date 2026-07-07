@@ -21,11 +21,12 @@ func TestDecideBurn(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		state         optical.DiscState
-		allowNonBlank bool
-		want          burnAction
-		requireError  require.ErrorAssertionFunc
+		name                 string
+		state                optical.DiscState
+		allowNonBlank        bool
+		driveHasVerifiedCopy bool
+		want                 burnAction
+		requireError         require.ErrorAssertionFunc
 	}{
 		{
 			name:  "blank disc writes directly (default)",
@@ -39,6 +40,15 @@ func TestDecideBurn(t *testing.T) {
 			want:          burnWrite,
 		},
 		{
+			// A freshly-swapped blank in a drive that already burned a copy still
+			// writes: the issue #154 guard only ever refuses a NON-blank disc.
+			name:                 "blank disc in a reused drive writes directly (issue #154)",
+			state:                optical.StateBlank,
+			allowNonBlank:        true,
+			driveHasVerifiedCopy: true,
+			want:                 burnWrite,
+		},
+		{
 			name:  "non-blank rewritable without opt-in pauses (AC3)",
 			state: optical.StateNonBlankRewritable,
 			want:  burnPause,
@@ -48,6 +58,16 @@ func TestDecideBurn(t *testing.T) {
 			state:         optical.StateNonBlankRewritable,
 			allowNonBlank: true,
 			want:          burnReclaimWrite,
+		},
+		{
+			// The core issue #154 fix: even with the opt-in, a non-blank rewritable
+			// disc in a drive that already verified a copy this run is that copy still
+			// loaded — never reclaim it, pause for a fresh blank instead.
+			name:                 "non-blank rewritable with opt-in but drive already verified a copy pauses (issue #154)",
+			state:                optical.StateNonBlankRewritable,
+			allowNonBlank:        true,
+			driveHasVerifiedCopy: true,
+			want:                 burnPause,
 		},
 		{
 			name:  "appendable write-once without opt-in pauses",
@@ -87,7 +107,7 @@ func TestDecideBurn(t *testing.T) {
 				requireError = require.NoError
 			}
 
-			action, err := decideBurn(test.state, test.allowNonBlank)
+			action, err := decideBurn(test.state, test.allowNonBlank, test.driveHasVerifiedCopy)
 			requireError(t, err)
 
 			if test.requireError == nil {
@@ -106,7 +126,7 @@ func TestDiscNotWritableError(t *testing.T) {
 	t.Run("rewritable without opt-in", func(t *testing.T) {
 		t.Parallel()
 
-		err := discNotWritableError("/dev/sr0", optical.StateNonBlankRewritable, false)
+		err := discNotWritableError("/dev/sr0", optical.StateNonBlankRewritable, false, false)
 
 		assert.True(t, IsDiscNotWritable(err), "should be recognized as the disc-not-writable pause error")
 		assert.ErrorContains(t, err, "/dev/sr0")
@@ -121,11 +141,26 @@ func TestDiscNotWritableError(t *testing.T) {
 	t.Run("write-once even with opt-in", func(t *testing.T) {
 		t.Parallel()
 
-		err := discNotWritableError("/dev/sr1", optical.StateFinalized, true)
+		err := discNotWritableError("/dev/sr1", optical.StateFinalized, true, false)
 
 		assert.True(t, IsDiscNotWritable(err))
 		assert.ErrorContains(t, err, "/dev/sr1")
 		assert.ErrorContains(t, err, "write-once")
+	})
+
+	t.Run("this run's own verified copy still loaded (issue #154)", func(t *testing.T) {
+		t.Parallel()
+
+		// A non-blank rewritable disc in a drive that already verified a copy, with
+		// the opt-in set: the reason must name it as this run's own copy, not a
+		// generic AllowNonBlankDiscs refusal, so the operator swaps rather than
+		// enabling the opt-in.
+		err := discNotWritableError("/dev/sr0", optical.StateNonBlankRewritable, true, true)
+
+		assert.True(t, IsDiscNotWritable(err), "should be recognized as the disc-not-writable pause error")
+		assert.ErrorContains(t, err, "/dev/sr0")
+		assert.ErrorContains(t, err, "already burned and verified")
+		assert.ErrorContains(t, err, "fresh blank")
 	})
 
 	t.Run("unrelated errors are not disc-not-writable", func(t *testing.T) {

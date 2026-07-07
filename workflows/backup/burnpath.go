@@ -231,6 +231,14 @@ func burnDiscSet(ctx workflow.Context, cfg config.Config, state *runState, set b
 	ch := workflow.NewBufferedChannel(ctx, len(set))
 
 	for i, assignment := range set {
+		// A drive that already produced a verified copy this run must never have its
+		// disc reclaimed: that non-blank disc is this run's own copy, not a prior-run
+		// leftover (issue #154). Computed from the copies recorded before this set —
+		// within a set each drive burns at most one disc, and a re-burn on resume
+		// keeps the same drive whose earlier attempt did NOT verify, so this is only
+		// ever true for a drive reused across sets (the forgotten-swap case).
+		driveHasVerifiedCopy := deviceHasVerifiedCopy(state.burnedDiscs, assignment.Device)
+
 		workflow.Go(ctx, func(gctx workflow.Context) {
 			res := discResult{index: i}
 
@@ -241,9 +249,10 @@ func burnDiscSet(ctx workflow.Context, cfg config.Config, state *runState, set b
 
 			var burn BurnResult
 			if err := workflow.ExecuteActivity(burnCtx, acts.BurnDisc, BurnDiscInput{
-				Device:             assignment.Device,
-				ISOPath:            state.uncompressedISOPath,
-				AllowNonBlankDiscs: allowNonBlank,
+				Device:               assignment.Device,
+				ISOPath:              state.uncompressedISOPath,
+				AllowNonBlankDiscs:   allowNonBlank,
+				DriveHasVerifiedCopy: driveHasVerifiedCopy,
 			}).Get(burnCtx, &burn); err != nil {
 				res.err = fmt.Errorf("burn: %w", err)
 				ch.Send(gctx, res)
@@ -311,6 +320,20 @@ func rebuildDeliveredReport(ctx workflow.Context, cfg config.Config, state *runS
 	state.reportPath = reportPath
 
 	return nil
+}
+
+// deviceHasVerifiedCopy reports whether burned already holds a copy this run
+// burned and verified on the given burner device. It backs the issue #154
+// drive-guard: a non-blank rewritable disc in such a drive is this run's own copy,
+// so it is never reclaimed even with AllowNonBlankDiscs set.
+func deviceHasVerifiedCopy(burned []BurnResult, device string) bool {
+	for _, disc := range burned {
+		if disc.Device == device {
+			return true
+		}
+	}
+
+	return false
 }
 
 // retryBurnSet builds the narrowed burn-set that re-drives only the failed discs

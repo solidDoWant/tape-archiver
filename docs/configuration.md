@@ -256,6 +256,14 @@ copies means two discs burn together, then the third.
 archival target — can **never** be overwritten regardless of this flag; a non-blank write-once
 disc always fails the burn. A deliberate reclaim is recorded in the run's PDF report.
 
+**`allowNonBlankDiscs` never reclaims a disc this run itself just burned.** The flag exists to
+reclaim a genuinely old disc left in a drive from a *prior* run. A non-blank rewritable disc in
+a burner that has already produced a verified copy **this** run — for example one still loaded
+because a between-set disc swap was resumed without swapping that drive's disc — is that copy,
+not a leftover. The run refuses to blank it (even with `allowNonBlankDiscs: true`) and pauses
+for you to load a fresh blank, so every copy the delivered report counts exists on its own
+distinct physical disc.
+
 #### Optical burn operator loop
 
 The Burn phase is operator-in-the-loop, mirroring the tape write-failure pause. Because

@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +15,15 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/optical"
 )
+
+// isBurnFailurePause reports whether a burn-pause alert is a within-set burn/verify
+// failure (as opposed to a between-set disc-swap prompt), distinguished by the
+// summary notifyBurnPause renders.
+func isBurnFailurePause(input BurnPauseInput) bool {
+	return strings.Contains(input.ErrorSummary, "a burn or verify failed")
+}
 
 // These tests drive runBurnPath — the burn-set / disc-swap / failure
 // pause-resume-abort loop (SPEC §10) — with mocked BurnDisc/VerifyDisc/
@@ -456,7 +465,7 @@ func TestBurnNonWritableDiscPauses(t *testing.T) {
 			if burns == 1 {
 				// The loaded disc is non-blank and cannot be written: the activity
 				// returns the typed operator-pause error, touching nothing.
-				return BurnResult{}, discNotWritableError(input.Device, 0, false)
+				return BurnResult{}, discNotWritableError(input.Device, 0, false, false)
 			}
 
 			return BurnResult{Device: input.Device}, nil
@@ -486,6 +495,178 @@ func TestBurnNonWritableDiscPauses(t *testing.T) {
 
 	assert.Equal(t, 1, pauseAlerts, "a non-writable disc pauses for the operator")
 	assert.Equal(t, 2, burns, "the burn is retried on resume after a blank disc is loaded")
+}
+
+// TestBurnStaleResumeSignalDoesNotSatisfyLaterPause covers issue #154 AC1: a
+// surplus resume signal buffered during an earlier pause must NOT instantly satisfy
+// a later pause. A 3-copy/2-drive run fails one disc in set 0 (a within-set pause);
+// during that pause the operator sends TWO resume signals. The first resumes set 0;
+// with the fix the surplus is drained at the entry of the between-set swap pause, so
+// that pause waits for a fresh action and — none arriving — times out. Without the
+// drain the stale signal would satisfy the swap pause and the run would complete.
+func TestBurnStaleResumeSignalDoesNotSatisfyLaterPause(t *testing.T) {
+	cfg := burnConfig(3, []string{"/dev/sr0", "/dev/sr1"}, false, 300)
+	env := newBurnPauseEnv(t)
+
+	var (
+		mu         sync.Mutex
+		burnsByDev = map[string]int{}
+		swapAlerts int
+		failAlerts int
+	)
+
+	// /dev/sr1 fails its first burn (within-set failure pause), then succeeds on the
+	// resume retry; /dev/sr0 always succeeds.
+	env.OnActivity((&BurnActivities{}).BurnDisc, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnDiscInput) (BurnResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			burnsByDev[input.Device]++
+
+			if input.Device == "/dev/sr1" && burnsByDev[input.Device] == 1 {
+				return BurnResult{}, errors.New("optical burn failed: drive reported a write error")
+			}
+
+			return BurnResult{Device: input.Device}, nil
+		})
+	env.OnActivity((&BurnActivities{}).VerifyDisc, mock.Anything, mock.Anything).Return(nil)
+
+	env.OnActivity((&FailureActivities{}).NotifyBurnPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			if isBurnFailurePause(input) {
+				failAlerts++
+			} else {
+				swapAlerts++
+			}
+
+			return nil
+		})
+
+	// During the set-0 within-set failure pause the operator sends TWO resume
+	// signals (a double `tapectl resume`). The first clears that pause; the surplus
+	// stays buffered and must not leak forward to the between-set swap pause.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 30*time.Second)
+
+	env.ExecuteWorkflow(burnPauseTestWorkflow, cfg)
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err, "the surplus resume must not satisfy the swap pause; it times out")
+	assert.Contains(t, err.Error(), "did not resume or abort")
+	assert.Contains(t, err.Error(), "disc-set 2", "the run stalls at the between-set swap pause")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, failAlerts, "set 0's within-set failure pauses once")
+	assert.Equal(t, 1, swapAlerts, "the between-set swap pause is reached and alerts once")
+	// Set 1 (disc-set 2) never burns: the swap pause was not satisfied by the stale
+	// signal, so /dev/sr0 burns only its set-0 copy.
+	assert.Equal(t, 1, burnsByDev["/dev/sr0"], "set 1 never burns; no disc-set-2 copy")
+}
+
+// TestBurnForgotSwapDoesNotOverwriteVerifiedCopy covers issue #154 AC2: with
+// allowNonBlankDiscs enabled on rewritable media, a reused drive whose just-verified
+// copy is still loaded (the operator resumed the between-set swap without swapping
+// that drive's disc) must pause for a fresh blank rather than blank and overwrite the
+// copy — so the run never reports more burned copies than distinct physical discs.
+func TestBurnForgotSwapDoesNotOverwriteVerifiedCopy(t *testing.T) {
+	// 3 copies, 2 drives, opt-in ON: set 0 = {sr0:copy0, sr1:copy1}, set 1 = {sr0:copy2}.
+	cfg := burnConfig(3, []string{"/dev/sr0", "/dev/sr1"}, true, 300)
+	env := newBurnPauseEnv(t)
+
+	var (
+		mu         sync.Mutex
+		burns      int
+		reclaims   int
+		verified   int
+		guardPause int
+	)
+
+	// The mocked activity stands in for the real BurnDisc: it drives the loaded
+	// disc's state through the true decideBurn. A drive that already verified a copy
+	// this run (DriveHasVerifiedCopy) still has that non-blank rewritable disc loaded
+	// (operator forgot to swap it); any other drive holds a fresh blank.
+	env.OnActivity((&BurnActivities{}).BurnDisc, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnDiscInput) (BurnResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			burns++
+
+			state := optical.StateBlank
+			if input.DriveHasVerifiedCopy {
+				state = optical.StateNonBlankRewritable // this run's own copy, still loaded
+			}
+
+			action, decErr := decideBurn(state, input.AllowNonBlankDiscs, input.DriveHasVerifiedCopy)
+			require.NoError(t, decErr)
+
+			if action == burnPause {
+				return BurnResult{}, discNotWritableError(input.Device, state, input.AllowNonBlankDiscs, input.DriveHasVerifiedCopy)
+			}
+
+			if action == burnReclaimWrite {
+				reclaims++
+			}
+
+			verified++
+
+			return BurnResult{Device: input.Device, OverwroteNonBlank: action == burnReclaimWrite}, nil
+		})
+	env.OnActivity((&BurnActivities{}).VerifyDisc, mock.Anything, mock.Anything).Return(nil)
+
+	env.OnActivity((&FailureActivities{}).NotifyBurnPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			if isBurnFailurePause(input) {
+				// A failure pause naming the reused drive: the guard refused to
+				// overwrite the verified copy.
+				assert.Equal(t, []string{"/dev/sr0"}, input.Devices)
+				assert.Contains(t, input.ErrorSummary, "already burned and verified")
+
+				guardPause++
+			}
+
+			return nil
+		})
+
+	// t=30s: resume the between-set swap pause (set 1 starts, but /dev/sr0 still holds
+	// its verified copy0). t=90s: abort after the guard pause fires.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 30*time.Second)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorAbortSignal, nil)
+	}, 90*time.Second)
+
+	env.ExecuteWorkflow(burnPauseTestWorkflow, cfg)
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err, "the run ends aborted after the guard refuses the overwrite")
+	assert.Contains(t, err.Error(), "aborted by operator")
+
+	// The workflow returns an error (aborted), so its result value is discarded; the
+	// mock's counters record what physically happened instead.
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, guardPause, "the reused drive's verified copy triggers exactly one guard pause")
+	assert.Equal(t, 2, verified, "only the two distinct set-0 discs are burned+verified")
+	assert.Equal(t, 0, reclaims, "the run's own verified copy is never blanked/reclaimed (issue #154)")
+	assert.GreaterOrEqual(t, burns, 3, "set 0 burns twice, set 1 attempts the reused drive at least once")
 }
 
 // TestBurnPauseAlertBestEffort covers AC9: when the pause alert delivery itself

@@ -645,6 +645,8 @@ func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (Eje
 // automatically once the station is closed with a free slot (IOStatus.CanAutoResume),
 // while libraries that do not report it wait for the signal or the timeout.
 func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
+	drainStaleResumeSignals(ctx)
+
 	signalCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	timeoutTimer := workflow.NewTimer(ctx, cfg.Library.EffectiveIOWaitTimeout())
 
