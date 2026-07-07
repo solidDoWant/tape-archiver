@@ -95,16 +95,33 @@ func (p phase) execute(ctx workflow.Context, cfg config.Config, state *runState)
 	return workflow.ExecuteActivity(actx, p.activity).Get(actx, nil)
 }
 
-// Backup is the tape-archiver backup workflow (SPEC §4.3). It sequences the
-// pipeline phases in order, tracking the most recently completed phase for the
-// LastCompletedPhaseQuery, and returns a Result listing the completed phases on
-// success. On any phase failure a deferred handler fires the operational failure
-// alert (SPEC §11) without masking the original error.
+// Backup is the tape-archiver backup workflow (SPEC §4.3). It validates the run
+// config at entry, then sequences the pipeline phases in order, tracking the most
+// recently completed phase for the LastCompletedPhaseQuery, and returns a Result
+// listing the completed phases on success. On any phase failure a deferred handler
+// fires the operational failure alert (SPEC §11) without masking the original
+// error.
 //
 // The phase activities are stubbed in this scaffold; the per-phase logic lands
 // in separate sub-issues that replace each stub. The control worker registers
 // this workflow under WorkflowType via RegisterControl.
 func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) {
+	// Validate the run config before any work (SPEC §4.2, §4.3). A run submitted
+	// directly through the Temporal UI/CLI bypasses the client-side validation in
+	// tapectl and config-load, so without this gate an invalid payload (no sources,
+	// copies < 1, ...) would pass Resolve and the entire terabyte-scale Prepare
+	// phase before a late error — or, worse, complete as a silently vacuous backup
+	// that wrote nothing, violating the run config's role as the single source of
+	// truth. Validate is pure and deterministic (it only reads struct fields and
+	// iterates slices — no I/O, time, or randomness), so it is safe to call directly
+	// in the workflow with no activity. The check sits before the failure-alert
+	// defer below: a rejected payload is a bad request, not an operational run
+	// failure, so it does not fire the SPEC §11 Discord alert — the submitter sees
+	// the workflow error directly.
+	if validateErr := cfg.Validate(); validateErr != nil {
+		return Result{}, fmt.Errorf("invalid config: %w", validateErr)
+	}
+
 	state := &runState{}
 
 	if queryErr := workflow.SetQueryHandler(ctx, LastCompletedPhaseQuery, func() (string, error) {
