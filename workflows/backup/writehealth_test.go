@@ -28,85 +28,102 @@ func TestEvaluateWriteHealth(t *testing.T) {
 
 	const floor = 50.0
 
+	// measuredZero is a log-page result whose reposition counter was read and is
+	// zero (drive supports page 0x30) — the common clean-drive case.
+	measuredZero := func() tape.LogPageResult {
+		return tape.LogPageResult{RepositionsMeasured: true}
+	}
+
 	tests := []struct {
-		name            string
-		stagedBytes     int64
-		elapsed         time.Duration
-		logs            tape.LogPageResult
-		floorMBps       float64
-		floorKnown      bool
-		wantThroughput  float64
-		wantBelowFloor  bool
-		wantRepositions int64
-		wantAlertCount  int
-		wantHealthy     bool
+		name                    string
+		stagedBytes             int64
+		elapsed                 time.Duration
+		logs                    tape.LogPageResult
+		floorMBps               float64
+		floorKnown              bool
+		wantThroughput          float64
+		wantBelowFloor          bool
+		wantRepositions         int64
+		wantRepositionsMeasured bool
+		wantAlertCount          int
+		wantHealthy             bool
 	}{
 		{
 			// 6 GB in 60 s = 100 MB/s: above the floor, no repositions, no flags.
-			name:           "healthy above floor",
-			stagedBytes:    6_000_000_000,
-			elapsed:        60 * time.Second,
-			logs:           tape.LogPageResult{Repositions: 0},
-			floorMBps:      floor,
-			floorKnown:     true,
-			wantThroughput: 100,
-			wantHealthy:    true,
+			name:                    "healthy above floor",
+			stagedBytes:             6_000_000_000,
+			elapsed:                 60 * time.Second,
+			logs:                    measuredZero(),
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantThroughput:          100,
+			wantRepositionsMeasured: true,
+			wantHealthy:             true,
 		},
 		{
 			// 2.4 GB in 60 s = 40 MB/s: below a 50 MB/s floor.
-			name:           "below floor",
-			stagedBytes:    2_400_000_000,
-			elapsed:        60 * time.Second,
-			logs:           tape.LogPageResult{Repositions: 0},
-			floorMBps:      floor,
-			floorKnown:     true,
-			wantThroughput: 40,
-			wantBelowFloor: true,
+			name:                    "below floor",
+			stagedBytes:             2_400_000_000,
+			elapsed:                 60 * time.Second,
+			logs:                    measuredZero(),
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantThroughput:          40,
+			wantBelowFloor:          true,
+			wantRepositionsMeasured: true,
 		},
 		{
-			name:            "repositions flagged",
-			stagedBytes:     6_000_000_000,
-			elapsed:         60 * time.Second,
-			logs:            tape.LogPageResult{Repositions: 5},
-			floorMBps:       floor,
-			floorKnown:      true,
-			wantThroughput:  100,
-			wantRepositions: 5,
+			// A non-zero reposition count (drive back-hitched) is never healthy,
+			// even with good throughput and no TapeAlert flags (AC1).
+			name:                    "repositions flagged",
+			stagedBytes:             6_000_000_000,
+			elapsed:                 60 * time.Second,
+			logs:                    tape.LogPageResult{Repositions: 5, RepositionsMeasured: true},
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantThroughput:          100,
+			wantRepositions:         5,
+			wantRepositionsMeasured: true,
+			wantHealthy:             false,
 		},
 		{
-			name:           "tapealert flagged",
-			stagedBytes:    6_000_000_000,
-			elapsed:        60 * time.Second,
-			logs:           tape.LogPageResult{TapeAlert: alertFlags("Cleaning required")},
-			floorMBps:      floor,
-			floorKnown:     true,
-			wantThroughput: 100,
-			wantAlertCount: 1,
+			name:                    "tapealert flagged",
+			stagedBytes:             6_000_000_000,
+			elapsed:                 60 * time.Second,
+			logs:                    tape.LogPageResult{TapeAlert: alertFlags("Cleaning required"), RepositionsMeasured: true},
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantThroughput:          100,
+			wantRepositionsMeasured: true,
+			wantAlertCount:          1,
 		},
 		{
-			// A drive that does not support log page 0x24 reports zero repositions
-			// (pkg/tape.LogPageReader behaviour) — the tape is still healthy.
-			name:           "unsupported reposition page is zero",
-			stagedBytes:    6_000_000_000,
-			elapsed:        60 * time.Second,
-			logs:           tape.LogPageResult{Repositions: 0},
-			floorMBps:      floor,
-			floorKnown:     true,
-			wantThroughput: 100,
-			wantHealthy:    true,
+			// A drive that does not support page 0x30: the reposition counter is
+			// not measured. An unread counter can never certify a clean streaming
+			// write, so the tape is not healthy even with good throughput (AC3).
+			name:                    "unmeasured reposition counter is not healthy",
+			stagedBytes:             6_000_000_000,
+			elapsed:                 60 * time.Second,
+			logs:                    tape.LogPageResult{RepositionsMeasured: false},
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantThroughput:          100,
+			wantRepositionsMeasured: false,
+			wantHealthy:             false,
 		},
 		{
 			// A generation with no known floor: throughput is reported but no
 			// below-floor verdict is made and the tape is not "healthy".
-			name:           "unknown floor is not judged",
-			stagedBytes:    2_400_000_000,
-			elapsed:        60 * time.Second,
-			logs:           tape.LogPageResult{Repositions: 0},
-			floorMBps:      0,
-			floorKnown:     false,
-			wantThroughput: 40,
-			wantBelowFloor: false,
-			wantHealthy:    false,
+			name:                    "unknown floor is not judged",
+			stagedBytes:             2_400_000_000,
+			elapsed:                 60 * time.Second,
+			logs:                    measuredZero(),
+			floorMBps:               0,
+			floorKnown:              false,
+			wantThroughput:          40,
+			wantBelowFloor:          false,
+			wantRepositionsMeasured: true,
+			wantHealthy:             false,
 		},
 	}
 
@@ -122,6 +139,7 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			assert.InDelta(t, test.floorMBps, health.FloorMBps, 0.001)
 			assert.Equal(t, test.wantBelowFloor, health.BelowFloor)
 			assert.Equal(t, test.wantRepositions, health.Repositions)
+			assert.Equal(t, test.wantRepositionsMeasured, health.RepositionsMeasured)
 			assert.Len(t, health.TapeAlertFlags, test.wantAlertCount)
 			assert.Equal(t, test.wantHealthy, health.Healthy())
 		})
@@ -258,13 +276,14 @@ func TestReportWriteHealthMapping(t *testing.T) {
 		"an unmeasured tape maps to nil so the report renders \"not measured\"")
 
 	mapped := reportWriteHealth(WriteHealth{
-		Measured:       true,
-		ThroughputMBps: 100,
-		FloorMBps:      50,
-		FloorKnown:     true,
-		BelowFloor:     false,
-		Repositions:    2,
-		TapeAlertFlags: []string{"8: Cleaning required"},
+		Measured:            true,
+		ThroughputMBps:      100,
+		FloorMBps:           50,
+		FloorKnown:          true,
+		BelowFloor:          false,
+		Repositions:         2,
+		RepositionsMeasured: true,
+		TapeAlertFlags:      []string{"8: Cleaning required"},
 	})
 
 	require.NotNil(t, mapped)
@@ -272,6 +291,7 @@ func TestReportWriteHealthMapping(t *testing.T) {
 	assert.InDelta(t, 50.0, mapped.FloorMBps, 0.001)
 	assert.True(t, mapped.FloorKnown)
 	assert.Equal(t, int64(2), mapped.Repositions)
+	assert.True(t, mapped.RepositionsMeasured)
 	assert.Equal(t, []string{"8: Cleaning required"}, mapped.TapeAlertFlags)
 	assert.False(t, mapped.Healthy, "repositions make the tape unhealthy")
 }

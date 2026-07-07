@@ -56,25 +56,27 @@ func completeManifest() report.Manifest {
 				Barcode:  "TAPE0001L8",
 				Contents: []string{"k8s-group-photos", "zfs-media"},
 				WriteHealth: &report.WriteHealth{
-					ThroughputMBps: 152.5,
-					FloorMBps:      50,
-					FloorKnown:     true,
-					BelowFloor:     false,
-					Repositions:    0,
-					Healthy:        true,
+					ThroughputMBps:      152.5,
+					FloorMBps:           50,
+					FloorKnown:          true,
+					BelowFloor:          false,
+					Repositions:         0,
+					RepositionsMeasured: true,
+					Healthy:             true,
 				},
 			},
 			{
 				Barcode:  "TAPE0002L8",
 				Contents: []string{"k8s-group-photos", "zfs-media"},
 				WriteHealth: &report.WriteHealth{
-					ThroughputMBps: 41.3,
-					FloorMBps:      50,
-					FloorKnown:     true,
-					BelowFloor:     true,
-					Repositions:    7,
-					TapeAlertFlags: []string{"8: Cleaning required"},
-					Healthy:        false,
+					ThroughputMBps:      41.3,
+					FloorMBps:           50,
+					FloorKnown:          true,
+					BelowFloor:          true,
+					Repositions:         7,
+					RepositionsMeasured: true,
+					TapeAlertFlags:      []string{"8: Cleaning required"},
+					Healthy:             false,
 				},
 			},
 		},
@@ -278,27 +280,35 @@ func TestBuildWriteHealthSection(t *testing.T) {
 	}{
 		{
 			name:     "healthy",
-			health:   &report.WriteHealth{ThroughputMBps: 160.0, FloorMBps: 50, FloorKnown: true, Healthy: true},
+			health:   &report.WriteHealth{ThroughputMBps: 160.0, FloorMBps: 50, FloorKnown: true, RepositionsMeasured: true, Healthy: true},
 			contains: []string{"160.0", "healthy"},
 		},
 		{
 			name:     "below floor",
-			health:   &report.WriteHealth{ThroughputMBps: 42.0, FloorMBps: 50, FloorKnown: true, BelowFloor: true},
+			health:   &report.WriteHealth{ThroughputMBps: 42.0, FloorMBps: 50, FloorKnown: true, RepositionsMeasured: true, BelowFloor: true},
 			contains: []string{"42.0", "below floor"},
 		},
 		{
 			name:     "repositions",
-			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, Repositions: 12},
+			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, RepositionsMeasured: true, Repositions: 12},
 			contains: []string{"12 repositions"},
 		},
 		{
+			// A drive that does not support the reposition counter (page 0x30): the
+			// report must state it is not supported, not imply a measured-zero clean
+			// back-hitch verdict (SPEC §14, AC3).
+			name:     "reposition counter not supported",
+			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, RepositionsMeasured: false},
+			contains: []string{"reposition counter not supported"},
+		},
+		{
 			name:     "tape alert",
-			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, TapeAlertFlags: []string{"20: Clean now"}},
+			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, RepositionsMeasured: true, TapeAlertFlags: []string{"20: Clean now"}},
 			contains: []string{"TapeAlert", "Clean now"},
 		},
 		{
 			name:     "floor unknown",
-			health:   &report.WriteHealth{ThroughputMBps: 90.0, FloorKnown: false},
+			health:   &report.WriteHealth{ThroughputMBps: 90.0, FloorKnown: false, RepositionsMeasured: true},
 			contains: []string{"90.0", "floor unknown"},
 		},
 		{

@@ -560,7 +560,8 @@ modified to pass — the code is fixed instead.
   staged before writing) and **measured on every run**: after each tape's write window
   closes, the run records that tape's sustained write throughput (bytes written to tape
   — archive slices + PAR2 recovery files — ÷ write-window elapsed), its
-  reposition/back-hitch count (SCSI log page `0x24`), and any
+  reposition/back-hitch count (`total_suspended_writes` from the SCSI Tape usage log page
+  `0x30`, LTO-5/6), and any
   TapeAlert flags (log page `0x2e`) in the PDF report (§9) and as Prometheus gauges, and
   flags any tape that streamed below the floor or back-hitched. The floor is the tape
   **generation's** speed-matching floor (the write format governs the drive's

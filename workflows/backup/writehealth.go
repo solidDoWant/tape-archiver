@@ -18,10 +18,10 @@ import (
 //
 // After a tape's write window closes (WriteTree → FinalizeTape, i.e. unmount and the
 // deferred LTFS index sync have settled), the MeasureWriteHealth activity scrapes the
-// drive's SCSI log pages (repositions from page 0x24, TapeAlert flags from page 0x2e)
-// via pkg/tape.LogPageReader, and computes sustained write throughput as the bytes
-// written to the tape (archive slices + PAR2 recovery files) divided by the
-// write-window elapsed time measured by the workflow.
+// drive's SCSI log pages (repositions as total_suspended_writes from the Tape usage
+// page 0x30, TapeAlert flags from page 0x2e) via pkg/tape.LogPageReader, and computes
+// sustained write throughput as the bytes written to the tape (archive slices + PAR2
+// recovery files) divided by the write-window elapsed time measured by the workflow.
 
 // bytesPerMB is the decimal megabyte (1e6 bytes) used for throughput, matching how
 // drive/tape rates are conventionally quoted (MB/s, not MiB/s).
@@ -86,19 +86,26 @@ type WriteHealth struct {
 	// BelowFloor is true when a throughput was measured against a known floor and
 	// fell below it.
 	BelowFloor bool
-	// Repositions is the drive's back-hitch count from log page 0x24; zero when the
-	// drive does not support the page (pkg/tape.LogPageReader behaviour).
+	// Repositions is the drive's back-hitch count (total_suspended_writes) from the
+	// Tape usage log page 0x30. Meaningful only when RepositionsMeasured is true.
 	Repositions int64
+	// RepositionsMeasured is true when the reposition counter was actually read
+	// from page 0x30. When false the drive did not support the page (or the scrape
+	// failed) and Repositions is a placeholder, not a measured zero — so a clean
+	// streaming write is never certified from an unread counter.
+	RepositionsMeasured bool
 	// TapeAlertFlags are the labels of the active TapeAlert flags from page 0x2e.
 	TapeAlertFlags []string
 }
 
 // Healthy reports whether the tape streamed cleanly: measured against a known floor,
-// at or above it, with no repositions and no active TapeAlert flags. A tape whose
-// generation has no known floor is never reported healthy — its streaming could not be
+// at or above it, with the reposition counter measured and zero, and no active
+// TapeAlert flags. A tape whose generation has no known floor, or whose reposition
+// counter could not be read, is never reported healthy — its streaming could not be
 // judged.
 func (h WriteHealth) Healthy() bool {
-	return h.Measured && h.FloorKnown && !h.BelowFloor && h.Repositions == 0 && len(h.TapeAlertFlags) == 0
+	return h.Measured && h.FloorKnown && !h.BelowFloor &&
+		h.RepositionsMeasured && h.Repositions == 0 && len(h.TapeAlertFlags) == 0
 }
 
 // evaluateWriteHealth computes the write-health verdict from the bytes written to the
@@ -109,10 +116,11 @@ func (h WriteHealth) Healthy() bool {
 // it was slow).
 func evaluateWriteHealth(bytesWritten int64, elapsed time.Duration, logs tape.LogPageResult, floorMBps float64, floorKnown bool) WriteHealth {
 	health := WriteHealth{
-		Measured:    true,
-		FloorMBps:   floorMBps,
-		FloorKnown:  floorKnown,
-		Repositions: logs.Repositions,
+		Measured:            true,
+		FloorMBps:           floorMBps,
+		FloorKnown:          floorKnown,
+		Repositions:         logs.Repositions,
+		RepositionsMeasured: logs.RepositionsMeasured,
 	}
 
 	for _, flag := range logs.TapeAlert.Flags {
@@ -172,7 +180,7 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "repositions",
-			Help:      "Drive reposition (back-hitch) count from SCSI log page 0x24; zero when unsupported.",
+			Help:      "Drive reposition (back-hitch) count (total_suspended_writes) from SCSI Tape usage log page 0x30. Only exported when the counter was measured (drive supports the page).",
 		}, []string{"barcode"}),
 		tapeAlerts: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "tape_archiver",
@@ -208,8 +216,14 @@ func (m *writeHealthMetrics) record(barcode string, health WriteHealth) {
 
 	labels := prometheus.Labels{"barcode": barcode}
 	m.throughput.With(labels).Set(health.ThroughputMBps)
-	m.repositions.With(labels).Set(float64(health.Repositions))
 	m.tapeAlerts.With(labels).Set(float64(len(health.TapeAlertFlags)))
+
+	// Only export the reposition gauge when the counter was actually read; leaving
+	// it unset when the drive does not support page 0x30 avoids implying a measured
+	// zero back-hitch count from an unread counter (SPEC §14).
+	if health.RepositionsMeasured {
+		m.repositions.With(labels).Set(float64(health.Repositions))
+	}
 
 	// Only export the below-floor gauge when a floor is known; leaving it unset for
 	// an unknown generation avoids implying "not below floor" when the floor could
