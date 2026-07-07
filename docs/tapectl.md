@@ -75,15 +75,22 @@ path exercises virtual hardware end to end (SPEC §12). The blank slots are left
 untouched. The override is applied client-side before submission, and the result is
 re-validated.
 
-The device paths default to the values `mhvtl` presents in the dev/CI environment and
-can be overridden via the environment — set these on a host where the real library
-already occupies those nodes so a dry-run never targets real hardware:
+The `mhvtl` device nodes must be named explicitly through the environment — there is
+**no hardware default**. The nodes `mhvtl` typically presents (`/dev/sch0`, `/dev/nstX`)
+are byte-identical to the real library, and because these variables are read on the
+`tapectl` client host while the devices are opened by the worker on the storage host,
+the submitted config carries no dry-run marker the worker could honor. A silent default
+would therefore let `tapectl run --dry-run`, launched from a host without these
+variables, aim a "test" run at the real changer and drives. To close that hole, all
+three variables are **required** for `--dry-run`; if any is unset the command **fails
+fast** naming the missing variable(s) and submits nothing. The dev shell's `mhvtl-up`
+exports them.
 
-| Variable | Default |
-|----------|---------|
-| `MHVTL_CHANGER_DEV` | `/dev/sch0` |
-| `MHVTL_DRIVE0_DEV` | `/dev/nst0` |
-| `MHVTL_DRIVE1_DEV` | `/dev/nst1` |
+| Variable | Required for `--dry-run` | Description |
+|----------|--------------------------|-------------|
+| `MHVTL_CHANGER_DEV` | yes | `mhvtl` media changer node (e.g. `/dev/sch0`). |
+| `MHVTL_DRIVE0_DEV` | yes | First `mhvtl` tape drive node (e.g. `/dev/nst0`). |
+| `MHVTL_DRIVE1_DEV` | yes | Second `mhvtl` tape drive node (e.g. `/dev/nst1`). |
 
 ---
 
