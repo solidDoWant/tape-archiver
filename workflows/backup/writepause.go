@@ -213,15 +213,20 @@ func notifyWritePathPause(ctx workflow.Context, phase string, affectedBarcodes [
 // retrySet builds the narrowed drive-set that re-drives only the failed tapes on
 // resume. Each retry assignment keeps the failed tape's drive and (tape, copy)
 // identity and reuses its source slot as the blank slot — the operator has
-// reloaded a fresh blank there (SPEC §4.3, decision B1).
+// reloaded a fresh blank there (SPEC §4.3, decision B1). It carries the drive's
+// config index explicitly (DriveIndex) so the Load phase, which pairs by drive
+// identity, re-drives the tape onto the same physical drive it failed on even
+// though this narrowed set is not a 0-based prefix of the library's drives
+// (issue #137).
 func retrySet(cfg config.Config, failed []failedTape) driveSet {
 	set := make(driveSet, 0, len(failed))
 	for _, tape := range failed {
 		set = append(set, TapeAssignment{
-			Drive:     cfg.Library.Drives[tape.Tape.DriveIndex],
-			BlankSlot: tape.Tape.SourceSlot,
-			TapeIndex: tape.Tape.TapeIndex,
-			CopyIndex: tape.Tape.CopyIndex,
+			Drive:      cfg.Library.Drives[tape.Tape.DriveIndex],
+			DriveIndex: tape.Tape.DriveIndex,
+			BlankSlot:  tape.Tape.SourceSlot,
+			TapeIndex:  tape.Tape.TapeIndex,
+			CopyIndex:  tape.Tape.CopyIndex,
 		})
 	}
 

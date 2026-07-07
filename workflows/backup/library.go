@@ -2,7 +2,9 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -101,31 +103,41 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 	for i, assignment := range input.Tapes {
 		stDev := assignment.Drive
 		targetSlot := assignment.BlankSlot
-		driveAddr := inv.Drives[i].Address
-
-		barcode, err := reconcileLoad(ctx, changer, inv, i, driveAddr, targetSlot, claimed)
-		if err != nil {
-			return nil, fmt.Errorf("load drive %d (slot %d): %w", i, targetSlot, err)
-		}
 
 		drive := tape.NewDrive(stDev)
 
+		// Pair this device node to its changer data-transfer element by the drive's
+		// unit-serial identity — not by its position in the set — so the changer
+		// moves the blank into the very drive the blank check and write then
+		// address. A retry-shaped (non-prefix) set or a kernel probe order that
+		// disagrees with the changer's element order would otherwise load one
+		// physical drive while checking another (issue #137).
+		de, err := driveElementFor(ctx, drive, inv)
+		if err != nil {
+			return nil, fmt.Errorf("load drive %d (%s): %w", assignment.DriveIndex, stDev, err)
+		}
+
+		barcode, err := reconcileLoad(ctx, changer, inv, de, targetSlot, claimed)
+		if err != nil {
+			return nil, fmt.Errorf("load drive %d (%s, slot %d): %w", assignment.DriveIndex, stDev, targetSlot, err)
+		}
+
 		sgDev, err := drive.SGDevice()
 		if err != nil {
-			return nil, fmt.Errorf("drive %d: resolve SCSI generic node for %s: %w", i, stDev, err)
+			return nil, fmt.Errorf("drive %d (%s): resolve SCSI generic node: %w", assignment.DriveIndex, stDev, err)
 		}
 
 		blank, err := blankCheckWhenReady(ctx, drive, driveReadyTimeout, driveReadyPoll)
 		if err != nil {
-			return nil, fmt.Errorf("drive %d: blank check for tape %s: %w", i, barcode, err)
+			return nil, fmt.Errorf("drive %d (%s): blank check for tape %s: %w", assignment.DriveIndex, stDev, barcode, err)
 		}
 
 		overwroteNonBlank := false
 
 		if !blank {
 			if !input.AllowNonBlankTapes {
-				return nil, fmt.Errorf("drive %d: tape %s is not blank — refusing to write"+
-					" (SPEC §4.3 step 6; reload a blank tape to continue)", i, barcode)
+				return nil, fmt.Errorf("drive %d (%s): tape %s is not blank — refusing to write"+
+					" (SPEC §4.3 step 6; reload a blank tape to continue)", assignment.DriveIndex, stDev, barcode)
 			}
 
 			// The operator deliberately opted in to reclaiming used tapes
@@ -137,7 +149,7 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 
 		loaded[i] = LoadedTape{
 			Barcode:           barcode,
-			DriveIndex:        i,
+			DriveIndex:        assignment.DriveIndex,
 			TapeIndex:         assignment.TapeIndex,
 			CopyIndex:         assignment.CopyIndex,
 			SourceSlot:        targetSlot,
@@ -148,6 +160,66 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 	}
 
 	return loaded, nil
+}
+
+// driveElementFor pairs a drive device node to its changer data-transfer element
+// by unit-serial identity (issue #137). It reads the drive's serial via INQUIRY
+// (Unit Serial Number VPD page 0x80, answered with no media motion) and returns the
+// inventory element whose DVCID serial matches. It never falls back to set position,
+// which a retry set or a kernel probe-order mismatch can make name a different
+// physical drive, and fails clearly on an unidentifiable or ambiguous drive.
+func driveElementFor(ctx context.Context, drive *tape.Drive, inv tape.Inventory) (tape.DriveElement, error) {
+	info, err := drive.Inquire(ctx)
+	if err != nil {
+		return tape.DriveElement{}, fmt.Errorf("read drive identity (INQUIRY): %w", err)
+	}
+
+	return matchDriveElement(inv, info.Serial)
+}
+
+// matchDriveElement returns the single data-transfer element whose DVCID unit
+// serial equals serial. It is the pure pairing rule, split out so it is unit
+// testable without a drive. It errors when serial is empty (neither the drive's
+// INQUIRY nor the changer's DVCID reported an identity, so position cannot be
+// trusted), when no element matches, or when the match is not unique.
+func matchDriveElement(inv tape.Inventory, serial string) (tape.DriveElement, error) {
+	if serial == "" {
+		return tape.DriveElement{}, errors.New("cannot pair device node to a changer element: " +
+			"no drive unit serial (INQUIRY VPD 0x80) or changer DVCID identity reported (issue #137)")
+	}
+
+	match := -1
+
+	for i, de := range inv.Drives {
+		if de.Serial != serial {
+			continue
+		}
+
+		if match != -1 {
+			return tape.DriveElement{}, fmt.Errorf("drive serial %q matches more than one changer element (drives %d and %d)",
+				serial, inv.Drives[match].Address, de.Address)
+		}
+
+		match = i
+	}
+
+	if match == -1 {
+		return tape.DriveElement{}, fmt.Errorf("drive serial %q matches no changer data-transfer element "+
+			"(the changer reported serials %s)", serial, driveSerials(inv))
+	}
+
+	return inv.Drives[match], nil
+}
+
+// driveSerials renders the changer's per-drive serials for a pairing-failure error,
+// so an operator can see what the library actually reported.
+func driveSerials(inv tape.Inventory) string {
+	parts := make([]string, len(inv.Drives))
+	for i, de := range inv.Drives {
+		parts[i] = fmt.Sprintf("drive %d=%q", de.Address, de.Serial)
+	}
+
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 const (
@@ -200,10 +272,11 @@ func blankCheckWhenReady(ctx context.Context, drive blankChecker, timeout, poll 
 	}
 }
 
-// reconcileLoad ensures the drive at driveAddr (which corresponds to the i-th
-// drive in the config) is loaded with the tape from targetSlot. It reads the
-// current inventory state and issues only the changer moves needed. Returns the
-// barcode of the tape that ends up in the drive.
+// reconcileLoad ensures the given data-transfer element (already paired to the
+// caller's device node by drive identity, not by set position — issue #137) is
+// loaded with the tape from targetSlot. It reads the current inventory state and
+// issues only the changer moves needed. Returns the barcode of the tape that ends
+// up in the drive.
 //
 // The reconciliation table (from the Load phase design in CLAUDE.md):
 //   - Drive already loaded from targetSlot → skip load (idempotent).
@@ -217,12 +290,8 @@ func blankCheckWhenReady(ctx context.Context, drive blankChecker, timeout, poll 
 // the same Load; findFreeStorageSlot excludes them so two drives with unexpected
 // tapes never target the same free slot. When this call relocates a tape, it
 // records the chosen slot in claimed for subsequent drives.
-func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventory, driveIndex, driveAddr, targetSlot int, claimed map[int]bool) (tape.Barcode, error) {
-	if driveIndex >= len(inv.Drives) {
-		return "", fmt.Errorf("drive index %d out of range (library has %d drives)", driveIndex, len(inv.Drives))
-	}
-
-	de := inv.Drives[driveIndex]
+func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventory, de tape.DriveElement, targetSlot int, claimed map[int]bool) (tape.Barcode, error) {
+	driveAddr := de.Address
 
 	if de.Loaded {
 		if de.SourceSlot == targetSlot {
@@ -349,10 +418,11 @@ func planDriveSets(plan TapePlan, drives []string, blankSlots []int) ([]driveSet
 	for tapeIndex := range plan.Tapes {
 		for copyIndex := 0; copyIndex < plan.Copies; copyIndex++ {
 			current = append(current, TapeAssignment{
-				Drive:     drives[len(current)],
-				BlankSlot: blankSlots[slot],
-				TapeIndex: tapeIndex,
-				CopyIndex: copyIndex,
+				Drive:      drives[len(current)],
+				DriveIndex: len(current),
+				BlankSlot:  blankSlots[slot],
+				TapeIndex:  tapeIndex,
+				CopyIndex:  copyIndex,
 			})
 			slot++
 
@@ -525,14 +595,19 @@ func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, w
 		}
 	}
 
-	// Unload from drive to source slot if the drive still holds this tape.
-	if wt.DriveIndex < len(inv.Drives) {
-		drive := inv.Drives[wt.DriveIndex]
+	// Unload from drive to source slot if the drive still holds this tape. Locate
+	// the drive by the tape's own barcode rather than by wt.DriveIndex: DriveIndex
+	// is the config drive index, which is not the changer's element position on a
+	// probe-order-mismatched host (issue #137). The barcode is the tape's canonical
+	// identity (SPEC §6), so scanning for it unloads exactly the drive holding it.
+	for _, drive := range inv.Drives {
 		if drive.Loaded && drive.Barcode == wt.Barcode {
 			if err := changer.Unload(ctx, wt.SourceSlot, drive.Address); err != nil {
 				return false, fmt.Errorf("unload tape %s from drive %d to slot %d: %w",
 					wt.Barcode, wt.DriveIndex, wt.SourceSlot, err)
 			}
+
+			break
 		}
 	}
 
