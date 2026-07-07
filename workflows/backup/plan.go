@@ -11,6 +11,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/par2"
 )
 
 // The Pack phase (SPEC §4.3 phase 3) bin-packs the prepared archives onto tapes
@@ -32,15 +33,29 @@ const (
 	packTimeout = 5 * time.Minute
 
 	// ltfsOverheadFraction is the fraction of a tape's native capacity reserved
-	// for LTFS filesystem overhead — the index partition, the on-tape index and
-	// directory metadata, and the per-tape manifest/checksum file (SPEC §6) — so
-	// a tape packed to its usable capacity still physically fits once LTFS is laid
-	// down. It is a deliberately conservative estimate (the archive payload is a
-	// handful of large age slices, so the index itself is tiny relative to this);
-	// it is an internal planning constant, not a run-config field, and can be
-	// tuned without changing any user-facing surface. SPEC §4.3 requires planning
-	// against native capacity with hardware compression disabled.
-	ltfsOverheadFraction = 0.005
+	// for LTFS filesystem overhead so a tape packed to its usable capacity still
+	// physically fits once LTFS is laid down. The dominant cost is mkltfs's default
+	// two-partition format — a dedicated index partition plus the wrap-granular
+	// guard between partitions — which pkg/ltfs/format.go always uses; on top of it
+	// sit the on-tape index and directory metadata and the per-tape
+	// manifest/checksum file (SPEC §6).
+	//
+	// It is set to bound the worst supported generation's two-partition format
+	// overhead: vendor capacity figures put that overhead near 1.4% on LTO-9,
+	// ~3% on LTO-6 and up to ~5% on LTO-5, so 5% is conservative across LTO-5..LTO-9.
+	// Erring high is the safe direction — a tape planned within usable capacity must
+	// never fail with ENOSPC deep in the write window (SPEC §14, principle 2); the
+	// only cost of over-reserving is slightly less fill-to-capacity parity on newer
+	// generations, and the capacity itself is not lost (issue #148).
+	//
+	// It is an internal planning constant, not a run-config field, and can be tuned
+	// without changing any user-facing surface: planning runs on the control worker
+	// before any tape is loaded (SPEC §4.3), so the drive's true post-format free
+	// space cannot be queried at plan time, and mhvtl cannot model physical wrap
+	// overhead — the exact per-generation figure is only measurable on a real LTO
+	// drive. SPEC §4.3 requires planning against native capacity with hardware
+	// compression disabled.
+	ltfsOverheadFraction = 0.05
 
 	// minPAR2Percent and maxPAR2Percent bound the integer redundancy percentage
 	// par2 accepts (SPEC §8); par2cmdline rejects anything outside [1, 100].
@@ -100,7 +115,8 @@ func pack(cfg config.Config, staged []StagedArchive) (TapePlan, error) {
 		item := PlannedArchive{
 			SourceIndex:       archive.SourceIndex,
 			DataBytes:         archive.SizeBytes,
-			PAR2ReservedBytes: reservedBytes(archive.SizeBytes, reservePercent),
+			SliceCount:        len(archive.Slices),
+			PAR2ReservedBytes: reservedBytes(archive.SizeBytes, len(archive.Slices), reservePercent),
 		}
 
 		// The measured size can exceed the Resolve feasibility estimate, so an
@@ -181,10 +197,14 @@ func par2ReservePercent(redundancy config.Redundancy) int {
 	}
 }
 
-// reservedBytes is the PAR2 footprint to reserve for an archive of dataBytes at
-// the given integer percentage, rounded up so the reservation never runs short.
-func reservedBytes(dataBytes int64, percent int) int64 {
-	return ceilDiv(dataBytes*int64(percent), 100)
+// reservedBytes is the PAR2 footprint to reserve for an archive of dataBytes
+// across sliceCount slice files at the given integer percentage. It is a
+// conservative upper bound on par2's real output (par2.MaxOutputBytes), not the
+// naive dataBytes×percent/100: par2 pads every slice to a block boundary and
+// replicates its critical packets across every recovery file, so the naive figure
+// runs short and lets a fill-to-capacity tape overflow Verify (issue #148).
+func reservedBytes(dataBytes int64, sliceCount, percent int) int64 {
+	return par2.MaxOutputBytes(dataBytes, sliceCount, percent)
 }
 
 // clampPercent clamps an integer percentage to the [1, 100] range par2 accepts.
