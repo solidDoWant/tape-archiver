@@ -160,6 +160,14 @@ write window.
    `sliceSizeBytes` so small for the resolved source size that the run's total slice
    count would grow an activity payload past Temporal's ~2 MB limit, naming the field
    and a suggested minimum. This is an estimate, not the plan.
+   Immediately after Resolve produces the work list — before any staging — the run
+   places a `zfs hold` on every resolved source snapshot and keeps it for the run's
+   duration, so an external `zfs destroy` cannot prune a snapshot mid-run; the holds are
+   released on every exit path (success, failure, cancellation). The hold tag is derived
+   from the Temporal run id (`tape-archiver-hold-<run-id>`), so it introduces no
+   cross-run state (§4.2) and is reconstructable from the run alone. A hold failure
+   fails the run here, before staging. Raw bare-dataset sources have no snapshot and are
+   not held.
 2. **Prepare.** For each archive: `tar` the snapshot contents → optional `zstd`
    compression → `age`-encrypt → split into fixed-size slices → compute SHA-256
    checksums. All output is staged to disk and its exact size measured.

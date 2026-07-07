@@ -241,3 +241,90 @@ func TestUserPropertySpoofIntegration(t *testing.T) {
 	err = k8ssnap.Verify(t.Context(), spoofReader{}, snapshot)
 	require.Error(t, err, "the spoofed snapshot must be rejected as unmanaged")
 }
+
+// TestHoldReleaseIntegration verifies the hold/release capability against a real
+// ZFS pool: a held snapshot cannot be destroyed until the hold is released (AC1),
+// the hold is gone after release (AC2), and both operations are idempotent. It
+// creates and destroys its own snapshot so it never touches the shared fixture
+// snapshot. Holding, releasing, and destroying snapshots are privileged, so this
+// runs under sudo via "make test-integration".
+func TestHoldReleaseIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	ctx := t.Context()
+	dataset := testutil.PoolDataset(t)
+	snapshot := dataset + "@tape-archiver-hold-test"
+	tag := "tape-archiver-hold-test-run"
+
+	// Create a throwaway snapshot to exercise the hold against. Ensure it is gone
+	// before and after the test regardless of hold state.
+	_ = runZFS(t, ctx, "destroy", "-d", snapshot) // best-effort pre-clean (ignored if absent)
+	requireZFS(t, ctx, "snapshot", snapshot)
+
+	t.Cleanup(func() {
+		// Release any lingering hold, then destroy the snapshot so a failed run
+		// never leaves the fixture pinned or present. t.Context() is already
+		// cancelled by the time cleanups run, so use a fresh background context.
+		cleanupCtx := context.Background()
+		_ = zfs.Release(cleanupCtx, tag, snapshot)
+		_ = runZFS(t, cleanupCtx, "destroy", snapshot)
+	})
+
+	// The fresh snapshot carries no holds.
+	holds, err := zfs.Holds(ctx, snapshot)
+	require.NoError(t, err)
+	assert.Empty(t, holds, "a fresh snapshot has no holds")
+
+	// Hold it, and confirm the tag is now present.
+	require.NoError(t, zfs.Hold(ctx, tag, snapshot))
+
+	holds, err = zfs.Holds(ctx, snapshot)
+	require.NoError(t, err)
+	assert.Contains(t, holds, tag, "the snapshot is held under the run tag")
+
+	// Holding again with the same tag is idempotent.
+	require.NoError(t, zfs.Hold(ctx, tag, snapshot), "re-holding the same tag is a no-op")
+
+	// AC1: while held, an external `zfs destroy` of the snapshot is refused.
+	require.Error(t, runZFS(t, ctx, "destroy", snapshot), "destroying a held snapshot must fail")
+
+	holds, err = zfs.Holds(ctx, snapshot)
+	require.NoError(t, err)
+	assert.Contains(t, holds, tag, "the refused destroy left the snapshot held")
+
+	// Release the hold; releasing again (already absent) is tolerated.
+	require.NoError(t, zfs.Release(ctx, tag, snapshot))
+	require.NoError(t, zfs.Release(ctx, tag, snapshot), "releasing an absent tag is a no-op")
+
+	// AC2: after release the hold is gone.
+	holds, err = zfs.Holds(ctx, snapshot)
+	require.NoError(t, err)
+	assert.NotContains(t, holds, tag, "the hold is gone after release")
+
+	// With the hold gone the snapshot can now be destroyed.
+	require.NoError(t, runZFS(t, ctx, "destroy", snapshot), "an unheld snapshot can be destroyed")
+}
+
+// requireZFS runs a privileged zfs subcommand and fails the test if it errors.
+func requireZFS(t *testing.T, ctx context.Context, args ...string) {
+	t.Helper()
+
+	require.NoError(t, runZFS(t, ctx, args...), "zfs %v", args)
+}
+
+// runZFS runs a zfs subcommand on the given context, returning its error (with
+// stderr attached) so a caller can assert on success or failure.
+func runZFS(t *testing.T, ctx context.Context, args ...string) error {
+	t.Helper()
+
+	cmd := exec.CommandContext(ctx, "zfs", args...)
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Logf("zfs %v: %v: %s", args, err, out)
+
+		return err
+	}
+
+	return nil
+}

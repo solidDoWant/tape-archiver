@@ -72,6 +72,7 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 // called from cmd/worker for the data role.
 func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newResolveDataActivities())
+	w.RegisterActivity(newHoldActivities())
 	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
 	w.RegisterActivity(newGeneratePAR2Activities())
 	w.RegisterActivity(newVerifyActivities())
