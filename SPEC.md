@@ -309,6 +309,21 @@ All formats are open and widely implemented, for 20-year recoverability.
   portable, longest-lived, application-agnostic representation, restorable file by file
   without ZFS. Optional `zstd` compression (open, RFC 8878) is applied before
   encryption; its binary and source are bundled on the recovery disc.
+  - **What the archive captures:** regular files, directories, and symlinks, with
+    their permission bits, ownership (uid/gid), and modification time. Hardlinked
+    regular files are stored once and reproduced as `tar` hardlink entries, so a
+    logically deduplicated dataset (e.g. the *arr-managed media dataset) is not written
+    twice. Sparse files are stored in **GNU sparse 1.0** (PAX `GNU.sparse.*`) form —
+    their holes are not written out and are restored as zeros — a construct the shipped
+    static GNU `tar` decodes natively.
+  - **What the archive does NOT capture:** extended attributes (`user.*`, `security.*`),
+    POSIX ACLs, and file capabilities (`security.capability`, e.g. `setcap` binaries)
+    are **not** preserved; a `tar`-level restore reproduces file contents and the mode
+    bits above but not this metadata. File types that a portable file-by-file `tar`
+    cannot represent and that carry no recoverable data — unix sockets, device nodes,
+    and named pipes (FIFOs) — are **skipped with a warning** rather than failing the
+    run, so a stale socket in an application datadir (e.g. `mysql.sock`) does not abort
+    a backup.
 
 ## 7. Encryption and key management
 

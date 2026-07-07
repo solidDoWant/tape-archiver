@@ -167,6 +167,17 @@ file** out of an archive:
    bin/tar -xf /scratch/archive.tar path/inside/the/archive
    ```
 
+   **What a `tar`-level restore reproduces:** regular files, directories, and
+   symlinks, with their permission bits, ownership, and modification time.
+   Hardlinked files are restored as hardlinks (stored once in the archive), and
+   sparse files are restored with their holes intact — the bundled `bin/tar`
+   decodes the GNU sparse 1.0 encoding used to write them. **Not** reproduced:
+   extended attributes (`user.*`/`security.*`), POSIX ACLs, and file capabilities
+   (`security.capability`, e.g. `setcap` binaries) are not carried by the archive,
+   so a restored file has its contents and mode bits but none of that extra
+   metadata. Unix sockets, device nodes, and named pipes present in the source
+   snapshot were skipped at backup time and are absent from the archive.
+
 ## Index-loss recovery
 
 LTFS may fail to mount because its **on-tape index is damaged**. Recover in two

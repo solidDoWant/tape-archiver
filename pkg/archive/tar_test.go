@@ -219,6 +219,9 @@ func extractTar(t *testing.T, r io.Reader, dest string) {
 		case tar.TypeSymlink:
 			require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
 			require.NoError(t, os.Symlink(header.Linkname, target))
+		case tar.TypeLink:
+			require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+			require.NoError(t, os.Link(filepath.Join(dest, filepath.FromSlash(header.Linkname)), target))
 		case tar.TypeReg:
 			require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
 			extractRegular(t, reader, target, os.FileMode(header.Mode))
