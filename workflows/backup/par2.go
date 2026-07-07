@@ -218,6 +218,16 @@ func generateArchivePAR2(ctx context.Context, archive StagedArchive, percent int
 		dataFiles[index] = slice.Path
 	}
 
+	// par2 create exits non-zero rather than overwriting when recovery files
+	// already exist, so a retry after a partial attempt (the worker-restart case
+	// the liveness heartbeat exists for) would fail deterministically. Purge any
+	// leftover recovery files first so generation is self-idempotent. The purge set
+	// is exactly the glob stagePAR2Files reads back, so no stale file from an
+	// earlier attempt can survive to be recorded or shipped.
+	if err := purgeStagedPAR2Files(archiveDir); err != nil {
+		return PAR2Set{}, err
+	}
+
 	if err := par2.Generate(ctx, recoverySetPath, dataFiles, percent); err != nil {
 		return PAR2Set{}, err
 	}
@@ -228,6 +238,26 @@ func generateArchivePAR2(ctx context.Context, archive StagedArchive, percent int
 	}
 
 	return PAR2Set{SourceIndex: archive.SourceIndex, RedundancyPercent: percent, Files: files}, nil
+}
+
+// purgeStagedPAR2Files removes every PAR2 recovery file in archiveDir (the index
+// plus any volume files) left by a prior partial attempt. It globs the same
+// par2GlobPattern stagePAR2Files reads back — matching only "archive*.par2", never
+// the archive's slices ("archive.NNN") — so generation starts from a clean recovery
+// set on every retry. A missing directory or no matches is not an error.
+func purgeStagedPAR2Files(archiveDir string) error {
+	matches, err := filepath.Glob(filepath.Join(archiveDir, par2GlobPattern))
+	if err != nil {
+		return fmt.Errorf("list leftover PAR2 files in %q: %w", archiveDir, err)
+	}
+
+	for _, path := range matches {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove leftover PAR2 file %q: %w", path, err)
+		}
+	}
+
+	return nil
 }
 
 // stagePAR2Files measures and checksums every PAR2 recovery file in archiveDir,
