@@ -165,6 +165,116 @@ func TestGenerateRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+// TestMaxOutputBytes proves par2.MaxOutputBytes is a true upper bound on the real
+// par2cmdline-turbo output across the cases that stress it: near-100% redundancy,
+// many small slices (the issue's per-slice-padding repro), few large slices, and a
+// single slice. The bound underpins the Pack phase's honest PAR2 reservation, so it
+// must never fall below what par2 actually writes (issue #148).
+func TestMaxOutputBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		sliceSizes        []int
+		redundancyPercent int
+	}{
+		{
+			// par2's critical packets dominate at maximum redundancy; the bound must
+			// still cover them.
+			name:              "near-100 percent redundancy",
+			sliceSizes:        []int{100_000, 100_000, 100_000},
+			redundancyPercent: 100,
+		},
+		{
+			// Many small slices: every slice pads up to a block boundary and the
+			// critical set is replicated widely — the issue's 550-file repro, scaled
+			// to run quickly while keeping the same block-padding pressure.
+			name:              "many small slices",
+			sliceSizes:        repeatSizes(550, 100_000),
+			redundancyPercent: 10,
+		},
+		{
+			name:              "few large slices",
+			sliceSizes:        []int{2_000_000, 2_000_000, 2_000_000, 2_000_000},
+			redundancyPercent: 50,
+		},
+		{
+			name:              "single slice",
+			sliceSizes:        []int{2_000_000},
+			redundancyPercent: 30,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			paths, _ := writeSlices(t, dir, test.sliceSizes)
+
+			var totalData int64
+			for _, size := range test.sliceSizes {
+				totalData += int64(size)
+			}
+
+			recoverySetPath := filepath.Join(dir, "archive.par2")
+
+			require.NoError(t, par2.Generate(t.Context(), recoverySetPath, paths, test.redundancyPercent))
+
+			// Measure everything par2 actually wrote: the index plus every volume.
+			matches, globErr := filepath.Glob(filepath.Join(dir, "archive*.par2"))
+			require.NoError(t, globErr)
+			require.NotEmpty(t, matches)
+
+			var realOutput int64
+
+			for _, path := range matches {
+				info, statErr := os.Stat(path)
+				require.NoError(t, statErr)
+
+				realOutput += info.Size()
+			}
+
+			bound := par2.MaxOutputBytes(totalData, len(test.sliceSizes), test.redundancyPercent)
+
+			// The bound must never run short of the real output.
+			assert.GreaterOrEqual(t, bound, realOutput,
+				"MaxOutputBytes (%d) must be an upper bound on real par2 output (%d)", bound, realOutput)
+		})
+	}
+}
+
+// TestMaxOutputBytesTightAtScale confirms the bound converges on the redundancy
+// percentage at LTO (terabyte) scale — where recovery packets dominate and the
+// replicated critical packets are negligible — so honest reservation costs almost
+// no usable capacity on a real tape (issue #148). It is pure arithmetic; no par2.
+func TestMaxOutputBytesTightAtScale(t *testing.T) {
+	t.Parallel()
+
+	const (
+		terabyte   = int64(1) << 40
+		sliceCount = 200
+		percent    = 10
+	)
+
+	data := 6 * terabyte
+	bound := par2.MaxOutputBytes(data, sliceCount, percent)
+
+	// At 6 TB the bound sits just above the nominal 10% and well under 11%.
+	assert.Greater(t, bound, int64(float64(data)*0.10))
+	assert.Less(t, bound, int64(float64(data)*0.11))
+}
+
+// repeatSizes returns a slice of count entries each equal to size.
+func repeatSizes(count, size int) []int {
+	sizes := make([]int, count)
+	for index := range sizes {
+		sizes[index] = size
+	}
+
+	return sizes
+}
+
 // writeSlices creates one file per size in dir, filled with varied bytes, and
 // returns the slice paths in order alongside a copy of each file's contents.
 func writeSlices(t *testing.T, dir string, sizes []int) ([]string, [][]byte) {

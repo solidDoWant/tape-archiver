@@ -147,6 +147,12 @@ type PlannedArchive struct {
 	SourceIndex int
 	// DataBytes is the archive's measured staged size (StagedArchive.SizeBytes).
 	DataBytes int64
+	// SliceCount is the number of staged slice files the archive's PAR2 recovery
+	// set protects (len(StagedArchive.Slices)). It is carried on the plan so the
+	// fill-to-capacity phase can recompute the per-archive PAR2 upper bound
+	// (par2.MaxOutputBytes) — which depends on the file count through par2's block
+	// sizing and per-file critical packets — without re-plumbing the staged tree.
+	SliceCount int
 	// PAR2ReservedBytes is the PAR2 footprint reserved for the archive during
 	// packing — the minimum recovery set size at the fixed target percentage or
 	// the fill-to-capacity floor. The Generate PAR2 phase may grow the actual set

@@ -7,7 +7,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/par2"
 )
+
+// gib is one gibibyte. The Pack tests plan at realistic (multi-GiB) tape scale,
+// where the honest PAR2 reservation (par2.MaxOutputBytes) is close to the nominal
+// redundancy percentage; at tiny byte sizes par2's fixed per-block and critical
+// overhead dwarfs the data, so small magic capacities no longer model real tapes.
+const gib = int64(1) << 30
 
 // targetRedundancy is a fixed-percentage PAR2 config at the given percent.
 func targetRedundancy(percent float64) config.Redundancy {
@@ -46,14 +53,17 @@ func stagedArchive(sourceIndex int, size int64) StagedArchive {
 func TestPackBinPacksWithinCapacity(t *testing.T) {
 	t.Parallel()
 
-	// Capacity 1,000,000; PAR2 reserve 10% → each 400,000-byte archive has a
-	// 440,000-byte footprint. Usable < native (LTFS reserved), so two fit per
-	// tape and the third spills onto a second tape.
-	cfg := packConfig(1_000_000, 2, 2, targetRedundancy(10))
+	// Native 12 GiB; PAR2 reserve 10% → each 4 GiB archive has a ~4.84 GiB
+	// footprint (data + the honest par2.MaxOutputBytes reserve). Usable < native
+	// (LTFS reserved), so two archives fit per tape and the third spills onto a
+	// second tape.
+	const archiveBytes = 4 * gib
+
+	cfg := packConfig(12*gib, 2, 2, targetRedundancy(10))
 	staged := []StagedArchive{
-		stagedArchive(0, 400_000),
-		stagedArchive(1, 400_000),
-		stagedArchive(2, 400_000),
+		stagedArchive(0, archiveBytes),
+		stagedArchive(1, archiveBytes),
+		stagedArchive(2, archiveBytes),
 	}
 
 	plan, err := pack(cfg, staged)
@@ -65,6 +75,12 @@ func TestPackBinPacksWithinCapacity(t *testing.T) {
 	// LTFS overhead is reserved: usable capacity is strictly below native.
 	require.NotEmpty(t, plan.Tapes)
 
+	// The PAR2 reserve is the honest upper bound on real par2 output, above the
+	// naive measured×percent figure it replaced (issue #148).
+	wantReserve := par2.MaxOutputBytes(archiveBytes, 1, 10)
+	naiveReserve := archiveBytes * 10 / 100
+	require.Greater(t, wantReserve, naiveReserve)
+
 	for _, tape := range plan.Tapes {
 		assert.Less(t, tape.UsableBytes, cfg.Library.TapeCapacityBytes,
 			"usable capacity must reserve LTFS overhead below native capacity")
@@ -73,15 +89,19 @@ func TestPackBinPacksWithinCapacity(t *testing.T) {
 		assert.LessOrEqual(t, tape.PlannedBytes(), tape.UsableBytes,
 			"a tape's data plus reserved PAR2 must fit within usable capacity")
 
-		// Each placement reserves PAR2 space on top of the measured data (AC1).
+		// Each placement reserves the honest PAR2 upper bound on top of the
+		// measured data (AC1), and records the slice count it was sized from.
 		for _, archive := range tape.Archives {
-			assert.Equal(t, int64(40_000), archive.PAR2ReservedBytes,
-				"PAR2 must be reserved at the configured percentage of measured size")
-			assert.Equal(t, int64(440_000), archive.Footprint())
+			assert.Equal(t, 1, archive.SliceCount, "the slice count must be recorded on the plan")
+			assert.Equal(t, wantReserve, archive.PAR2ReservedBytes,
+				"PAR2 must be reserved as the honest upper bound on real par2 output")
+			assert.Greater(t, archive.PAR2ReservedBytes, naiveReserve,
+				"the honest reserve must exceed the naive measured×percent figure")
+			assert.Equal(t, archiveBytes+wantReserve, archive.Footprint())
 		}
 	}
 
-	// Three 440,000-byte footprints into ~995,000-byte tapes need two tapes.
+	// Three ~4.84 GiB footprints into ~11.4 GiB usable tapes need two tapes.
 	assert.Len(t, plan.Tapes, 2)
 
 	// Every staged archive is placed exactly once across all tapes.
@@ -93,15 +113,21 @@ func TestPackBinPacksWithinCapacity(t *testing.T) {
 func TestPackFillModeReservesFloor(t *testing.T) {
 	t.Parallel()
 
-	cfg := packConfig(10_000_000, 1, 1, fillRedundancy(5))
-	plan, err := pack(cfg, []StagedArchive{stagedArchive(0, 1_000_000)})
+	const archiveBytes = 2 * gib
+
+	cfg := packConfig(3*gib, 1, 1, fillRedundancy(5))
+	plan, err := pack(cfg, []StagedArchive{stagedArchive(0, archiveBytes)})
 	require.NoError(t, err)
 
 	require.Len(t, plan.Tapes, 1)
 	require.Len(t, plan.Tapes[0].Archives, 1)
 
-	// 5% of 1,000,000 measured bytes is reserved for PAR2.
-	assert.Equal(t, int64(50_000), plan.Tapes[0].Archives[0].PAR2ReservedBytes)
+	// The floor's honest PAR2 upper bound (par2.MaxOutputBytes at 5%) is reserved —
+	// the minimum footprint fill mode later grows into the tape's slack — and it
+	// exceeds the naive 5%-of-measured figure it replaced (issue #148).
+	wantReserve := par2.MaxOutputBytes(archiveBytes, 1, 5)
+	assert.Equal(t, wantReserve, plan.Tapes[0].Archives[0].PAR2ReservedBytes)
+	assert.Greater(t, wantReserve, archiveBytes*5/100)
 }
 
 // TestPackRejectsOversizedArchive covers the measured-size guard: an archive
@@ -110,10 +136,12 @@ func TestPackFillModeReservesFloor(t *testing.T) {
 func TestPackRejectsOversizedArchive(t *testing.T) {
 	t.Parallel()
 
-	cfg := packConfig(1_000_000, 1, 1, targetRedundancy(10))
+	cfg := packConfig(3*gib, 1, 1, targetRedundancy(10))
 
-	// 950,000 data + 95,000 PAR2 = 1,045,000 > usable (~995,000).
-	_, err := pack(cfg, []StagedArchive{stagedArchive(4, 950_000)})
+	// An archive whose measured data alone nearly fills the tape cannot also hold
+	// its PAR2 reserve: ~2.69 GiB data fits under the ~2.85 GiB usable, but adding
+	// its ~0.37 GiB PAR2 reserve pushes the footprint over.
+	_, err := pack(cfg, []StagedArchive{stagedArchive(4, 2750*(1<<20))})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sources[4]")
 	assert.Contains(t, err.Error(), "exceeds one tape's usable capacity")
@@ -125,9 +153,9 @@ func TestPackRejectsOversizedArchive(t *testing.T) {
 func TestPackAllowsCopiesExceedingDrives(t *testing.T) {
 	t.Parallel()
 
-	cfg := packConfig(1_000_000, 3, 2, targetRedundancy(10))
+	cfg := packConfig(3*gib, 3, 2, targetRedundancy(10))
 
-	plan, err := pack(cfg, []StagedArchive{stagedArchive(0, 100_000)})
+	plan, err := pack(cfg, []StagedArchive{stagedArchive(0, 1*gib)})
 	require.NoError(t, err)
 	assert.Equal(t, 3, plan.Copies, "the plan records the requested copy count even though it exceeds the drives")
 	assert.NotEmpty(t, plan.Tapes)

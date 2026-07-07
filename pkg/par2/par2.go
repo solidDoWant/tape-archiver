@@ -5,6 +5,7 @@ package par2
 import (
 	"context"
 	"fmt"
+	"math/bits"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,7 +70,7 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 		names[index] = filepath.Base(dataFile)
 	}
 
-	blockSize := computeBlockSize(totalSize, len(dataFiles))
+	blockSize := ComputeBlockSize(totalSize, len(dataFiles))
 
 	// -qq fully silences par2's progress output; -s sets the block size, -r the
 	// redundancy percentage, -a the recovery set name. -- ends option parsing so
@@ -102,7 +103,7 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 	return nil
 }
 
-// computeBlockSize returns the PAR2 block size to use for totalSize bytes spread
+// ComputeBlockSize returns the PAR2 block size to use for totalSize bytes spread
 // across fileCount files.
 //
 // PAR2 counts source blocks per file — sum(ceil(size_i / blockSize)) — so
@@ -111,7 +112,10 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 // that headroom, keeping the real count within PAR2's 32,768-block limit
 // (SPEC §8). The result is rounded up to a multiple of 4 (which par2 requires)
 // and never falls below one such block.
-func computeBlockSize(totalSize int64, fileCount int) int64 {
+//
+// It is exported so the Pack phase can reserve a conservative upper bound on the
+// recovery-set size (MaxOutputBytes) from the same block size Generate will use.
+func ComputeBlockSize(totalSize int64, fileCount int) int64 {
 	capacity := int64(maxRecoveryBlocks - fileCount)
 	if capacity < 1 {
 		capacity = 1
@@ -129,6 +133,88 @@ func computeBlockSize(totalSize int64, fileCount int) int64 {
 
 	return blockSize
 }
+
+// MaxOutputBytes returns a conservative upper bound on the total on-disk size of
+// the PAR2 recovery set Generate produces for dataBytes spread across fileCount
+// files at redundancyPercent. It exists so the Pack phase can reserve honest tape
+// space for parity: par2's real output is measurably larger than the naive
+// dataBytes×percent/100, so reserving that naive figure lets a fill-to-capacity
+// tape pass Pack and then overflow its usable capacity in Verify after the
+// multi-hour PAR2 compute (issue #148).
+//
+// The bound decomposes par2cmdline-turbo's output (validated against the shipped
+// 1.4.0 binary by TestMaxOutputBytes) into two parts:
+//
+//   - Recovery packets: recoveryBlocks packets, each a header plus one block. The
+//     source-block count is bounded above by ceil(dataBytes/B)+fileCount-1 (the
+//     same per-file rounding ComputeBlockSize budgets for), and the recovery-block
+//     count by ceil(sourceBlocks×percent/100)+1.
+//   - Critical packets (the main, creator, file-description and input-file
+//     slice-checksum packets): par2 replicates the whole critical set into the
+//     index file and every recovery volume file, more copies in the larger files.
+//     One copy is bounded by 20 bytes per source block (the slice checksums) plus
+//     a per-file and fixed allowance; par2's default exponential volume grouping
+//     yields at most bitLen(recoveryBlocks)+2 files, each holding at most
+//     bitLen(recoveryBlocks)+1 copies, so (bitLen+2)(bitLen+1) copies bound the total.
+//
+// At LTO (terabyte) scale the recovery packets dominate and the bound is tight
+// (~percent% + a fraction of a percent); at tiny sizes the replicated critical
+// packets dominate and the bound runs a small multiple above the real output —
+// always conservative, which is the safe direction for a capacity reserve
+// (principles 1 and 2: recoverability and never overrunning a tape).
+//
+// fileCount below 1 is treated as 1; redundancyPercent is used as given (callers
+// clamp it to par2's [1, 100]).
+func MaxOutputBytes(dataBytes int64, fileCount, redundancyPercent int) int64 {
+	if fileCount < 1 {
+		fileCount = 1
+	}
+
+	blockSize := ComputeBlockSize(dataBytes, fileCount)
+
+	// Upper bound on source blocks: per-file rounding adds at most fileCount-1
+	// blocks over ceil(dataBytes/blockSize) — the headroom ComputeBlockSize budgets.
+	sourceBlocks := ceilDiv(dataBytes, blockSize) + int64(fileCount) - 1
+	if sourceBlocks < 1 {
+		sourceBlocks = 1
+	}
+
+	// Upper bound on recovery blocks: round the percentage up and add one so the
+	// bound never dips below par2's chosen count.
+	recoveryBlocks := ceilDiv(sourceBlocks*int64(redundancyPercent), 100) + 1
+
+	// Recovery packets: one header (bounded generously at 68 bytes with alignment)
+	// plus one block each.
+	recoveryBytes := recoveryBlocks * (blockSize + recoveryPacketOverhead)
+
+	// One copy of the critical packet set: the input-file slice checksums dominate
+	// at 20 bytes (MD5 + CRC-32) per source block, plus a per-file allowance (file
+	// description packets) and a fixed allowance (main and creator packets).
+	criticalPerCopy := sliceChecksumBytesPerBlock*sourceBlocks +
+		criticalPerFileBytes*int64(fileCount) + criticalFixedBytes
+
+	// par2 replicates the critical set across the index and volume files, more
+	// copies in larger files; bound the total copies by (bitLen+2)(bitLen+1).
+	fileBits := int64(bits.Len64(uint64(recoveryBlocks)))
+	criticalCopies := (fileBits + 2) * (fileBits + 1)
+
+	return recoveryBytes + criticalPerCopy*criticalCopies
+}
+
+const (
+	// recoveryPacketOverhead bounds a single recovery-slice packet's non-payload
+	// bytes (the 64-byte PAR2 packet header plus block alignment slack).
+	recoveryPacketOverhead = 68
+	// sliceChecksumBytesPerBlock is the per-source-block cost of the input-file
+	// slice-checksum packets: a 16-byte MD5 plus a 4-byte CRC-32 per block.
+	sliceChecksumBytesPerBlock = 20
+	// criticalPerFileBytes bounds the per-file critical-packet cost (the file
+	// description packet's header, IDs, hashes, length and file name).
+	criticalPerFileBytes = 512
+	// criticalFixedBytes bounds the file-count-independent critical packets (the
+	// main packet and the creator packet) in one copy of the critical set.
+	criticalFixedBytes = 4096
+)
 
 // ceilDiv returns ceil(numerator / denominator) for non-negative numerator and
 // positive denominator.

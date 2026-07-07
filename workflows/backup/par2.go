@@ -149,30 +149,54 @@ func par2Percentages(redundancy config.Redundancy, plan TapePlan) (map[int]int, 
 }
 
 // fillPercent is the uniform PAR2 redundancy for one tape in fill-to-capacity
-// mode: the percentage that grows every archive's recovery set proportionally so
-// the recovery sets together consume the tape's remaining capacity, never below
-// the floor and never above 100%. The percentage is rounded down so the recovery
-// sets stay within the tape (SPEC §4.3 phases 3–4).
+// mode: the largest integer percentage, from the floor up to 100, at which the
+// tape's archives' modeled PAR2 output still fits the tape's remaining capacity.
+//
+// It grows every archive's recovery set to consume the slack between the tape's
+// data and its usable capacity, never below the floor. Crucially it sizes against
+// par2.MaxOutputBytes — the same conservative upper bound Pack reserves with — not
+// the naive data×percent/100: since real par2 output ≤ that bound ≤ the remaining
+// slack, the recovery sets are guaranteed to fit and Verify cannot overflow after
+// the PAR2 compute (issue #148, SPEC §4.3 phases 3–4).
 func fillPercent(tape PlannedTape, floor int) int {
+	floor = clampPercent(floor)
+
 	data := tape.DataBytes()
 	if data <= 0 {
 		return floor
 	}
 
-	remaining := tape.UsableBytes - data
-	if remaining < 0 {
-		remaining = 0
+	slack := tape.UsableBytes - data
+	if slack < 0 {
+		slack = 0
 	}
 
-	// Floor division so the parity (data × percent / 100) never exceeds the
-	// remaining capacity. Packing reserved at least the floor, so this is already
-	// ≥ floor; the max keeps the floor guarantee explicit.
-	percent := int((remaining * 100) / data)
-	if percent < floor {
-		percent = floor
+	// MaxOutputBytes is monotonically non-decreasing in the percentage, so scan up
+	// from the floor and stop at the first percentage that overflows the slack. Pack
+	// reserved the floor's bound within capacity, so the floor itself always fits.
+	best := floor
+
+	for percent := floor; percent <= maxPAR2Percent; percent++ {
+		if tapePAR2Bound(tape, percent) > slack {
+			break
+		}
+
+		best = percent
 	}
 
-	return clampPercent(percent)
+	return best
+}
+
+// tapePAR2Bound is the summed conservative PAR2 upper bound (par2.MaxOutputBytes)
+// across a tape's archives at the given redundancy percentage — the modeled parity
+// footprint fill-to-capacity sizing keeps within the tape's remaining capacity.
+func tapePAR2Bound(tape PlannedTape, percent int) int64 {
+	var total int64
+	for _, archive := range tape.Archives {
+		total += par2.MaxOutputBytes(archive.DataBytes, archive.SliceCount, percent)
+	}
+
+	return total
 }
 
 // generateArchivePAR2 generates and stages one archive's PAR2 recovery set at the
