@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -109,9 +110,29 @@ func TestPrometheusEndpoint_Disabled(t *testing.T) {
 	require.NoError(t, provider.WaitForScrape(t.Context()))
 }
 
+// unsetEnv removes an environment variable for the duration of the test,
+// restoring its prior value (set or unset) on cleanup. t.Setenv cannot express
+// "unset", so tests that must distinguish unset from empty use this helper.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+
+	prior, had := os.LookupEnv(key)
+	require.NoError(t, os.Unsetenv(key))
+
+	t.Cleanup(func() {
+		if had {
+			require.NoError(t, os.Setenv(key, prior))
+
+			return
+		}
+
+		require.NoError(t, os.Unsetenv(key))
+	})
+}
+
 func TestNewFromEnv_FallsBackToDefaultAddr(t *testing.T) {
 	addr := freeAddr(t)
-	t.Setenv("METRICS_ADDR", "")
+	unsetEnv(t, "METRICS_ADDR")
 
 	// NewFromEnv binds the supplied default when METRICS_ADDR is unset.
 	provider, shutdown, err := metrics.NewFromEnv(addr)
@@ -120,6 +141,23 @@ func TestNewFromEnv_FallsBackToDefaultAddr(t *testing.T) {
 
 	require.NotNil(t, provider.PrometheusRegisterer())
 	assert.Contains(t, scrape(t, addr), "go_goroutines")
+}
+
+func TestNewFromEnv_EmptyAddr_DisablesEndpoint(t *testing.T) {
+	addr := freeAddr(t)
+	t.Setenv("METRICS_ADDR", "")
+
+	// An explicitly empty METRICS_ADDR disables the endpoint even when a
+	// non-empty defaultAddr is supplied: no HTTP server, nil registry.
+	provider, shutdown, err := metrics.NewFromEnv(addr)
+	require.NoError(t, err)
+	t.Cleanup(shutdown)
+
+	require.Nil(t, provider.PrometheusRegisterer())
+
+	// Nothing must be listening on the default address.
+	_, err = net.DialTimeout("tcp", addr, 250*time.Millisecond)
+	require.Error(t, err, "no /metrics server should be listening when METRICS_ADDR is empty")
 }
 
 func TestNewFromEnv_EmptyDefault_KeepsMetricsDisabled(t *testing.T) {

@@ -164,5 +164,17 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 
 	slog.Info("worker stopped", "role", string(cfg.Role), "task_queue", queue)
 
+	// Give Prometheus a bounded window to collect a final scrape of
+	// end-of-lifecycle metrics before the deferred metricsShutdown() closes the
+	// /metrics server. A non-cancelled context is used deliberately: the
+	// SIGTERM-driven shutdown that got us here also cancelled ctx, and passing
+	// that cancelled context would defeat the wait. A timeout here is expected
+	// and benign (Prometheus simply did not scrape in time), so it is logged at
+	// debug rather than failing the run. WaitForScrape is a no-op when metrics
+	// are disabled or the configured timeout is non-positive.
+	if err := metricsProvider.WaitForScrape(context.Background()); err != nil {
+		slog.Debug("final metrics scrape wait ended without a scrape", "error", err)
+	}
+
 	return nil
 }
