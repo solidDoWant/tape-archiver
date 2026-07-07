@@ -16,11 +16,19 @@ import (
 // work directory under `-o capture_index`.
 const indexSchemaSuffix = ".schema"
 
-// genSuffixRe matches a generation-suffixed schema name (e.g.
-// "<uuid>-3.schema"). LTFS names the current index "<uuid>.schema" and may also
-// leave generation-suffixed copies; the unsuffixed file is the canonical latest
-// index, so it is preferred.
-var genSuffixRe = regexp.MustCompile(`-[0-9]+\` + indexSchemaSuffix + `$`)
+// canonicalIndexRe matches a canonical captured-index name: exactly
+// "<uuid>.schema", where <uuid> is an RFC-4122 8-4-4-4-12 hex UUID. LTFS names
+// the current index after the volume UUID ("<uuid>.schema") and may also leave
+// generation-suffixed copies ("<uuid>-3.schema"); the canonical unsuffixed file
+// is the latest index, so it is preferred.
+//
+// The match is positive (require the canonical shape) rather than a negative
+// "-<n>.schema" test: an all-digit final UUID group (e.g. ...-000000000000) is
+// still hex and so still matches, whereas the old negative test misclassified
+// such a canonical name as generation-suffixed and excluded it.
+var canonicalIndexRe = regexp.MustCompile(
+	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\` +
+		indexSchemaSuffix + `$`)
 
 // ReadIndex returns the LTFS index XML for the volume, read from the index that
 // LTFS captured to the work directory at unmount (`-o capture_index`). It must
@@ -54,7 +62,7 @@ func (m *Mount) ReadIndex(ctx context.Context) ([]byte, error) {
 		candidates = append(candidates, indexCandidate{name: entry.Name(), modTime: info.ModTime()})
 	}
 
-	name, err := pickIndexFile(candidates)
+	name, err := pickIndexFile(candidates, m.mountStart)
 	if err != nil {
 		return nil, fmt.Errorf("locate captured LTFS index in %s: %w", m.workDir, err)
 	}
@@ -82,21 +90,43 @@ type indexCandidate struct {
 // ReadIndex was called before Unmount, so LTFS never wrote one.
 var errNoIndex = fmt.Errorf("no captured index (.schema) file found; ReadIndex must be called after Unmount")
 
-// pickIndexFile chooses the captured index among the work directory's files: the
-// canonical unsuffixed "<uuid>.schema" is preferred over generation-suffixed
-// copies, and the newest is chosen if several remain (name as a stable
-// tie-breaker). It returns errNoIndex when no .schema file is present.
-func pickIndexFile(candidates []indexCandidate) (string, error) {
+// errStaleIndex is returned when the work directory holds captured index files
+// but every one predates this mount cycle — i.e. they are leftovers from a prior
+// format of the same barcode and this cycle's `-o capture_index` dump never
+// appeared (a silent LTFS index-capture failure). Returning the stale index
+// would ship a prior format's byte-level map on the recovery ISO (SPEC.md §10,
+// §14), so the run must fail instead.
+var errStaleIndex = fmt.Errorf("captured index predates this mount; index capture did not occur this cycle")
+
+// pickIndexFile chooses the captured index among the work directory's files: any
+// candidate older than notBefore (the mount's start time) is a leftover from a
+// prior format and is rejected; among the rest the canonical unsuffixed
+// "<uuid>.schema" is preferred over generation-suffixed copies, and the newest
+// is chosen if several remain (name as a stable tie-breaker). It returns
+// errNoIndex when no .schema file is present and errStaleIndex when .schema
+// files exist but all predate notBefore.
+func pickIndexFile(candidates []indexCandidate, notBefore time.Time) (string, error) {
 	var schemas, canonical []indexCandidate
+
+	var sawStale bool
 
 	for _, candidate := range candidates {
 		if !strings.HasSuffix(candidate.name, indexSchemaSuffix) {
 			continue
 		}
 
+		// A capture written this cycle postdates the mount start; a leftover from
+		// a prior format predates it. Reject stale leftovers so ReadIndex never
+		// returns a previous format's index as this tape's recovery map.
+		if candidate.modTime.Before(notBefore) {
+			sawStale = true
+
+			continue
+		}
+
 		schemas = append(schemas, candidate)
 
-		if !genSuffixRe.MatchString(candidate.name) {
+		if canonicalIndexRe.MatchString(candidate.name) {
 			canonical = append(canonical, candidate)
 		}
 	}
@@ -107,6 +137,10 @@ func pickIndexFile(candidates []indexCandidate) (string, error) {
 	}
 
 	if len(chosen) == 0 {
+		if sawStale {
+			return "", errStaleIndex
+		}
+
 		return "", errNoIndex
 	}
 

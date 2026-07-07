@@ -27,6 +27,13 @@ type Mount struct {
 	mountpoint string
 	workDir    string
 
+	// mountStart is a strict lower bound on the mtime of any index this mount
+	// cycle could capture: it is set before the ltfs process starts, so a
+	// captured index written at unmount always postdates it, while a leftover
+	// index from a prior format of the same barcode always predates it.
+	// ReadIndex uses it to reject stale leftovers (see pickIndexFile).
+	mountStart time.Time
+
 	cmd    *exec.Cmd
 	stderr *bytes.Buffer
 
@@ -55,6 +62,11 @@ func (m *Mount) Mountpoint() string {
 // The ltfs process is run in the foreground and supervised so that Unmount can
 // wait for it and learn whether the index write succeeded.
 func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount, error) {
+	// Capture the mount start before anything else so it is a strict lower bound
+	// on any index this cycle writes; ReadIndex rejects captured files older than
+	// this as leftovers from a prior format (see Mount.mountStart, pickIndexFile).
+	mountStart := time.Now()
+
 	absMount, err := filepath.Abs(mountpoint)
 	if err != nil {
 		return nil, fmt.Errorf("resolve mountpoint %q: %w", mountpoint, err)
@@ -98,6 +110,7 @@ func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount,
 	m := &Mount{
 		mountpoint: absMount,
 		workDir:    workDir,
+		mountStart: mountStart,
 		cmd:        cmd,
 		stderr:     stderr,
 		done:       make(chan struct{}),
