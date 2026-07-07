@@ -56,14 +56,40 @@ func TestBuildSubmission(t *testing.T) {
 }
 
 func TestBuildSubmissionDryRun(t *testing.T) {
-	t.Run("default mhvtl devices when env unset", func(t *testing.T) {
+	// AC1: a dry-run with no MHVTL_* set must fail closed rather than fall back
+	// to device nodes that are byte-identical to the real library.
+	t.Run("errors and submits nothing when env unset", func(t *testing.T) {
 		withGetenv(t, func(string) string { return "" })
 
 		cfg, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), dryRun: true})
-		require.NoError(t, err)
+		require.Error(t, err)
+		assert.Nil(t, cfg)
 
-		assert.Equal(t, defaultMHVTLChanger, cfg.Library.Changer)
-		assert.Equal(t, []string{defaultMHVTLDrive0, defaultMHVTLDrive1}, cfg.Library.Drives)
+		message := err.Error()
+		assert.Contains(t, message, mhvtlChangerEnv)
+		assert.Contains(t, message, mhvtlDrive0Env)
+		assert.Contains(t, message, mhvtlDrive1Env)
+	})
+
+	// AC1: the error names exactly which variable(s) are missing so the operator
+	// can fix it, and it must not silently proceed on a partial override.
+	t.Run("errors naming the single missing variable", func(t *testing.T) {
+		env := map[string]string{
+			mhvtlChangerEnv: "/dev/sch9",
+			mhvtlDrive0Env:  "/dev/nst8",
+			// mhvtlDrive1Env deliberately unset.
+		}
+
+		withGetenv(t, func(name string) string { return env[name] })
+
+		cfg, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), dryRun: true})
+		require.Error(t, err)
+		assert.Nil(t, cfg)
+
+		message := err.Error()
+		assert.Contains(t, message, mhvtlDrive1Env)
+		assert.NotContains(t, message, mhvtlChangerEnv)
+		assert.NotContains(t, message, mhvtlDrive0Env)
 	})
 
 	t.Run("env overrides mhvtl device paths", func(t *testing.T) {
@@ -90,6 +116,18 @@ func TestParseRunArgsRejectsID(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestParseRunArgsRejectsStrayPositional covers AC2: a stray positional
+// argument must be rejected naming the unexpected argument. Go's flag package
+// stops at the first positional, so without this guard a trailing --dry-run is
+// silently dropped and a real run is submitted where a test was intended.
+func TestParseRunArgsRejectsStrayPositional(t *testing.T) {
+	options, err := parseRunArgs([]string{"--config", "run.json", "backup", "--dry-run"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "backup")
+	// The dropped --dry-run must not have been silently honored.
+	assert.False(t, options.dryRun)
+}
+
 func TestTranslateSubmitError(t *testing.T) {
 	t.Run("already-started conflict is reported as actionable", func(t *testing.T) {
 		started := serviceerror.NewWorkflowExecutionAlreadyStarted("already started", "req-1", "run-abc")
@@ -101,7 +139,14 @@ func TestTranslateSubmitError(t *testing.T) {
 		assert.Contains(t, message, "already in progress")
 		assert.Contains(t, message, backupWorkflowID)
 		assert.Contains(t, message, "run-abc")
-		assert.Contains(t, message, "tapectl status")
+
+		// AC3: the suggested inspection command must execute successfully when
+		// copy-pasted verbatim. `tapectl status` takes no arguments
+		// (requireNoArgs), so the suggestion must be bare `tapectl status` and
+		// must not append the workflow ID as an argument.
+		assert.Contains(t, message, "`tapectl status`")
+		assert.NotContains(t, message, "tapectl status "+backupWorkflowID)
+		require.NoError(t, requireNoArgs("status", suggestedStatusArgs(message)))
 	})
 
 	t.Run("other errors are wrapped verbatim", func(t *testing.T) {
@@ -203,6 +248,29 @@ func TestDispatchHelp(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, dispatch(context.Background(), []string{"--help"}, &out))
 	assert.True(t, strings.Contains(out.String(), "tapectl"))
+}
+
+// suggestedStatusArgs extracts the arguments of the backticked `tapectl status`
+// command embedded in an error message and returns the tokens after
+// `tapectl status`. It lets a test feed the tool's own suggestion straight into
+// requireNoArgs, proving the copy-pasted command parses (AC3). If the message
+// contains no backticked `tapectl status` command it returns nil.
+func suggestedStatusArgs(message string) []string {
+	const prefix = "`tapectl status"
+
+	start := strings.Index(message, prefix)
+	if start < 0 {
+		return nil
+	}
+
+	rest := message[start+len(prefix):]
+
+	end := strings.Index(rest, "`")
+	if end < 0 {
+		return nil
+	}
+
+	return strings.Fields(rest[:end])
 }
 
 // withGetenv swaps the package getenv for the duration of a test.

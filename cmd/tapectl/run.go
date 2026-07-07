@@ -87,6 +87,15 @@ func parseRunArgs(args []string) (runOptions, error) {
 		return runOptions{}, err
 	}
 
+	// Reject stray positional arguments. Go's flag package stops parsing at the
+	// first positional, so a stray argument would silently drop any flags after
+	// it (e.g. `--config prod.json backup --dry-run` loses --dry-run and submits
+	// a real run). Fail fast naming the unexpected argument instead.
+	if flagSet.NArg() != 0 {
+		return runOptions{}, fmt.Errorf("tapectl run takes no positional arguments, but got %q\n\n"+
+			"Usage: tapectl run --config <file> [--dry-run]", flagSet.Arg(0))
+	}
+
 	return options, nil
 }
 
@@ -104,7 +113,9 @@ func buildSubmission(options runOptions) (*config.Config, error) {
 	}
 
 	if options.dryRun {
-		applyDryRun(cfg, getenv)
+		if err := applyDryRun(cfg, getenv); err != nil {
+			return nil, err
+		}
 
 		// The override changes the device set, so the result must satisfy the
 		// same invariants (e.g. copies <= drives) as the original config.
@@ -125,8 +136,8 @@ func translateSubmitError(err error) error {
 	var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
 	if errors.As(err, &alreadyStarted) {
 		return fmt.Errorf("a backup run is already in progress (workflow ID %q, run ID %s); "+
-			"backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status %s`",
-			backupWorkflowID, alreadyStarted.RunId, backupWorkflowID)
+			"backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status`",
+			backupWorkflowID, alreadyStarted.RunId)
 	}
 
 	return fmt.Errorf("submit backup workflow: %w", err)
