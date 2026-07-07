@@ -136,6 +136,21 @@ func TestParseLogicalReferenced(t *testing.T) {
 			want: 0,
 		},
 		{
+			// A space in the name (legal in OpenZFS) must not shift the field
+			// indices: cutting on tabs keeps the value in field 2.
+			name: "dataset name containing a space",
+			out:  "tank/media disc\tlogicalreferenced\t123456789\t-\n",
+			want: 123456789,
+		},
+		{
+			// The worst case: the name's third whitespace token is numeric, so
+			// strings.Fields would return a plausible-but-wrong byte count from
+			// the name ("2"). Cutting on tabs returns the true value instead.
+			name: "dataset name whose third whitespace token is numeric",
+			out:  "tank/media disc 2\tlogicalreferenced\t123456789\t-\n",
+			want: 123456789,
+		},
+		{
 			name:      "empty output",
 			out:       "",
 			assertErr: require.Error,

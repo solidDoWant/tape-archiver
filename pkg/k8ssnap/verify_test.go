@@ -9,23 +9,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakePropertyReader returns canned user properties (or an error) for any path,
-// standing in for pkg/zfs so Verify can be exercised without a pool. It records
-// the path it was asked about.
+// fakePropertyReader returns a canned single-property value (or an error) for any
+// path, standing in for pkg/zfs so Verify can be exercised without a pool. It
+// records the path and property name it was asked about. properties maps a
+// property name to its value; an unread property yields "-" as real zfs does.
 type fakePropertyReader struct {
-	properties map[string]string
-	err        error
-	askedPath  string
+	properties    map[string]string
+	err           error
+	askedPath     string
+	askedProperty string
 }
 
-func (f *fakePropertyReader) UserProperties(_ context.Context, dataset string) (map[string]string, error) {
+func (f *fakePropertyReader) UserProperty(_ context.Context, dataset, property string) (string, error) {
 	f.askedPath = dataset
+	f.askedProperty = property
 
 	if f.err != nil {
-		return nil, f.err
+		return "", f.err
 	}
 
-	return f.properties, nil
+	if value, ok := f.properties[property]; ok {
+		return value, nil
+	}
+
+	return "-", nil
 }
 
 func TestVerify(t *testing.T) {
@@ -80,6 +87,8 @@ func TestVerify(t *testing.T) {
 
 			assert.Equal(t, snapshot.ZFSPath(), test.reader.askedPath,
 				"Verify should read properties of the @-snapshot path")
+			assert.Equal(t, managedResourceProperty, test.reader.askedProperty,
+				"Verify should read the managed_resource property by name, not scrape all properties")
 		})
 	}
 }

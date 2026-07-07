@@ -110,6 +110,14 @@ func Mountpoint(ctx context.Context, dataset string) (string, error) {
 // just those two columns. A non-existent dataset or snapshot makes zfs exit
 // non-zero, so this doubles as an existence check — the backup pipeline relies on
 // that to reject a resolved snapshot that is not present on the pool (SPEC.md §4.3).
+//
+// The returned map is NOT authoritative for individual property values: a user
+// property value may legally embed a newline, and "all" output is newline-record
+// delimited, so a crafted continuation line of the form "name:space<tab>value" is
+// indistinguishable from a real record and can fabricate a property. This scrape
+// is therefore used only as the raw-source existence check; any security decision
+// (e.g. the democratic-csi ownership guard) must read the specific property by
+// name via UserProperty, which is structurally immune to that ambiguity.
 func UserProperties(ctx context.Context, dataset string) (map[string]string, error) {
 	cmd := exec.CommandContext(ctx, "zfs", "get", "-Hp", "-o", "property,value", "all", dataset)
 
@@ -127,6 +135,36 @@ func UserProperties(ctx context.Context, dataset string) (map[string]string, err
 	}
 
 	return parseUserProperties(out), nil
+}
+
+// UserProperty returns the value of a single named ZFS user property (e.g.
+// democratic-csi:managed_resource) on the given dataset or snapshot. Unlike
+// UserProperties, it reads exactly one property by name and so cannot be spoofed
+// by a continuation line embedded in some other property's value — there is no
+// multi-record parsing to confuse. It is the reader the ownership guard uses.
+//
+// It runs "zfs get -Hp -o value <property> <dataset>": -H drops the header, -p
+// prints the raw value, and -o value selects just the value column. zfs emits the
+// property's value on a single line, or "-" when the property is unset on the
+// dataset; the value is returned trimmed. A non-existent dataset or snapshot makes
+// zfs exit non-zero, so this preserves the existence semantics of UserProperties.
+func UserProperty(ctx context.Context, dataset, property string) (string, error) {
+	cmd := exec.CommandContext(ctx, "zfs", "get", "-Hp", "-o", "value", property, dataset)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return "", fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	return strings.TrimSpace(string(out)), nil
 }
 
 // parseUserProperties extracts the user properties from "zfs get -H -o
@@ -157,12 +195,15 @@ func parseUserProperties(out []byte) map[string]string {
 //
 // With -H the output is a single tab-delimited line of the form
 // "<name>\tlogicalreferenced\t<value>\t<source>"; with -p the value field is a
-// plain integer number of bytes. ZFS names contain no whitespace, so splitting
-// on whitespace isolates the value as the third field.
+// plain integer number of bytes. OpenZFS name components may legally contain
+// spaces (but never a tab), so the line must be cut on tabs, not on arbitrary
+// whitespace: a space in the name would otherwise shift the field indices and
+// yield a parse error or — when the third whitespace token happens to be numeric
+// (e.g. "tank/media disc 2") — a silently wrong byte count. The value is field 2.
 func parseLogicalReferenced(out []byte) (int64, error) {
 	line := strings.TrimSpace(string(out))
 
-	fields := strings.Fields(line)
+	fields := strings.Split(line, "\t")
 	if len(fields) < 3 {
 		return 0, fmt.Errorf("unexpected zfs get output: %q", line)
 	}

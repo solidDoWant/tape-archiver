@@ -3,14 +3,19 @@
 package zfs_test
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/pkg/k8ssnap"
 	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 )
 
@@ -117,4 +122,122 @@ func TestUserPropertiesIntegration(t *testing.T) {
 
 	_, err = zfs.UserProperties(t.Context(), testutil.PoolDataset(t)+"@tape-archiver-nonexistent-snapshot")
 	require.Error(t, err, "a non-existent snapshot should error")
+}
+
+// poolRoot returns the top-level pool name from the configured test dataset
+// (e.g. "tape_test" from "tape_test/archive"), so helper datasets can be created
+// as pool children with names the test fully controls.
+func poolRoot(t *testing.T) string {
+	t.Helper()
+
+	root, _, _ := strings.Cut(testutil.PoolDataset(t), "/")
+	require.NotEmpty(t, root, "pool dataset should have a pool component")
+
+	return root
+}
+
+// createDataset creates a ZFS dataset by exact name (which may contain spaces)
+// and registers its recursive destruction for test cleanup. Any pre-existing
+// dataset of the same name is destroyed first so a prior failed run cannot leak
+// state. Requires root (the integration suite runs under sudo), so the test is
+// skipped when not privileged.
+func createDataset(t *testing.T, name string) {
+	t.Helper()
+
+	if os.Geteuid() != 0 {
+		t.Skip("creating ZFS datasets requires root — run via 'make test-integration' (sudo)")
+	}
+
+	destroy := func() {
+		_ = exec.Command("zfs", "destroy", "-r", name).Run()
+	}
+
+	destroy()
+
+	require.NoError(t, exec.Command("zfs", "create", name).Run(),
+		"create dataset %q", name)
+
+	t.Cleanup(destroy)
+}
+
+// zfsGetRaw reads a property's raw value directly via the zfs CLI, as the truth
+// oracle the parser under test is compared against.
+func zfsGetRaw(t *testing.T, property, dataset string) string {
+	t.Helper()
+
+	out, err := exec.Command("zfs", "get", "-Hp", "-o", "value", property, dataset).Output()
+	require.NoError(t, err, "zfs get %s %q", property, dataset)
+
+	return strings.TrimSpace(string(out))
+}
+
+// TestLogicalReferencedSpacedNameIntegration proves AC1/AC2 against a real pool:
+// a dataset whose name contains a space — and whose third whitespace token is the
+// numeric "2", the worst case for whitespace splitting — yields the true
+// logicalreferenced byte count, not a number parsed out of the name.
+func TestLogicalReferencedSpacedNameIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	// "media disc 2": legal in OpenZFS, contains spaces, and its third
+	// whitespace-separated token is the numeric "2" that a Fields-based parser
+	// would wrongly return.
+	dataset := poolRoot(t) + "/media disc 2"
+	createDataset(t, dataset)
+
+	want := zfsGetRaw(t, "logicalreferenced", dataset)
+
+	got, err := zfs.LogicalReferenced(t.Context(), dataset)
+	require.NoError(t, err, "spaced dataset name should parse, not error")
+
+	assert.Equal(t, want, strconv.FormatInt(got, 10),
+		"logicalreferenced should be the true byte count, not a token from the name")
+	assert.NotEqual(t, int64(2), got,
+		"the numeric name token '2' must not be mistaken for the value")
+}
+
+// spoofReader adapts zfs.UserProperty to k8ssnap.PropertyReader so the ownership
+// guard can be exercised end-to-end against the real pool.
+type spoofReader struct{}
+
+func (spoofReader) UserProperty(ctx context.Context, dataset, property string) (string, error) {
+	return zfs.UserProperty(ctx, dataset, property)
+}
+
+// TestUserPropertySpoofIntegration proves AC3 against a real pool: a user property
+// whose value embeds a newline followed by "democratic-csi:managed_resource<tab>true"
+// cannot fabricate that property. The by-name UserProperty read returns the unset
+// marker "-" (not "true"), and k8ssnap.Verify rejects the snapshot.
+func TestUserPropertySpoofIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	dataset := poolRoot(t) + "/spoof target"
+	createDataset(t, dataset)
+
+	// A crafted value that, in "zfs get all" newline-delimited output, looks
+	// exactly like a real democratic-csi:managed_resource=true record.
+	spoof := "harmless\ndemocratic-csi:managed_resource\ttrue"
+	require.NoError(t,
+		exec.Command("zfs", "set", "custom:note="+spoof, dataset).Run(),
+		"set crafted user property")
+
+	managed, err := zfs.UserProperty(t.Context(), dataset, "democratic-csi:managed_resource")
+	require.NoError(t, err)
+	assert.NotEqual(t, "true", managed,
+		"a continuation line must not fabricate managed_resource=true")
+	assert.Equal(t, "-", managed, "the property is genuinely unset")
+
+	// End-to-end: the ownership guard must reject a dataset it does not own,
+	// even in the presence of the spoof value. Snapshot the dataset so the guard
+	// reads an @-snapshot path, mirroring production.
+	require.NoError(t, exec.Command("zfs", "snapshot", dataset+"@snap").Run())
+
+	snapshot := k8ssnap.Snapshot{Dataset: dataset, SnapshotName: "snap"}
+	require.NoError(t,
+		exec.Command("zfs", "set", "custom:note="+spoof, dataset+"@snap").Run(),
+		"carry the crafted property onto the snapshot")
+
+	err = k8ssnap.Verify(t.Context(), spoofReader{}, snapshot)
+	require.Error(t, err, "the spoofed snapshot must be rejected as unmanaged")
 }

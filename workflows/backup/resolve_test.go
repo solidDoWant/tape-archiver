@@ -60,6 +60,22 @@ func (f fakePool) UserProperties(_ context.Context, dataset string) (map[string]
 	return properties, nil
 }
 
+// UserProperty reads one named property, mirroring zfs: a missing dataset errors
+// (the existence check ownership verification leans on), and an unset property on
+// an existing dataset yields "-".
+func (f fakePool) UserProperty(_ context.Context, dataset, property string) (string, error) {
+	properties, ok := f.properties[dataset]
+	if !ok {
+		return "", errors.New("dataset does not exist")
+	}
+
+	if value, ok := properties[property]; ok {
+		return value, nil
+	}
+
+	return "-", nil
+}
+
 func (f fakePool) LogicalReferenced(_ context.Context, dataset string) (int64, error) {
 	if f.sizeErr != nil {
 		return 0, f.sizeErr

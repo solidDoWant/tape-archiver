@@ -14,11 +14,14 @@ import (
 // stamped at all. See issue #13 and SPEC.md §3.
 const managedResourceProperty = "democratic-csi:managed_resource"
 
-// PropertyReader reads ZFS user properties for a dataset or snapshot. It is
-// satisfied by pkg/zfs and injected so the data-side check runs wherever the pool
-// is reachable (SPEC.md §16). A non-existent snapshot must yield an error.
+// PropertyReader reads a single named ZFS user property for a dataset or
+// snapshot. It is satisfied by pkg/zfs and injected so the data-side check runs
+// wherever the pool is reachable (SPEC.md §16). Reading one property by name
+// (rather than scraping all of them) means a newline embedded in some other
+// property's value can never fabricate the property being checked. A non-existent
+// snapshot must yield an error.
 type PropertyReader interface {
-	UserProperties(ctx context.Context, dataset string) (map[string]string, error)
+	UserProperty(ctx context.Context, dataset, property string) (string, error)
 }
 
 // Verify is the data-side integrity guard (SPEC.md §4.3 phase 1, §16): before any
@@ -30,12 +33,12 @@ type PropertyReader interface {
 func Verify(ctx context.Context, reader PropertyReader, snapshot Snapshot) error {
 	path := snapshot.ZFSPath()
 
-	properties, err := reader.UserProperties(ctx, path)
+	managed, err := reader.UserProperty(ctx, path, managedResourceProperty)
 	if err != nil {
-		return fmt.Errorf("read user properties for %s: %w", path, err)
+		return fmt.Errorf("read user property %s for %s: %w", managedResourceProperty, path, err)
 	}
 
-	if managed := properties[managedResourceProperty]; managed != "true" {
+	if managed != "true" {
 		return fmt.Errorf("snapshot %s is not democratic-csi managed (%s=%q)",
 			path, managedResourceProperty, managed)
 	}
