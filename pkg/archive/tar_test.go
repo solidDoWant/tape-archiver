@@ -149,6 +149,68 @@ func TestTarMembers(t *testing.T) {
 	assert.True(t, got["pvc-empty"].mode.IsDir())
 }
 
+// TestTarMembersDuplicateSubdir verifies TarMembers rejects a member set whose
+// Subdir values would collide on extraction — standard tar is last-entry-wins, so
+// two members under one path silently drop the earlier member's files at restore.
+// The guard must name the colliding subdirectory and must not write a partial
+// archive (AC1).
+func TestTarMembersDuplicateSubdir(t *testing.T) {
+	t.Parallel()
+
+	dirA := t.TempDir()
+	writeFile(t, filepath.Join(dirA, "data.txt"), []byte("volume a"))
+
+	dirB := t.TempDir()
+	writeFile(t, filepath.Join(dirB, "data.txt"), []byte("volume b"))
+
+	members := []archive.Member{
+		{Subdir: "pvc-dup", Dir: dirA},
+		{Subdir: "pvc-dup", Dir: dirB},
+	}
+
+	var buf bytes.Buffer
+
+	err := archive.TarMembers(t.Context(), &buf, members)
+	require.Error(t, err, "colliding member subdirectories must be rejected")
+	assert.Contains(t, err.Error(), "pvc-dup", "the error must name the colliding subdirectory")
+	assert.Contains(t, err.Error(), dirA, "the error must name the first colliding member's source")
+	assert.Contains(t, err.Error(), dirB, "the error must name the second colliding member's source")
+
+	// The guard runs before any bytes are written, so no partial archive escapes:
+	// neither member's tree may appear on the writer.
+	assert.Empty(t, buf.Bytes(), "a rejected member set must not write any archive bytes")
+}
+
+// TestTarMembersInvalidSubdir verifies the single-path-element Subdir contract is
+// enforced: an empty Subdir or one containing a slash is rejected before any
+// bytes are written (AC1, secondary).
+func TestTarMembersInvalidSubdir(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		subdir string
+	}{
+		{name: "empty subdir", subdir: ""},
+		{name: "slash in subdir", subdir: "nested/pvc"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "data.txt"), []byte("payload"))
+
+			var buf bytes.Buffer
+
+			err := archive.TarMembers(t.Context(), &buf, []archive.Member{{Subdir: test.subdir, Dir: dir}})
+			require.Error(t, err, "an invalid member subdirectory must be rejected")
+			assert.Empty(t, buf.Bytes(), "a rejected member set must not write any archive bytes")
+		})
+	}
+}
+
 // writeFile writes content to path, creating parent directories as needed.
 func writeFile(t *testing.T, path string, content []byte) {
 	t.Helper()
