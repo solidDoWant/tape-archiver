@@ -191,10 +191,12 @@ func scsiLocate(ctx context.Context, f *os.File, partition uint8, block uint64) 
 }
 
 // scsiReadBlock issues a variable-length READ(6) (SILI set) for the block at the
-// current position and returns a copy of the payload. Any non-GOOD status means
-// the position holds no data block (filemark, end-of-data, or blank) — the
-// extractor reads only recorded data blocks, so that is a mis-locate, reported
-// as an error rather than silent truncation.
+// current position and returns a copy of the payload. Only a GOOD status carries
+// a data block, and a CHECK CONDITION whose sense key is NO SENSE is the
+// incorrect-length indication for a short data block (still a data phase); any
+// other status, a real sense key, or a filemark means the position holds no
+// readable data block — the extractor reads only recorded data blocks, so that
+// is a mis-locate, reported as an error rather than silent truncation.
 func scsiReadBlock(ctx context.Context, f *os.File, bufSize int) ([]byte, error) {
 	buf := make([]byte, bufSize)
 	sense := make([]byte, senseBufferLen)
@@ -231,12 +233,32 @@ func scsiReadBlock(ctx context.Context, f *os.File, bufSize int) ([]byte, error)
 		return nil, fmt.Errorf("SG_IO READ(6) on %s: %w", f.Name(), err)
 	}
 
+	return decodeReadBlock(&hdr, sense[:hdr.sbLenWr], buf, f.Name())
+}
+
+// decodeReadBlock interprets a completed READ(6) SG_IO result and returns a copy
+// of the block payload, or an error if the position holds no readable data
+// block. It is the pure decision half of scsiReadBlock, split out so the decode
+// logic is unit-testable without a real drive (status-only completions cannot be
+// produced by mhvtl). sense is the written sense bytes (sense[:sbLenWr]); buf is
+// the READ data buffer; name identifies the device in error messages.
+func decodeReadBlock(hdr *sgIOHdr, sense, buf []byte, name string) ([]byte, error) {
 	if hdr.hostStatus != 0 || hdr.driverStatus&^driverSense != 0 {
 		return nil, fmt.Errorf("READ(6) on %s transport error (host=0x%x driver=0x%x)",
-			f.Name(), hdr.hostStatus, hdr.driverStatus)
+			name, hdr.hostStatus, hdr.driverStatus)
 	}
 
-	key, asc, ascq, filemark := parseSense(sense[:hdr.sbLenWr])
+	// Only GOOD carries a data block, and a CHECK CONDITION carries the sense the
+	// key check below interprets. Any other status byte (BUSY, RESERVATION
+	// CONFLICT, TASK SET FULL, ...) means no data phase occurred: the residual and
+	// the empty sense buffer would otherwise be misread as a full transfer, so
+	// reject it before the sense/transferred checks rather than fabricate a block.
+	if hdr.status != statusGood && hdr.status != statusCheckCondition {
+		return nil, fmt.Errorf("READ(6) on %s returned no data block "+
+			"(status=0x%02x)", name, hdr.status)
+	}
+
+	key, asc, ascq, filemark := parseSense(sense)
 	transferred := int(hdr.dxferLen) - int(hdr.resid)
 
 	// A CHECK CONDITION carrying sense key NO SENSE is informational, not an
@@ -248,11 +270,11 @@ func scsiReadBlock(ctx context.Context, f *os.File, bufSize int) ([]byte, error)
 	if filemark || key != senseKeyNoSense {
 		return nil, fmt.Errorf("READ(6) on %s returned no data block "+
 			"(status=0x%02x sense_key=0x%02x asc=0x%02x ascq=0x%02x filemark=%t)",
-			f.Name(), hdr.status, key, asc, ascq, filemark)
+			name, hdr.status, key, asc, ascq, filemark)
 	}
 
 	if transferred <= 0 {
-		return nil, fmt.Errorf("READ(6) on %s returned 0 bytes", f.Name())
+		return nil, fmt.Errorf("READ(6) on %s returned 0 bytes", name)
 	}
 
 	out := make([]byte, transferred)

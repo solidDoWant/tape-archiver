@@ -90,21 +90,40 @@ func (d *Drive) IsBlank(ctx context.Context) (blank bool, err error) {
 		return false, err
 	}
 
+	return interpretBlankProbe(res, f.Name())
+}
+
+// interpretBlankProbe turns a decoded blank-probe READ(6) into IsBlank's verdict.
+// It is the pure decision half of IsBlank, split out so the decode logic is
+// unit-testable without a real drive (status-only completions cannot be produced
+// by mhvtl). It returns an error — never a false verdict — for any completion
+// that does not positively resolve to blank, data, or filemark, so the caller's
+// ready-retry loop retries a transient condition instead of recording a wrong
+// answer.
+func interpretBlankProbe(probe blankProbe, name string) (bool, error) {
 	switch {
-	case res.transferred > 0:
+	case probe.status != statusGood && probe.status != statusCheckCondition:
+		// A status-only completion (BUSY, RESERVATION CONFLICT, TASK SET FULL, ...)
+		// carries no data phase and no sense: its residual and empty sense buffer
+		// would otherwise be misread as transferred data (a false "not blank").
+		// Report it as an error so blankCheckWhenReady retries rather than commit
+		// to a definitive verdict from a completion that never read the medium.
+		return false, fmt.Errorf(
+			"read first block of %s (status=0x%02x): %w", name, probe.status, errUnexpectedSense)
+	case probe.transferred > 0:
 		// The first block returned data — the tape has recorded content.
 		return false, nil
-	case res.senseKey == senseKeyBlankCheck:
+	case probe.senseKey == senseKeyBlankCheck:
 		// BLANK CHECK at beginning-of-partition: end-of-data is the very first
 		// block, so nothing has ever been written. This is the only blank case.
 		return true, nil
-	case res.filemark:
+	case probe.filemark:
 		// A filemark is recorded structure, not blank media.
 		return false, nil
 	default:
 		return false, fmt.Errorf(
 			"read first block of %s (status=0x%02x sense_key=0x%02x asc=0x%02x ascq=0x%02x): %w",
-			f.Name(), res.status, res.senseKey, res.asc, res.ascq, errUnexpectedSense)
+			name, probe.status, probe.senseKey, probe.asc, probe.ascq, errUnexpectedSense)
 	}
 }
 
@@ -179,6 +198,9 @@ const (
 	sgDxferFromDev = -3 // SG_DXFER_FROM_DEV
 
 	driverSense = 0x08 // DRIVER_SENSE bit in sg_io_hdr.driver_status
+
+	statusGood           = 0x00 // SCSI status GOOD (data phase completed)
+	statusCheckCondition = 0x02 // SCSI status CHECK CONDITION (sense data present)
 
 	opcodeRewind = 0x01 // REWIND
 	opcodeRead6  = 0x08 // READ(6)
