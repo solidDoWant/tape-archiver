@@ -193,9 +193,18 @@ type VerifiedPlan struct{}
 // Load activity turns each into a LoadedTape.
 type TapeAssignment struct {
 	// Drive is the non-rewinding tape device node (e.g. /dev/nst0) this physical
-	// tape is loaded into and written on. Within a drive-set the assignments map
-	// one-to-one onto the library's drives in order.
+	// tape is loaded into and written on. The Load phase pairs it to the changer's
+	// data-transfer element by the drive's unit serial identity — not by the
+	// assignment's position in the set — so a retry-shaped (non-prefix) set or a
+	// kernel probe order that disagrees with the changer's element order still
+	// loads, blank-checks, formats, and writes the tape on this one physical drive
+	// (issue #137).
 	Drive string
+	// DriveIndex is the 0-based index of Drive in cfg.Library.Drives — the config
+	// drive this tape is written on, carried explicitly so it is recorded on the
+	// LoadedTape regardless of the tape's position within the drive-set. Drive is
+	// always cfg.Library.Drives[DriveIndex].
+	DriveIndex int
 	// BlankSlot is the storage slot address holding the blank tape to load. Every
 	// physical tape across the whole run has its own blank slot.
 	BlankSlot int
@@ -219,8 +228,10 @@ type LoadedTape struct {
 	// Barcode is the tape's library barcode (the SCSI volume tag), used as the
 	// LTFS volume name and as the manifest and report identity (SPEC §6).
 	Barcode tape.Barcode
-	// DriveIndex is the 0-based position of the drive in cfg.Library.Drives,
-	// tying the tape to its physical drive for Write and Eject.
+	// DriveIndex is the 0-based index in cfg.Library.Drives of the drive that
+	// physically wrote this tape — carried from the TapeAssignment, not the tape's
+	// position within the drive-set. It ties the tape to its physical drive for the
+	// Write phase and for the run record (issue #137).
 	DriveIndex int
 	// TapeIndex is the 0-based index of the logical tape this physical tape
 	// carries (an index into plan.Tapes). All copies of the same logical tape

@@ -48,6 +48,32 @@ const (
 	// reserved area and sequence number we do not use.
 	primaryVolumeTagOffset = 12
 	primaryVolumeTagLen    = 32
+	// primaryVolumeTagFieldLen is the full width of the primary volume tag field
+	// (32-byte volume identifier + a 4-byte reserved/sequence area). When PVOLTAG
+	// is set the field is present in every descriptor, so the DVCID device
+	// identifier that follows a data-transfer descriptor starts this far past the
+	// volume tag offset.
+	primaryVolumeTagFieldLen = 36
+)
+
+// DVCID primary device identifier (a SPC designation descriptor appended to each
+// data-transfer element descriptor when DVCID is set in the READ ELEMENT STATUS
+// CDB) layout and the code sets we decode a serial from.
+const (
+	// deviceIDHeaderLen is the designation descriptor header: byte 0 code set,
+	// byte 1 designator type, byte 2 reserved, byte 3 designator length.
+	deviceIDHeaderLen = 4
+	// deviceIDCodeSetOffset and deviceIDLengthOffset locate the code set and the
+	// designator length within that header.
+	deviceIDCodeSetOffset = 0
+	deviceIDLengthOffset  = 3
+	// deviceIDCodeSetMask masks the code set out of byte 0 (the upper nibble is
+	// the protocol identifier).
+	deviceIDCodeSetMask = 0x0F
+	// codeSetASCII and codeSetUTF8 are the printable-text code sets we extract a
+	// serial from; a binary (code set 1) designator carries no ASCII serial.
+	codeSetASCII = 0x02
+	codeSetUTF8  = 0x03
 )
 
 // MODE SENSE(6) response layout (Element Address Assignment page). The page
@@ -304,6 +330,11 @@ func decodeDescriptor(elementType byte, pvoltag bool, desc []byte, addressing *e
 			}
 		}
 
+		// Pair a drive device node to this element by its unit serial: decode the
+		// DVCID device identifier that follows the (optional) primary volume tag
+		// (issue #137). Absent when the library does not implement DVCID.
+		el.Serial = decodeDriveSerial(desc, pvoltag)
+
 		inv.Drives = append(inv.Drives, el)
 
 	case elementTypeStorage:
@@ -329,6 +360,57 @@ func decodeDescriptor(elementType byte, pvoltag bool, desc []byte, addressing *e
 		// The robot itself is not surfaced in Inventory; its address is taken
 		// from the mode page for MOVE MEDIUM.
 	}
+}
+
+// decodeDriveSerial extracts a data-transfer element's unit serial from the DVCID
+// device identifier appended to its descriptor. The identifier is a single SPC
+// designation descriptor sitting after the 12-byte descriptor prefix and, when the
+// page's PVOLTAG flag is set, the 36-byte primary volume tag. It returns "" when
+// the descriptor carries no identifier (the library did not report DVCID, or the
+// descriptor is too short) or the designator is not printable text — so a
+// non-reporting library still decodes with an empty Serial rather than failing.
+func decodeDriveSerial(desc []byte, pvoltag bool) string {
+	start := primaryVolumeTagOffset
+	if pvoltag {
+		start += primaryVolumeTagFieldLen
+	}
+
+	if len(desc) < start+deviceIDHeaderLen {
+		return ""
+	}
+
+	header := desc[start:]
+
+	codeSet := header[deviceIDCodeSetOffset] & deviceIDCodeSetMask
+	if codeSet != codeSetASCII && codeSet != codeSetUTF8 {
+		return ""
+	}
+
+	idLen := int(header[deviceIDLengthOffset])
+	if idLen <= 0 || deviceIDHeaderLen+idLen > len(header) {
+		return ""
+	}
+
+	return serialFromDeviceID(header[deviceIDHeaderLen : deviceIDHeaderLen+idLen])
+}
+
+// serialFromDeviceID reduces a T10 device-identifier string to the drive's unit
+// serial: the last whitespace-delimited token. A T10 vendor designator is the
+// vendor id, optionally the product id, then the serial (all space-padded); a
+// serial contains no spaces, so the final token is the serial — matching the value
+// the drive returns in INQUIRY VPD page 0x80. It handles a null-terminated field
+// and returns "" when no token is present.
+func serialFromDeviceID(identifier []byte) string {
+	if i := bytes.IndexByte(identifier, 0); i >= 0 {
+		identifier = identifier[:i]
+	}
+
+	fields := strings.Fields(string(identifier))
+	if len(fields) == 0 {
+		return ""
+	}
+
+	return fields[len(fields)-1]
 }
 
 // trimVolumeTag extracts a barcode from a fixed-width primary volume tag field.

@@ -54,11 +54,13 @@ func twoDriveConfig(writeFailureWaitSeconds int) config.Config {
 }
 
 // twoTapeSet is one drive-set of two physical tapes (the two copies of one logical
-// tape), one per drive, drawn from slots 100 and 101.
+// tape), one per drive, drawn from slots 100 and 101. DriveIndex mirrors what
+// planDriveSets stamps (the drive's config index), so the mocked Load pairs each
+// tape to the same physical drive the real activity would (issue #137).
 func twoTapeSet() driveSet {
 	return driveSet{
-		{Drive: "/dev/nst0", BlankSlot: 100, TapeIndex: 0, CopyIndex: 0},
-		{Drive: "/dev/nst1", BlankSlot: 101, TapeIndex: 0, CopyIndex: 1},
+		{Drive: "/dev/nst0", DriveIndex: 0, BlankSlot: 100, TapeIndex: 0, CopyIndex: 0},
+		{Drive: "/dev/nst1", DriveIndex: 1, BlankSlot: 101, TapeIndex: 0, CopyIndex: 1},
 	}
 }
 
@@ -81,38 +83,35 @@ func barcodeForSlot(slot int) tape.Barcode {
 	return tape.Barcode(fmt.Sprintf("TA%04dL6", slot))
 }
 
+// loadedFromAssignment mirrors the real Load activity's identity-based contract:
+// the tape lands on the drive the assignment names (STDevice = assignment.Drive)
+// and its recorded DriveIndex is the assignment's config drive index — not its
+// position in the set (issue #137).
+func loadedFromAssignment(assignment TapeAssignment) LoadedTape {
+	return LoadedTape{
+		Barcode:    barcodeForSlot(assignment.BlankSlot),
+		DriveIndex: assignment.DriveIndex,
+		TapeIndex:  assignment.TapeIndex,
+		CopyIndex:  assignment.CopyIndex,
+		SourceSlot: assignment.BlankSlot,
+		STDevice:   assignment.Drive,
+		SGDevice:   sgForDrive(assignment.Drive),
+	}
+}
+
 // mockLoadFromSet makes the Load activity synthesize LoadedTapes from its input
 // assignments — so both the initial full set and the narrowed resume set load the
 // tapes the assignments name, keyed by slot for stable barcodes/devices.
-func mockLoadFromSet(env *testsuite.TestWorkflowEnvironment, cfg config.Config) {
+func mockLoadFromSet(env *testsuite.TestWorkflowEnvironment, _ config.Config) {
 	env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
 			loaded := make([]LoadedTape, len(input.Tapes))
 			for i, assignment := range input.Tapes {
-				loaded[i] = LoadedTape{
-					Barcode:    barcodeForSlot(assignment.BlankSlot),
-					DriveIndex: driveIndexOf(cfg, assignment.Drive),
-					TapeIndex:  assignment.TapeIndex,
-					CopyIndex:  assignment.CopyIndex,
-					SourceSlot: assignment.BlankSlot,
-					STDevice:   assignment.Drive,
-					SGDevice:   sgForDrive(assignment.Drive),
-				}
+				loaded[i] = loadedFromAssignment(assignment)
 			}
 
 			return loaded, nil
 		})
-}
-
-// driveIndexOf resolves a drive device node to its 0-based index in the config.
-func driveIndexOf(cfg config.Config, device string) int {
-	for i, drive := range cfg.Library.Drives {
-		if drive == device {
-			return i
-		}
-	}
-
-	return -1
 }
 
 // newWritePauseEnv registers the Backup activities the write path dispatches, with
@@ -162,6 +161,7 @@ func TestWritePathPauseSignalResume(t *testing.T) {
 		formatsByDev = map[string]int{}
 		ejectCounts  []int
 		pauseAlerts  int
+		loadInputs   []LoadInput
 	)
 
 	// /dev/sg1 (drive 1) fails to format on its first attempt, then succeeds on the
@@ -180,7 +180,23 @@ func TestWritePathPauseSignalResume(t *testing.T) {
 			return nil
 		})
 
-	mockLoadFromSet(env, cfg)
+	// Record every Load input so the resume retry set can be inspected: the
+	// re-drive must target the failed tape's original physical drive (AC1) and
+	// carry its config drive index (AC2), not drive 0 or the set position.
+	env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			loadInputs = append(loadInputs, input)
+
+			loaded := make([]LoadedTape, len(input.Tapes))
+			for i, assignment := range input.Tapes {
+				loaded[i] = loadedFromAssignment(assignment)
+			}
+
+			return loaded, nil
+		})
 
 	// Eject always exports everything (no I/O-full pause). Record how many tapes
 	// each call ejects: the first ejects both the succeeded and the failed tape,
@@ -224,6 +240,16 @@ func TestWritePathPauseSignalResume(t *testing.T) {
 	assert.Equal(t, 1, formatsByDev["/dev/sg0"], "the tape that succeeded is never re-formatted (AC5)")
 	assert.Equal(t, 2, formatsByDev["/dev/sg1"], "the failed tape is re-formatted once on resume")
 	assert.Equal(t, []int{2, 1}, ejectCounts, "first eject frees both tapes; resume ejects only the retried one")
+
+	// The resume Load re-drives only the failed tape, and onto its original
+	// physical drive: the retry set is one assignment naming drive 1's device node
+	// and config index (issue #137 AC1/AC2), not drive 0 or the set-position drive.
+	require.Len(t, loadInputs, 2, "one Load for the initial set, one for the resume retry")
+	retry := loadInputs[1].Tapes
+	require.Len(t, retry, 1, "the resume retry re-drives only the failed tape")
+	assert.Equal(t, "/dev/nst1", retry[0].Drive, "retried on the failed tape's physical drive")
+	assert.Equal(t, 1, retry[0].DriveIndex, "retried tape carries its config drive index (AC2)")
+	assert.Equal(t, 101, retry[0].BlankSlot, "the fresh blank is reloaded into the failed tape's slot")
 }
 
 // TestWritePathStaleResumeSignalDoesNotSatisfyLaterPause covers issue #154 AC1 for
@@ -404,15 +430,7 @@ func TestWritePathLoadFailurePauseResume(t *testing.T) {
 
 			loaded := make([]LoadedTape, len(input.Tapes))
 			for i, assignment := range input.Tapes {
-				loaded[i] = LoadedTape{
-					Barcode:    barcodeForSlot(assignment.BlankSlot),
-					DriveIndex: driveIndexOf(cfg, assignment.Drive),
-					TapeIndex:  assignment.TapeIndex,
-					CopyIndex:  assignment.CopyIndex,
-					SourceSlot: assignment.BlankSlot,
-					STDevice:   assignment.Drive,
-					SGDevice:   sgForDrive(assignment.Drive),
-				}
+				loaded[i] = loadedFromAssignment(assignment)
 			}
 
 			return loaded, nil

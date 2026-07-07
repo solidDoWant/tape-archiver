@@ -231,10 +231,10 @@ func TestReconcileLoad(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		drives     []tape.DriveElement
-		driveIndex int
-		driveAddr  int
+		name string
+		// drive is the data-transfer element already paired to the caller's device
+		// node by drive identity (issue #137); reconcileLoad reconciles it directly.
+		drive      tape.DriveElement
 		targetSlot int
 		// wantBarcode is the barcode that should end up in the drive; empty means
 		// the call is expected to fail.
@@ -242,44 +242,22 @@ func TestReconcileLoad(t *testing.T) {
 		wantErr     require.ErrorAssertionFunc
 	}{
 		{
-			name: "drive empty loads from target slot",
-			drives: []tape.DriveElement{
-				{Address: 0, Loaded: false},
-			},
-			driveIndex:  0,
-			driveAddr:   0,
+			name:        "drive empty loads from target slot",
+			drive:       tape.DriveElement{Address: 0, Loaded: false},
 			targetSlot:  1,
 			wantBarcode: "AAA001L8",
 			wantErr:     require.Error, // no real changer; expect error from changer.Load
 		},
 		{
-			name: "drive already loaded from target slot is idempotent",
-			drives: []tape.DriveElement{
-				{Address: 0, Loaded: true, Barcode: "AAA001L8", SourceSlot: 1},
-			},
-			driveIndex:  0,
-			driveAddr:   0,
+			name:        "drive already loaded from target slot is idempotent",
+			drive:       tape.DriveElement{Address: 0, Loaded: true, Barcode: "AAA001L8", SourceSlot: 1},
 			targetSlot:  1,
 			wantBarcode: "AAA001L8",
 			wantErr:     require.NoError,
 		},
 		{
-			name: "drive index out of range returns error",
-			drives: []tape.DriveElement{
-				{Address: 0, Loaded: false},
-			},
-			driveIndex: 5,
-			driveAddr:  0,
-			targetSlot: 1,
-			wantErr:    require.Error,
-		},
-		{
-			name: "target slot empty returns error",
-			drives: []tape.DriveElement{
-				{Address: 0, Loaded: false},
-			},
-			driveIndex: 0,
-			driveAddr:  0,
+			name:       "target slot empty returns error",
+			drive:      tape.DriveElement{Address: 0, Loaded: false},
 			targetSlot: 3, // slot 3 is empty in baseSlots
 			wantErr:    require.Error,
 		},
@@ -289,12 +267,12 @@ func TestReconcileLoad(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			inv := inventoryWith(test.drives, baseSlots, nil)
+			inv := inventoryWith([]tape.DriveElement{test.drive}, baseSlots, nil)
 			// Use a nil changer device — the idempotent path returns before any
 			// changer command; the other paths hit a command error which is the
 			// expected test outcome for non-idempotent cases.
 			changer := tape.NewChanger("")
-			bc, err := reconcileLoad(t.Context(), changer, inv, test.driveIndex, test.driveAddr, test.targetSlot, make(map[int]bool))
+			bc, err := reconcileLoad(t.Context(), changer, inv, test.drive, test.targetSlot, make(map[int]bool))
 			test.wantErr(t, err)
 
 			if err == nil {
@@ -469,16 +447,89 @@ func TestReconcileLoadClaimsDistinctSlots(t *testing.T) {
 
 	// Both calls fail at the unload (no real changer), but each must have claimed
 	// its relocation slot first.
-	_, err := reconcileLoad(t.Context(), changer, inv, 0, drives[0].Address, 5, claimed)
+	_, err := reconcileLoad(t.Context(), changer, inv, drives[0], 5, claimed)
 	require.Error(t, err)
 
-	_, err = reconcileLoad(t.Context(), changer, inv, 1, drives[1].Address, 5, claimed)
+	_, err = reconcileLoad(t.Context(), changer, inv, drives[1], 5, claimed)
 	require.Error(t, err)
 
 	// Exactly two distinct free slots claimed — no collision.
 	assert.Len(t, claimed, 2, "each relocation must claim its own storage slot")
 	assert.True(t, claimed[1], "first relocation should claim slot 1")
 	assert.True(t, claimed[2], "second relocation should claim the distinct slot 2")
+}
+
+// TestMatchDriveElement covers the identity pairing that replaces positional
+// drive↔element association (issue #137): a device node's unit serial selects the
+// changer element with the same DVCID serial, regardless of the elements' order,
+// and unidentifiable or ambiguous drives fail rather than mispair.
+func TestMatchDriveElement(t *testing.T) {
+	t.Parallel()
+
+	// A probe-order-mismatched library: the changer reports DTE 0 with serial
+	// SN_B and DTE 1 with serial SN_A — the reverse of the config's drive order —
+	// exactly the dev-host case where /dev/nst0's unit is the changer's second DTE.
+	swapped := []tape.DriveElement{
+		{Address: 0, Serial: "SN_B"},
+		{Address: 1, Serial: "SN_A"},
+	}
+
+	tests := []struct {
+		name        string
+		drives      []tape.DriveElement
+		serial      string
+		wantAddress int
+		wantErr     require.ErrorAssertionFunc
+	}{
+		{
+			name:        "serial selects the element regardless of position",
+			drives:      swapped,
+			serial:      "SN_A",
+			wantAddress: 1,
+			wantErr:     require.NoError,
+		},
+		{
+			name:        "the other serial selects the other element",
+			drives:      swapped,
+			serial:      "SN_B",
+			wantAddress: 0,
+			wantErr:     require.NoError,
+		},
+		{
+			name:    "empty serial cannot be paired",
+			drives:  swapped,
+			serial:  "",
+			wantErr: require.Error,
+		},
+		{
+			name:    "no matching element",
+			drives:  swapped,
+			serial:  "SN_C",
+			wantErr: require.Error,
+		},
+		{
+			name: "ambiguous serial is rejected",
+			drives: []tape.DriveElement{
+				{Address: 0, Serial: "SN_DUP"},
+				{Address: 1, Serial: "SN_DUP"},
+			},
+			serial:  "SN_DUP",
+			wantErr: require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			de, err := matchDriveElement(inventoryWith(test.drives, nil, nil), test.serial)
+			test.wantErr(t, err)
+
+			if err == nil {
+				assert.Equal(t, test.wantAddress, de.Address)
+			}
+		})
+	}
 }
 
 // tapesFor builds a plan with tapeCount logical tapes and the given copy count.

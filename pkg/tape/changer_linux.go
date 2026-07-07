@@ -34,6 +34,14 @@ const (
 	// descriptor carries its primary volume tag (element type code 0 = all
 	// types).
 	readElementVoltag = 0x10
+	// readElementDVCID sets DVCID (byte 6, bit 0) in the READ ELEMENT STATUS CDB
+	// so each data-transfer element descriptor carries the drive's primary device
+	// identifier (its unit serial). The Load phase pairs a configured drive device
+	// node to its changer element by that identity — not by set position — so a
+	// probe-order or retry-set mismatch can never load a blank into one physical
+	// drive while blank-checking another (issue #137). Libraries that do not
+	// implement DVCID simply omit the identifier; the decode tolerates its absence.
+	readElementDVCID = 0x01
 	// readElementAllElements is the "number of elements" CDB field value that
 	// requests every element the library has.
 	readElementAllElements = 0xFFFF
@@ -305,7 +313,7 @@ func scsiReadElementStatus(ctx context.Context, f *os.File) ([]byte, error) {
 		readElementVoltag, // VOLTAG set, element type code 0 (all types)
 		0, 0,              // starting element address 0
 		byte(readElementAllElements >> 8), byte(readElementAllElements & 0xFF), // number of elements
-		0,                                                // reserved (DVCID/CURDATA off)
+		readElementDVCID,                                 // DVCID set (CURDATA off): report per-drive device identifiers
 		byte(alloc >> 16), byte(alloc >> 8), byte(alloc), // allocation length (24-bit)
 		0, // reserved
 		0, // control

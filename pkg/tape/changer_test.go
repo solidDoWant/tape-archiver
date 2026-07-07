@@ -1,6 +1,7 @@
 package tape
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -280,6 +281,126 @@ func TestDecodeElementStatusTruncatedReport(t *testing.T) {
 	assert.Empty(t, inv.Slots, "no partial slots surfaced")
 	assert.Empty(t, inv.Drives, "no partial drives surfaced")
 	assert.Empty(t, inv.IOSlots, "no partial I/O slots surfaced")
+}
+
+// --- DVCID drive serial decoding (issue #137) ----------------------------
+
+// TestDecodeElementStatusDVCIDGolden decodes verbatim READ ELEMENT STATUS
+// responses captured from the mhvtl L700 with DVCID set and cleared. With DVCID
+// each data-transfer element carries its unit serial (the identity the Load phase
+// pairs a drive device node to its changer element by); without it, the serial is
+// empty. The two drives report XYZZY_A1 (DTE 0) and XYZZY_A2 (DTE 1) — the same
+// serials their INQUIRY VPD page 0x80 returns.
+func TestDecodeElementStatusDVCIDGolden(t *testing.T) {
+	t.Parallel()
+
+	withDVCID, err := os.ReadFile("testdata/read_element_status_dvcid.bin")
+	require.NoError(t, err)
+
+	inv, err := decodeElementStatus(withDVCID, testAddressing())
+	require.NoError(t, err)
+
+	require.Len(t, inv.Drives, 2, "two data-transfer elements")
+	assert.Equal(t, 0, inv.Drives[0].Address)
+	assert.Equal(t, "XYZZY_A1", inv.Drives[0].Serial, "DTE 0 unit serial from DVCID")
+	assert.Equal(t, 1, inv.Drives[1].Address)
+	assert.Equal(t, "XYZZY_A2", inv.Drives[1].Serial, "DTE 1 unit serial from DVCID")
+
+	// The bigger DVCID response must still decode the rest of the topology.
+	assert.Len(t, inv.Slots, 47, "storage slots")
+	assert.Len(t, inv.IOSlots, 3, "I/O slots")
+
+	// The same library queried without DVCID reports no per-drive serials — the
+	// decode tolerates the absent identifier rather than failing.
+	noDVCID, err := os.ReadFile("testdata/read_element_status_nodvcid.bin")
+	require.NoError(t, err)
+
+	invNo, err := decodeElementStatus(noDVCID, testAddressing())
+	require.NoError(t, err)
+	require.Len(t, invNo.Drives, 2)
+	assert.Empty(t, invNo.Drives[0].Serial, "no DVCID → no serial")
+	assert.Empty(t, invNo.Drives[1].Serial, "no DVCID → no serial")
+}
+
+// dvcidDesignator builds an SPC designation descriptor (code set, designator type,
+// reserved, length, identifier) as appended to a data-transfer descriptor when
+// DVCID is set.
+func dvcidDesignator(codeSet, idType byte, identifier string) []byte {
+	d := []byte{codeSet, idType, 0x00, byte(len(identifier))}
+
+	return append(d, []byte(identifier)...)
+}
+
+// dvcidDriveDescriptor builds a data-transfer element descriptor carrying a DVCID
+// designator after the 12-byte prefix and the 36-byte primary volume tag (which is
+// present because the DTE page sets PVOLTAG).
+func dvcidDriveDescriptor(addr int, flags byte, designator []byte) []byte {
+	d := make([]byte, primaryVolumeTagOffset+primaryVolumeTagFieldLen)
+	d[descAddressOffset], d[descAddressOffset+1] = byte(addr>>8), byte(addr)
+	d[descFlagsOffset] = flags
+
+	return append(d, designator...)
+}
+
+func TestDecodeDriveSerial(t *testing.T) {
+	t.Parallel()
+
+	const (
+		codeSetBinary = 0x01
+		idTypeT10     = 0x01
+	)
+
+	tests := []struct {
+		name    string
+		desc    []byte
+		pvoltag bool
+		want    string
+	}{
+		{
+			name:    "T10 vendor+product+serial (mhvtl shape)",
+			desc:    dvcidDriveDescriptor(500, flagAccess, dvcidDesignator(codeSetASCII, idTypeT10, "IBM     ULT3580-TD6     XYZZY_A1  ")),
+			pvoltag: true,
+			want:    "XYZZY_A1",
+		},
+		{
+			name:    "serial-only identifier",
+			desc:    dvcidDriveDescriptor(500, flagAccess, dvcidDesignator(codeSetASCII, idTypeT10, "1013000652")),
+			pvoltag: true,
+			want:    "1013000652",
+		},
+		{
+			name:    "UTF-8 code set is decoded",
+			desc:    dvcidDriveDescriptor(500, flagAccess, dvcidDesignator(codeSetUTF8, idTypeT10, "HP      ULTRIUM 6-SCSI  HU1234567X")),
+			pvoltag: true,
+			want:    "HU1234567X",
+		},
+		{
+			name:    "binary code set yields no serial",
+			desc:    dvcidDriveDescriptor(500, flagAccess, dvcidDesignator(codeSetBinary, 0x03, "\x50\x01\x23")),
+			pvoltag: true,
+			want:    "",
+		},
+		{
+			name:    "descriptor without a designator (no DVCID)",
+			desc:    descriptor(500, flagAccess),
+			pvoltag: true,
+			want:    "",
+		},
+		{
+			name:    "zero-length designator",
+			desc:    dvcidDriveDescriptor(500, flagAccess, dvcidDesignator(codeSetASCII, idTypeT10, "")),
+			pvoltag: true,
+			want:    "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, decodeDriveSerial(tc.desc, tc.pvoltag))
+		})
+	}
 }
 
 // --- friendly ↔ raw address mapping --------------------------------------

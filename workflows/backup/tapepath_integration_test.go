@@ -499,6 +499,206 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 	require.Len(t, writtenBarcodes, 4, "all four physical tapes must be written")
 }
 
+// TestLoadPairsDriveByIdentity drives the real Load activity against mhvtl with a
+// retry-shaped, non-prefix drive-set — a single assignment for a configured drive
+// whose changer data-transfer element is NOT element 0 — and proves the blank is
+// loaded into the same physical drive Load blank-checks and records (issue #137).
+//
+// It covers:
+//   - AC3: the configured drive device order disagrees with the changer's element
+//     order (this repo's dev host: /dev/nst0 is the changer's DTE 1), yet the tape
+//     is loaded and blank-checked on the drive it was assigned to.
+//   - AC4: the set is non-prefix (position 0 holds config drive index 1's node, or
+//     a node whose DTE address ≠ 0); the test fails if the loaded-into drive (the
+//     element the changer moved the blank into) and the written-to drive (the
+//     assignment's device node) diverge. Positional pairing would move the blank
+//     into DTE 0 while blank-checking a different drive.
+//   - AC2: the returned LoadedTape.DriveIndex is the assignment's config drive
+//     index, not its position in the set.
+//
+// Skips when mhvtl is absent or does not report per-drive DVCID serials.
+func TestLoadPairsDriveByIdentity(t *testing.T) {
+	testutil.SkipIfMhvtlUnavailable(t)
+
+	changer := tape.NewChanger(testutil.ChangerDev(t))
+
+	inv, err := changer.Inventory(t.Context())
+	require.NoError(t, err, "initial inventory")
+	require.GreaterOrEqual(t, len(inv.Drives), 2, "identity pairing needs at least 2 drives")
+
+	for i, de := range inv.Drives {
+		if de.Serial == "" {
+			t.Skipf("mhvtl drive %d reports no DVCID serial; identity pairing test needs DVCID", i)
+		}
+	}
+
+	// Map each configured drive device node to the changer element that IS that
+	// physical unit, by unit serial. The two config nodes and the changer's element
+	// order may disagree (probe-order mismatch) — that is exactly what we exercise.
+	configNodes := []string{testutil.Drive0Dev(t), testutil.Drive1Dev(t)}
+
+	type target struct {
+		configIndex int
+		device      string
+		serial      string
+		dteAddress  int
+	}
+
+	var targets []target
+
+	for configIndex, node := range configNodes {
+		info, inqErr := tape.NewDrive(node).Inquire(t.Context())
+		require.NoErrorf(t, inqErr, "INQUIRY on %s", node)
+		require.NotEmptyf(t, info.Serial, "drive %s must report a unit serial", node)
+
+		de, matchErr := matchDriveElement(inv, info.Serial)
+		require.NoErrorf(t, matchErr, "pair %s by serial %q", node, info.Serial)
+
+		targets = append(targets, target{configIndex: configIndex, device: node, serial: info.Serial, dteAddress: de.Address})
+	}
+
+	// Pick the configured drive whose changer element is NOT element 0, so a
+	// single-assignment set (position 0) would positionally pair to DTE 0 — a
+	// different physical drive. Identity pairing must instead pick this drive's own
+	// element. On the dev host that is /dev/nst0 (DTE 1).
+	chosen := targets[0]
+	for _, tg := range targets {
+		if tg.dteAddress > chosen.dteAddress {
+			chosen = tg
+		}
+	}
+
+	require.NotEqualf(t, 0, chosen.dteAddress,
+		"need a drive whose changer element ≠ 0 to exercise a position/identity mismatch; got %+v", targets)
+
+	// Use a storage slot distinct from the other tape-path tests (0 session, 1
+	// single-tape, 2 whole-run, 4–7 multi-set) so leftover state never collides.
+	const slotIdx = 3
+	require.Greater(t, len(inv.Slots), slotIdx, "need at least 4 storage slots")
+	require.Truef(t, inv.Slots[slotIdx].Full, "slot %d must hold a tape", slotIdx)
+
+	slotAddr := inv.Slots[slotIdx].Address
+	barcode := inv.Slots[slotIdx].Barcode
+	require.NotEmpty(t, barcode, "chosen slot tape must have a barcode")
+
+	// Restore the library: tape blanked and parked back in its slot, drive empty.
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
+		defer cancel()
+
+		returnAndBlankFromElement(cleanupCtx, changer, chosen.device, chosen.serial, slotAddr, barcode)
+	})
+
+	// Start clean: the drive holding the chosen element must be empty, and the tape
+	// must be in its slot. If a prior run left the tape in the drive, unload it.
+	if de, ok := driveElementBySerial(inv, chosen.serial); ok && de.Loaded {
+		require.NoError(t, changer.Unload(t.Context(), slotAddr, de.Address), "clear the chosen drive before the test")
+	}
+
+	// Readiness probe on the chosen drive (skips cleanly on a wedged mhvtl drive),
+	// then unload so Load exercises a fresh load.
+	chosenDTE, ok := driveElementBySerial(inv, chosen.serial)
+	require.True(t, ok, "chosen element present in inventory")
+	require.NoError(t, changer.Load(t.Context(), slotAddr, chosenDTE.Address), "pre-load for readiness probe")
+	testutil.SkipIfDriveNotReady(t, chosen.device)
+	require.NoError(t, changer.Unload(t.Context(), slotAddr, chosenDTE.Address), "unload after readiness probe")
+
+	// --- Real Load with a retry-shaped, non-prefix set -----------------------
+	loadActs := newLoadActivities()
+
+	loaded, err := loadActs.Load(t.Context(), LoadInput{
+		Changer:            testutil.ChangerDev(t),
+		AllowNonBlankTapes: true, // robust to a leftover non-blank tape; pairing is what we assert
+		Tapes: []TapeAssignment{
+			{Drive: chosen.device, DriveIndex: chosen.configIndex, BlankSlot: slotAddr, TapeIndex: 0, CopyIndex: 0},
+		},
+	})
+	require.NoError(t, err, "Load must pair the device node to its element by identity, not position")
+	require.Len(t, loaded, 1)
+
+	lt := loaded[0]
+	assert.Equal(t, barcode, lt.Barcode, "loaded tape is the one from the target slot")
+	assert.Equal(t, chosen.configIndex, lt.DriveIndex, "recorded DriveIndex is the config index (AC2)")
+	assert.Equal(t, chosen.device, lt.STDevice, "written-to device is the assignment's node")
+
+	// The loaded-into drive (the element now holding the tape) must be the SAME
+	// physical drive as the written-to device (AC4): its serial equals the chosen
+	// device's serial, and its address is the chosen element — never DTE 0.
+	postInv, err := changer.Inventory(t.Context())
+	require.NoError(t, err, "post-load inventory")
+
+	loadedInto := -1
+	loadedIntoSerial := ""
+
+	for _, de := range postInv.Drives {
+		if de.Loaded && de.Barcode == barcode {
+			loadedInto = de.Address
+			loadedIntoSerial = de.Serial
+
+			break
+		}
+	}
+
+	require.NotEqualf(t, -1, loadedInto, "tape %s must be loaded into a drive after Load", barcode)
+	assert.Equal(t, chosen.serial, loadedIntoSerial,
+		"loaded-into drive and written-to drive must not diverge (AC4)")
+	assert.Equal(t, chosen.dteAddress, loadedInto,
+		"the blank must land in the assigned drive's element, not the set-position element")
+}
+
+// driveElementBySerial finds the data-transfer element with the given unit serial.
+func driveElementBySerial(inv tape.Inventory, serial string) (tape.DriveElement, bool) {
+	for _, de := range inv.Drives {
+		if de.Serial == serial {
+			return de, true
+		}
+	}
+
+	return tape.DriveElement{}, false
+}
+
+// returnAndBlankFromElement restores a tape to blank in its home slot, addressing
+// the drive by unit serial (identity) rather than by index. Best-effort cleanup.
+func returnAndBlankFromElement(ctx context.Context, changer *tape.Changer, stDev, serial string, slotAddr int, barcode tape.Barcode) {
+	inv, err := changer.Inventory(ctx)
+	if err != nil {
+		return
+	}
+
+	de, ok := driveElementBySerial(inv, serial)
+	if !ok {
+		return
+	}
+
+	loadedInDrive := de.Loaded && de.Barcode == barcode
+	if !loadedInDrive {
+		for _, io := range inv.IOSlots {
+			if io.Full && io.Barcode == barcode {
+				_ = changer.Transfer(ctx, io.Address, slotAddr)
+
+				break
+			}
+		}
+
+		if err := changer.Load(ctx, slotAddr, de.Address); err != nil {
+			return
+		}
+	}
+
+	sgDev, err := tape.NewDrive(stDev).SGDevice()
+	if err != nil {
+		return
+	}
+
+	rewindCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
+
+	cancel()
+
+	_ = exec.CommandContext(ctx, "sg_raw", sgDev, "0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
+	_ = changer.Unload(ctx, slotAddr, de.Address)
+}
+
 // returnAndBlank restores one written tape to blank in its home storage slot,
 // wherever it currently sits (an I/O slot after Eject, the drive after an
 // interrupted run, or already home). It is best-effort: failures are ignored so

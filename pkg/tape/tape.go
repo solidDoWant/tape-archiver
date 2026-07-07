@@ -20,6 +20,15 @@ type DriveElement struct {
 	// SourceSlot is the storage slot number the tape was loaded from, when Loaded is true.
 	// It is 0 when the drive is empty or the source slot is unknown.
 	SourceSlot int
+	// Serial is the drive's unit serial number, read from the DTE's DVCID device
+	// identifier in the READ ELEMENT STATUS response (the last whitespace-delimited
+	// token of the primary device identifier — for a T10 vendor designator the
+	// vendor/product prefix is dropped, leaving the serial that also appears in the
+	// drive's INQUIRY Unit Serial Number VPD page 0x80). It is the identity the Load
+	// phase pairs a configured drive device node to its changer element by, instead
+	// of trusting set position (issue #137). It is empty when the library does not
+	// report DVCID device identifiers.
+	Serial string
 }
 
 // StorageElement is a storage slot reported by READ ELEMENT STATUS.

@@ -120,7 +120,7 @@ Specifies the SCSI changer, drives, and which storage slots hold blank tapes.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `changer` | `string` | yes | SCSI changer device path (e.g. `/dev/sch0`) or a virtual library path for dry-run. |
-| `drives` | `[]string` | yes | Tape drive device paths. Prefer the non-rewinding nodes (`/dev/nst0`, `/dev/nst1`). Each path must be non-blank and distinct — blank or duplicate entries fail validation. |
+| `drives` | `[]string` | yes | Tape drive device paths. Prefer the non-rewinding nodes (`/dev/nst0`, `/dev/nst1`). Each path must be non-blank and distinct — blank or duplicate entries fail validation. Order is not significant and need not match the changer's data-transfer element order: the Load phase pairs each device node to its changer element by the drive's unit serial (read from the drive's INQUIRY and the changer's `READ ELEMENT STATUS` DVCID identifier), so a kernel probe order that assigns `/dev/nst0` to the second drive still loads, blank-checks, and writes each tape on the drive it was assigned to. |
 | `blankSlots` | `[]integer` | yes | Storage slot numbers that hold usable blank tapes. |
 | `tapeCapacityBytes` | `integer` | yes | Native (uncompressed) capacity of one tape, in bytes (e.g. `2500000000000` for LTO-6). Runs plan against native capacity with LTO hardware compression disabled. It is the single-tape ceiling the Resolve feasibility pre-check tests against and the capacity the Pack phase bin-packs into. Must be > 0. |
 | `ioWaitTimeoutSeconds` | `integer` | no | How long the Eject phase waits for the operator to clear the import/export station when it fills before failing the run (see below). Omit for the default of 12 hours. Must be > 0 when set. |
