@@ -372,6 +372,33 @@ func (d *doc) section(title string) {
 // label top-aligned. When mono is true the value uses the monospace font (for
 // identifiers, device nodes, and other fixed-width data).
 func (d *doc) kv(label, value string, mono bool) {
+	// Measure the row and force a page break before capturing x,y so the label
+	// and value can never split across a page boundary. This mirrors tableRow:
+	// without the guard the label's MultiCell auto-page-breaks when the row
+	// lands with too little space left, but the value is then positioned with
+	// SetXY back to the pre-break y, stranding it on a different page from its
+	// label. SplitLines measures under each cell's own font, so set the font
+	// before measuring.
+	d.pdf.SetFont(fontBody, "B", 10)
+	labelLines := d.pdf.SplitLines([]byte(d.tr(label)), labelColW)
+
+	if mono {
+		d.pdf.SetFont(fontMono, "", 9.5)
+	} else {
+		d.pdf.SetFont(fontBody, "", 10)
+	}
+
+	valueLines := d.pdf.SplitLines([]byte(d.tr(value)), contentW-labelColW)
+
+	rowH := float64(max(len(labelLines), len(valueLines))) * 5.5
+
+	_, pageH := d.pdf.GetPageSize()
+	_, _, _, bottom := d.pdf.GetMargins()
+
+	if d.pdf.GetY()+rowH > pageH-bottom {
+		d.pdf.AddPage()
+	}
+
 	x, y := d.pdf.GetX(), d.pdf.GetY()
 
 	d.pdf.SetFont(fontBody, "B", 10)
