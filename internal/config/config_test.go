@@ -291,10 +291,99 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "redundancy.targetPercentage",
 		},
 		{
+			name: "redundancy zero percentage",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = ptr(0.0)
+			},
+			wantErr:     require.Error,
+			errContains: "redundancy.targetPercentage",
+		},
+		{
+			name: "redundancy percentage at lower bound",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = ptr(1.0)
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "redundancy percentage at upper bound",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = ptr(100.0)
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "redundancy percentage above upper bound",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = ptr(101.0)
+			},
+			wantErr:     require.Error,
+			errContains: "redundancy.targetPercentage",
+		},
+		{
+			name: "redundancy percentage far above upper bound",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = ptr(150.0)
+			},
+			wantErr:     require.Error,
+			errContains: "redundancy.targetPercentage",
+		},
+		{
+			name: "redundancy fractional percentage",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = ptr(10.5)
+			},
+			wantErr:     require.Error,
+			errContains: "redundancy.targetPercentage",
+		},
+		{
 			name: "redundancy negative fill floor",
 			mutate: func(c *Config) {
 				c.Redundancy.TargetPercentage = nil
 				c.Redundancy.FillToCapacity = &FillConfig{Floor: -1}
+			},
+			wantErr:     require.Error,
+			errContains: "redundancy.fillToCapacity.floor",
+		},
+		{
+			name: "redundancy zero fill floor",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = nil
+				c.Redundancy.FillToCapacity = &FillConfig{Floor: 0}
+			},
+			wantErr:     require.Error,
+			errContains: "redundancy.fillToCapacity.floor",
+		},
+		{
+			name: "redundancy fill floor at lower bound",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = nil
+				c.Redundancy.FillToCapacity = &FillConfig{Floor: 1}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "redundancy fill floor at upper bound",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = nil
+				c.Redundancy.FillToCapacity = &FillConfig{Floor: 100}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "redundancy fill floor above upper bound",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = nil
+				c.Redundancy.FillToCapacity = &FillConfig{Floor: 101}
+			},
+			wantErr:     require.Error,
+			errContains: "redundancy.fillToCapacity.floor",
+		},
+		{
+			name: "redundancy fractional fill floor",
+			mutate: func(c *Config) {
+				c.Redundancy.TargetPercentage = nil
+				c.Redundancy.FillToCapacity = &FillConfig{Floor: 10.5}
 			},
 			wantErr:     require.Error,
 			errContains: "redundancy.fillToCapacity.floor",

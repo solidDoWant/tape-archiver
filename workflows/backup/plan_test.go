@@ -159,3 +159,43 @@ func placedSourceIndices(plan TapePlan) []int {
 
 	return indices
 }
+
+// TestRedundancyPercentIsConsistent covers AC2: for any config that passes
+// validation, the Resolve feasibility pre-check (par2Fraction) and the Pack
+// reservation (par2ReservePercent) resolve to the same integer percentage — the
+// configured value, with clampPercent and rounding no longer altering it. This
+// holds because config validation now rejects out-of-range and fractional
+// redundancy percentages, so both paths see the exact configured whole number.
+func TestRedundancyPercentIsConsistent(t *testing.T) {
+	t.Parallel()
+
+	// Whole percentages spanning the validated [1, 100] range, in both PAR2
+	// modes. Each must satisfy config validation and then agree between the
+	// feasibility pre-check and the Pack reservation.
+	percents := []float64{1, 10, 15, 50, 99, 100}
+
+	for _, percent := range percents {
+		for _, mode := range []struct {
+			name       string
+			redundancy config.Redundancy
+		}{
+			{name: "fixed target", redundancy: targetRedundancy(percent)},
+			{name: "fill floor", redundancy: fillRedundancy(percent)},
+		} {
+			t.Run(mode.name, func(t *testing.T) {
+				t.Parallel()
+
+				// Each percent is a whole number in [1, 100] — exactly what config
+				// validation now guarantees before planning (asserted separately in
+				// internal/config). Under that guarantee both paths must agree.
+				reserve := par2ReservePercent(mode.redundancy)
+				fraction := par2Fraction(mode.redundancy)
+
+				// The reservation equals the configured whole percent (no clamping).
+				assert.Equal(t, int(percent), reserve)
+				// The feasibility fraction is that same percent, so both agree.
+				assert.InDelta(t, fraction*100, float64(reserve), 1e-9)
+			})
+		}
+	}
+}

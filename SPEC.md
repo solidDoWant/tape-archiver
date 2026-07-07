@@ -334,7 +334,10 @@ recoverer understands what protects against what:
   damaged segment. Recoverable up to the configured redundancy. Block size is computed
   from tape capacity so as not to exceed PAR2's hard limit of 32,768 recovery blocks.
   Using otherwise-wasted tape capacity for additional parity is encouraged
-  (fill-to-capacity mode).
+  (fill-to-capacity mode). The PAR2 engine accepts only whole redundancy
+  percentages in the inclusive range [1, 100]; the config gate enforces that
+  contract, rejecting out-of-range or fractional `targetPercentage`/`floor`
+  values up front so the configured redundancy always equals what is applied.
 - **N copies (across tapes):** protects against *whole-tape* loss — a snapped,
   demagnetized, or lost tape, which PAR2 cannot recover at any percentage.
 

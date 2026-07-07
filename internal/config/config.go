@@ -146,7 +146,7 @@ func (l Library) EffectiveWriteFailureWaitTimeout() time.Duration {
 // Redundancy specifies the PAR2 redundancy policy.
 // Exactly one of TargetPercentage or FillToCapacity must be set.
 type Redundancy struct {
-	TargetPercentage *float64    `json:"targetPercentage,omitempty"`
+	TargetPercentage *float64    `json:"targetPercentage,omitempty" jsonschema:"minimum=1,maximum=100,multipleOf=1"`
 	FillToCapacity   *FillConfig `json:"fillToCapacity,omitempty"`
 	SliceSizeBytes   int64       `json:"sliceSizeBytes"`
 }
@@ -154,7 +154,7 @@ type Redundancy struct {
 // FillConfig configures fill-to-capacity PAR2 mode, which expands redundancy to
 // consume remaining tape space down to a minimum floor percentage.
 type FillConfig struct {
-	Floor float64 `json:"floor"`
+	Floor float64 `json:"floor" jsonschema:"minimum=1,maximum=100,multipleOf=1"`
 }
 
 // Encryption specifies the age recipients to encrypt archives to, and the
