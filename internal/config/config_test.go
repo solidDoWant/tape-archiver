@@ -172,6 +172,21 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "sources[0].k8s.namespace",
 		},
 		{
+			// A labelSelector with no namespace is valid: it selects matching
+			// snapshots across all namespaces (cluster-wide; SPEC §5). Only a single
+			// named snapshot requires a namespace (see "k8s no namespace" above).
+			name: "k8s labelSelector without namespace is cluster-wide",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion:    "snapshot.storage.k8s.io/v1",
+					Kind:          "VolumeSnapshot",
+					LabelSelector: "app=foo",
+				}
+			},
+			wantErr: require.NoError,
+		},
+		{
 			name: "k8s no name and no selector",
 			mutate: func(c *Config) {
 				c.Sources[0].ZFSPath = nil

@@ -131,10 +131,6 @@ func (k *K8sRef) validate(index int) error {
 		return fmt.Errorf("sources[%d].k8s.kind: must not be empty", index)
 	}
 
-	if k.Namespace == "" {
-		return fmt.Errorf("sources[%d].k8s.namespace: must not be empty", index)
-	}
-
 	hasName := k.Name != ""
 	hasSelector := k.LabelSelector != ""
 
@@ -143,6 +139,13 @@ func (k *K8sRef) validate(index int) error {
 		return fmt.Errorf("sources[%d].k8s: one of name or labelSelector must be set", index)
 	case hasName && hasSelector:
 		return fmt.Errorf("sources[%d].k8s: name and labelSelector are mutually exclusive", index)
+	}
+
+	// Namespace is required for a single named snapshot (a name has no cluster-wide
+	// meaning), but optional for a labelSelector: an empty namespace there selects
+	// across all namespaces (cluster-wide; SPEC §5, pkg/k8ssnap Ref).
+	if hasName && k.Namespace == "" {
+		return fmt.Errorf("sources[%d].k8s.namespace: must not be empty", index)
 	}
 
 	return nil
