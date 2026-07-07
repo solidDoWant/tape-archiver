@@ -192,6 +192,19 @@ func (l Library) validate() error {
 		return fmt.Errorf("library.drives: at least one drive is required")
 	}
 
+	seen := make(map[string]struct{}, len(l.Drives))
+	for i, drive := range l.Drives {
+		if strings.TrimSpace(drive) == "" {
+			return fmt.Errorf("library.drives[%d]: must not be empty", i)
+		}
+
+		if _, ok := seen[drive]; ok {
+			return fmt.Errorf("library.drives[%d]: duplicate device path %q", i, drive)
+		}
+
+		seen[drive] = struct{}{}
+	}
+
 	if len(l.BlankSlots) == 0 {
 		return fmt.Errorf("library.blankSlots: at least one blank slot is required")
 	}

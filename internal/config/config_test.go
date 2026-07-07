@@ -238,6 +238,23 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "library.drives",
 		},
 		{
+			name:        "library duplicate drives",
+			mutate:      func(c *Config) { c.Library.Drives = []string{"/dev/nst0", "/dev/nst0"} },
+			wantErr:     require.Error,
+			errContains: "library.drives[1]",
+		},
+		{
+			name:        "library blank drive",
+			mutate:      func(c *Config) { c.Library.Drives = []string{"/dev/nst0", "  "} },
+			wantErr:     require.Error,
+			errContains: "library.drives[1]",
+		},
+		{
+			name:    "library distinct non-blank drives is allowed",
+			mutate:  func(c *Config) { c.Library.Drives = []string{"/dev/nst0", "/dev/nst1", "/dev/nst2"} },
+			wantErr: require.NoError,
+		},
+		{
 			name:        "library no blank slots",
 			mutate:      func(c *Config) { c.Library.BlankSlots = nil },
 			wantErr:     require.Error,
