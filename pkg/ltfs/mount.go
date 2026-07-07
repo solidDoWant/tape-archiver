@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,6 +29,12 @@ type Mount struct {
 
 	cmd    *exec.Cmd
 	stderr *bytes.Buffer
+
+	// detached is true once fusermount -u has successfully released the FUSE
+	// mount. A subsequent Unmount skips the detach: re-running fusermount -u on an
+	// already-released mountpoint exits non-zero, which must not fail an otherwise
+	// successful retry (see Unmount).
+	detached bool
 
 	// done is closed when the supervised ltfs process exits; waitErr holds its
 	// exit error and is safe to read only after done is closed.
@@ -51,6 +58,24 @@ func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount,
 	absMount, err := filepath.Abs(mountpoint)
 	if err != nil {
 		return nil, fmt.Errorf("resolve mountpoint %q: %w", mountpoint, err)
+	}
+
+	// Establish attribution before spawning ltfs. Mountpoints are stable per
+	// barcode, so the path may already carry a mount — a live one from a prior
+	// run, or one orphaned by a killed daemon (stat returns ENOTCONN but it is
+	// still listed in /proc/self/mountinfo). Refuse rather than mount over it:
+	// because the path is proven un-mounted here, any mount waitForMount later
+	// observes is necessarily from our own ltfs. This also runs before MkdirAll
+	// so an orphaned mount's ENOTCONN cannot surface as an opaque stat error.
+	inUse, err := mountpointInUse(absMount)
+	if err != nil {
+		return nil, fmt.Errorf("check whether %s is already mounted: %w", absMount, err)
+	}
+
+	if inUse {
+		return nil, fmt.Errorf("mountpoint %s is already in use by an existing LTFS mount "+
+			"(live from a prior run, or orphaned by a killed daemon); release it first with "+
+			"`fusermount -u %s`", absMount, absMount)
 	}
 
 	for _, dir := range []string{absMount, workDir} {
@@ -97,6 +122,11 @@ func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount,
 
 // waitForMount blocks until the FUSE mount is live, the ltfs process exits early
 // (a mount failure), or ctx is done.
+//
+// isMountpoint is a pure st_dev comparison and cannot by itself attribute an
+// observed mount to m.cmd. Attribution instead rests on the pre-start invariant
+// established by Volume.Mount: the mountpoint is proven un-mounted before ltfs is
+// spawned, so any mount observed here is necessarily from our own ltfs process.
 func (m *Mount) waitForMount(ctx context.Context) error {
 	ticker := time.NewTicker(mountPollInterval)
 	defer ticker.Stop()
@@ -135,15 +165,37 @@ func (m *Mount) waitForMount(ctx context.Context) error {
 //
 // Lazy unmount (fusermount -uz) is deliberately not used: it detaches without
 // ensuring the flush, defeating this guarantee.
+//
+// Unmount is idempotent, which the FinalizeTape retry loop relies on: if a first
+// attempt detaches the mount but its index-write wait returns a context error,
+// re-running fusermount -u on the now-detached mountpoint would exit non-zero
+// ("entry ... not found in /etc/mtab") and spuriously fail a tape whose index is
+// already on disk. A retry therefore skips the detach once it has succeeded, and
+// reports the recorded index-write result instead.
 func (m *Mount) Unmount(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "fusermount", "-u", m.mountpoint)
+	// Detach the FUSE mount, unless a prior Unmount already did. Skipping the
+	// re-detach is what makes a retry succeed once the index write has completed.
+	if !m.detached {
+		cmd := exec.CommandContext(ctx, "fusermount", "-u", m.mountpoint)
 
-	if out, err := cmd.CombinedOutput(); err != nil {
-		if msg := strings.TrimSpace(string(out)); msg != "" {
-			return fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			// A fusermount failure is benign if the supervised ltfs process has
+			// already exited: the mount is already gone (a prior detach, or an
+			// external kill/crash), so fall through to report the index-write
+			// result. If the process is still live the detach genuinely failed,
+			// and the error stands.
+			select {
+			case <-m.done:
+			default:
+				if msg := strings.TrimSpace(string(out)); msg != "" {
+					return fmt.Errorf("%s: %w: %s", cmd, err, msg)
+				}
+
+				return fmt.Errorf("%s: %w", cmd, err)
+			}
 		}
 
-		return fmt.Errorf("%s: %w", cmd, err)
+		m.detached = true
 	}
 
 	select {
@@ -208,4 +260,66 @@ func isMountpoint(path string) (bool, error) {
 	}
 
 	return st.Dev != parent.Dev, nil
+}
+
+// mountpointInUse reports whether path is currently a mount point, by scanning
+// /proc/self/mountinfo. Unlike isMountpoint (a stat-based st_dev comparison), it
+// does not stat path, so it detects an orphaned FUSE mount whose stat returns
+// ENOTCONN just as well as a live mount — both remain listed in mountinfo.
+//
+// The query path is canonicalized through its parent directory so a symlinked
+// ancestor still matches the kernel's symlink-free mountinfo path; resolving the
+// parent (a normal directory) rather than path itself avoids stat'ing an
+// orphaned final component.
+func mountpointInUse(path string) (bool, error) {
+	target := path
+	if resolved, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		target = filepath.Join(resolved, filepath.Base(path))
+	}
+
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return false, fmt.Errorf("read /proc/self/mountinfo: %w", err)
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		// Per proc(5), the mount point is the 5th space-separated field, with
+		// space, tab, newline, and backslash octal-escaped.
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+
+		if unescapeMountinfo(fields[4]) == target {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+// unescapeMountinfo decodes the octal escaping (\OOO) that /proc/self/mountinfo
+// applies to space, tab, newline, and backslash in its path fields (see proc(5)).
+func unescapeMountinfo(field string) string {
+	if !strings.Contains(field, `\`) {
+		return field
+	}
+
+	var b strings.Builder
+
+	for i := 0; i < len(field); i++ {
+		if field[i] == '\\' && i+3 < len(field) {
+			if n, err := strconv.ParseUint(field[i+1:i+4], 8, 8); err == nil {
+				b.WriteByte(byte(n))
+
+				i += 3
+
+				continue
+			}
+		}
+
+		b.WriteByte(field[i])
+	}
+
+	return b.String()
 }
