@@ -193,6 +193,62 @@ func measuredTapeFootprint(t *testing.T, tape PlannedTape, staged []StagedArchiv
 	return total
 }
 
+// TestGeneratePAR2RetriesAfterPartialAttempt covers AC1 and AC2: after a prior
+// attempt already produced recovery files in the staging directory — including a
+// stale leftover the current run would not regenerate — a retry over the same
+// directories completes successfully, produces a complete valid recovery set for
+// every archive, and records no stale file.
+func TestGeneratePAR2RetriesAfterPartialAttempt(t *testing.T) {
+	t.Parallel()
+
+	staged := []StagedArchive{
+		writeStagedArchive(t, 0, []int{100_000, 100_000}),
+		writeStagedArchive(t, 1, []int{120_000}),
+	}
+
+	// A generous tape capacity so both archives pack: par2cmdline's per-block
+	// overhead inflates the recovery set far past its nominal percentage at these
+	// tiny test-block sizes (negligible at LTO's TB scale), which a small capacity
+	// would otherwise overflow once pack measures the real PAR2 footprint.
+	cfg := packConfig(500_000_000, 1, 1, targetRedundancy(20))
+
+	plan, err := pack(cfg, staged)
+	require.NoError(t, err)
+
+	// First attempt: leaves a full recovery set in every archive's staging dir —
+	// the "files already exist" partial precondition a retry must survive.
+	_, err = generatePAR2(t.Context(), cfg, plan, staged)
+	require.NoError(t, err)
+
+	// Plant a stale leftover the current run will not regenerate, matching the
+	// recovery-set glob, in the first archive's staging directory.
+	staleDir := filepath.Dir(staged[0].Slices[0].Path)
+	stalePath := filepath.Join(staleDir, "archive.vol900+99.par2")
+	require.NoError(t, os.WriteFile(stalePath, []byte("stale leftover"), 0o600))
+
+	// Retry over the same staging directories. Without the purge this fails
+	// deterministically (par2 create exits non-zero when recovery files exist).
+	sets, err := generatePAR2(t.Context(), cfg, plan, staged)
+	require.NoError(t, err)
+	require.Len(t, sets, len(staged))
+
+	// AC2: the stale leftover is gone from disk and recorded in no set.
+	_, statErr := os.Stat(stalePath)
+	assert.True(t, os.IsNotExist(statErr), "stale leftover PAR2 file must be purged from disk")
+
+	for index, set := range sets {
+		assert.Equal(t, staged[index].SourceIndex, set.SourceIndex)
+
+		for _, file := range set.Files {
+			assert.NotEqual(t, stalePath, file.Path, "no stale file may be recorded")
+		}
+
+		// AC1/AC2: each retried set is complete and valid, and every recorded
+		// file's checksum/size matches its fresh on-disk bytes.
+		assertStagedRecoverySet(t, staged[index], set)
+	}
+}
+
 // TestGeneratePAR2Empty verifies a run with nothing staged generates no recovery
 // sets and does not invoke par2.
 func TestGeneratePAR2Empty(t *testing.T) {
