@@ -25,6 +25,7 @@ func TestFindFreeStorageSlot(t *testing.T) {
 		name       string
 		slots      []tape.StorageElement
 		preferSlot int
+		claimed    map[int]bool
 		want       int
 	}{
 		{
@@ -71,6 +72,38 @@ func TestFindFreeStorageSlot(t *testing.T) {
 			preferSlot: 99,
 			want:       1,
 		},
+		{
+			name: "skips a claimed free slot and returns the next free one",
+			slots: []tape.StorageElement{
+				{Address: 1, Full: false},
+				{Address: 2, Full: false},
+				{Address: 3, Full: false},
+			},
+			preferSlot: 0,
+			claimed:    map[int]bool{1: true},
+			want:       2,
+		},
+		{
+			name: "skips the preferred slot when it is claimed",
+			slots: []tape.StorageElement{
+				{Address: 1, Full: false},
+				{Address: 2, Full: false},
+				{Address: 3, Full: false},
+			},
+			preferSlot: 2,
+			claimed:    map[int]bool{2: true},
+			want:       1,
+		},
+		{
+			name: "returns -1 when every free slot is claimed",
+			slots: []tape.StorageElement{
+				{Address: 1, Full: true},
+				{Address: 2, Full: false},
+			},
+			preferSlot: 2,
+			claimed:    map[int]bool{2: true},
+			want:       -1,
+		},
 	}
 
 	for _, test := range tests {
@@ -78,10 +111,37 @@ func TestFindFreeStorageSlot(t *testing.T) {
 			t.Parallel()
 
 			inv := inventoryWith(nil, test.slots, nil)
-			got := findFreeStorageSlot(inv, test.preferSlot)
+			got := findFreeStorageSlot(inv, test.preferSlot, test.claimed)
 			assert.Equal(t, test.want, got)
 		})
 	}
+}
+
+// TestFindFreeStorageSlotDistinctPerClaim proves the AC2 behavior at the
+// slot-selection layer: choosing a slot, recording it as claimed, then choosing
+// again from the same inventory snapshot yields a distinct slot — the previously
+// chosen slot is not offered a second time within one Load.
+func TestFindFreeStorageSlotDistinctPerClaim(t *testing.T) {
+	t.Parallel()
+
+	// Both drives report SourceSlot 0 (SVALID unreported), so both prefer the same
+	// (absent) slot 0 and fall back to the free-slot scan — the exact production
+	// collision this issue fixes.
+	inv := inventoryWith(nil, []tape.StorageElement{
+		{Address: 1, Full: false},
+		{Address: 2, Full: false},
+	}, nil)
+
+	claimed := make(map[int]bool)
+
+	first := findFreeStorageSlot(inv, 0, claimed)
+	require.NotEqual(t, -1, first)
+	claimed[first] = true
+
+	second := findFreeStorageSlot(inv, 0, claimed)
+	require.NotEqual(t, -1, second)
+
+	assert.NotEqual(t, first, second, "second relocation must not reuse the first's slot")
 }
 
 func TestFindFreeIOSlot(t *testing.T) {
@@ -234,7 +294,7 @@ func TestReconcileLoad(t *testing.T) {
 			// changer command; the other paths hit a command error which is the
 			// expected test outcome for non-idempotent cases.
 			changer := tape.NewChanger("")
-			bc, err := reconcileLoad(t.Context(), changer, inv, test.driveIndex, test.driveAddr, test.targetSlot)
+			bc, err := reconcileLoad(t.Context(), changer, inv, test.driveIndex, test.driveAddr, test.targetSlot, make(map[int]bool))
 			test.wantErr(t, err)
 
 			if err == nil {
@@ -378,6 +438,47 @@ func TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll(t *testing.T) {
 	assert.False(t, blank)
 	assert.Less(t, elapsed, 5*time.Second,
 		"must return promptly via the ctx.Done() select arm, not wait out the poll interval")
+}
+
+// TestReconcileLoadClaimsDistinctSlots proves the fix for this issue at the
+// reconcile layer (AC2): two drives that both hold an unexpected tape and both
+// report SourceSlot 0 (SVALID unreported) must be offered distinct free storage
+// slots when reconciled against one shared inventory snapshot. reconcileLoad
+// records each chosen relocation slot in the shared claimed map before issuing
+// the (here failing, no real changer) unload, so the second drive cannot be
+// handed the slot the first already claimed. With the pre-fix code both drives
+// would claim the same first free slot.
+func TestReconcileLoadClaimsDistinctSlots(t *testing.T) {
+	t.Parallel()
+
+	// Two free storage slots (1, 2) and a target blank slot (5). Both drives hold
+	// an unexpected tape with SourceSlot 0 — the deterministic collision case.
+	slots := []tape.StorageElement{
+		{Address: 1, Full: false},
+		{Address: 2, Full: false},
+		{Address: 5, Barcode: "BLNK01L8", Full: true},
+	}
+	drives := []tape.DriveElement{
+		{Address: 0, Loaded: true, Barcode: "UNEXP0L8", SourceSlot: 0},
+		{Address: 1, Loaded: true, Barcode: "UNEXP1L8", SourceSlot: 0},
+	}
+
+	inv := inventoryWith(drives, slots, nil)
+	changer := tape.NewChanger("") // relocate's unload fails, but only after the slot is claimed
+	claimed := make(map[int]bool)
+
+	// Both calls fail at the unload (no real changer), but each must have claimed
+	// its relocation slot first.
+	_, err := reconcileLoad(t.Context(), changer, inv, 0, drives[0].Address, 5, claimed)
+	require.Error(t, err)
+
+	_, err = reconcileLoad(t.Context(), changer, inv, 1, drives[1].Address, 5, claimed)
+	require.Error(t, err)
+
+	// Exactly two distinct free slots claimed — no collision.
+	assert.Len(t, claimed, 2, "each relocation must claim its own storage slot")
+	assert.True(t, claimed[1], "first relocation should claim slot 1")
+	assert.True(t, claimed[2], "second relocation should claim the distinct slot 2")
 }
 
 // tapesFor builds a plan with tapeCount logical tapes and the given copy count.
