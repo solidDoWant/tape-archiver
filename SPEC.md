@@ -126,7 +126,10 @@ are visible. The worker stages into a plain subdirectory of an existing dataset 
   keeps within one run. Operator-in-the-loop pauses (the Eject I/O-station pause, §4.3
   phase 8, and the Load/Write-failure pause, §4.3 phases 6–8) hold their resume state in
   the run's own workflow event history and discard it when the run ends — they are not a
-  catalog and not cross-run state.
+  catalog and not cross-run state. The Eject pause's auto-resume poll loop runs in a
+  self-continuing child workflow that `ContinueAsNew`s periodically so a long pause's
+  polling cannot grow the run's history past Temporal's event limit; the child is still
+  single-run state (bound to the run, discarded when it ends), not a catalog.
 - **Tape inventory is resolved live, per run.** At startup the tool reads the library
   with SCSI `READ ELEMENT STATUS`; the config declares which storage elements hold usable blank
   tapes. Written tapes are exported to the I/O station at the end of the run; the
@@ -214,9 +217,11 @@ staged and verified on disk** — eliminating any computation during the write w
    in an I/O or storage slot. It resumes automatically on libraries that report the
    import/export ACCESS bit (once the station is cleared and closed), or on the explicit
    `operatorResume` signal (`tapectl resume`) otherwise, then exports the
-   remaining tapes into the freed slots. If the operator does not respond within
-   `library.ioWaitTimeoutSeconds` (default 12h), the run fails in that defined state and is
-   reported.
+   remaining tapes into the freed slots. The auto-resume poll runs in a self-continuing
+   child workflow that periodically `ContinueAsNew`s, so the pause's Temporal history
+   stays bounded regardless of how long the operator takes (§4.2). If the operator does
+   not respond within `library.ioWaitTimeoutSeconds` (default 12h), the run fails in that
+   defined state and is reported.
 9. **Report.** Build the PDF report (§9), and — only when `delivery.opticalBurn` is
    configured — the recovery ISO (§10) as the mountable image the Burn phase consumes.
 10. **Burn (optional).** When `delivery.opticalBurn` is configured, burn the recovery

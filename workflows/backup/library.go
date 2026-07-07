@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
@@ -639,49 +640,69 @@ func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (Eje
 
 // waitForIOCleared pauses the Eject phase until the operator has cleared the I/O
 // station, returning true to resume and false when the configured wait elapses
-// first. It selects over three futures: the OperatorResumeSignal (explicit
-// operator resume), an overall wait-timeout timer, and a repeating poll timer. On
-// each poll it reads the I/O station; libraries that report access state resume
-// automatically once the station is closed with a free slot (IOStatus.CanAutoResume),
-// while libraries that do not report it wait for the signal or the timeout.
+// first. The auto-resume poll loop runs in a self-continuing child workflow
+// (ioStationWaitWorkflow) that ContinueAsNew's every maxPollsBeforeContinue polls,
+// so the run's own history grows by only the child start/complete pair per pause,
+// regardless of how long the operator takes (issue #168). The parent keeps the
+// operator-resume and timeout decision in a single O(1) selector: it waits on the
+// OperatorResumeSignal (explicit resume) and the child future. A signal resumes
+// immediately and cancels the child; the child completes true when the station
+// reports it can auto-resume (IOStatus.CanAutoResume) or false when the wait
+// deadline elapses.
 func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
 	signalCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
-	timeoutTimer := workflow.NewTimer(ctx, cfg.Library.EffectiveIOWaitTimeout())
 
-	for {
-		var signalled, timedOut, polled bool
+	// Absolute deadline for the whole wait, computed once here and carried through
+	// the child (and its continuations) so the total budget never drifts.
+	deadline := workflow.Now(ctx).Add(cfg.Library.EffectiveIOWaitTimeout())
 
-		selector := workflow.NewSelector(ctx)
-		selector.AddReceive(signalCh, func(c workflow.ReceiveChannel, _ bool) {
-			c.Receive(ctx, nil)
+	// Run the poll loop as a child so its history — not the run's — absorbs the
+	// per-poll timer + activity events; ParentClosePolicy TERMINATE ties the child
+	// to this run (no cross-run state, SPEC §4.2). A cancellable context lets an
+	// explicit operator resume stop the child promptly.
+	childCtx, cancelChild := workflow.WithCancel(ctx)
+	defer cancelChild()
 
-			signalled = true
-		})
-		selector.AddFuture(timeoutTimer, func(workflow.Future) {
-			timedOut = true
-		})
-		selector.AddFuture(workflow.NewTimer(ctx, ioStationPollInterval), func(workflow.Future) {
-			polled = true
-		})
+	childCtx = workflow.WithChildOptions(childCtx, workflow.ChildWorkflowOptions{
+		TaskQueue:         TaskQueue,
+		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_TERMINATE,
+	})
 
-		selector.Select(ctx)
+	childFuture := workflow.ExecuteChildWorkflow(childCtx, ioStationWaitWorkflow, ioStationWaitInput{
+		Cfg:      cfg,
+		Deadline: deadline,
+	})
 
-		switch {
-		case signalled:
-			return true, nil
-		case timedOut:
-			return false, nil
-		case polled:
-			status, err := runIOStationStatus(ctx, cfg)
-			if err != nil {
-				return false, err
-			}
+	var (
+		signalled bool
+		resumed   bool
+		childErr  error
+	)
 
-			if status.CanAutoResume() {
-				return true, nil
-			}
-		}
+	selector := workflow.NewSelector(ctx)
+	selector.AddReceive(signalCh, func(c workflow.ReceiveChannel, _ bool) {
+		c.Receive(ctx, nil)
+
+		signalled = true
+	})
+	selector.AddFuture(childFuture, func(f workflow.Future) {
+		childErr = f.Get(ctx, &resumed)
+	})
+
+	selector.Select(ctx)
+
+	if signalled {
+		// Stop the poll loop; the deferred cancel also covers the child-done path.
+		cancelChild()
+
+		return true, nil
 	}
+
+	if childErr != nil {
+		return false, childErr
+	}
+
+	return resumed, nil
 }
 
 // runIOStationStatus dispatches one IOStationStatus poll on the data worker. It

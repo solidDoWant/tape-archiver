@@ -42,14 +42,24 @@ func TestRegisterControl(t *testing.T) {
 
 	RegisterControl(rw, ControlConfig{FailureWebhookURL: "https://discord.example/webhook"})
 
-	// The Backup workflow is registered under the contract's WorkflowType so
-	// clients can start it by name.
-	require.Len(t, rw.workflows, 1)
-	assert.Equal(t, WorkflowType, rw.workflows[0].name)
+	// The control worker registers the Backup workflow (under the contract's
+	// WorkflowType so clients can start it by name) and the Eject-pause
+	// auto-resume child workflow (issue #168), which keeps the run's history
+	// bounded across long pauses by ContinueAsNew'ing its own poll loop.
+	require.Len(t, rw.workflows, 2)
+
+	backupWorkflow := findWorkflow(t, rw.workflows, WorkflowType)
 	assert.Equal(t,
 		reflect.ValueOf(Backup).Pointer(),
-		reflect.ValueOf(rw.workflows[0].fn).Pointer(),
-		"the registered workflow must be Backup",
+		reflect.ValueOf(backupWorkflow.fn).Pointer(),
+		"the workflow registered under WorkflowType must be Backup",
+	)
+
+	ioWaitWorkflow := findWorkflow(t, rw.workflows, IOStationWaitWorkflowType)
+	assert.Equal(t,
+		reflect.ValueOf(ioStationWaitWorkflow).Pointer(),
+		reflect.ValueOf(ioWaitWorkflow.fn).Pointer(),
+		"the workflow registered under IOStationWaitWorkflowType must be ioStationWaitWorkflow",
 	)
 
 	// The failure-alert activity is registered wired with the configured URL.
@@ -107,6 +117,22 @@ func TestRegisterData(t *testing.T) {
 		"the data worker must register the Deliver activity (Discord delivery)")
 	assert.True(t, hasActivity[*BurnActivities](rw.activities),
 		"the data worker must register the optical Burn/Verify activities (BurnDisc, VerifyDisc)")
+}
+
+// findWorkflow returns the recorded workflow registered under the given name,
+// failing the test if none matches.
+func findWorkflow(t *testing.T, workflows []recordedWorkflow, name string) recordedWorkflow {
+	t.Helper()
+
+	for _, wf := range workflows {
+		if wf.name == name {
+			return wf
+		}
+	}
+
+	t.Fatalf("no workflow registered under name %q", name)
+
+	return recordedWorkflow{}
 }
 
 // hasActivity reports whether any registered activity is of type T.

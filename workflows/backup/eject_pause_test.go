@@ -57,6 +57,9 @@ func newEjectPauseEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(ejectPauseTestWorkflow)
+	// The Eject pause auto-resume poll loop runs in this child workflow
+	// (issue #168); it must be registered for the parent to start it.
+	env.RegisterWorkflow(ioStationWaitWorkflow)
 	env.RegisterActivity(newEjectActivities())
 	env.RegisterActivity(&FailureActivities{})
 
@@ -220,6 +223,100 @@ func TestEjectPhaseTimeout(t *testing.T) {
 	err := env.GetWorkflowError()
 	require.Error(t, err, "the run fails when the operator never clears the station")
 	assert.Contains(t, err.Error(), "did not clear the import/export station")
+}
+
+// TestEjectPhaseBoundedHistory covers AC1: a pause that outlasts a single child
+// execution's poll budget must still resume correctly, which is only possible if
+// the poll loop's child workflow ContinueAsNew's to reset its history. It drives
+// the pause past maxPollsBeforeContinue polls (so at least one continuation is
+// forced) via the test env's time-skipping, then auto-resumes; observing more
+// than maxPollsBeforeContinue polls with a clean completion proves the child
+// continued rather than growing one unbounded execution.
+func TestEjectPhaseBoundedHistory(t *testing.T) {
+	env := newEjectPauseEnv(t)
+
+	// Resume a handful of polls past the continuation bound so at least one
+	// ContinueAsNew must have happened before the station clears.
+	resumeAtPoll := maxPollsBeforeContinue + 5
+
+	var (
+		mu         sync.Mutex
+		ejectCalls int
+		polls      int
+	)
+
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input EjectInput) (EjectResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			ejectCalls++
+
+			if ejectCalls == 1 {
+				return EjectResult{
+					InIOStation: []tape.Barcode{"TA0001L6"},
+					Remaining:   input.WrittenTapes[1:],
+				}, nil
+			}
+
+			return EjectResult{}, nil
+		})
+
+	// The station stays open (cannot auto-resume) until well past the poll bound,
+	// forcing the child to ContinueAsNew, then reports closed with a free slot.
+	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ IOStatusInput) (IOStatus, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			polls++
+
+			if polls < resumeAtPoll {
+				return IOStatus{FreeSlots: 0, AccessReported: true, StationClosed: false}, nil
+			}
+
+			return IOStatus{FreeSlots: 1, AccessReported: true, StationClosed: true}, nil
+		})
+
+	env.OnActivity((&FailureActivities{}).NotifyOperatorPause, mock.Anything, mock.Anything).Return(nil)
+
+	// A long wait budget (well beyond resumeAtPoll poll intervals) so the pause is
+	// bounded by the child's ContinueAsNew, not the timeout.
+	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{
+		Cfg:     ejectPauseConfig(4 * 60 * 60),
+		Written: twoWrittenTapes(),
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 2, ejectCalls, "Eject resumes and exports the remaining tape after the long pause")
+	assert.GreaterOrEqual(t, polls, resumeAtPoll,
+		"the pause polled past the continuation bound, so the child workflow must have ContinueAsNew'd at least once")
+}
+
+// TestBoundedHistoryEventBudget covers AC1 deterministically: the per-execution
+// history a single child accrues (its poll budget × the worst-case events per
+// poll) stays far below Temporal's 51,200-event hard limit, so no pause length
+// can exhaust one execution's history.
+func TestBoundedHistoryEventBudget(t *testing.T) {
+	t.Parallel()
+
+	const (
+		historyHardLimit = 51_200
+		// Worst case per poll: a timer (start + fire) plus an IOStationStatus
+		// activity retried the full ioStatusMaxAttempts times (schedule + start +
+		// fail each). This upper bound is intentionally generous.
+		worstCaseEventsPerPoll = 3 + 3*ioStatusMaxAttempts
+	)
+
+	perExecution := maxPollsBeforeContinue * worstCaseEventsPerPoll
+
+	assert.Less(t, perExecution, historyHardLimit/4,
+		"a single child execution's history must stay well under the server limit before ContinueAsNew resets it")
 }
 
 func TestIOStatusCanAutoResume(t *testing.T) {

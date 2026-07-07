@@ -50,6 +50,12 @@ type DataConfig struct {
 func RegisterControl(w worker.Worker, cfg ControlConfig) {
 	w.RegisterWorkflowWithOptions(Backup, workflow.RegisterOptions{Name: WorkflowType})
 
+	// The Eject-pause auto-resume poll loop runs as a self-continuing child
+	// workflow so the run's own history stays bounded across long pauses
+	// (issue #168). It is a control-side workflow (its IOStationStatus polls
+	// dispatch to the data queue) and is started by waitForIOCleared.
+	w.RegisterWorkflowWithOptions(ioStationWaitWorkflow, workflow.RegisterOptions{Name: IOStationWaitWorkflowType})
+
 	w.RegisterActivity(&FailureActivities{WebhookURL: cfg.FailureWebhookURL})
 
 	w.RegisterActivity(newResolveControlActivities(cfg.K8sDatasetParent))

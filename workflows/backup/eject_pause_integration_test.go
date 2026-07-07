@@ -111,6 +111,9 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 
 	controlWorker := worker.New(temporalClient, TaskQueue, worker.Options{})
 	controlWorker.RegisterWorkflow(ejectPauseTestWorkflow)
+	// The Eject pause auto-resume poll loop runs in this child workflow on the
+	// control queue (issue #168); register it so the parent can start it.
+	controlWorker.RegisterWorkflow(ioStationWaitWorkflow)
 	controlWorker.RegisterActivity(&FailureActivities{})
 	require.NoError(t, controlWorker.Start(), "start control worker")
 	t.Cleanup(controlWorker.Stop)
