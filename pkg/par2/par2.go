@@ -13,11 +13,11 @@ import (
 	"strings"
 )
 
-// maxRecoveryBlocks is PAR2's hard limit on the number of source blocks in a
+// maxSourceBlocks is PAR2's hard limit on the number of source blocks in a
 // recovery set (SPEC §8). The block size is derived from the data size so the
 // real block count stays at or below this; par2 itself rejects any larger
 // count.
-const maxRecoveryBlocks = 32768
+const maxSourceBlocks = 32768
 
 // blockSizeMultiple is the alignment par2 requires of every block size — a
 // block size that is not a multiple of 4 is rejected outright.
@@ -116,7 +116,7 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 // It is exported so the Pack phase can reserve a conservative upper bound on the
 // recovery-set size (MaxOutputBytes) from the same block size Generate will use.
 func ComputeBlockSize(totalSize int64, fileCount int) int64 {
-	capacity := int64(maxRecoveryBlocks - fileCount)
+	capacity := int64(maxSourceBlocks - fileCount)
 	if capacity < 1 {
 		capacity = 1
 	}

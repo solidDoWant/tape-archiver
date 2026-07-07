@@ -19,19 +19,26 @@ ISO 9660) so the data stays recoverable decades from now (SPEC §2).
 ## What you have
 
 - **The physical tapes**, each identified by its **barcode** (e.g. `TA0001L6`).
-  The report maps every barcode to the archives it holds, and each logical tape
-  is written to **two or more tapes** (copies), so a damaged tape has a sibling.
+  The report maps every barcode to the archives it holds. When the run was
+  configured for more than one copy, each logical tape is written to **two or
+  more tapes**, so a damaged tape has a sibling; the report lists every copy by
+  barcode, so consult it to see whether a given tape has one.
 - **The laminated PDF report** (also on the disc as `report.pdf`). It lists the
   contents manifest (every archive, its source snapshot, sizes, SHA-256), the
   barcode-to-archive mapping, the **build parameters** (the exact `age`, `par2`,
-  `zstd`, `tar`, and `ltfs` versions and the tape/library identifiers used), the
-  **age private identity**, and a concise copy of this procedure.
+  and `ltfs` versions and the tape/library identifiers used — the disc's
+  `bin/zstd` and `bin/tar` are the exact binaries this run wrote with and
+  self-report their versions), the **age private identity**, and a concise copy
+  of this procedure.
 - **The recovery disc**, an ISO 9660 image holding:
   - `report.pdf` — the report above.
   - `manifest.sha256` — the SHA-256 of every on-tape file.
   - `recovery-procedure.md` — this document.
   - `ltfs-index/<barcode>.schema` — a backup copy of each tape's LTFS index (one
-    per tape), used for [index-loss recovery](#index-loss-recovery).
+    per tape), used for [index-loss recovery](#index-loss-recovery). The
+    `<barcode>` is folded to **lowercase** on the mounted disc (e.g.
+    `ltfs-index/ta0001l6.schema` for barcode `TA0001L6`), so a scripted
+    exact-case lookup must lowercase the barcode.
   - `bin/<name>` — the static recovery binaries `age`, `par2`, `zstd`, `tar`.
 
 ## Prerequisites
@@ -230,7 +237,8 @@ Then mount read-only and follow [Normal recovery](#normal-recovery-ltfs-mounts-c
 
 When LTFS will not mount at all, recover **without any working on-tape index and
 without mounting LTFS**, using the captured index shipped on the disc:
-`ltfs-index/<barcode>.schema`. That XML is a complete byte-level map — for every
+`ltfs-index/<barcode>.schema` (the `<barcode>` component is lowercased on the
+disc, e.g. `ta0001l6.schema`). That XML is a complete byte-level map — for every
 file it lists one or more **extents**:
 
 ```xml
@@ -248,8 +256,9 @@ each extent listed under that file in the captured index:
 
 1. **Select the partition and position to the start block.** Map the LTFS
    partition label to the drive partition number — data `b` = partition `1`,
-   index `a` = partition `0` (the reference format; confirm in the report's build
-   parameters). If the host's `st` driver supports tape partitions:
+   index `a` = partition `0`. This mapping is fixed: the archiver formats every
+   tape with `mkltfs` defaults, so the reference two-partition layout always
+   holds. If the host's `st` driver supports tape partitions:
 
    ```
    mt -f /dev/nst0 setpartition 1
@@ -266,9 +275,9 @@ each extent listed under that file in the captured index:
    sg_raw /dev/sg0 92 02 00 01  00 00 00 00 00 00 00 <startblock>  00 00 00 00
    ```
 
-2. **Read the raw block(s).** Read whole tape blocks (the LTFS format block size,
-   typically `524288` = 512 KiB — see the report) until you have at least
-   `byteoffset + bytecount` bytes:
+2. **Read the raw block(s).** Read whole tape blocks (the LTFS format block size
+   is `524288` = 512 KiB, the `mkltfs` default the archiver formats with) until
+   you have at least `byteoffset + bytecount` bytes:
 
    ```
    dd if=/dev/nst0 bs=524288 count=<blocks-needed> of=extent.raw
@@ -298,10 +307,10 @@ below are **recovery-time**.
 | Symptom | What it means | What to do |
 |---------|---------------|------------|
 | A slice or PAR2 file fails its checksum, but only a little | Media damage **within** the PAR2 redundancy | `bin/par2 repair archives/NNN-<label>/archive.par2` reconstructs the exact bytes; continue. |
-| `par2 repair` cannot repair (damage **exceeds** PAR2 capacity) | Too much of one region is gone | Recover that archive from the **redundant copy on another tape** (the report lists every copy by barcode). Blast radius is bounded — one bad region damages at most one slice. |
-| `age -d` aborts partway with a stream error | `age` authenticates each ~64 KiB chunk and stops at the first uncorrectable one, so the archive is truncated there | PAR2-repair first; if that is not enough, decrypt the **other copy**. |
-| A file's digest does not match `manifest.sha256` / on-tape `manifest.json` | That file is corrupt | Identify the slice, `par2 repair` it, or use the other copy. |
-| A tape has **no `manifest.json`** at its LTFS root | The tape was **not completely written** (the manifest is written last as the completeness signal) | Discard that tape and recover from the other copy. |
+| `par2 repair` cannot repair (damage **exceeds** PAR2 capacity) | Too much of one region is gone | Recover that archive from **another copy, if the run wrote one** (the report lists every copy by barcode). Blast radius is bounded — one bad region damages at most one slice. |
+| `age -d` aborts partway with a stream error | `age` authenticates each ~64 KiB chunk and stops at the first uncorrectable one, so the archive is truncated there | PAR2-repair first; if that is not enough, decrypt **another copy, if the run wrote one** (the report lists them by barcode). |
+| A file's digest does not match `manifest.sha256` / on-tape `manifest.json` | That file is corrupt | Identify the slice, `par2 repair` it, or use another copy if the run wrote one. |
+| A tape has **no `manifest.json`** at its LTFS root | The tape was **not completely written** (the manifest is written last as the completeness signal) | Discard that tape and recover from another copy if the run wrote one. |
 | The barcode label is unreadable | You cannot identify the tape by its label | The LTFS **volume name equals the barcode** (`mkltfs` sets it); read it from the mounted volume or the captured index, then cross-reference the report. |
 
 ## See also

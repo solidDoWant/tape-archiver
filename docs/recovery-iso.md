@@ -35,8 +35,8 @@ The image holds, at these paths:
   `docs/recovery-procedure.md` (a test asserts the two match); the PDF report additionally
   carries a concise copy so the laminated printout is self-contained.
 - `ltfs-index/<barcode>.schema` — a backup copy of each tape's LTFS index, one per tape,
-  named by the tape barcode. This lets the tape be read even if its on-tape index
-  partition is damaged.
+  named by the tape barcode (the `<barcode>` component is lowercased on the disc; see below).
+  This lets the tape be read even if its on-tape index partition is damaged.
 - `bin/<name>` — the static recovery binaries (`age`, `par2`, `zstd`, `tar`) staged from
   a configurable source directory.
 - `src/<tool>-<version>.*` — each recovery tool's upstream **source archive** (SPEC §2,
@@ -51,7 +51,10 @@ and truncates to the level-2 length caps. The short, fixed artifact names above 
 unchanged, but the tape-barcode index names (`ltfs-index/<barcode>.schema`) and source
 archive names carry arbitrary characters, so `recoverykit` records each in the
 disc-content manifest under the exact name the read-back presents — reproducing that
-transformation — so post-burn verification always compares equal (issue #153).
+transformation — so post-burn verification always compares equal (issue #153). In
+particular the `<barcode>` component of `ltfs-index/<barcode>.schema` is folded to
+lowercase on the disc (e.g. `ltfs-index/ta0001l6.schema` for barcode `TA0001L6`), so
+scripted exact-case lookups must lowercase the barcode.
 
 ## Recovery binaries must be statically linked
 

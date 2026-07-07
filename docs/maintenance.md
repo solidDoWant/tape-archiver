@@ -27,11 +27,15 @@ real risk — drive availability, handling damage, and slow readability drift ar
 
 Cadence:
 
-- **Verify annually.** Once a year, read each burned disc back and check it against its
-  `manifest.sha256` (the disc-content manifest `pkg/recoverykit` records and the Burn
-  phase verifies against). Every file must read cleanly and match its digest. A disc that
-  reads slowly, throws read errors, or mismatches a digest has begun to fail — re-burn it
-  now (see below), do not wait for the 5-year mark.
+- **Verify annually.** Once a year, read each burned disc back and confirm every file
+  reads cleanly and matches the **archived master ISO** (`recovery.iso`) — the same durable
+  source a re-burn uses (see below). A disc that reads slowly, throws read errors, or
+  mismatches has begun to fail — re-burn it now, do not wait for the 5-year mark. (Note: the
+  disc's own `manifest.sha256` is the SHA-256 manifest of the **on-tape** files, not of the
+  disc's contents, so it cannot verify a disc file against itself. The Burn phase's own
+  read-back check instead compares against a separate `disc-manifest.sha256` that
+  `pkg/recoverykit` stages beside the uncompressed ISO in the run staging directory and does
+  **not** ship on the disc.)
 - **Re-burn every 5 years, or immediately on any failure.** Burn a fresh disc from the
   archived ISO (or re-run the burn against a known-good copy) at least every five years,
   and at once whenever a verification fails or a disc is physically damaged or lost.
@@ -46,8 +50,8 @@ burns each disc and verifies it against the disc-content manifest, pausing for t
 operator between burn-sets (see
 [configuration.md](configuration.md#optical-burn-operator-loop)). Left unconfigured,
 burning and verification are a **manual operator step**: burn at least two copies and
-verify each against `manifest.sha256`. Either way the re-burn/refresh above stays a
-recurring maintenance task.
+verify each disc reads back cleanly against the archived master ISO (`recovery.iso`).
+Either way the re-burn/refresh above stays a recurring maintenance task.
 
 > **M-DISC is write-once.** A re-burn always uses a **fresh blank** disc; you cannot
 > overwrite an M-DISC or DVD-R. Discard superseded discs securely — the disc carries the
