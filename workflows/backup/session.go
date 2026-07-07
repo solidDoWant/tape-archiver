@@ -333,7 +333,61 @@ func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInpu
 // re-drives only the failed ones (SPEC §4.3). The returned error is reserved for
 // an unrecoverable orchestration fault (e.g. session creation) that touched no
 // tape; per-tape write failures come back as failedTape values, not as error.
+// validateBarcodes enforces the pre-write invariant that every tape in a
+// drive-set carries a non-empty barcode and that no two tapes share one
+// (SPEC §4.3). The per-tape LTFS mountpoint and work directory are keyed solely
+// on the barcode (WriteTree: stagingDir/mounts/{barcode}, stagingDir/work/{barcode}),
+// so an empty barcode (an unlabeled blank: pkg/tape only sets a barcode when the
+// SCSI PVOLTAG bit is present) or a collision would make two parallel WriteTree
+// activities share one mountpoint and work dir — cross-writing trees and letting
+// ReadIndex return the wrong tape's index. isMountpoint is a pure st_dev compare
+// and cannot disambiguate collided mounts, so this must be caught before any mount.
+//
+// It is pure (no Temporal dependency) and reports every offender in a single
+// joined error: empty barcodes are named by drive index (there is no label to
+// name), duplicates by the shared barcode value and the drive indices that carry
+// it. A single walk builds barcode → drive indices so both diagnostics come from
+// one pass; drive indices are reported in encounter order.
+func validateBarcodes(loaded []LoadedTape) error {
+	byBarcode := make(map[tape.Barcode][]int, len(loaded))
+	order := make([]tape.Barcode, 0, len(loaded))
+
+	var errs []error
+
+	for _, lt := range loaded {
+		if lt.Barcode == "" {
+			errs = append(errs, fmt.Errorf("drive %d: empty barcode (unlabeled tape cannot key its LTFS mountpoint)", lt.DriveIndex))
+
+			continue
+		}
+
+		if _, seen := byBarcode[lt.Barcode]; !seen {
+			order = append(order, lt.Barcode)
+		}
+
+		byBarcode[lt.Barcode] = append(byBarcode[lt.Barcode], lt.DriveIndex)
+	}
+
+	for _, barcode := range order {
+		if drives := byBarcode[barcode]; len(drives) > 1 {
+			errs = append(errs, fmt.Errorf("duplicate barcode %q on drives %v", barcode, drives))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded []LoadedTape) ([]WrittenTape, []failedTape, error) {
+	// Validate the drive-set's barcodes before creating the session or dispatching
+	// any activity, so an empty or duplicate barcode fails the run before any LTFS
+	// volume is formatted or mounted (SPEC §4.3). runDriveSet treats a writePhase
+	// error as an unrecoverable orchestration fault and fails the run without the
+	// operator-pause/retry loop — correct here, since reloading the same unlabeled
+	// or collided tapes could never clear the condition.
+	if err := validateBarcodes(loaded); err != nil {
+		return nil, nil, fmt.Errorf("write phase: %w", err)
+	}
+
 	// CreateSession pins the session to the task queue in the context's activity
 	// options, falling back to the workflow's own queue (control) when none is
 	// set. The session must run on the data worker — that is where the tape

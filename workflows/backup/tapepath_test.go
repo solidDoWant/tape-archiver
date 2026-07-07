@@ -484,3 +484,110 @@ func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 			"already-written tape %s must never be re-formatted", barcode)
 	}
 }
+
+// TestRunTapePathRejectsBadBarcodesBeforeMount is the AC-level test for issue
+// #170: a drive-set whose loaded tapes have empty or duplicate barcodes fails the
+// run before any LTFS volume is formatted or mounted, and the error names the
+// offenders. It mocks Load to return the bad barcode set and asserts FormatTape
+// and WriteTree are never invoked — proving the barcode validation precedes any
+// mount. A drive-set of distinct non-empty barcodes is the happy path already
+// covered by the other tape-path tests.
+func TestRunTapePathRejectsBadBarcodesBeforeMount(t *testing.T) {
+	t.Parallel()
+
+	// badLoad mocks Load to echo the assignments back but rewrites the barcodes
+	// to the caller-supplied bad set (indexed by drive position within the set).
+	tests := []struct {
+		name           string
+		barcodes       []tape.Barcode
+		wantSubstrings []string
+	}{
+		{
+			name:           "empty barcodes collide on a shared mountpoint",
+			barcodes:       []tape.Barcode{"", ""},
+			wantSubstrings: []string{"write phase", "drive 0", "drive 1", "empty barcode"},
+		},
+		{
+			name:           "duplicate barcodes collide on a shared mountpoint",
+			barcodes:       []tape.Barcode{"BC-DUP", "BC-DUP"},
+			wantSubstrings: []string{"write phase", "duplicate barcode", "BC-DUP", "[0 1]"},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := newTapePathEnv(t)
+
+			var (
+				mu          sync.Mutex
+				formatCalls int
+				writeCalls  int
+			)
+
+			// A single drive-set with two drives so both bad barcodes land together.
+			env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
+					loaded := make([]LoadedTape, len(input.Tapes))
+					for i, assignment := range input.Tapes {
+						loaded[i] = LoadedTape{
+							Barcode:    test.barcodes[i],
+							DriveIndex: i,
+							TapeIndex:  assignment.TapeIndex,
+							CopyIndex:  assignment.CopyIndex,
+							SourceSlot: assignment.BlankSlot,
+							STDevice:   assignment.Drive,
+							SGDevice:   fmt.Sprintf("/dev/sg%d", i),
+						}
+					}
+
+					return loaded, nil
+				})
+
+			// If validation did not precede the mount path these would fire; the
+			// counters must stay zero.
+			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, _ FormatInput) error {
+					mu.Lock()
+					formatCalls++
+					mu.Unlock()
+
+					return nil
+				})
+			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, _ WriteTreeInput) error {
+					mu.Lock()
+					writeCalls++
+					mu.Unlock()
+
+					return nil
+				})
+
+			plan, staged, par2 := seededPlan(1, 2)
+
+			env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+				Cfg:    tapePathConfig(2, 1, 2),
+				Plan:   plan,
+				Staged: staged,
+				PAR2:   par2,
+			})
+
+			require.True(t, env.IsWorkflowCompleted())
+
+			err := env.GetWorkflowError()
+			require.Error(t, err, "a bad-barcode drive-set must fail the run")
+
+			for _, want := range test.wantSubstrings {
+				assert.ErrorContains(t, err, want)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			assert.Zero(t, formatCalls, "no tape may be formatted before barcode validation")
+			assert.Zero(t, writeCalls, "no LTFS volume may be mounted/written before barcode validation")
+		})
+	}
+}

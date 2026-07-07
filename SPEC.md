@@ -198,7 +198,14 @@ staged and verified on disk** — eliminating any computation during the write w
    `library.allowNonBlankTapes`, in which case the run instead logs a prominent warning naming the
    tape's barcode and slot, proceeds to overwrite it, and records the overwrite in the run report.
    The override changes only the non-blank outcome — never detection — and never silences it.
-7. **Write.** `mkltfs` each tape in the set (setting the LTFS volume name to the tape's
+7. **Write.** Before any tape in the set is formatted or mounted, validate the set's
+   barcodes: every loaded tape must carry a **non-empty, set-unique** barcode. The per-tape
+   LTFS mountpoint and work directory are keyed on the barcode, so an empty barcode (an
+   unlabeled blank — a barcode is only read when the SCSI PVOLTAG bit is set) or a
+   collision would make two parallel writes share one mountpoint. The run fails naming the
+   offending tapes before any LTFS volume is mounted or written; reloading the same tapes
+   cannot clear the condition, so this is a fatal fault, not an operator pause.
+   `mkltfs` each tape in the set (setting the LTFS volume name to the tape's
    barcode), mount LTFS **with index sync deferred to unmount** (`-o sync_type=unmount`),
    and stream the staged tree to tape. The set's tapes write to their drives in parallel.
    Writing is a pure sequential disk→tape copy whose sustained rate is monitored. The LTFS
