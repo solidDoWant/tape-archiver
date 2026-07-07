@@ -145,7 +145,7 @@ file** out of an archive:
    retry):
 
    ```
-   bin/par2 repair -p /scratch/NNN/archive.par2
+   bin/par2 repair -p /scratch/NNN-<label>/archive.par2
    ```
 
    As an independent SHA-256 cross-check you have two manifests. The tape's own
@@ -179,7 +179,7 @@ file** out of an archive:
    authoritative if you ever need to confirm the order:
 
    ```
-   cat /scratch/NNN/archive.[0-9]* > /scratch/archive.age
+   cat /scratch/NNN-<label>/archive.[0-9]* > /scratch/archive.age
    ```
 
 6. **Decrypt** with the escrowed identity:
