@@ -91,14 +91,17 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 
 	loaded := make([]LoadedTape, setSize)
 
-	// claimed records the storage slots consumed by relocations of unexpected
-	// tapes earlier in this Load. The inventory is read once before the loop, so
-	// each iteration works from that stale snapshot; without this set, two drives
-	// both holding unexpected tapes would be offered the same free slot and the
-	// second MOVE MEDIUM would fail destination-full. Threading it through
-	// reconcileLoad → findFreeStorageSlot excludes already-claimed slots
-	// deterministically, with no extra changer reads.
-	claimed := make(map[int]bool)
+	// relocated records, per storage slot, the barcode of the unexpected tape a
+	// relocation earlier in this Load moved into it. The inventory is read once
+	// before the loop, so each iteration works from that stale snapshot. The map
+	// serves two purposes: findFreeStorageSlot treats a recorded slot as occupied
+	// (so two drives both holding unexpected tapes never target the same free slot,
+	// whose second MOVE MEDIUM would fail destination-full), and reconcileLoad
+	// consults it when resolving a later assignment's target slot — so a blank
+	// relocated into that slot (e.g. left in an earlier drive by a prior run) is
+	// seen instead of the stale snapshot's still-empty slot (issue #224). Threading
+	// it through avoids any extra changer reads.
+	relocated := make(map[int]tape.Barcode)
 
 	for i, assignment := range input.Tapes {
 		stDev := assignment.Drive
@@ -117,7 +120,7 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 			return nil, fmt.Errorf("load drive %d (%s): %w", assignment.DriveIndex, stDev, err)
 		}
 
-		barcode, err := reconcileLoad(ctx, changer, inv, de, targetSlot, claimed)
+		barcode, err := reconcileLoad(ctx, changer, inv, de, targetSlot, relocated)
 		if err != nil {
 			return nil, fmt.Errorf("load drive %d (%s, slot %d): %w", assignment.DriveIndex, stDev, targetSlot, err)
 		}
@@ -286,11 +289,14 @@ func blankCheckWhenReady(ctx context.Context, drive blankChecker, timeout, poll 
 // The blank check always runs after this function, so non-blank tapes are caught
 // regardless of which path was taken.
 //
-// claimed carries the storage slots already consumed by relocations earlier in
-// the same Load; findFreeStorageSlot excludes them so two drives with unexpected
-// tapes never target the same free slot. When this call relocates a tape, it
-// records the chosen slot in claimed for subsequent drives.
-func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventory, de tape.DriveElement, targetSlot int, claimed map[int]bool) (tape.Barcode, error) {
+// relocated carries the storage slots already consumed by relocations earlier in
+// the same Load, each mapped to the barcode moved there; findFreeStorageSlot
+// excludes those slots so two drives with unexpected tapes never target the same
+// free slot. When this call relocates a tape, it records the chosen slot and its
+// barcode for subsequent drives. It is also consulted when resolving targetSlot,
+// so a blank relocated into that slot earlier in this Load is seen even though the
+// once-read inventory snapshot still shows the slot empty (issue #224).
+func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventory, de tape.DriveElement, targetSlot int, relocated map[int]tape.Barcode) (tape.Barcode, error) {
 	driveAddr := de.Address
 
 	if de.Loaded {
@@ -303,15 +309,16 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 		// slot), then load the blank. A tape with an active LTFS mount asserts
 		// SCSI PREVENT MEDIUM REMOVAL, so the unload will fail with a clear
 		// hardware error and the run aborts rather than force-yanking a live tape.
-		relocateSlot := findFreeStorageSlot(inv, de.SourceSlot, claimed)
+		relocateSlot := findFreeStorageSlot(inv, de.SourceSlot, relocated)
 		if relocateSlot == -1 {
 			return "", fmt.Errorf("drive has unexpected tape %s (from slot %d) and no free storage slot to relocate it",
 				de.Barcode, de.SourceSlot)
 		}
 
-		// Claim the slot before the move so a later drive in this Load cannot be
-		// offered it from the same stale inventory snapshot.
-		claimed[relocateSlot] = true
+		// Record the slot and the barcode moving into it before the move, so a later
+		// drive in this Load cannot be offered the same slot from the stale snapshot
+		// and a later target-slot lookup sees this relocated tape.
+		relocated[relocateSlot] = de.Barcode
 
 		if err := changer.Unload(ctx, relocateSlot, driveAddr); err != nil {
 			return "", fmt.Errorf("relocate unexpected tape %s (from slot %d) to slot %d: %w",
@@ -319,8 +326,17 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 		}
 	}
 
-	// Drive is now empty — confirm the target slot has a tape and load it.
-	targetBarcode, ok := slotBarcode(inv, targetSlot)
+	// Drive is now empty — confirm the target slot has a tape and load it. Check
+	// this Load's own relocations first: if an earlier drive's unexpected tape was
+	// moved into this slot (e.g. the blank this set needs was left in that drive by
+	// a prior run), the once-read inventory snapshot still shows the slot empty, but
+	// the tape is physically there now (issue #224). The blank check after this
+	// function still runs, so a non-blank relocated tape is caught regardless.
+	targetBarcode, ok := relocated[targetSlot]
+	if !ok {
+		targetBarcode, ok = slotBarcode(inv, targetSlot)
+	}
+
 	if !ok {
 		return "", fmt.Errorf("target slot %d is empty; cannot load a blank tape", targetSlot)
 	}
@@ -333,20 +349,20 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 }
 
 // findFreeStorageSlot returns the address of an empty storage slot, preferring
-// preferSlot if it is empty. Slots already claimed by an earlier relocation in
+// preferSlot if it is empty. Slots already consumed by an earlier relocation in
 // the same Load are treated as occupied and skipped (including the preferred
 // slot), so successive relocations never target the same slot from one stale
-// inventory snapshot. A nil claimed map means nothing is claimed. Returns -1 if
-// no free, unclaimed storage slot exists.
-func findFreeStorageSlot(inv tape.Inventory, preferSlot int, claimed map[int]bool) int {
+// inventory snapshot. A nil relocated map means nothing is relocated yet. Returns
+// -1 if no free, unclaimed storage slot exists.
+func findFreeStorageSlot(inv tape.Inventory, preferSlot int, relocated map[int]tape.Barcode) int {
 	for _, slot := range inv.Slots {
-		if slot.Address == preferSlot && !slot.Full && !claimed[slot.Address] {
+		if _, claimed := relocated[slot.Address]; slot.Address == preferSlot && !slot.Full && !claimed {
 			return slot.Address
 		}
 	}
 
 	for _, slot := range inv.Slots {
-		if !slot.Full && !claimed[slot.Address] {
+		if _, claimed := relocated[slot.Address]; !slot.Full && !claimed {
 			return slot.Address
 		}
 	}
