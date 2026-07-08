@@ -714,3 +714,37 @@ func TestBurnPauseAlertBestEffort(t *testing.T) {
 
 	assert.Equal(t, 2, burns, "the run still resumed and re-burned the failed disc")
 }
+
+// burnPhaseTestWorkflow drives the top-level burnPhase gate so its disabled no-op
+// path can be exercised in the workflow test environment.
+func burnPhaseTestWorkflow(ctx workflow.Context, cfg config.Config) error {
+	state := &runState{uncompressedISOPath: stagedISO, discManifestPath: stagedManifest}
+
+	return burnPhase(ctx, cfg, state)
+}
+
+// TestBurnPhaseDisabledIsNoOp covers the state a tapectl --dry-run produces: when
+// optical burning is disabled (OpticalBurn nil / not Enabled), burnPhase is a no-op
+// — the run reaches a defined end state (the workflow completes with no error) and
+// no burner activity is ever dispatched, so a dry-run whose burn section was
+// neutralized never drives real hardware.
+func TestBurnPhaseDisabledIsNoOp(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+
+	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterWorkflow(burnPhaseTestWorkflow)
+	env.RegisterActivity(newBurnActivities())
+
+	// A config with no optical-burn section — exactly what applyDryRun leaves behind.
+	env.OnActivity((&BurnActivities{}).BurnDisc, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ BurnDiscInput) (BurnResult, error) {
+			require.FailNow(t, "burnPhase must not burn when optical burning is disabled")
+
+			return BurnResult{}, nil
+		})
+
+	env.ExecuteWorkflow(burnPhaseTestWorkflow, config.Config{})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+}

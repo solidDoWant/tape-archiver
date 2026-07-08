@@ -25,6 +25,20 @@ const validConfigJSON = `{
   "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
 }`
 
+// opticalBurnConfigJSON is validConfigJSON with optical burning enabled, naming a
+// real burner device. A dry-run must never leave this device in the submitted config.
+const opticalBurnConfigJSON = `{
+  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+  "copies": 2,
+  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+  "delivery": {
+    "webhookUrl": "https://discord.com/api/webhooks/123/abc",
+    "opticalBurn": {"drives": ["/dev/sr0"], "copies": 1, "allowNonBlankDiscs": true}
+  }
+}`
+
 // writeConfig writes content to a temp file and returns its path.
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
@@ -106,6 +120,56 @@ func TestBuildSubmissionDryRun(t *testing.T) {
 
 		assert.Equal(t, "/dev/sch9", cfg.Library.Changer)
 		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, cfg.Library.Drives)
+	})
+
+	// AC1: a dry-run must never leave delivery.opticalBurn pointing at the real
+	// burner. mhvtl has no virtual optical burner, so the section is neutralized so
+	// the burn phase is a no-op and no original burner device survives the override.
+	// AC2: the submission is still accepted (non-nil, valid) and burning being off
+	// lets the run reach a defined end state rather than driving real hardware.
+	t.Run("disables optical burning and drops the real burner device", func(t *testing.T) {
+		env := map[string]string{
+			mhvtlChangerEnv: "/dev/sch9",
+			mhvtlDrive0Env:  "/dev/nst8",
+			mhvtlDrive1Env:  "/dev/nst9",
+		}
+
+		withGetenv(t, func(name string) string { return env[name] })
+		warnings := withWarnOut(t)
+
+		cfg, err := buildSubmission(runOptions{configPath: writeConfig(t, opticalBurnConfigJSON), dryRun: true})
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+
+		// Burning is neutralized: Enabled() is false and no device from the original
+		// opticalBurn.drives ("/dev/sr0") survives into the submitted config.
+		assert.False(t, cfg.Delivery.OpticalBurn.Enabled())
+		assert.Nil(t, cfg.Delivery.OpticalBurn)
+
+		// The tape path is still redirected to the mhvtl nodes — a config that
+		// configures burning remains dry-runnable for its tape path.
+		assert.Equal(t, "/dev/sch9", cfg.Library.Changer)
+		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, cfg.Library.Drives)
+
+		// The operator is told burning was skipped (not silent).
+		assert.Contains(t, warnings.String(), "optical burning disabled")
+	})
+
+	// A dry-run of a config that does not configure burning emits no advisory.
+	t.Run("no optical-burn advisory when burning is not configured", func(t *testing.T) {
+		env := map[string]string{
+			mhvtlChangerEnv: "/dev/sch9",
+			mhvtlDrive0Env:  "/dev/nst8",
+			mhvtlDrive1Env:  "/dev/nst9",
+		}
+
+		withGetenv(t, func(name string) string { return env[name] })
+		warnings := withWarnOut(t)
+
+		cfg, err := buildSubmission(runOptions{configPath: writeConfig(t, validConfigJSON), dryRun: true})
+		require.NoError(t, err)
+		assert.Nil(t, cfg.Delivery.OpticalBurn)
+		assert.Empty(t, warnings.String())
 	})
 }
 
@@ -281,4 +345,17 @@ func withGetenv(t *testing.T, fn func(string) string) {
 	getenv = fn
 
 	t.Cleanup(func() { getenv = original })
+}
+
+// withWarnOut redirects dry-run advisories to a buffer for the duration of a test.
+func withWarnOut(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	original := warnOut
+	buffer := &bytes.Buffer{}
+	warnOut = buffer
+
+	t.Cleanup(func() { warnOut = original })
+
+	return buffer
 }

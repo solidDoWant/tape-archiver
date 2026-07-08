@@ -92,6 +92,22 @@ exports them.
 | `MHVTL_DRIVE0_DEV` | yes | First `mhvtl` tape drive node (e.g. `/dev/nst0`). |
 | `MHVTL_DRIVE1_DEV` | yes | Second `mhvtl` tape drive node (e.g. `/dev/nst1`). |
 
+#### Optical burning under `--dry-run`
+
+`--dry-run` **disables optical burning**: it removes the `delivery.opticalBurn` section
+from the submitted config so the burn phase is a no-op. `mhvtl` provides no virtual
+optical burner, so — unlike the tape library — there is no safe device to redirect to,
+and the submitted config carries no dry-run marker the worker could honor. Were the
+section left in place, the worker would probe, pause on, blank, and irreversibly burn the
+real burner named in `delivery.opticalBurn.drives` (including write-once M-DISC media)
+during what is meant to be a hardware-free test. With the section neutralized, a dry-run
+**never probes, blanks, pauses on, or writes any device in `delivery.opticalBurn.drives`**,
+while the tape path is still exercised end to end against `mhvtl` — so a production config
+that also configures burning remains dry-runnable for its tape path. When a dry-run
+disables a configured burn section, `tapectl` prints a one-line advisory to stderr so the
+skipped burning is not silent. Optical burning is only ever exercised by a real
+(non-`--dry-run`) run against real hardware.
+
 ---
 
 ## `tapectl status`
