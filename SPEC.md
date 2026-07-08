@@ -675,10 +675,12 @@ procedures in `docs/maintenance.md`:
   sets the LTFS volume name to that barcode (§6). Documented in
   `docs/maintenance.md`.
 - **Recovery-disc re-burn / refresh cadence** — verify each burned disc's
-  readability against `manifest.sha256` **annually**, re-burn a fresh copy every
-  **5 years** or immediately on any read/verify failure, and always keep **≥2
-  copies** in separate locations. The disc is a redundancy layer, not a hard
-  dependency (§10). Documented in `docs/maintenance.md`.
+  readability **annually** against the archived master ISO (`recovery.iso`), not
+  the disc's own `manifest.sha256` (which is the SHA-256 manifest of the on-tape
+  files, not of the disc's contents); re-burn a fresh copy every **5 years** or
+  immediately on any read/verify failure, and always keep **≥2 copies** in
+  separate locations. The disc is a redundancy layer, not a hard dependency (§10).
+  Documented in `docs/maintenance.md`.
 
 - **Index-loss recovery is a tested first-class path** (issue #21) — the captured
   LTFS index shipped on the recovery disc (`ltfs-index/<barcode>.schema`) is a

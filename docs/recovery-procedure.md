@@ -27,12 +27,13 @@ ISO 9660) so the data stays recoverable decades from now (SPEC §2).
   contents manifest (every archive, its source snapshot, sizes, SHA-256), the
   barcode-to-archive mapping, the **build parameters** (the exact `age`, `par2`,
   and `ltfs` versions and the tape/library identifiers used — the disc's
-  `bin/zstd` and `bin/tar` are the exact binaries this run wrote with and
-  self-report their versions), the **age private identity**, and a concise copy
+  `bin/zstd` and `bin/tar` self-report their versions, which are the pinned
+  versions this run used), the **age private identity**, and a concise copy
   of this procedure.
 - **The recovery disc**, an ISO 9660 image holding:
   - `report.pdf` — the report above.
-  - `manifest.sha256` — the SHA-256 of every on-tape file.
+  - `manifest.sha256` — the SHA-256 of every archive slice and PAR2 file on tape
+    (not the per-tape `manifest.json`).
   - `recovery-procedure.md` — this document.
   - `ltfs-index/<barcode>.schema` — a backup copy of each tape's LTFS index (one
     per tape), used for [index-loss recovery](#index-loss-recovery). The
@@ -40,6 +41,9 @@ ISO 9660) so the data stays recoverable decades from now (SPEC §2).
     `ltfs-index/ta0001l6.schema` for barcode `TA0001L6`), so a scripted
     exact-case lookup must lowercase the barcode.
   - `bin/<name>` — the static recovery binaries `age`, `par2`, `zstd`, `tar`.
+  - `src/<tool>-<version>.*` — each recovery tool's upstream **source archive**,
+    so the tools can be rebuilt from source on future hardware the pinned static
+    binaries cannot run on (SPEC §2, §10).
 
 ## Prerequisites
 
@@ -49,8 +53,9 @@ works). Prefer the non-rewinding node (`/dev/nst0`) for the data path and note
 the paired SCSI generic node (`/dev/sg0`).
 
 **Tools that ship on the disc** under `bin/` — statically linked, run them
-directly, no installation. These are the **exact binaries this run wrote with**,
-so there is nothing to version-match — just run them:
+directly, no installation. These are the **pinned versions this run used**
+(recorded in the report's **Build parameters**), so there is nothing to
+version-match — just run them:
 
 | Tool | Purpose |
 |------|---------|
@@ -148,19 +153,19 @@ file** out of an archive:
    bin/par2 repair -p /scratch/NNN-<label>/archive.par2
    ```
 
-   As an independent SHA-256 cross-check you have two manifests. The tape's own
-   `manifest.json` lists each file's digest relative to the archive, so it checks
-   straight from the local copy. The disc's `manifest.sha256` is a single file
-   spanning **every** tape, and each of its lines is prefixed with the source
-   tape's barcode — `<barcode>/archives/NNN-<label>/<file>`. To use it, lay the
-   copied files out under a directory named for that barcode (matching the
-   manifest's paths) and run `sha256sum -c` from the parent of the barcode
-   directory. Because one manifest covers all tapes, filter to the tape you have
-   copied (works on any coreutils):
+   As an independent SHA-256 cross-check, use the disc's `manifest.sha256` — it
+   needs no further tape access. It is a single file spanning **every** tape, and
+   each of its lines is prefixed with the source tape's barcode —
+   `<barcode>/archives/NNN-<label>/<file>` (it covers the archive slices and PAR2
+   files, not the per-tape `manifest.json`). To use it, lay the **local** copy
+   from step 3 out under a directory named for that barcode so the paths match the
+   manifest, then run `sha256sum -c` from the parent of the barcode directory.
+   Because one manifest covers all tapes, filter to the tape you copied (works on
+   any coreutils):
 
    ```
-   mkdir -p /scratch/verify/<barcode>
-   cp -r /mnt/tape/archives /scratch/verify/<barcode>/
+   mkdir -p /scratch/verify/<barcode>/archives
+   cp -r /scratch/NNN-<label> /scratch/verify/<barcode>/archives/
    cd /scratch/verify
    grep '  <barcode>/' /path/to/disc/manifest.sha256 | sha256sum -c -
    ```
@@ -169,6 +174,13 @@ file** out of an archive:
    checks lines for tapes you have not copied and reports them as missing (a
    non-zero exit); on modern coreutils `sha256sum -c --ignore-missing` verifies
    everything copied so far in one pass.
+
+   The tape also carries its own `manifest.json`, but it is written at the **LTFS
+   root** with **LTFS-root-relative** paths (`archives/NNN-<label>/<file>`) —
+   outside the `archives/NNN-<label>` directory step 3's single-archive copy took,
+   so that copy does not contain it. It is available only if you copied the whole
+   tape (`cp -r /mnt/tape/* /scratch/`, which places it at `/scratch/manifest.json`);
+   for a single-archive copy, use the disc's `manifest.sha256` above.
 
 5. **Reassemble the encrypted archive** by concatenating its slice files in
    numeric order (`manifest.json` lists them; they are named `archive.000`,
@@ -188,9 +200,11 @@ file** out of an archive:
    bin/age -d -i identity.txt -o /scratch/archive.tar.zst /scratch/archive.age
    ```
 
-7. **Decompress** if the source was stored compressed (the report's contents
-   manifest records this per source; an uncompressed archive is already a `tar`
-   after step 6):
+7. **Decompress** if the source was stored compressed. Whether it was is not
+   recorded anywhere, so let the bytes decide: run the command below. `bin/zstd -d`
+   fails cleanly on input that is not a zstd stream, so if it errors the archive
+   was never compressed — the `/scratch/archive.tar.zst` from step 6 is already
+   the `tar`; rename it to `/scratch/archive.tar` and continue with step 8:
 
    ```
    bin/zstd -d /scratch/archive.tar.zst -o /scratch/archive.tar
