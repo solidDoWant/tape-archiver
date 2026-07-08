@@ -170,8 +170,10 @@ func holdSnapshots(ctx workflow.Context, state *runState) error {
 // disconnected context so the release still fires when the workflow is cancelled
 // (modeled on notifyFailure). It logs but never returns a release error: a failed
 // release must not mask the run's own outcome — a leaked hold is observable and
-// manually clearable (docs/maintenance.md). It is deferred once, after the hold
-// succeeds, so it fires at workflow return on every exit path.
+// manually clearable (docs/maintenance.md). It is deferred once, *before* the hold
+// is placed, so it fires at workflow return on every exit path — including when
+// HoldSnapshots fails after pinning only a subset of the snapshots. Releasing a
+// snapshot that was never held is a no-op, so arming it ahead of the hold is safe.
 func releaseSnapshots(ctx workflow.Context, state *runState) {
 	snapshots := holdSnapshotPaths(state)
 	if len(snapshots) == 0 {
