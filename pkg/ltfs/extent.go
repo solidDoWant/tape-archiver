@@ -210,17 +210,12 @@ func (idx *Index) ExtractFile(ctx context.Context, name string, r BlockReader) (
 	out := make([]byte, file.Length)
 
 	for _, extent := range file.Extents {
-		data, err := readExtent(ctx, r, extent)
+		// readExtent validates the extent against declaredLength and rejects any
+		// corrupt range before repositioning the tape, so a copy that would panic
+		// the slice index never happens and no tape work is wasted on a bad extent.
+		data, err := readExtent(ctx, r, extent, file.Length)
 		if err != nil {
 			return nil, fmt.Errorf("read extent of %q at partition %s block %d: %w", name, extent.Partition, extent.StartBlock, err)
-		}
-
-		// Overflow-safe overrun check: extent.FileOffset + len(data) can wrap a
-		// uint64 for a corrupt fileoffset, so compare each term against the
-		// remaining space instead of summing. Either failure means the extent
-		// does not fit the file, and copying it would panic the slice index.
-		if extent.FileOffset > file.Length || uint64(len(data)) > file.Length-extent.FileOffset {
-			return nil, fmt.Errorf("extent of %q at fileoffset %d overruns declared length %d", name, extent.FileOffset, file.Length)
 		}
 
 		copy(out[extent.FileOffset:], data)
@@ -231,8 +226,10 @@ func (idx *Index) ExtractFile(ctx context.Context, name string, r BlockReader) (
 
 // readExtent positions r at the extent's start block and reads whole blocks until
 // it has at least ByteOffset+ByteCount bytes, then returns exactly the extent's
-// [ByteOffset, ByteOffset+ByteCount) slice.
-func readExtent(ctx context.Context, r BlockReader, extent Extent) ([]byte, error) {
+// [ByteOffset, ByteOffset+ByteCount) slice. declaredLength is the owning file's
+// declared length: readExtent rejects any extent that cannot fit within it before
+// touching the tape, so the caller can copy the result without an out-of-range panic.
+func readExtent(ctx context.Context, r BlockReader, extent Extent, declaredLength uint64) ([]byte, error) {
 	// A corrupt index can hold byteoffset/bytecount values whose sum overflows
 	// a uint64. That wrap would make the read loop stop early and the final
 	// buf[ByteOffset:ByteOffset+ByteCount] slice panic, so reject it before any
@@ -241,11 +238,29 @@ func readExtent(ctx context.Context, r BlockReader, extent Extent) ([]byte, erro
 		return nil, fmt.Errorf("extent byte range overflows: byteoffset %d + bytecount %d", extent.ByteOffset, extent.ByteCount)
 	}
 
+	// Even without a uint64 wrap, ByteOffset+ByteCount can exceed the largest
+	// slice Go can allocate (math.MaxInt), so make([]byte, 0, need) would panic
+	// with "makeslice: cap out of range". Reject it here, before any tape work,
+	// naming both fields. This makes readExtent panic-proof regardless of caller,
+	// including a huge ByteOffset that the declaredLength overrun check cannot catch.
+	need := extent.ByteOffset + extent.ByteCount
+	if need > math.MaxInt {
+		return nil, fmt.Errorf("extent byte range %d (byteoffset %d + bytecount %d) exceeds the addressable maximum %d", need, extent.ByteOffset, extent.ByteCount, math.MaxInt)
+	}
+
+	// The extent contributes exactly ByteCount bytes at FileOffset in the file,
+	// so FileOffset+ByteCount must fit declaredLength or the later copy into the
+	// output slice would panic. Compare each term against the remaining space
+	// (FileOffset+ByteCount can itself wrap a uint64) and reject before any tape
+	// repositioning or reads — an oversized-but-allocatable count must not drive
+	// wasted tape work.
+	if extent.FileOffset > declaredLength || extent.ByteCount > declaredLength-extent.FileOffset {
+		return nil, fmt.Errorf("extent at fileoffset %d bytecount %d overruns declared length %d", extent.FileOffset, extent.ByteCount, declaredLength)
+	}
+
 	if err := r.Locate(ctx, extent.Partition, extent.StartBlock); err != nil {
 		return nil, err
 	}
-
-	need := extent.ByteOffset + extent.ByteCount
 
 	buf := make([]byte, 0, need)
 	for uint64(len(buf)) < need {

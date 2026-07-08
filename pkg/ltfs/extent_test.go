@@ -313,7 +313,17 @@ func TestExtractFileOutOfRange(t *testing.T) {
 </ltfsindex>`, length, byteOffset, byteCount, fileOffset)
 	}
 
-	const maxUint64 = "18446744073709551615"
+	const (
+		maxUint64 = "18446744073709551615"
+		// twoPow63 is the smallest value that overflows math.MaxInt (2^63-1)
+		// without wrapping uint64: make([]byte, 0, twoPow63) panics with
+		// "makeslice: cap out of range".
+		twoPow63 = "9223372036854775808"
+		// twoPow40 (~1 TiB) stays below math.MaxInt, so it does not panic make;
+		// it must still be rejected against the declared length before any tape
+		// work rather than driving an unbounded allocation and read.
+		twoPow40 = "1099511627776"
+	)
 
 	tests := []struct {
 		name  string
@@ -324,6 +334,18 @@ func TestExtractFileOutOfRange(t *testing.T) {
 		{name: "fileoffset overruns declared length", index: buildIndex("2", "0", "2", maxUint64), field: "fileoffset"},
 		{name: "byteoffset overflows byte range", index: buildIndex("2", maxUint64, "5", "0"), field: "byteoffset"},
 		{name: "bytecount overflows byte range", index: buildIndex("2", "5", maxUint64, "0"), field: "bytecount"},
+		// Huge non-wrapping bytecount above the allocation ceiling (2^63): the
+		// sum does not wrap uint64 but make would panic. Must return a named
+		// error, not crash. (issue #215 AC1)
+		{name: "bytecount exceeds addressable maximum", index: buildIndex("2", "0", twoPow63, "0"), field: "bytecount"},
+		// Huge non-wrapping byteoffset above the allocation ceiling while the
+		// bytecount fits the declared length: only the alloc-ceiling guard in
+		// readExtent catches this, so it exercises that guard directly. (#215)
+		{name: "byteoffset exceeds addressable maximum", index: buildIndex("2", twoPow63, "2", "0"), field: "byteoffset"},
+		// Oversized-but-allocatable bytecount (~1 TiB) for a 2-byte file: below
+		// the alloc ceiling, so it must be rejected against the declared length
+		// before any tape repositioning or reads. (issue #215 AC2)
+		{name: "bytecount vastly exceeds declared length", index: buildIndex("2", "0", twoPow40, "0"), field: "bytecount"},
 	}
 
 	for _, test := range tests {
@@ -343,6 +365,9 @@ func TestExtractFileOutOfRange(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.field)
 			assert.Nil(t, got)
+			// Every corrupt extent must be rejected before the tape is
+			// repositioned: fakeTape.Locate is the only thing that sets located.
+			assert.False(t, tape.located, "corrupt extent must be rejected before any tape repositioning or reads")
 		})
 	}
 }
