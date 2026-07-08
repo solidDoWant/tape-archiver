@@ -208,6 +208,55 @@ func TestBuildKVLabelAndValueShareAPage(t *testing.T) {
 	}
 }
 
+// TestBuildTableRowMonoCellStaysOnOnePage asserts that a table row whose
+// monospace cell wraps to more lines under the mono font than under the body
+// font is never split across a page boundary — tableRow's row-atomicity
+// contract. It sweeps the content preceding the Recovery discs section (one
+// fixed-height file-table row per step) so the disc row carrying a long device
+// path is pushed through every vertical offset, including the page bottom that —
+// before tableRow measured each cell under its own font — let the Courier cell
+// auto-page-break mid-row while its neighbour stayed anchored to the prior page.
+func TestBuildTableRowMonoCellStaysOnOnePage(t *testing.T) {
+	t.Parallel()
+
+	// 29 chars of narrow glyphs: two lines under Courier 8.5 (~24 chars per 46mm
+	// line) but a single line under Helvetica, so measuring the mono cell under a
+	// leftover proportional font under-counts its wrapped height.
+	const device = "/dev/disk/by-id/il-1234567890"
+
+	for fillers := 0; fillers <= 60; fillers++ {
+		t.Run(fmt.Sprintf("fillers=%d", fillers), func(t *testing.T) {
+			t.Parallel()
+
+			manifest := completeManifest()
+			manifest.Discs = []report.Disc{{Device: device}}
+
+			// Each file-table row is one fixed-height line, so padding archive 0
+			// shifts the Recovery discs section down a line at a time, sweeping its
+			// row through the page boundary.
+			files := make([]report.ArchiveFile, fillers)
+			for index := range files {
+				files[index] = report.ArchiveFile{
+					Name:   fmt.Sprintf("filler-%03d.bin", index),
+					Size:   int64(index + 1),
+					SHA256: fmt.Sprintf("%064x", index),
+				}
+			}
+
+			manifest.Archives[0].Files = files
+
+			pages := extractPages(t, manifest)
+
+			devicePage := pageContaining(pages, device)
+			require.NotEqual(t, -1, devicePage,
+				"the device path must render in full on one page, never split across a page break")
+
+			assert.Contains(t, pages[devicePage], "burnedandverified",
+				"the row's Notes cell must render on the same page as its device cell")
+		})
+	}
+}
+
 func TestBuildContainsEverySpec9Field(t *testing.T) {
 	t.Parallel()
 

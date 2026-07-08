@@ -305,10 +305,18 @@ type rowCell struct {
 // row's starting y: a MultiCell that auto-page-breaks mid-row would leave the
 // later, manually positioned columns anchored to the previous page's y, which
 // scatters a single row's columns across pages.
+//
+// SplitLines measures under whatever font is currently active, so the measure
+// loop sets each cell's own font (via setCellFont) before measuring — mirroring
+// the draw loop and the kv() fix. Measuring a monospace cell under a leftover
+// proportional font under-counts its wrapped lines, understates rowH, and lets
+// the row split across a page boundary the guard exists to prevent.
 func (d *doc) tableRow(cells []rowCell, lineH float64, drawHeader func()) {
 	rowH := lineH
 
 	for _, cell := range cells {
+		d.setCellFont(cell)
+
 		lines := d.pdf.SplitLines([]byte(d.tr(cell.text)), cell.w)
 		if h := float64(len(lines)) * lineH; h > rowH {
 			rowH = h
@@ -337,11 +345,7 @@ func (d *doc) tableRow(cells []rowCell, lineH float64, drawHeader func()) {
 			align = "L"
 		}
 
-		if cell.mono {
-			d.pdf.SetFont(fontMono, "", 8.5)
-		} else {
-			d.pdf.SetFont(fontBody, "", 8.5)
-		}
+		d.setCellFont(cell)
 
 		d.pdf.SetXY(x, y)
 		d.pdf.MultiCell(cell.w, lineH, d.tr(cell.text), "", align, false)
@@ -355,6 +359,18 @@ func (d *doc) tableRow(cells []rowCell, lineH float64, drawHeader func()) {
 	rowBottom := y + rowH
 	d.pdf.Line(marginX, rowBottom, marginX+contentW, rowBottom)
 	d.pdf.SetXY(marginX, rowBottom)
+}
+
+// setCellFont applies a table cell's font at the shared cell size — the
+// monospace font for device nodes and barcodes, otherwise the body font. Both
+// the measure loop (SplitLines) and the draw loop (MultiCell) call it so a
+// cell's wrapped-line count is computed under the same font it is drawn in.
+func (d *doc) setCellFont(cell rowCell) {
+	if cell.mono {
+		d.pdf.SetFont(fontMono, "", 8.5)
+	} else {
+		d.pdf.SetFont(fontBody, "", 8.5)
+	}
 }
 
 // section renders a full-width filled heading bar. It first reserves enough
