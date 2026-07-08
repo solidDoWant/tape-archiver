@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -18,6 +20,37 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
+
+// resumeWhilePauseAlertFires models an operator who reacts to a pause alert by
+// sending OperatorResumeSignal in the gap between the pause-alert activity and the
+// workflow task that begins the wait. That gap — opened by a control-worker
+// restart/deploy or a task-queue backlog — is exactly the window in which a
+// stale-signal drain run at wait entry would discard a legitimate resume
+// (issue #216): the resume is buffered ahead of the task that arms the wait, so a
+// drain at that task discards it. Delivering the resume as the alert activity
+// starts (via SetOnActivityStartedListener) buffers it while the alert runs,
+// reproducing that ordering deterministically: the test fails on a
+// drain-at-wait-entry implementation (the run times out) and passes once the drain
+// runs before the alert dispatch. It fires exactly once, on the named pause-alert
+// activity's first start.
+func resumeWhilePauseAlertFires(env *testsuite.TestWorkflowEnvironment, alertActivity string) {
+	var once sync.Once
+
+	// Deliver the resume as the alert activity starts: the signal is then buffered
+	// while the alert runs, so it lands in history before the workflow task that
+	// begins the wait. A drain relocated ahead of the alert dispatch has already
+	// run, so the resume survives; a drain at wait entry runs after the alert and
+	// discards it (the run then times out) — which is the #216 regression.
+	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
+		if info.ActivityType.Name != alertActivity {
+			return
+		}
+
+		once.Do(func() {
+			env.SignalWorkflow(OperatorResumeSignal, nil)
+		})
+	})
+}
 
 // writePauseParams seeds the writePauseTestWorkflow. driveSet is a named slice of
 // exported TapeAssignment, so it round-trips through the test env's data converter.
@@ -250,6 +283,65 @@ func TestWritePathPauseSignalResume(t *testing.T) {
 	assert.Equal(t, "/dev/nst1", retry[0].Drive, "retried on the failed tape's physical drive")
 	assert.Equal(t, 1, retry[0].DriveIndex, "retried tape carries its config drive index (AC2)")
 	assert.Equal(t, 101, retry[0].BlankSlot, "the fresh blank is reloaded into the failed tape's slot")
+}
+
+// TestWritePathResumeInAlertToWaitGapResumes covers issue #216 AC1: a resume the
+// operator sends after a write-failure pause's alert has fired but before the
+// workflow task that begins the wait executes (a control-worker restart/deploy or
+// task-queue backlog) must resume the run, not be drained as stale. /dev/sg1 fails
+// its first format and succeeds on the resume retry; the resume is delivered from
+// the pause alert firing, so it is buffered ahead of the wait task. A drain
+// at wait entry would discard it and the run would time out.
+func TestWritePathResumeInAlertToWaitGapResumes(t *testing.T) {
+	cfg := twoDriveConfig(300)
+	env := newWritePauseEnv(t)
+	expectHealthyWriteExceptFormat(env)
+
+	var (
+		mu           sync.Mutex
+		formatsByDev = map[string]int{}
+		pauseAlerts  int
+	)
+
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			formatsByDev[input.Device]++
+
+			if input.Device == "/dev/sg1" && formatsByDev[input.Device] == 1 {
+				return errors.New("mkltfs: drive reported a hard write error")
+			}
+
+			return nil
+		})
+
+	mockLoadFromSet(env, cfg)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ WritePathPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			pauseAlerts++
+
+			return nil
+		})
+
+	// The operator resumes in the alert-to-wait-entry gap.
+	resumeWhilePauseAlertFires(env, "NotifyWritePathPause")
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError(), "a resume in the alert-to-wait gap must resume the run, not be drained")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
+	assert.Equal(t, 2, formatsByDev["/dev/sg1"], "the failed tape is re-formatted on the honored resume")
 }
 
 // TestWritePathStaleResumeSignalDoesNotSatisfyLaterPause covers issue #154 AC1 for

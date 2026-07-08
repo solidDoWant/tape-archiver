@@ -152,6 +152,61 @@ func TestBurnSetFailurePauseResume(t *testing.T) {
 	assert.Len(t, result.Burned, 2, "both copies are recorded once burned and verified")
 }
 
+// TestBurnResumeInAlertToWaitGapResumes covers issue #216 AC2 for the burn path: a
+// resume the operator sends after a burn-set pause's alert has fired but before the
+// workflow task that begins the wait executes must resume the run, not be drained
+// as stale. /dev/sr1 fails its first burn and succeeds on the resume retry; the
+// resume is delivered from the pause alert firing, so it is buffered ahead of
+// the wait task. A drain at wait entry would discard it and the run would time out.
+func TestBurnResumeInAlertToWaitGapResumes(t *testing.T) {
+	cfg := burnConfig(2, []string{"/dev/sr0", "/dev/sr1"}, false, 300)
+	env := newBurnPauseEnv(t)
+
+	var (
+		mu          sync.Mutex
+		burnsByDev  = map[string]int{}
+		pauseAlerts int
+	)
+
+	env.OnActivity((&BurnActivities{}).BurnDisc, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnDiscInput) (BurnResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			burnsByDev[input.Device]++
+
+			if input.Device == "/dev/sr1" && burnsByDev[input.Device] == 1 {
+				return BurnResult{}, errors.New("optical burn failed: drive reported a write error")
+			}
+
+			return BurnResult{Device: input.Device}, nil
+		})
+	env.OnActivity((&BurnActivities{}).VerifyDisc, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&FailureActivities{}).NotifyBurnPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ BurnPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			pauseAlerts++
+
+			return nil
+		})
+
+	// The operator resumes in the alert-to-wait-entry gap.
+	resumeWhilePauseAlertFires(env, "NotifyBurnPause")
+
+	env.ExecuteWorkflow(burnPauseTestWorkflow, cfg)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError(), "a resume in the alert-to-wait gap must resume the run, not be drained")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
+	assert.Equal(t, 2, burnsByDev["/dev/sr1"], "the failed disc is re-burned on the honored resume")
+}
+
 // TestBurnSingleSetAllVerified covers AC2: with copies at or below the burner
 // count and a blank disc in each drive, every copy burns and independently
 // verifies in a single burn-set — no pause, one burn and one verify per disc.

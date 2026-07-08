@@ -123,6 +123,11 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 // the resume signal, the abort signal, or the configured wait-timeout, returning
 // which one fired.
 func waitForOperator(ctx workflow.Context, cfg config.Config, phase string, affectedBarcodes []string, reloadSlots []int, cause error) pauseOutcome {
+	// Drain before the alert is dispatched: any resume buffered now predates this
+	// pause's alert and is therefore stale, while a resume the operator sends in
+	// response to the alert lands strictly afterwards and survives (issue #216).
+	drainStaleResumeSignals(ctx)
+
 	notifyWritePathPause(ctx, phase, affectedBarcodes, reloadSlots, cause)
 
 	return waitForWritePathCleared(ctx, cfg)
@@ -132,8 +137,6 @@ func waitForOperator(ctx workflow.Context, cfg config.Config, phase string, affe
 // the configured wait-timeout elapses (SPEC §4.3). Unlike the Eject pause there
 // is no station state to poll, so resume is always an explicit operator signal.
 func waitForWritePathCleared(ctx workflow.Context, cfg config.Config) pauseOutcome {
-	drainStaleResumeSignals(ctx)
-
 	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	abortCh := workflow.GetSignalChannel(ctx, OperatorAbortSignal)
 	timeoutTimer := workflow.NewTimer(ctx, cfg.Library.EffectiveWriteFailureWaitTimeout())
@@ -166,13 +169,23 @@ func waitForWritePathCleared(ctx workflow.Context, cfg config.Config) pauseOutco
 // pause (issue #154). Temporal buffers unconsumed signals indefinitely, and
 // `tapectl resume` signals unconditionally with no pause-state check, so without
 // this drain a surplus signal from an earlier pause leaks forward and blanks a
-// just-verified disc between burn-sets. A resume for THIS pause can only be sent
-// after the operator sees its alert (fired just before the wait), so it always
-// arrives after entry and is never drained. Only the resume channel is drained: a
-// buffered abort is a deliberate, safe, reported no-data-loss outcome and is left
-// to satisfy the wait rather than silently discarded. The drain is a deterministic
-// ReceiveAsync loop (no history event), so it is a no-op on any pause with no
-// stale signal and never changes the behavior of a single, correctly-timed resume.
+// just-verified disc between burn-sets.
+//
+// It must be called *before this pause's alert is dispatched*, never at wait entry.
+// The alert (an activity completion) and the wait selector run in different workflow
+// tasks; a resume the operator sends in response to the alert is appended to history
+// after the alert but can be buffered ahead of the later task that begins the wait
+// (during a control-worker restart/deploy or task-queue backlog). Draining at wait
+// entry would discard that legitimate resume and fail an otherwise-recoverable run
+// (issue #216). Draining before the alert instead makes the two cases disjoint: any
+// resume buffered before the alert predates it and is stale; any resume prompted by
+// the alert lands strictly afterwards and survives.
+//
+// Only the resume channel is drained: a buffered abort is a deliberate, safe,
+// reported no-data-loss outcome and is left to satisfy the wait rather than silently
+// discarded. The drain is a deterministic ReceiveAsync loop (no history event), so it
+// is a no-op on any pause with no stale signal and never changes the behavior of a
+// single, correctly-timed resume.
 func drainStaleResumeSignals(ctx workflow.Context) {
 	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	for resumeCh.ReceiveAsync(nil) {

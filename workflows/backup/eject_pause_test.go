@@ -133,6 +133,71 @@ func TestEjectPhaseSignalResume(t *testing.T) {
 	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
 }
 
+// TestEjectResumeInAlertToWaitGapResumes covers issue #216 AC2 for the Eject I/O
+// pause: a resume the operator sends after the pause's alert has fired but before
+// the workflow task that begins the wait executes must resume the export, not be
+// drained as stale. The first Eject fills the station with one tape remaining; the
+// resume is delivered from the pause alert firing (buffered ahead of the wait
+// task), and the second Eject exports the remainder. A drain at wait entry would
+// discard the resume and the run would time out.
+func TestEjectResumeInAlertToWaitGapResumes(t *testing.T) {
+	env := newEjectPauseEnv(t)
+
+	var (
+		mu          sync.Mutex
+		ejectCalls  int
+		pauseAlerts int
+	)
+
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input EjectInput) (EjectResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			ejectCalls++
+
+			if ejectCalls == 1 {
+				return EjectResult{
+					InIOStation: []tape.Barcode{"TA0001L6"},
+					Remaining:   input.WrittenTapes[1:],
+				}, nil
+			}
+
+			return EjectResult{InIOStation: []tape.Barcode{"TA0001L6", "TA0002L6"}}, nil
+		})
+
+	// The library never reports access state, so only the signal ends the wait.
+	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
+		IOStatus{FreeSlots: 0, AccessReported: false}, nil)
+
+	env.OnActivity((&FailureActivities{}).NotifyOperatorPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ OperatorPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			pauseAlerts++
+
+			return nil
+		})
+
+	// The operator resumes in the alert-to-wait-entry gap.
+	resumeWhilePauseAlertFires(env, "NotifyOperatorPause")
+
+	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{
+		Cfg:     ejectPauseConfig(300),
+		Written: twoWrittenTapes(),
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError(), "a resume in the alert-to-wait gap must resume the export, not be drained")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 2, ejectCalls, "Eject runs once, pauses, then resumes on the honored signal")
+	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
+}
+
 // TestEjectPhaseAutoResume covers AC2: a library that reports the access bit
 // resumes automatically once the station is closed with a free slot — no signal.
 func TestEjectPhaseAutoResume(t *testing.T) {
