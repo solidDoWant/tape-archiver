@@ -596,7 +596,7 @@ func TestRunTapePathTeardownRetryBounded(t *testing.T) {
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-		[]byte("<ltfsindex></ltfsindex>"), nil)
+		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
@@ -670,7 +670,7 @@ func TestRunTapePathWriteHealthRetryBounded(t *testing.T) {
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-		[]byte("<ltfsindex></ltfsindex>"), nil)
+		"/stage/indexes/tape.xml", nil)
 
 	// MeasureWriteHealth fails on every attempt, modelling a scrape that hangs and is
 	// killed at writeHealthTimeout. Count the attempts to prove the retry is bounded
