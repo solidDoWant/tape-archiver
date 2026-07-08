@@ -278,6 +278,52 @@ func TestBackupRejectsZeroSources(t *testing.T) {
 	assert.ErrorContains(t, err, "sources")
 }
 
+// TestBackupReleasesHoldsWhenHoldFails covers AC1 at the real Backup workflow: a
+// run whose HoldSnapshots activity fails (after pinning a subset of the resolved
+// snapshots — opaque to the workflow, which sees only the error) ends in failure,
+// yet still dispatches ReleaseSnapshots over the resolved snapshots so none retains
+// the run's hold tag. This guards the workflow's defer ordering directly — the
+// release is armed before the hold — rather than only the hold helper.
+func TestBackupReleasesHoldsWhenHoldFails(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+
+	// Resolve to a single real snapshot so the run has something to hold.
+	archives := []ResolvedArchive{{Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/a@snap1"}}}}
+
+	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
+		Return([]ResolvedArchive(nil), nil)
+	env.OnActivity((&ResolveDataActivities{}).ResolveAndCheck, mock.Anything, mock.Anything).
+		Return(archives, nil)
+
+	// The hold fails (e.g. a snapshot pruned in the resolve→hold window) after
+	// potentially pinning earlier snapshots.
+	env.OnActivity((&HoldActivities{}).HoldSnapshots, mock.Anything, mock.Anything).
+		Return(errors.New("hold boom"))
+
+	var releaseInput HoldInput
+
+	env.OnActivity((&HoldActivities{}).ReleaseSnapshots, mock.Anything, mock.Anything).
+		Return(func(_ context.Context, input HoldInput) error {
+			releaseInput = input
+
+			return nil
+		})
+
+	env.ExecuteWorkflow(Backup, validBackupConfig())
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	// The run fails at the Hold phase, before any staging.
+	require.ErrorContains(t, env.GetWorkflowError(), "phase Hold")
+
+	// The release fired despite the hold failure, over every resolved snapshot, so
+	// no snapshot retains the run's hold tag.
+	assert.Contains(t, releaseInput.Tag, holdTagPrefix)
+	assert.ElementsMatch(t, []string{"pool/a@snap1"}, releaseInput.Snapshots)
+}
+
 // failPhase mocks the named phase to fail through its activity. Every phase is
 // run-orchestrated, so each fails via the activity it dispatches. The failure
 // tests target phases up to Eject; Report and Deliver are mocked to succeed in

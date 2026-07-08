@@ -183,18 +183,28 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 		// register its release on every exit path (SPEC §4.3). A hold failure fails
 		// the run here, before any staging: the hold exists to guarantee the
 		// snapshot is pinned before hours of Prepare work, so proceeding unprotected
-		// would defeat it. The release is deferred once (Resolve runs once) so it
-		// fires at workflow return on success, failure, and cancellation.
+		// would defeat it.
+		//
+		// The release is armed *before* the hold runs, not after it succeeds:
+		// HoldSnapshots holds sequentially and aborts on the first failure, leaving
+		// any earlier holds in place, so a partial-hold failure — or an operator
+		// cancel while the hold is failing and retrying — must still release those
+		// holds or they leak past the dead run (hidden per-run state, SPEC §4.2).
+		// Arming it here is safe on every exit path: releaseSnapshots re-derives its
+		// list from the already-resolved work list, is a no-op for any snapshot that
+		// was never held (zfs.Release treats an absent hold as success), runs on a
+		// disconnected context, and never propagates a release error. It is deferred
+		// once because Resolve runs once.
 		if currentPhase.name == PhaseResolve {
 			failingPhase = PhaseHold
+
+			defer releaseSnapshots(ctx, state)
 
 			if err = holdSnapshots(ctx, state); err != nil {
 				err = fmt.Errorf("phase %s: %w", PhaseHold, err)
 
 				return Result{}, err
 			}
-
-			defer releaseSnapshots(ctx, state)
 		}
 	}
 
