@@ -35,7 +35,7 @@ Versions are pinned by the flake's `nixpkgs` revision and recorded as image labe
 | `age` | `age` | 1.3.1 | encryption, native post-quantum recipients (SPEC §7) |
 | `par2` | `par2cmdline-turbo` | 1.4.0 | per-archive PAR2 recovery sets (SPEC §8) |
 | `zstd` | `zstd` | 1.5.7 | optional pre-encryption compression (SPEC §4.3) |
-| `tar` | `gnutar` | 1.35 | archive creation (SPEC §4.3) |
+| `tar` | `gnutar` | 1.35 | recovery-disc tool parity (archives are written by the Go `archive/tar` writer, not this binary) |
 | `xorriso` | `xorriso` | 1.5.6 | burn/verify the optical recovery disc (`pkg/optical`, SPEC §10) |
 | `mt` | `mt-st` | — | drive control (non-rewinding `nst` nodes) |
 | `sg_logs` / `sg_turs` | `sg3_utils` | — | TapeAlert / log pages, drive readiness (SPEC §3) |
