@@ -380,6 +380,49 @@ func TestResolveAndCheck(t *testing.T) {
 			assertErr: require.Error,
 		},
 		{
+			// AC1 (issue #224): a source whose estimate fits within the tape's native
+			// capacity but exceeds the usable capacity Pack enforces (native less the
+			// LTFS reserve) must be rejected here, in Resolve, before any staging —
+			// not admitted only to fail at Pack after hours of staging. Native 1000 →
+			// usable 950; estimate 990 sits in the (usable, native] band that the old
+			// native-capacity bound wrongly admitted.
+			name:    "rejects an archive that exceeds usable capacity though it fits native capacity",
+			sources: []config.Source{zfsSource("pool/band@snap")},
+			pool: fakePool{
+				properties: map[string]map[string]string{"pool/band@snap": {}},
+				sizes:      map[string]int64{"pool/band@snap": 900},
+			},
+			redundancy: fixedRedundancy,
+			overhead:   floatPtr(1.0),
+			// Estimate ceil(900 * 1.0 * 1.10) = 990. usable = 1000 - ceil(1000*0.05)
+			// = 950. 990 > 950 (reject) yet 990 <= 1000 (fits native).
+			capacity:    1000,
+			assertErr:   require.Error,
+			errContains: "usable capacity",
+		},
+		{
+			// AC2 (issue #224): a source whose estimate is within the usable capacity
+			// must still pass the feasibility pre-check — no over-rejection regression
+			// from tightening the bound.
+			name:    "admits an archive whose estimate is within usable capacity",
+			sources: []config.Source{zfsSource("pool/fits@snap")},
+			pool: fakePool{
+				properties: map[string]map[string]string{"pool/fits@snap": {}},
+				sizes:      map[string]int64{"pool/fits@snap": 800},
+			},
+			redundancy: fixedRedundancy,
+			overhead:   floatPtr(1.0),
+			// Estimate ceil(800 * 1.0 * 1.10) = 881 (float rounding) <= usable 950.
+			capacity: 1000,
+			want: []ResolvedArchive{{
+				SourceIndex:    0,
+				Label:          "fits",
+				Compression:    true,
+				Snapshots:      []ResolvedSnapshot{{ZFSPath: "pool/fits@snap"}},
+				EstimatedBytes: 881,
+			}},
+		},
+		{
 			name:    "uses the fill-to-capacity floor for the estimate",
 			sources: []config.Source{zfsSource("pool/raw@snap")},
 			pool: fakePool{

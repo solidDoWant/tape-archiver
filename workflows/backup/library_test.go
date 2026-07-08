@@ -25,7 +25,7 @@ func TestFindFreeStorageSlot(t *testing.T) {
 		name       string
 		slots      []tape.StorageElement
 		preferSlot int
-		claimed    map[int]bool
+		relocated  map[int]tape.Barcode
 		want       int
 	}{
 		{
@@ -80,7 +80,7 @@ func TestFindFreeStorageSlot(t *testing.T) {
 				{Address: 3, Full: false},
 			},
 			preferSlot: 0,
-			claimed:    map[int]bool{1: true},
+			relocated:  map[int]tape.Barcode{1: "RELOC1"},
 			want:       2,
 		},
 		{
@@ -91,7 +91,7 @@ func TestFindFreeStorageSlot(t *testing.T) {
 				{Address: 3, Full: false},
 			},
 			preferSlot: 2,
-			claimed:    map[int]bool{2: true},
+			relocated:  map[int]tape.Barcode{2: "RELOC2"},
 			want:       1,
 		},
 		{
@@ -101,7 +101,7 @@ func TestFindFreeStorageSlot(t *testing.T) {
 				{Address: 2, Full: false},
 			},
 			preferSlot: 2,
-			claimed:    map[int]bool{2: true},
+			relocated:  map[int]tape.Barcode{2: "RELOC2"},
 			want:       -1,
 		},
 	}
@@ -111,7 +111,7 @@ func TestFindFreeStorageSlot(t *testing.T) {
 			t.Parallel()
 
 			inv := inventoryWith(nil, test.slots, nil)
-			got := findFreeStorageSlot(inv, test.preferSlot, test.claimed)
+			got := findFreeStorageSlot(inv, test.preferSlot, test.relocated)
 			assert.Equal(t, test.want, got)
 		})
 	}
@@ -132,13 +132,13 @@ func TestFindFreeStorageSlotDistinctPerClaim(t *testing.T) {
 		{Address: 2, Full: false},
 	}, nil)
 
-	claimed := make(map[int]bool)
+	relocated := make(map[int]tape.Barcode)
 
-	first := findFreeStorageSlot(inv, 0, claimed)
+	first := findFreeStorageSlot(inv, 0, relocated)
 	require.NotEqual(t, -1, first)
-	claimed[first] = true
+	relocated[first] = "RELOC"
 
-	second := findFreeStorageSlot(inv, 0, claimed)
+	second := findFreeStorageSlot(inv, 0, relocated)
 	require.NotEqual(t, -1, second)
 
 	assert.NotEqual(t, first, second, "second relocation must not reuse the first's slot")
@@ -272,7 +272,7 @@ func TestReconcileLoad(t *testing.T) {
 			// changer command; the other paths hit a command error which is the
 			// expected test outcome for non-idempotent cases.
 			changer := tape.NewChanger("")
-			bc, err := reconcileLoad(t.Context(), changer, inv, test.drive, test.targetSlot, make(map[int]bool))
+			bc, err := reconcileLoad(t.Context(), changer, inv, test.drive, test.targetSlot, make(map[int]tape.Barcode))
 			test.wantErr(t, err)
 
 			if err == nil {
@@ -422,10 +422,10 @@ func TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll(t *testing.T) {
 // reconcile layer (AC2): two drives that both hold an unexpected tape and both
 // report SourceSlot 0 (SVALID unreported) must be offered distinct free storage
 // slots when reconciled against one shared inventory snapshot. reconcileLoad
-// records each chosen relocation slot in the shared claimed map before issuing
-// the (here failing, no real changer) unload, so the second drive cannot be
-// handed the slot the first already claimed. With the pre-fix code both drives
-// would claim the same first free slot.
+// records each chosen relocation slot (mapped to the relocated barcode) in the
+// shared relocated map before issuing the (here failing, no real changer) unload,
+// so the second drive cannot be handed the slot the first already claimed. With
+// the pre-fix code both drives would claim the same first free slot.
 func TestReconcileLoadClaimsDistinctSlots(t *testing.T) {
 	t.Parallel()
 
@@ -443,20 +443,66 @@ func TestReconcileLoadClaimsDistinctSlots(t *testing.T) {
 
 	inv := inventoryWith(drives, slots, nil)
 	changer := tape.NewChanger("") // relocate's unload fails, but only after the slot is claimed
-	claimed := make(map[int]bool)
+	relocated := make(map[int]tape.Barcode)
 
 	// Both calls fail at the unload (no real changer), but each must have claimed
 	// its relocation slot first.
-	_, err := reconcileLoad(t.Context(), changer, inv, drives[0], 5, claimed)
+	_, err := reconcileLoad(t.Context(), changer, inv, drives[0], 5, relocated)
 	require.Error(t, err)
 
-	_, err = reconcileLoad(t.Context(), changer, inv, drives[1], 5, claimed)
+	_, err = reconcileLoad(t.Context(), changer, inv, drives[1], 5, relocated)
 	require.Error(t, err)
 
-	// Exactly two distinct free slots claimed — no collision.
-	assert.Len(t, claimed, 2, "each relocation must claim its own storage slot")
-	assert.True(t, claimed[1], "first relocation should claim slot 1")
-	assert.True(t, claimed[2], "second relocation should claim the distinct slot 2")
+	// Exactly two distinct free slots claimed — no collision — each recording the
+	// barcode of the unexpected tape relocated into it.
+	assert.Len(t, relocated, 2, "each relocation must claim its own storage slot")
+	assert.Equal(t, tape.Barcode("UNEXP0L8"), relocated[1], "first relocation should claim slot 1")
+	assert.Equal(t, tape.Barcode("UNEXP1L8"), relocated[2], "second relocation should claim the distinct slot 2")
+}
+
+// TestReconcileLoadResolvesRelocatedTargetSlot proves the issue #224 stale-inventory
+// fix (AC3): when an earlier drive holds an unexpected tape whose home slot is a
+// later assignment's blank slot — the blank the set needs was left in that drive by
+// a prior run — Load relocates it back into that slot, and the later assignment's
+// reconcileLoad must see the relocated blank there rather than reading the once-read
+// snapshot (which still shows the slot empty) and failing "target slot is empty".
+//
+// Both reconcileLoad calls share one inventory snapshot and one relocated map, as in
+// production. The nil changer makes the physical moves fail, but the relocation is
+// recorded before the move, so the assertion is on the target-slot resolution: the
+// later call reaches the load command for the correct blank barcode instead of the
+// pre-fix "target slot N is empty" error.
+func TestReconcileLoadResolvesRelocatedTargetSlot(t *testing.T) {
+	t.Parallel()
+
+	// Slot 1 holds drive 0's own blank; slot 5 is drive 1's blank slot but shows
+	// empty in the snapshot because its tape ("BLNK05L8") is sitting in drive 0.
+	slots := []tape.StorageElement{
+		{Address: 1, Barcode: "BLNK01L8", Full: true},
+		{Address: 5, Full: false},
+	}
+	// Drive 0 holds BLNK05L8, whose home slot 5 is drive 1's target; drive 1 is empty.
+	driveZero := tape.DriveElement{Address: 0, Loaded: true, Barcode: "BLNK05L8", SourceSlot: 5}
+	driveOne := tape.DriveElement{Address: 1, Loaded: false}
+
+	inv := inventoryWith([]tape.DriveElement{driveZero, driveOne}, slots, nil)
+	changer := tape.NewChanger("") // physical moves fail, but only after the relocation is recorded
+	relocated := make(map[int]tape.Barcode)
+
+	// Drive 0 (target slot 1) relocates its unexpected tape back to its home slot 5.
+	_, err := reconcileLoad(t.Context(), changer, inv, driveZero, 1, relocated)
+	require.Error(t, err) // fails at the (nil-changer) unload, after recording the relocation
+	require.Equal(t, tape.Barcode("BLNK05L8"), relocated[5],
+		"relocating drive 0's unexpected tape must record its barcode against home slot 5")
+
+	// Drive 1 (target slot 5) must now resolve the relocated blank from slot 5 —
+	// not fail "target slot 5 is empty" off the stale snapshot.
+	_, err = reconcileLoad(t.Context(), changer, inv, driveOne, 5, relocated)
+	require.Error(t, err) // fails at the (nil-changer) load, i.e. it got past the empty-slot check
+	assert.NotContains(t, err.Error(), "is empty",
+		"the relocated blank in the target slot must be seen, not reported empty")
+	assert.ErrorContains(t, err, "load tape BLNK05L8 from slot 5",
+		"reconcile must reach the load command for the relocated blank in the target slot")
 }
 
 // TestMatchDriveElement covers the identity pairing that replaces positional
