@@ -203,7 +203,9 @@ func newResolveDataActivities() *ResolveDataActivities {
 // ResolveAndCheck completes the work list on the data side (SPEC §4.3 phase 1):
 // it validates raw ZFS sources exist, verifies each control-resolved k8s snapshot
 // exists and is democratic-csi-managed, then sizes every archive and rejects any
-// whose estimate exceeds one tape's capacity. It also rejects a sliceSizeBytes so
+// whose estimate exceeds one tape's usable capacity — the native capacity less the
+// LTFS reserve Pack enforces (usableCapacity), so an archive admitted here is never
+// rejected at Pack only after hours of staging (issue #224). It also rejects a sliceSizeBytes so
 // small for the resolved source size that the run's slice count would grow an
 // activity payload past Temporal's ~2 MB limit (checkPayloadBound). The estimate
 // inflates logicalreferenced by the configured overhead factor and PAR2 % purely
@@ -213,7 +215,12 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 	cfg := input.Config
 	overhead := cfg.EffectiveFeasibilityOverhead()
 	par2 := par2Fraction(cfg.Redundancy)
-	capacity := cfg.Library.TapeCapacityBytes
+	// Bound the estimate against the same usable capacity Pack enforces — the
+	// native capacity less the LTFS filesystem reserve — not the raw native
+	// capacity. Comparing against native admitted an incompressible source in the
+	// (usable, native] band that Pack then rejected only after hours of staging
+	// (issue #224); usableCapacity keeps the two checks consistent.
+	capacity := usableCapacity(cfg.Library.TapeCapacityBytes)
 
 	k8sByIndex := make(map[int]ResolvedArchive, len(input.K8sArchives))
 	for _, archive := range input.K8sArchives {
@@ -237,8 +244,9 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 
 		if estimate > capacity {
 			return nil, fmt.Errorf(
-				"sources[%d] estimated size %d bytes exceeds one tape's capacity %d bytes",
-				index, estimate, capacity,
+				"sources[%d] estimated size %d bytes exceeds one tape's usable capacity %d bytes "+
+					"(native %d less the LTFS reserve Pack enforces)",
+				index, estimate, capacity, cfg.Library.TapeCapacityBytes,
 			)
 		}
 
