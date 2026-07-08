@@ -32,7 +32,7 @@ func (w *tarWriter) writeSparseEntry(ctx context.Context, header *tar.Header, fi
 	realSize := header.Size
 	realName := header.Name
 
-	sparseMap := buildSparseMap(regions)
+	sparseMap := buildSparseMap(regions, realSize)
 
 	var dataLen int64
 	for _, region := range regions {
@@ -110,16 +110,39 @@ func (w *tarWriter) copyRegions(ctx context.Context, file *os.File, regions []sp
 	return nil
 }
 
-// buildSparseMap encodes the GNU sparse 1.0 in-band map: a decimal count of data
-// regions, then an offset/length pair per region, each terminated by a newline,
+// buildSparseMap encodes the GNU sparse 1.0 in-band map: a decimal count of map
+// entries, then an offset/length pair per entry, each terminated by a newline,
 // padded with NUL to a 512-byte block boundary.
-func buildSparseMap(regions []sparseRegion) []byte {
+//
+// When the last data region ends before realSize — i.e. the file ends in a hole,
+// including the all-hole case where there are no data regions at all — a terminal
+// {realSize, 0} entry is appended. GNU tar's sparse 1.0 decoder extracts only up to
+// the end of the last map entry and does not extend the file to GNU.sparse.realsize,
+// so without this terminal entry it would silently truncate a trailing-hole file at
+// its last data extent. GNU tar's own encoder emits the identical terminal entry
+// (e.g. "2\n0\n4096\n8388608\n0\n" for a file with 4096 bytes of head data and a hole
+// to 8 MiB), and Go's archive/tar reader accepts it too.
+func buildSparseMap(regions []sparseRegion, realSize int64) []byte {
 	var builder strings.Builder
 
-	fmt.Fprintf(&builder, "%d\n", len(regions))
+	var lastEnd int64
+	for _, region := range regions {
+		lastEnd = region.offset + region.length
+	}
+
+	entries := len(regions)
+	if lastEnd < realSize {
+		entries++
+	}
+
+	fmt.Fprintf(&builder, "%d\n", entries)
 
 	for _, region := range regions {
 		fmt.Fprintf(&builder, "%d\n%d\n", region.offset, region.length)
+	}
+
+	if lastEnd < realSize {
+		fmt.Fprintf(&builder, "%d\n%d\n", realSize, 0)
 	}
 
 	encoded := []byte(builder.String())
