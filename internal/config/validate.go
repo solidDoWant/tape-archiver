@@ -209,6 +209,25 @@ func (l Library) validate() error {
 		return fmt.Errorf("library.blankSlots: at least one blank slot is required")
 	}
 
+	// A negative slot address can never name a real changer element, and a
+	// repeated slot maps two logical tapes onto one physical slot: planDriveSets
+	// consumes BlankSlots positionally with no dedup (workflows/backup/library.go),
+	// so a duplicate only fails at Load, after hours of staging. Reject both here,
+	// at the config gate, mirroring the duplicate-drive check above. Zero is a
+	// legal element address and is allowed.
+	seenSlots := make(map[int]struct{}, len(l.BlankSlots))
+	for i, slot := range l.BlankSlots {
+		if slot < 0 {
+			return fmt.Errorf("library.blankSlots[%d]: must not be negative, got %d", i, slot)
+		}
+
+		if _, ok := seenSlots[slot]; ok {
+			return fmt.Errorf("library.blankSlots[%d]: duplicate slot address %d", i, slot)
+		}
+
+		seenSlots[slot] = struct{}{}
+	}
+
 	if l.TapeCapacityBytes <= 0 {
 		return fmt.Errorf("library.tapeCapacityBytes: must be > 0, got %d", l.TapeCapacityBytes)
 	}

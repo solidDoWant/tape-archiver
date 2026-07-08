@@ -261,6 +261,23 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "library.blankSlots",
 		},
 		{
+			name:        "library duplicate blank slots",
+			mutate:      func(c *Config) { c.Library.BlankSlots = []int{1030, 1030} },
+			wantErr:     require.Error,
+			errContains: "library.blankSlots[1]",
+		},
+		{
+			name:        "library negative blank slot",
+			mutate:      func(c *Config) { c.Library.BlankSlots = []int{1, -1} },
+			wantErr:     require.Error,
+			errContains: "library.blankSlots[1]",
+		},
+		{
+			name:    "library distinct non-negative blank slots is allowed",
+			mutate:  func(c *Config) { c.Library.BlankSlots = []int{0, 1, 2, 3} },
+			wantErr: require.NoError,
+		},
+		{
 			name:        "library zero tape capacity",
 			mutate:      func(c *Config) { c.Library.TapeCapacityBytes = 0 },
 			wantErr:     require.Error,
