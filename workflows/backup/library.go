@@ -708,7 +708,12 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) 
 		}
 
 		// The I/O station is full with tapes still to export. Alert the operator
-		// which tapes to remove, then pause until the station is cleared.
+		// which tapes to remove, then pause until the station is cleared. Drain any
+		// stale resume before the alert is dispatched so only genuinely-stale
+		// (pre-alert) resumes are discarded while a resume prompted by this alert
+		// survives (issue #216).
+		drainStaleResumeSignals(ctx)
+
 		notifyOperatorPause(ctx, result.InIOStation, len(remaining))
 
 		resumed, err := waitForIOCleared(ctx, cfg)
@@ -759,9 +764,11 @@ func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (Eje
 // immediately and cancels the child; the child completes true when the station
 // reports it can auto-resume (IOStatus.CanAutoResume) or false when the wait
 // deadline elapses.
+//
+// Stale buffered resumes are drained by the caller before the pause alert is
+// dispatched (issue #216), not here at wait entry, so a resume the operator sends
+// in response to the alert is never discarded.
 func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
-	drainStaleResumeSignals(ctx)
-
 	signalCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 
 	// Absolute deadline for the whole wait, computed once here and carried through

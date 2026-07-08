@@ -24,6 +24,10 @@ import (
 // then blocks on resume, abort, or the configured burn-wait timeout, returning
 // which fired.
 func waitForBurnOperator(ctx workflow.Context, cfg config.Config, devices []string, cause error) pauseOutcome {
+	// Drain before the alert is dispatched so only genuinely-stale (pre-alert)
+	// resumes are discarded and a resume prompted by this alert survives (issue #216).
+	drainStaleResumeSignals(ctx)
+
 	notifyBurnPause(ctx, devices, cause)
 
 	return waitForBurnCleared(ctx, cfg)
@@ -34,8 +38,6 @@ func waitForBurnOperator(ctx workflow.Context, cfg config.Config, devices []stri
 // unlike the Eject pause there is no library state to poll, so resume is always an
 // explicit operator signal (there is no optical autoloader).
 func waitForBurnCleared(ctx workflow.Context, cfg config.Config) pauseOutcome {
-	drainStaleResumeSignals(ctx)
-
 	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	abortCh := workflow.GetSignalChannel(ctx, OperatorAbortSignal)
 	timeoutTimer := workflow.NewTimer(ctx, cfg.Delivery.OpticalBurn.EffectiveBurnWaitTimeout())

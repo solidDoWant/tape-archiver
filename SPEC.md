@@ -529,14 +529,17 @@ affected tapes for fresh blanks and resumes, or aborts; if neither happens withi
 paused state and is reported.
 
 **Resume signals are matched to the pause that is waiting.** Every operator pause — the
-Eject I/O-station pause, the write-path pause, and the optical-burn pause — resumes only on
-a resume signal sent *after* it began (i.e. after the operator has seen its alert). A resume
-already buffered when a pause begins is stale — a double `tapectl resume`, or one that raced
+Eject I/O-station pause, the write-path pause, and the optical-burn pause — drains any
+resume signal already buffered *before it dispatches that pause's alert*, then waits. A
+resume buffered before the alert is stale — a double `tapectl resume`, or one that raced
 an auto-resume (the Eject poll can resume on the access bit while a signal is still in
-flight) — and is discarded at the pause's entry, so it can never instantly satisfy a later
-pause. Without this, a surplus resume could skip a between-burn-set disc-swap pause and blank
-a just-verified recovery disc. A buffered *abort* is never discarded: aborting is always a
-safe, reported, no-further-data outcome.
+flight) — and is discarded, so it can never instantly satisfy a later pause. Without this,
+a surplus resume could skip a between-burn-set disc-swap pause and blank a just-verified
+recovery disc. The drain runs before the alert, never at wait entry: a resume the operator
+sends *in response to* this pause's alert is appended after the alert and always survives —
+even if it lands while the control worker is restarting, deploying, or backlogged and so is
+buffered ahead of the workflow task that begins the wait. A buffered *abort* is never
+discarded: aborting is always a safe, reported, no-further-data outcome.
 
 ## 12. Dry-run and the virtual library
 
