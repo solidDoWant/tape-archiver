@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -168,63 +169,153 @@ func TestTarDeduplicatesHardlinks(t *testing.T) {
 		"both hardlinked paths must extract with identical content")
 }
 
-// TestTarSparseFile covers AC3: a sparse file whose logical size greatly exceeds
-// its allocated size does not grow the archive to the full logical size (with no
-// compression in play — Tar writes a raw stream), and extraction reproduces the
-// file's contents including its holes.
-func TestTarSparseFile(t *testing.T) {
-	t.Parallel()
+// dataExtent is a run of real (non-hole) bytes written at a given offset when
+// building a sparse test fixture.
+type dataExtent struct {
+	offset int64
+	data   []byte
+}
 
-	const (
-		logical  = int64(16 << 20) // 16 MiB logical
-		chunkLen = 64 << 10        // 64 KiB of real data at each end
-	)
-
-	src := t.TempDir()
-	path := filepath.Join(src, "disk.img")
-
-	head := bytes.Repeat([]byte("H"), chunkLen)
-	tail := bytes.Repeat([]byte("T"), chunkLen)
+// writeSparseFixture creates a sparse file of the given logical size with the
+// supplied data extents written into it (the gaps are left as holes). It returns
+// the file's full logical contents so extractions can be compared byte-for-byte.
+// It skips the test when the filesystem did not actually leave a hole, so the
+// sparse encoder is genuinely exercised.
+func writeSparseFixture(t *testing.T, path string, logical int64, extents []dataExtent) []byte {
+	t.Helper()
 
 	file, err := os.Create(path)
 	require.NoError(t, err)
 
-	_, err = file.WriteAt(head, 0)
-	require.NoError(t, err)
-	_, err = file.WriteAt(tail, logical-int64(len(tail)))
-	require.NoError(t, err)
+	require.NoError(t, file.Truncate(logical))
+
+	want := make([]byte, logical)
+
+	for _, extent := range extents {
+		_, err = file.WriteAt(extent.data, extent.offset)
+		require.NoError(t, err)
+		copy(want[extent.offset:], extent.data)
+	}
+
 	require.NoError(t, file.Close())
 
-	// Precondition: the filesystem actually left a hole, otherwise the sparse
-	// path is not being exercised.
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	require.Equal(t, logical, info.Size())
 
 	stat := info.Sys().(*syscall.Stat_t)
-	require.Less(t, stat.Blocks*512, logical,
-		"test precondition: the file must be sparse on this filesystem")
+	if stat.Blocks*512 >= logical {
+		t.Skipf("filesystem did not leave a hole for %s (allocated %d bytes for a %d-byte file); "+
+			"the sparse path is not exercised here", filepath.Base(path), stat.Blocks*512, logical)
+	}
 
-	var buf bytes.Buffer
+	return want
+}
 
-	require.NoError(t, archive.Tar(t.Context(), &buf, src))
+// TestTarSparseFile covers AC1–AC3: sparse files (including trailing-hole and
+// all-hole layouts) do not grow the archive to their full logical size, and extract
+// byte-identically at their full logical size through *both* a real GNU tar binary —
+// the family the recovery disc ships, whose sparse 1.0 decoder does not honor
+// GNU.sparse.realsize and so truncates a map that omits the terminal hole entry — and
+// Go's archive/tar reader.
+func TestTarSparseFile(t *testing.T) {
+	t.Parallel()
 
-	assert.Less(t, buf.Len(), 1<<20,
-		"the archive must not grow to the file's full logical size")
+	const logical = int64(8 << 20) // 8 MiB logical
 
-	dest := t.TempDir()
-	extractTar(t, &buf, dest)
+	head := bytes.Repeat([]byte("H"), 64<<10)
+	tail := bytes.Repeat([]byte("T"), 64<<10)
 
-	got, err := os.ReadFile(filepath.Join(dest, "disk.img"))
-	require.NoError(t, err)
+	testCases := []struct {
+		name    string
+		extents []dataExtent
+	}{
+		{
+			// Data at the start, hole through to the logical end: the case GNU tar
+			// silently truncated before the terminal {realsize, 0} map entry.
+			name:    "trailing hole",
+			extents: []dataExtent{{offset: 0, data: head}},
+		},
+		{
+			// No data at all: an all-hole file of nonzero logical size.
+			name:    "all hole",
+			extents: nil,
+		},
+		{
+			// Data at both ends, hole in the middle, ending in data: the pre-fix
+			// layout, kept as a regression guard.
+			name: "ends in data",
+			extents: []dataExtent{
+				{offset: 0, data: head},
+				{offset: logical - int64(len(tail)), data: tail},
+			},
+		},
+	}
 
-	require.Len(t, got, int(logical), "extraction must reproduce the full logical size")
-	assert.Equal(t, head, got[:chunkLen], "leading data extent must match")
-	assert.Equal(t, tail, got[logical-int64(len(tail)):], "trailing data extent must match")
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 
-	middle := got[chunkLen : logical-int64(len(tail))]
-	assert.Equal(t, len(middle), bytes.Count(middle, []byte{0}),
-		"the hole must extract as zeros")
+			src := t.TempDir()
+			path := filepath.Join(src, "disk.img")
+
+			want := writeSparseFixture(t, path, logical, testCase.extents)
+
+			var buf bytes.Buffer
+
+			require.NoError(t, archive.Tar(t.Context(), &buf, src))
+
+			assert.Less(t, buf.Len(), int(logical),
+				"the archive must not grow to the file's full logical size")
+
+			archived := buf.Bytes()
+
+			for _, extractor := range []struct {
+				name    string
+				extract func(t *testing.T, archived []byte, dest string)
+			}{
+				{"gnu tar", extractWithGNUTar},
+				{"go reader", func(t *testing.T, archived []byte, dest string) {
+					extractTar(t, bytes.NewReader(archived), dest)
+				}},
+			} {
+				t.Run(extractor.name, func(t *testing.T) {
+					dest := t.TempDir()
+					extractor.extract(t, archived, dest)
+
+					got, err := os.ReadFile(filepath.Join(dest, "disk.img"))
+					require.NoError(t, err)
+
+					require.Len(t, got, int(logical),
+						"extraction must reproduce the full logical size")
+					assert.Equal(t, want, got,
+						"extracted contents must be byte-identical to the source, holes intact")
+				})
+			}
+		})
+	}
+}
+
+// extractWithGNUTar extracts archived into dest by invoking the bundled GNU tar
+// binary — the family the recovery disc ships and that docs/recovery-procedure.md
+// runs as `bin/tar -xf`. Unlike Go's archive/tar reader it does not extend sparse
+// files to GNU.sparse.realsize, so it is the extractor that reveals a sparse map
+// missing its terminal hole entry. The test skips when no tar binary is available.
+func extractWithGNUTar(t *testing.T, archived []byte, dest string) {
+	t.Helper()
+
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("no tar binary available to validate GNU sparse extraction")
+	}
+
+	cmd := exec.CommandContext(t.Context(), "tar", "-x", "-f", "-", "-C", dest)
+	cmd.Stdin = bytes.NewReader(archived)
+
+	var stderr bytes.Buffer
+
+	cmd.Stderr = &stderr
+
+	require.NoError(t, cmd.Run(), "gnu tar extraction failed: %s", stderr.String())
 }
 
 // TestTarDropsExtendedAttributes covers AC4 (behavioral half): a user.* extended
