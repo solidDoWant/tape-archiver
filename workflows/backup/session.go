@@ -22,9 +22,20 @@ const (
 	// sessionCreationTimeout is how long workflow.CreateSession waits for a
 	// data worker to accept the session before failing.
 	sessionCreationTimeout = 10 * time.Minute
-	// teardownTimeout bounds TeardownSession: it only needs to unmount/kill
-	// any live mounts, which should complete in well under a minute.
+	// teardownTimeout bounds each TeardownSession attempt: it only needs to
+	// unmount/kill any live mounts, which should complete in well under a
+	// minute. teardownCtx also caps the attempts (RetryPolicy) so a wedged
+	// unmount cannot retry forever.
 	teardownTimeout = 5 * time.Minute
+	// teardownUnmountTimeout bounds the per-mount Unmount wait inside
+	// TeardownSession, independent of the (uncancellable) WithoutCancel context
+	// the activity detaches onto. It is deliberately shorter than teardownTimeout
+	// so a permanently wedged ltfs index-write returns from Unmount in time for
+	// the Kill fallback (MountRegistry.Teardown) to run and release the
+	// process-global registry mutex within the same activity attempt, instead of
+	// blocking on ctx.Done() forever (pkg/ltfs Mount.Unmount) and wedging every
+	// future teardown on the worker.
+	teardownUnmountTimeout = 3 * time.Minute
 	// writeTimeoutSafetyFactor scales the theoretical floor-speed write duration
 	// (capacity ÷ speed-matching floor) into the per-tape activity ceiling. A
 	// factor of 2 absorbs mount/format/finalize overhead and rate variance while
@@ -407,10 +418,17 @@ func newTeardownActivities(registry *MountRegistry) *TeardownActivities {
 func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInput) error {
 	// Detach from the cancellation of the incoming activity context: if the
 	// Write phase was cancelled (which is why we are being called), we still
-	// need to unmount. Use context.WithoutCancel so the teardown runs to
-	// completion regardless of the parent cancellation, bounded by the
-	// teardownTimeout the workflow configured on the activity options.
-	return a.registry.Teardown(context.WithoutCancel(ctx))
+	// need to unmount. Use context.WithoutCancel so the teardown runs regardless
+	// of the parent cancellation. Then re-arm a fresh deadline: without one, a
+	// wedged ltfs index-write leaves Unmount's ctx.Done() case unable to ever
+	// fire (WithoutCancel severs the parent's cancellation), so Unmount would
+	// block forever holding the registry mutex and the Kill fallback would be
+	// unreachable. teardownUnmountTimeout bounds that wait so Teardown falls
+	// through to Kill and returns within the activity's teardownTimeout.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownUnmountTimeout)
+	defer cancel()
+
+	return a.registry.Teardown(ctx)
 }
 
 // writePhase orchestrates the Write phase (SPEC §4.3 phase 7) for one drive-set
@@ -530,9 +548,17 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		disconnected, cancel := workflow.NewDisconnectedContext(sessionCtx)
 		defer cancel()
 
+		// Bound the retries: without a RetryPolicy the server default is unlimited
+		// (MaximumAttempts: 0), so a TeardownSession attempt that keeps timing out
+		// (e.g. a permanently wedged unmount) would retry forever and this
+		// disconnected .Get would never return — hanging writePhase, hence Backup,
+		// so the deferred notifyFailure never fires. Cap the attempts so teardown
+		// concludes and the run reaches a defined failed end state (mirrors
+		// FinalizeTape's retryOpts, #152).
 		teardownCtx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
 			TaskQueue:           DataTaskQueue,
 			StartToCloseTimeout: teardownTimeout,
+			RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 3},
 		})
 
 		var teardown *TeardownActivities
@@ -690,9 +716,20 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 // principle 2, §14), a measurement failure is logged and reported as unmeasured
 // rather than propagated.
 func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWriteArchive, elapsed time.Duration, floorMBps float64, floorKnown bool) WriteHealth {
+	// Bound the retries to a single attempt: without a RetryPolicy the server
+	// default is unlimited, so a scrape that *hangs* (rather than fails fast —
+	// MeasureWriteHealth already absorbs a fast ReadLogPages error and returns
+	// nil, degrading to throughput-only health) would be killed at
+	// writeHealthTimeout and retried forever, stalling an already-finished write
+	// phase until the session ExecutionTimeout. Write-health is observational
+	// only (SPEC §2 principle 2, §14) and must never gate a run, so a single
+	// timed-out attempt is enough: the tape is recorded unmeasured and the run
+	// proceeds. One attempt (not FinalizeTape's 3) avoids burning more of the
+	// completed write window re-scraping a wedged sg node.
 	healthCtx := workflow.WithActivityOptions(gctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: writeHealthTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
 
 	var acts *WriteHealthActivities

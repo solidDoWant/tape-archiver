@@ -1,6 +1,7 @@
 package ltfs
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 	"testing"
@@ -107,6 +108,31 @@ func TestUnmountIdempotentAfterDetach(t *testing.T) {
 			test.wantErr(t, err)
 		})
 	}
+}
+
+// TestUnmountReturnsWhenContextCancelled proves the seam issue #223's teardown fix
+// relies on: Unmount's terminal wait for the LTFS index write honours the context,
+// so bounding that context (TeardownSession wraps its uncancellable WithoutCancel
+// context in a WithTimeout) makes Unmount return — letting MountRegistry.Teardown
+// fall through to Kill — instead of blocking forever. Here the supervised process
+// never exits (done is never closed) and the context is already cancelled, so
+// Unmount must return the context error promptly rather than hang.
+func TestUnmountReturnsWhenContextCancelled(t *testing.T) {
+	t.Parallel()
+
+	m := &Mount{
+		mountpoint: t.TempDir(),         // exists but is not a mount point
+		detached:   true,                // skip fusermount; exercise only the terminal wait
+		done:       make(chan struct{}), // never closed: the ltfs index write never finishes
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := m.Unmount(ctx)
+	require.Error(t, err,
+		"Unmount must return when its context is cancelled instead of waiting forever for the index write")
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 // TestUnmountFusermountFailureBenignAfterProcessExit proves the second half of

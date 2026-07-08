@@ -566,6 +566,156 @@ func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
 		"FinalizeTape must be bounded to MaximumAttempts=3 so a persistent unmount failure surfaces promptly instead of retrying until the session timeout")
 }
 
+// TestRunTapePathTeardownRetryBounded covers issue #223 AC1/AC2: when the deferred
+// TeardownSession activity keeps failing (a permanently wedged ltfs unmount that
+// times out every attempt), the bounded retry policy concludes teardown after a
+// fixed number of attempts instead of retrying under Temporal's default-unlimited
+// policy. So writePhase returns and the run reaches a defined end state within a
+// bounded time — the deferred failure alert then fires (TestWorkflowFailureSendsAlert)
+// — instead of the workflow hanging forever with no alert. The teardown error is
+// best-effort and never masks the phase result: the written tape is still recorded.
+func TestRunTapePathTeardownRetryBounded(t *testing.T) {
+	t.Parallel()
+
+	const (
+		drives = 1
+		tapes  = 1
+		copies = 1
+	)
+
+	env := newTapePathEnv(t)
+
+	var (
+		mu               sync.Mutex
+		loadSetSizes     []int
+		teardownAttempts int
+	)
+
+	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
+
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
+		[]byte("<ltfsindex></ltfsindex>"), nil)
+	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+		WriteHealth{}, nil)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+		EjectResult{}, nil)
+
+	// TeardownSession fails on every attempt, modelling a wedged unmount that times
+	// out each time. Count the attempts to prove the retry policy is bounded rather
+	// than the Temporal-default unlimited (which would retry until the session
+	// timeout and hang writePhase, so Backup never returns and no alert fires).
+	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(
+		func(context.Context, TeardownInput) error {
+			mu.Lock()
+			teardownAttempts++
+			mu.Unlock()
+
+			return fmt.Errorf("simulated wedged unmount: teardown timed out")
+		})
+
+	plan, staged, par2 := seededPlan(tapes, copies)
+
+	env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+		Cfg:    tapePathConfig(drives, tapes, copies),
+		Plan:   plan,
+		Staged: staged,
+		PAR2:   par2,
+	})
+
+	// The write phase reaches a defined end state (does not hang) even though teardown
+	// keeps failing.
+	require.True(t, env.IsWorkflowCompleted(),
+		"the write phase must return within a bounded time even when teardown keeps failing")
+	require.NoError(t, env.GetWorkflowError(),
+		"a best-effort teardown failure must not fail the run or mask the phase result")
+
+	var written []WrittenTape
+	require.NoError(t, env.GetWorkflowResult(&written))
+	assert.Len(t, written, 1, "the successfully written tape is still recorded despite the teardown failure")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 3, teardownAttempts,
+		"TeardownSession must be bounded to MaximumAttempts=3 so a wedged unmount cannot retry until the session timeout and hang the workflow with no failure alert")
+}
+
+// TestRunTapePathWriteHealthRetryBounded covers issue #223 AC3: when the post-write
+// MeasureWriteHealth scrape hangs and is killed at its StartToClose timeout on every
+// attempt, the bounded retry policy concludes after a single attempt instead of
+// retrying under Temporal's default-unlimited policy — so an already-finished write
+// phase is not stalled until the session timeout. Write-health is observational only
+// (SPEC §2 principle 2, §14): the tape is still recorded, with health unmeasured.
+func TestRunTapePathWriteHealthRetryBounded(t *testing.T) {
+	t.Parallel()
+
+	const (
+		drives = 1
+		tapes  = 1
+		copies = 1
+	)
+
+	env := newTapePathEnv(t)
+
+	var (
+		mu             sync.Mutex
+		loadSetSizes   []int
+		healthAttempts int
+	)
+
+	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
+
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
+		[]byte("<ltfsindex></ltfsindex>"), nil)
+
+	// MeasureWriteHealth fails on every attempt, modelling a scrape that hangs and is
+	// killed at writeHealthTimeout. Count the attempts to prove the retry is bounded
+	// rather than the Temporal-default unlimited (which would stall the finished
+	// write phase until the session timeout).
+	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+		func(context.Context, MeasureWriteHealthInput) (WriteHealth, error) {
+			mu.Lock()
+			healthAttempts++
+			mu.Unlock()
+
+			return WriteHealth{}, fmt.Errorf("simulated hung scrape: measure write health timed out")
+		})
+
+	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+		EjectResult{}, nil)
+
+	plan, staged, par2 := seededPlan(tapes, copies)
+
+	env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+		Cfg:    tapePathConfig(drives, tapes, copies),
+		Plan:   plan,
+		Staged: staged,
+		PAR2:   par2,
+	})
+
+	require.True(t, env.IsWorkflowCompleted(),
+		"the write phase must conclude within a bounded time even when the health scrape hangs every attempt")
+	require.NoError(t, env.GetWorkflowError(),
+		"an observational write-health failure must never fail the run")
+
+	var written []WrittenTape
+	require.NoError(t, env.GetWorkflowResult(&written))
+	require.Len(t, written, 1, "the tape is still recorded as written when health cannot be measured")
+	assert.Equal(t, WriteHealth{}, written[0].WriteHealth,
+		"a tape whose health scrape hung is recorded unmeasured (zero-value health)")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, healthAttempts,
+		"MeasureWriteHealth must be bounded to MaximumAttempts=1 so a hung scrape cannot retry until the session timeout and stall a finished write")
+}
+
 // TestRunTapePathResumeNeverReformatsCompletedTapes covers issue #92 AC5 across
 // drive-sets: with two sets, the first completes and one tape in the second fails.
 // On resume only that failed tape is re-driven — the first set's tapes (a
