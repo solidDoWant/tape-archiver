@@ -279,6 +279,10 @@ const (
 // PrepareArchives result carries every archive's []StagedSlice in one payload, and
 // the same metadata re-ships through Pack, GeneratePAR2, Verify, the per-tape
 // WriteTreeInput, and Report; bounding the whole-run slice count bounds them all.
+// The one payload term that does not scale with slice metadata — the captured
+// LTFS index, which grows with the on-tape file count — is deliberately excluded:
+// FinalizeTape stages it to disk and the post-write phases pass it by path, so it
+// never travels in an activity payload and needs no budget here (issue #221).
 //
 // The count is derived from each archive's inflated EstimatedBytes, so it
 // over-estimates and never under-bounds the payload (matching feasibilityEstimate).

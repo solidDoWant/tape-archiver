@@ -60,10 +60,22 @@ func reportTestInput(t *testing.T) ReportInput {
 			Tapes:  []PlannedTape{{Archives: []PlannedArchive{{SourceIndex: 0, DataBytes: 150, PAR2ReservedBytes: 20}}}},
 		},
 		Written: []WrittenTape{
-			{Barcode: tape.Barcode("TAPE01L6"), TapeIndex: 0, CopyIndex: 0, IndexXML: []byte("<ltfsindex/>")},
-			{Barcode: tape.Barcode("TAPE02L6"), TapeIndex: 0, CopyIndex: 1, IndexXML: []byte("<ltfsindex/>")},
+			{Barcode: tape.Barcode("TAPE01L6"), TapeIndex: 0, CopyIndex: 0, IndexXMLPath: stageTestIndex(t, "TAPE01L6")},
+			{Barcode: tape.Barcode("TAPE02L6"), TapeIndex: 0, CopyIndex: 1, IndexXMLPath: stageTestIndex(t, "TAPE02L6")},
 		},
 	}
+}
+
+// stageTestIndex writes a captured LTFS index for barcode to a temp file and
+// returns its path, mirroring how FinalizeTape stages the index to disk for the
+// Report phase to read back (issue #221).
+func stageTestIndex(t *testing.T, barcode string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), barcode+".xml")
+	require.NoError(t, os.WriteFile(path, []byte("<ltfsindex/>"), 0o644))
+
+	return path
 }
 
 func ptrFloat(f float64) *float64 { return &f }
@@ -619,4 +631,47 @@ func generateTestKeypair(t *testing.T) (identity, recipient string) {
 	require.NotEmpty(t, recipient, "recipient not found in identity file")
 
 	return string(contents), recipient
+}
+
+// TestTapeIndexesReadFromStagedFiles pins the disk-staging fix for issue #221:
+// the recovery-ISO tape indexes are read from the paths FinalizeTape staged them
+// to, not carried in the ReportInput payload. This is what keeps the post-write
+// Report payload bounded regardless of run size (no multi-MB index per copy).
+func TestTapeIndexesReadFromStagedFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	pathA := filepath.Join(dir, "TAPE01L6.xml")
+	pathB := filepath.Join(dir, "TAPE02L6.xml")
+
+	require.NoError(t, os.WriteFile(pathA, []byte("<ltfsindex>A</ltfsindex>"), 0o644))
+	require.NoError(t, os.WriteFile(pathB, []byte("<ltfsindex>B</ltfsindex>"), 0o644))
+
+	written := []WrittenTape{
+		{Barcode: tape.Barcode("TAPE01L6"), IndexXMLPath: pathA},
+		{Barcode: tape.Barcode("TAPE02L6"), IndexXMLPath: pathB},
+	}
+
+	indexes, err := tapeIndexes(written)
+	require.NoError(t, err)
+
+	require.Len(t, indexes, 2)
+	assert.Equal(t, "TAPE01L6", indexes[0].Barcode)
+	assert.Equal(t, []byte("<ltfsindex>A</ltfsindex>"), indexes[0].Index)
+	assert.Equal(t, "TAPE02L6", indexes[1].Barcode)
+	assert.Equal(t, []byte("<ltfsindex>B</ltfsindex>"), indexes[1].Index)
+}
+
+// TestTapeIndexesMissingFileErrors ensures a missing staged index is a named,
+// actionable error rather than a silent empty index in the recovery ISO.
+func TestTapeIndexesMissingFileErrors(t *testing.T) {
+	t.Parallel()
+
+	written := []WrittenTape{
+		{Barcode: tape.Barcode("TAPE01L6"), IndexXMLPath: filepath.Join(t.TempDir(), "absent.xml")},
+	}
+
+	_, err := tapeIndexes(written)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TAPE01L6", "the error must name the tape whose staged index is missing")
 }

@@ -113,13 +113,15 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 	// --- FinalizeTape retry: the entry is present and already unmounted, so it
 	// must skip re-unmounting a detached volume, re-read the captured index, and
 	// succeed — never re-driving the finalized tape or reporting a lost mount.
-	index, err := acts.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev})
+	indexPath, err := acts.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev, Barcode: barcode})
 	require.NoError(t, err, "FinalizeTape retry after a prior unmount must re-read the index, not fail mount-lost")
 
 	_, stillInRegistryAfterSuccess := registry.Get(sgDev)
 	assert.False(t, stillInRegistryAfterSuccess, "mount must be removed from registry after successful FinalizeTape")
 
-	// --- Index validation (AC: index captured, valid LTFS XML) ----------------
+	// --- Index validation (AC: index captured to disk, valid LTFS XML) --------
+	index, err := os.ReadFile(indexPath)
+	require.NoError(t, err, "staged LTFS index must be readable from the path FinalizeTape returned")
 	assert.NotEmpty(t, index, "captured LTFS index must not be empty")
 	assert.Contains(t, string(index), "<ltfsindex", "captured index must be LTFS XML")
 	assert.Contains(t, string(index), "<name>"+string(barcode)+"</name>",
@@ -142,6 +144,6 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 	assert.Equal(t, sentinelContent, string(got), "sentinel content must survive the retry cycle")
 
 	// Clean up the re-mount.
-	_, finalErr := acts.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev})
+	_, finalErr := acts.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev, Barcode: barcode})
 	assert.NoError(t, finalErr, "final FinalizeTape on re-mount must succeed")
 }

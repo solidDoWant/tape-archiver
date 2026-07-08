@@ -270,10 +270,14 @@ type WrittenTape struct {
 	// SourceSlot is the storage slot the blank tape was loaded from; the Eject
 	// phase unloads the tape to this slot before transferring it to I/O.
 	SourceSlot int
-	// IndexXML is the captured LTFS index returned by FinalizeTape, byte-identical
-	// to the index LTFS wrote to the tape's index partition at unmount (SPEC §6,
-	// §10). It is included in the recovery ISO.
-	IndexXML []byte
+	// IndexXMLPath is the filesystem path, on the data worker's staging volume,
+	// to the captured LTFS index FinalizeTape staged to disk — byte-identical to
+	// the index LTFS wrote to the tape's index partition at unmount (SPEC §6,
+	// §10). The Report phase reads it from disk (it runs on the same data worker)
+	// to include the index in the recovery ISO. It is a path rather than the
+	// bytes so the multi-MB index never travels in an activity payload (issue
+	// #221).
+	IndexXMLPath string
 	// WriteHealth is the observational write-health measurement for this tape
 	// (sustained throughput, repositions, TapeAlert flags), taken after the write
 	// window closed. It never affects run success (SPEC §2 principle 2, §14).
@@ -367,8 +371,8 @@ type runState struct {
 	loaded []LoadedTape
 	// written accumulates every tape written by the Write phase across all
 	// drive-sets (SPEC §4.3 phase 7). Each set's tapes are appended as it
-	// completes; the Report phase uses the full list (barcodes, IndexXML) for the
-	// report and recovery ISO.
+	// completes; the Report phase uses the full list (barcodes, staged index
+	// paths) for the report and recovery ISO.
 	written []WrittenTape
 	// reportPath is the on-disk path of the PDF report the Report phase builds
 	// (SPEC §4.3 phase 9), staged on the data worker. The Deliver phase uploads it.

@@ -87,7 +87,7 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 		// recorded in the run.
 		*failingPhase = PhaseEject
 
-		if err := ejectPhase(ctx, cfg, append(cloneWritten(written), failedAsWritten(failed)...)); err != nil {
+		if err := ejectPhase(ctx, cfg, append(ejectProjection(written), failedAsWritten(failed)...)); err != nil {
 			return err
 		}
 
@@ -264,10 +264,25 @@ func failedAsWritten(failed []failedTape) []WrittenTape {
 	return out
 }
 
-// cloneWritten returns a fresh copy of written so appending the failed tapes for
-// ejection never aliases or mutates the slice the caller records in the run.
-func cloneWritten(written []WrittenTape) []WrittenTape {
-	return append([]WrittenTape(nil), written...)
+// ejectProjection returns the minimal WrittenTape shape the Eject activity needs
+// (barcode, drive, indices, source slot) for each written tape, mirroring
+// failedAsWritten. It drops the staged-index path and write-health that Eject
+// never reads, keeping the EjectInput payload bounded and independent of run
+// size (issue #221), and — being a fresh slice of fresh values — it never
+// aliases or mutates the slice the caller records in the run.
+func ejectProjection(written []WrittenTape) []WrittenTape {
+	out := make([]WrittenTape, 0, len(written))
+	for _, tape := range written {
+		out = append(out, WrittenTape{
+			Barcode:    tape.Barcode,
+			DriveIndex: tape.DriveIndex,
+			TapeIndex:  tape.TapeIndex,
+			CopyIndex:  tape.CopyIndex,
+			SourceSlot: tape.SourceSlot,
+		})
+	}
+
+	return out
 }
 
 // reloadSlots lists the storage slots the operator must restock with fresh blanks

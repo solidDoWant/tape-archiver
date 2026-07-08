@@ -224,6 +224,12 @@ relationship, and suggests a minimum value. A comfortably-sized slice (for examp
 1 GiB slices on a few-terabyte source) is never affected. Raising `sliceSizeBytes`
 per the suggestion resolves it.
 
+The other large post-write artifact — each physical tape's captured LTFS index, which
+grows with the on-tape file count and can reach several megabytes — does not count
+against this bound: it is staged to disk and passed to the Report phase by path rather
+than carried in an activity payload, so it never inflates a payload regardless of run
+size.
+
 ---
 
 ## Encryption
