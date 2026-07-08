@@ -479,7 +479,12 @@ recovery ISO travels on its burned disc (§10); the report is the single uploade
 artifact, which keeps the upload comfortably within the webhook's ~25 MB limit. The
 report upload is bounded by the Deliver activity's timeout (the request context), not by
 a fixed client-wide HTTP timeout, so a multi-megabyte report can upload over a slow
-uplink for the full activity budget rather than being aborted after a few seconds.
+uplink for the full activity budget rather than being aborted after a few seconds. A
+transient upload failure (a 429 rate-limit or a 5xx, or a transport blip) is retried a
+bounded number of times so a brief outage still delivers; a deterministic rejection (a
+permanent 4xx — a deleted or rotated webhook, or a report the endpoint refuses as too
+large) fails the run fast rather than retrying forever, so the failure alert below fires
+instead of the run wedging silently after all tapes are already written.
 
 **Failure alert (operational, configured via env var).** A separate failure webhook,
 configured on the worker via the `DISCORD_FAILURE_WEBHOOK_URL` environment variable

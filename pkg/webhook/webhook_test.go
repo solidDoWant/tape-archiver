@@ -459,3 +459,51 @@ func TestSendFailureNilError(t *testing.T) {
 	body := string(cap.body)
 	assert.True(t, strings.Contains(body, "run-789"), "payload should name the run: %s", body)
 }
+
+// TestStatusErrorFromNon2xx asserts that a non-2xx webhook response surfaces as a
+// *StatusError carrying the numeric status code, so callers can classify the
+// failure's retryability without string-matching, while the message text is
+// unchanged from the previous opaque error.
+func TestStatusErrorFromNon2xx(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newServer(t, http.StatusNotFound)
+
+	err := webhook.New(server.URL).Send(t.Context(), webhook.Message{Content: "x"})
+	require.Error(t, err)
+
+	var statusErr *webhook.StatusError
+	require.ErrorAs(t, err, &statusErr)
+	assert.Equal(t, http.StatusNotFound, statusErr.Code)
+	assert.Equal(t, "webhook: unexpected status 404", statusErr.Error())
+}
+
+// TestStatusErrorRetryable pins the HTTP-domain retryability classification:
+// 429 and every 5xx are transient (retryable); every other non-2xx is a
+// deterministic permanent failure (not retryable).
+func TestStatusErrorRetryable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		code          int
+		wantRetryable bool
+	}{
+		{name: "429 rate limited is transient", code: http.StatusTooManyRequests, wantRetryable: true},
+		{name: "500 server error is transient", code: http.StatusInternalServerError, wantRetryable: true},
+		{name: "503 unavailable is transient", code: http.StatusServiceUnavailable, wantRetryable: true},
+		{name: "400 bad request is permanent", code: http.StatusBadRequest, wantRetryable: false},
+		{name: "401 unauthorized is permanent", code: http.StatusUnauthorized, wantRetryable: false},
+		{name: "404 deleted webhook is permanent", code: http.StatusNotFound, wantRetryable: false},
+		{name: "413 report too large is permanent", code: http.StatusRequestEntityTooLarge, wantRetryable: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			statusErr := &webhook.StatusError{Code: test.code}
+			assert.Equal(t, test.wantRetryable, statusErr.Retryable())
+		})
+	}
+}

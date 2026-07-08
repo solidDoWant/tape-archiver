@@ -319,9 +319,34 @@ func formatSlots(slots []int) string {
 	return strings.Join(parts, ", ")
 }
 
+// StatusError is the error do returns when the webhook endpoint answers with a
+// non-2xx HTTP status. It carries the numeric status Code so callers can classify
+// the failure's retryability without string-matching. Its Error text is unchanged
+// from the previous opaque error, so logs and existing callers are unaffected.
+type StatusError struct {
+	Code int
+}
+
+// Error renders the status as "webhook: unexpected status %d".
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("webhook: unexpected status %d", e.Code)
+}
+
+// Retryable reports whether a retry could plausibly succeed for this status. It
+// encodes HTTP-domain knowledge, staying free of any orchestration concern: 429
+// (Discord rate-limiting) and any 5xx (server-side) are transient and worth
+// retrying; every other non-2xx (a permanent 4xx such as 400/401/404/413 — a
+// deleted or rotated webhook, or a report the endpoint refuses as too large) is
+// deterministic and will fail identically on every attempt.
+func (e *StatusError) Retryable() bool {
+	return e.Code == http.StatusTooManyRequests || (e.Code >= 500 && e.Code <= 599)
+}
+
 // do sends req with the client's HTTP client and maps the response to an error:
-// nil for 2xx, a non-nil error otherwise. The response body is always drained
-// and closed.
+// nil for 2xx, a non-nil error otherwise. A non-2xx status yields a *StatusError
+// carrying the code (so callers can classify retryability); a transport failure
+// yields a plain wrapped error (inherently transient, hence retryable). The
+// response body is always drained and closed.
 func (c *Client) do(req *http.Request) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -330,7 +355,7 @@ func (c *Client) do(req *http.Request) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("webhook: unexpected status %d", resp.StatusCode)
+		return &StatusError{Code: resp.StatusCode}
 	}
 
 	return nil
