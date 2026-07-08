@@ -256,6 +256,10 @@ type WriteTreeInput struct {
 type FinalizeInput struct {
 	// Device identifies the mount to retrieve from the registry.
 	Device string
+	// Barcode is the tape's canonical identity (SPEC §6); FinalizeTape stages the
+	// captured LTFS index to a barcode-keyed path under the run's staging
+	// directory and returns that path.
+	Barcode tape.Barcode
 }
 
 // TeardownInput is the payload for the TeardownSession activity.
@@ -339,7 +343,12 @@ func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) e
 
 // FinalizeTape unmounts the live LTFS mount from the registry, triggering the
 // single deferred index write (SPEC §14), then reads the captured index back
-// from the work directory. It removes the mount from the registry on success.
+// from the work directory and stages it to a barcode-keyed file under the run's
+// staging directory. It returns the path to that staged index — not the index
+// bytes — so the multi-MB LTFS index never travels in an activity payload
+// (issue #221); the Report phase, which runs on the same data worker, reads the
+// file from disk to build the recovery ISO. It removes the mount from the
+// registry on success.
 //
 // FinalizeTape is safely retriable because the registry tracks each mount's
 // unmount state (mountEntry.unmounted). A retry after a successful Unmount whose
@@ -350,7 +359,7 @@ func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) e
 // that genuinely lost mount is the sole mount-lost case, and that tape is
 // re-written on the next run (SPEC §14). writePhase bounds the retries so a
 // persistent Unmount failure surfaces to the operator promptly.
-func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput) ([]byte, error) {
+func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput) (string, error) {
 	mount, unmounted, ok := a.registry.getEntry(input.Device)
 	if !ok {
 		// A missing entry is terminal, not transient: the only way it is absent
@@ -360,7 +369,7 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 		// on the next run (SPEC §14). Mark the error non-retryable so the Write
 		// phase fails fast instead of retrying the unrecoverable state until the
 		// session timeout.
-		return nil, temporal.NewNonRetryableApplicationError(
+		return "", temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("finalize %s: no live mount in registry (data-worker restarted between write and finalize?)", input.Device),
 			"mount-lost",
 			nil,
@@ -377,7 +386,7 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 			// Keep the entry (not yet unmounted) so a retry re-attempts the
 			// Unmount; writePhase's bounded retry policy surfaces a persistent
 			// failure promptly instead of looping until the session timeout.
-			return nil, fmt.Errorf("unmount LTFS volume on %s: %w", input.Device, err)
+			return "", fmt.Errorf("unmount LTFS volume on %s: %w", input.Device, err)
 		}
 
 		a.registry.MarkUnmounted(input.Device)
@@ -390,12 +399,44 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 		// captured index without re-Unmounting a detached mount or misdiagnosing
 		// a lost mount. Do not delete: deleting would send the retry down the
 		// mount-lost branch and re-drive a correctly finalized tape (SPEC §14).
-		return nil, fmt.Errorf("read captured LTFS index for %s: %w", input.Device, err)
+		return "", fmt.Errorf("read captured LTFS index for %s: %w", input.Device, err)
+	}
+
+	// Stage the index to disk before deleting the registry entry. If staging
+	// fails, keep the entry (already marked unmounted) so a retry re-reads the
+	// idempotent captured index and re-stages, rather than dropping into the
+	// mount-lost branch and re-driving a correctly finalized tape (SPEC §14).
+	indexPath, err := a.stageIndex(input.Barcode, index)
+	if err != nil {
+		return "", fmt.Errorf("stage captured LTFS index for %s: %w", input.Device, err)
 	}
 
 	a.registry.Delete(input.Device)
 
-	return index, nil
+	return indexPath, nil
+}
+
+// stageIndex writes the captured LTFS index for barcode to a stable,
+// barcode-keyed path under the data worker's staging directory and returns that
+// path. It mirrors WriteTree's flat, barcode-keyed staging layout (a barcode is
+// physically in at most one run at a time, so the path is unambiguous), and the
+// path is deterministic so a FinalizeTape retry re-stages to the same file. The
+// bytes are staged rather than returned so the multi-MB index never enters an
+// activity payload; the Report phase, on the same data worker, reads the file
+// back to build the recovery ISO (issue #221).
+func (a *WriteActivities) stageIndex(barcode tape.Barcode, index []byte) (string, error) {
+	dir := filepath.Join(a.stagingDir, "indexes")
+
+	if err := os.MkdirAll(dir, stagingDirPerm); err != nil {
+		return "", fmt.Errorf("create index staging directory %s: %w", dir, err)
+	}
+
+	path := filepath.Join(dir, string(barcode)+".xml")
+	if err := os.WriteFile(path, index, 0o644); err != nil {
+		return "", fmt.Errorf("write staged index %s: %w", path, err)
+	}
+
+	return path, nil
 }
 
 // TeardownActivities hosts the TeardownSession activity, which cleans up any
@@ -596,7 +637,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 
 	type driveResult struct {
 		loadedIdx int
-		indexXML  []byte
+		indexPath string
 		health    WriteHealth
 		err       error
 	}
@@ -655,17 +696,18 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 				return
 			}
 
-			var indexXML []byte
+			var indexPath string
 			if err := workflow.ExecuteActivity(retryCtx, acts.FinalizeTape, FinalizeInput{
-				Device: lt.SGDevice,
-			}).Get(retryCtx, &indexXML); err != nil {
+				Device:  lt.SGDevice,
+				Barcode: lt.Barcode,
+			}).Get(retryCtx, &indexPath); err != nil {
 				res.err = fmt.Errorf("drive %d: finalize: %w", lt.DriveIndex, err)
 				ch.Send(gctx, res)
 
 				return
 			}
 
-			res.indexXML = indexXML
+			res.indexPath = indexPath
 			// Measure write-health after the window closed (unmount and the
 			// deferred index sync have settled). This is observational only
 			// (SPEC §2 principle 2): a measurement failure is logged and the tape
@@ -699,7 +741,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 				TapeIndex:         lt.TapeIndex,
 				CopyIndex:         lt.CopyIndex,
 				SourceSlot:        lt.SourceSlot,
-				IndexXML:          res.indexXML,
+				IndexXMLPath:      res.indexPath,
 				WriteHealth:       res.health,
 				OverwroteNonBlank: lt.OverwroteNonBlank,
 			})

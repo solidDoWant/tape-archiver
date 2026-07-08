@@ -176,7 +176,7 @@ func newWritePauseEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 // to control which tapes fail.
 func expectHealthyWriteExceptFormat(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return([]byte("<index/>"), nil)
+	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return("/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(WriteHealth{}, nil)
 }
 
@@ -554,4 +554,53 @@ func TestWritePathLoadFailurePauseResume(t *testing.T) {
 
 	assert.Equal(t, 1, loadAlerts, "the operator is alerted once for the Load failure")
 	assert.Equal(t, 2, loadCalls, "Load runs once, pauses, then retries the whole set on resume")
+}
+
+// TestEjectProjectionDropsIndexAndHealth pins the Part-A fix for issue #221: the
+// Eject payload must not carry the captured LTFS index (nor the write-health),
+// only the identity and slot fields Eject actually reads. This keeps EjectInput
+// bounded regardless of run size — so a large run's post-write Eject phase never
+// fails on the Temporal payload-size limit.
+func TestEjectProjectionDropsIndexAndHealth(t *testing.T) {
+	t.Parallel()
+
+	written := []WrittenTape{
+		{
+			Barcode:      tape.Barcode("TAPE01L6"),
+			DriveIndex:   0,
+			TapeIndex:    1,
+			CopyIndex:    0,
+			SourceSlot:   4,
+			IndexXMLPath: "/stage/run-1/indexes/TAPE01L6.xml",
+			WriteHealth:  WriteHealth{Repositions: 7},
+		},
+		{
+			Barcode:      tape.Barcode("TAPE02L6"),
+			DriveIndex:   1,
+			TapeIndex:    1,
+			CopyIndex:    1,
+			SourceSlot:   5,
+			IndexXMLPath: "/stage/run-1/indexes/TAPE02L6.xml",
+			WriteHealth:  WriteHealth{Repositions: 9},
+		},
+	}
+
+	projected := ejectProjection(written)
+
+	require.Len(t, projected, 2)
+
+	for i, got := range projected {
+		assert.Empty(t, got.IndexXMLPath, "eject payload must not carry the staged index path (entry %d)", i)
+		assert.Zero(t, got.WriteHealth, "eject payload must not carry write-health (entry %d)", i)
+		// Identity and slot fields Eject reads are preserved.
+		assert.Equal(t, written[i].Barcode, got.Barcode)
+		assert.Equal(t, written[i].DriveIndex, got.DriveIndex)
+		assert.Equal(t, written[i].TapeIndex, got.TapeIndex)
+		assert.Equal(t, written[i].CopyIndex, got.CopyIndex)
+		assert.Equal(t, written[i].SourceSlot, got.SourceSlot)
+	}
+
+	// The projection must be a fresh slice: mutating it never touches the run record.
+	projected[0].Barcode = tape.Barcode("MUTATED")
+	assert.Equal(t, tape.Barcode("TAPE01L6"), written[0].Barcode, "projection must not alias the input")
 }

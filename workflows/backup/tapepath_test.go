@@ -186,7 +186,7 @@ func TestRunTapePathPassesAllowNonBlankTapes(t *testing.T) {
 			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
 			env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-				[]byte("<ltfsindex></ltfsindex>"), nil)
+				"/stage/indexes/tape.xml", nil)
 			env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 				WriteHealth{}, nil)
 			env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
@@ -253,7 +253,7 @@ func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
 			return ctx.Err()
 		})
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-		[]byte("<ltfsindex></ltfsindex>"), nil)
+		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
@@ -329,7 +329,7 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 			return nil
 		})
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-		[]byte("<ltfsindex></ltfsindex>"), nil)
+		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
 	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
@@ -435,7 +435,7 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 		fmt.Errorf("simulated format failure"))
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-		[]byte("<ltfsindex></ltfsindex>"), nil)
+		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
 
@@ -527,12 +527,12 @@ func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
 	// failure. Count the attempts to prove the retry policy is bounded rather than
 	// the Temporal-default unlimited.
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-		func(_ context.Context, _ FinalizeInput) ([]byte, error) {
+		func(_ context.Context, _ FinalizeInput) (string, error) {
 			mu.Lock()
 			finalizeAttempts++
 			mu.Unlock()
 
-			return nil, fmt.Errorf("unmount LTFS volume on /dev/sg0: persistent media error")
+			return "", fmt.Errorf("unmount LTFS volume on /dev/sg0: persistent media error")
 		})
 
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
@@ -761,7 +761,7 @@ func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
-		[]byte("<ltfsindex></ltfsindex>"), nil)
+		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
 	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)

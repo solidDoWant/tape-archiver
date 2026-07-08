@@ -96,7 +96,9 @@ where the data lives:
   the recovery ISO — and delivers the report to Discord: the report/ISO inputs — the
   staged files, the recovery binaries staged into the ISO, the pinned tool versions, and
   the captured LTFS indexes — all live here, and building from here keeps the tens-of-MB
-  ISO off the Temporal payload path and out of the control image.
+  ISO, and the per-tape LTFS indexes it embeds (each staged to disk and passed to the
+  Report phase by path, never as bytes), off the Temporal payload path and out of the
+  control image.
 
 The data worker is a **Nix-built OCI image** (`streamLayeredImage`, per media-processor)
 run by systemd-managed Docker on the host. The image bundles pinned tooling — `ltfs`,
@@ -230,7 +232,10 @@ write window.
    Writing is a pure sequential disk→tape copy whose sustained rate is monitored. The LTFS
    index is therefore written **once**, at unmount during Eject, rather than periodically
    during the write — see §14. A per-tape checksum/manifest file is written last; the
-   LTFS index is read back after unmount and captured for the ISO. The captured index is
+   LTFS index is read back after unmount and staged to disk for the ISO: `FinalizeTape`
+   writes it to a barcode-keyed file under the staging directory and returns that path, not
+   the index bytes, so the multi-MB index never rides a Temporal activity payload (the
+   Report phase, on the same data worker, reads it back from disk). The captured index is
    verified to belong to *this* mount cycle (it must postdate the mount); a stale leftover
    from a prior format of the same barcode, or a missing capture, fails the run rather than
    shipping a previous format's index.

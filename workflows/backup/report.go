@@ -248,10 +248,15 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 
 	uncompressedISOPath := filepath.Join(outDir, isoFileName)
 
+	indexes, err := tapeIndexes(input.Written)
+	if err != nil {
+		return ReportOutput{}, fmt.Errorf("collect tape indexes: %w", err)
+	}
+
 	isoInput := recoverykit.Input{
 		Report:      pdf,
 		Manifest:    sha256Manifest,
-		TapeIndexes: tapeIndexes(input.Written),
+		TapeIndexes: indexes,
 		BinariesDir: a.binariesDir,
 		SourcesDir:  a.sourcesDir,
 	}
@@ -413,17 +418,25 @@ func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, isoPath s
 
 // tapeIndexes maps each written physical tape to its LTFS index backup for the
 // recovery ISO (SPEC §10), keyed by barcode — the canonical physical ID (SPEC §6).
-func tapeIndexes(written []WrittenTape) []recoverykit.TapeIndex {
+// Each tape's index is read from the path FinalizeTape staged it to on this data
+// worker's staging volume, not carried in the activity payload, so the multi-MB
+// index never inflates the ReportInput blob (issue #221).
+func tapeIndexes(written []WrittenTape) ([]recoverykit.TapeIndex, error) {
 	indexes := make([]recoverykit.TapeIndex, 0, len(written))
 
-	for _, tape := range written {
+	for _, writtenTape := range written {
+		index, err := os.ReadFile(writtenTape.IndexXMLPath)
+		if err != nil {
+			return nil, fmt.Errorf("read staged LTFS index for tape %s: %w", writtenTape.Barcode, err)
+		}
+
 		indexes = append(indexes, recoverykit.TapeIndex{
-			Barcode: string(tape.Barcode),
-			Index:   tape.IndexXML,
+			Barcode: string(writtenTape.Barcode),
+			Index:   index,
 		})
 	}
 
-	return indexes
+	return indexes, nil
 }
 
 // buildReportManifest assembles the report.Manifest from the run state (SPEC §9).

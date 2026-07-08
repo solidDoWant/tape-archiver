@@ -149,7 +149,7 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 
 	// FinalizeTape unmounts, flushing the LTFS index to tape so the re-mount below
 	// reads a durably written volume.
-	_, err = writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice})
+	_, err = writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
 	require.NoError(t, err, "FinalizeTape")
 
 	// --- Re-mount the finalized volume and verify on-tape contents ------------
@@ -286,7 +286,7 @@ func TestWriteTreeCopyFailureLeavesNoManifest(t *testing.T) {
 	// WriteTree parked the mount before the copy; finalize it to unmount/flush the
 	// partially written tape, exactly as the production Teardown/Finalize path
 	// would leave it.
-	_, err = writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev})
+	_, err = writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev, Barcode: barcode})
 	require.NoError(t, err, "FinalizeTape must unmount the partially written tape")
 
 	// Re-mount and assert manifest.json is absent — the completeness signal must

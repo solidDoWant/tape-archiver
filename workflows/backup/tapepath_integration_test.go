@@ -166,21 +166,25 @@ func TestTapePath(t *testing.T) {
 		Archives:  archives,
 	}), "WriteTree")
 
-	// FinalizeTape (AC3: LTFS index captured).
-	indexXML, err := writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice})
+	// FinalizeTape stages the LTFS index to disk and returns its path (AC3: LTFS
+	// index captured; staged rather than returned per issue #221).
+	indexPath, err := writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
 	require.NoError(t, err, "FinalizeTape")
+	require.NotEmpty(t, indexPath, "FinalizeTape must return the staged index path")
+	indexXML, err := os.ReadFile(indexPath)
+	require.NoError(t, err, "read staged LTFS index")
 	assert.NotEmpty(t, indexXML, "captured LTFS index must not be empty")
 	assert.Contains(t, string(indexXML), "<ltfsindex", "captured index must be LTFS XML")
 	assert.Contains(t, string(indexXML), "<name>"+string(lt.Barcode)+"</name>",
 		"index must name the volume by barcode")
 
 	written := WrittenTape{
-		Barcode:    lt.Barcode,
-		DriveIndex: lt.DriveIndex,
-		TapeIndex:  lt.TapeIndex,
-		CopyIndex:  lt.CopyIndex,
-		SourceSlot: lt.SourceSlot,
-		IndexXML:   indexXML,
+		Barcode:      lt.Barcode,
+		DriveIndex:   lt.DriveIndex,
+		TapeIndex:    lt.TapeIndex,
+		CopyIndex:    lt.CopyIndex,
+		SourceSlot:   lt.SourceSlot,
+		IndexXMLPath: indexPath,
 	}
 
 	// --- Phase: Eject ---------------------------------------------------------
@@ -448,11 +452,14 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 			Archives:  archives,
 		}), "set %d: WriteTree", setIndex)
 
-		indexXML, err := writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice})
+		indexPath, err := writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
 		require.NoErrorf(t, err, "set %d: FinalizeTape", setIndex)
+		indexXML, err := os.ReadFile(indexPath)
+		require.NoErrorf(t, err, "set %d: read staged LTFS index", setIndex)
 		assert.Containsf(t, string(indexXML), "<ltfsindex", "set %d: captured index must be LTFS XML", setIndex)
 
 		// --- Eject the set (frees the drive for the next set) --------------------
+		// Eject needs only identity/slot fields, not the index (issue #221).
 		ejectResult, err := ejectActs.Eject(t.Context(), EjectInput{
 			Changer: testutil.ChangerDev(t),
 			WrittenTapes: []WrittenTape{{
@@ -461,7 +468,6 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 				TapeIndex:  lt.TapeIndex,
 				CopyIndex:  lt.CopyIndex,
 				SourceSlot: lt.SourceSlot,
-				IndexXML:   indexXML,
 			}},
 		})
 		require.NoErrorf(t, err, "set %d: Eject", setIndex)
