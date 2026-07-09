@@ -6,7 +6,7 @@ MODULE_NAME := $(shell go list -m)
 
 BIN_DIR := $(PROJECT_DIR)/bin
 
-GO_SOURCE_FILES := $(shell find cmd pkg \( -name '*.go' ! -name '*_test.go' \) 2>/dev/null)
+GO_SOURCE_FILES := $(shell find cmd pkg internal workflows \( -name '*.go' ! -name '*_test.go' \) 2>/dev/null)
 
 # web/ (Vite + React + TypeScript) frontend, embedded into cmd/web via
 # go:embed (cmd/web/assets.go). WEB_DIR is the npm project root; vite.config.ts
@@ -436,13 +436,22 @@ zpool-down: ## Destroy the ephemeral ZFS test pool.
 WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
 
 .PHONY: web-dev
-# Depends on the *-up targets directly (not web-dev-up.sh calling `make`
+# Depends on temporal-up/mhvtl-up directly (not web-dev-up.sh calling `make`
 # itself), the same pattern test-integration/test-e2e already use, so Make's
 # own dependency graph — not ad hoc shell — decides what needs bringing up.
 # recovery-binaries provides the real static age/par2/zstd/tar the data
 # worker's Report phase requires (nix build .#recoveryBinaries, cached after
 # the first run).
-web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up zpool-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground (Ctrl+C stops only the web server — see docs/web-ui.md's "Local development").
+#
+# Deliberately NOT a zpool-up prerequisite here, unlike temporal-up/mhvtl-up:
+# zpool-up.sh destroys and recreates the pool on every invocation (the right
+# behavior for test-integration/test-e2e, which each want a guaranteed-clean
+# pool) — for web-dev, which is meant to be re-run repeatedly across a dev
+# session, that would silently blow away the ZFS snapshot backing whatever
+# sample runs are still in flight (webdevseed's background seeding pass, or
+# any run submitted through the UI mid-session) every time. web-dev-up.sh
+# instead only calls zpool-up when the pool isn't already present.
+web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground (Ctrl+C stops only the web server — see docs/web-ui.md's "Local development").
 	@BIN_DIR=$(BIN_DIR) WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-up.sh
 
 .PHONY: web-dev-down

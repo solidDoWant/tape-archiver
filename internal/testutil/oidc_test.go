@@ -45,7 +45,11 @@ func TestNewStandaloneFakeOIDCProvider_realAuthCodeFlow(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// t.Context() is already canceled by the time Cleanup funcs run, so a
+		// fresh deadline needs context.WithoutCancel to strip that
+		// cancellation first — same pattern e2e/harness_test.go's
+		// terminateOnCleanup already uses for the same reason.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
 		defer cancel()
 
 		_ = server.Shutdown(ctx)

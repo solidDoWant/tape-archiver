@@ -28,23 +28,49 @@ stop_daemon() {
   local pid
   pid="$(cat "$pidfile")"
 
-  if ! kill -0 "$pid" 2> /dev/null; then
+  # sudo, and the whole process GROUP (pkill --pgroup), not a bare
+  # single-PID kill:
+  #
+  # 1. worker-control and worker-data run under sudo (web-dev-up.sh — their
+  #    activities need root for real zfs/zpool commands), so an unprivileged
+  #    `kill` against them fails with "Operation not permitted" and silently
+  #    leaves them running. sudo can signal a user-owned process
+  #    (webdevoidc/webdevseed) exactly as well as a root-owned one, so using
+  #    it uniformly here is correct for all four daemons.
+  # 2. $pid here is only ever the PID setsid itself reports via bash's $! —
+  #    for a "setsid sudo env ... worker &" launch, that's sudo's own PID,
+  #    not the real worker process sudo forks. A single-PID SIGKILL against
+  #    sudo kills sudo before it gets a chance to forward anything to its
+  #    child, orphaning the real (root-owned) worker process — it keeps
+  #    running, un-managed, even though this function reports success.
+  #    Signaling the whole process group (setsid gives the group the same ID
+  #    as the leader PID recorded here) reaches that child too, regardless of
+  #    how many fork/exec layers sudo introduces.
+  #
+  # Not `kill -- "-$pid"` (the traditional POSIX "negative PID = process
+  # group" kill(2) target): confirmed the hard way that util-linux's kill
+  # binary (pkgs.util-linux, this repo's own setsid dependency) does not
+  # support it — it parses a leading "-" as an option/name, not a negative
+  # PID, and always reports "cannot find process". pkill --pgroup (procps,
+  # pkgs.procps — see flake.nix) is the reliable, portable way to do this
+  # instead; -0/-TERM/-KILL below are pkill's --signal values, not kill(1)'s.
+  if ! sudo pgrep -g "$pid" > /dev/null 2>&1; then
     echo "==> $name (pid $pid) already stopped"
     rm -f "$pidfile"
     return 0
   fi
 
   echo "==> stopping $name (pid $pid)..."
-  kill -TERM "$pid" 2> /dev/null || true
+  sudo pkill --pgroup "$pid" --signal TERM 2> /dev/null || true
 
   for _ in $(seq 1 20); do
-    kill -0 "$pid" 2> /dev/null || break
+    sudo pgrep -g "$pid" > /dev/null 2>&1 || break
     sleep 0.5
   done
 
-  if kill -0 "$pid" 2> /dev/null; then
+  if sudo pgrep -g "$pid" > /dev/null 2>&1; then
     echo "==> $name (pid $pid) did not exit in time; sending SIGKILL"
-    kill -KILL "$pid" 2> /dev/null || true
+    sudo pkill --pgroup "$pid" --signal KILL 2> /dev/null || true
   fi
 
   rm -f "$pidfile"
@@ -59,6 +85,9 @@ stop_daemon worker-data
 stop_daemon webdevoidc
 
 echo "==> removing $WEB_DEV_STATE_DIR"
-rm -rf "$WEB_DEV_STATE_DIR"
+# sudo: worker-data (running as root — see web-dev-up.sh) writes real staging
+# files (archives, PAR2 volumes, the PDF report) under here as root, which an
+# unprivileged rm cannot remove.
+sudo rm -rf "$WEB_DEV_STATE_DIR"
 
 echo "==> web dev stack (OIDC provider + workers) is down."
