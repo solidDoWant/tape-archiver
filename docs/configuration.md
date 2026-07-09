@@ -421,10 +421,10 @@ alerting works even when config parsing fails.
 The `web` binary (the browser UI's HTTP server — see `docs/web-ui-design.md`) is a
 separate process from `worker`/`tapectl` and reads its own environment variables, though
 it shares the Temporal client factory (`pkg/temporalclient`) and the
-`METRICS_ADDR`/`HEALTH_ADDR` conventions with `worker`. It now serves the SPA plus a
-read-only JSON API under `/api/*` (listing/describing backup runs via Temporal
-visibility); submitting runs, live updates, resume/abort, and OIDC auth land in later
-sub-issues and will extend this table further.
+`METRICS_ADDR`/`HEALTH_ADDR` conventions with `worker`. It serves the SPA, a read-only
+JSON API under `/api/*` (listing/describing backup runs via Temporal visibility), and
+run submission (including dry-run); live updates, resume/abort, and OIDC auth land in
+later sub-issues and will extend this table further.
 
 | Variable | Required | Description |
 |----------|----------|--------------|
@@ -434,6 +434,7 @@ sub-issues and will extend this table further.
 | `METRICS_SCRAPE_WAIT_TIMEOUT` | no | Same semantics as the worker's setting above: bounds the end-of-run wait for a final Prometheus scrape before `cmd/web` shuts its `/metrics` server down. Defaults to `60s`; set to `0s` to disable the wait. |
 | `TEMPORAL_ADDRESS` / `TEMPORAL_NAMESPACE` / `TEMPORAL_API_KEY` / `TEMPORAL_TLS` | yes (`TEMPORAL_ADDRESS`) | Same envconfig-driven Temporal client settings documented above for `worker`/`tapectl` (`pkg/temporalclient`) — `cmd/web` connects to the same Temporal frontend to serve `/api/runs` and `/api/runs/{runID}`. |
 | `LOG_LEVEL` | no | Same semantics as the worker's `LOG_LEVEL` above: `debug`, `info`, `warn` (or `warning`), or `error`, case-insensitive, defaulting to `info`. |
+| `MHVTL_CHANGER_DEV` / `MHVTL_DRIVE0_DEV` / `MHVTL_DRIVE1_DEV` | only for dry-run submissions | Same mhvtl device nodes `tapectl run --dry-run` requires (see above). `POST /api/runs` with `"dryRun": true` fails closed with `400` unless all three are set on `cmd/web`'s own environment — a dry-run submitted through the browser never falls back to real hardware. |
 
 `cmd/web` fails to start if it cannot reach Temporal (same startup health check as
 `worker`/`tapectl` — `pkg/temporalclient.New` — since a run browser that cannot reach
@@ -448,6 +449,26 @@ of the singleton `backup` workflow ID, newest first; `GET /api/runs/{runID}` (Te
 run ID, which disambiguates individual executions of that one workflow ID) additionally
 reports the last completed phase via the existing `lastCompletedPhase` query. An unknown
 but well-formed run ID is `404`; a malformed one (Temporal run IDs are UUIDs) is `400`.
+
+#### `POST /api/runs`
+
+Submits a backup run — the browser's front door to the same submission path
+`tapectl run [--dry-run]` uses (`pkg/runsubmit`, shared by both so they can never
+drift). The request body is `{"config": <run-config JSON>, "dryRun": <bool>}`; `config`
+is validated with the same `internal/config` rules `tapectl` applies (unknown fields
+rejected, all cross-field invariants checked) before Temporal is ever contacted. When
+`dryRun` is `true`, the library device targets are redirected to the `mhvtl` nodes named
+by `MHVTL_CHANGER_DEV`/`MHVTL_DRIVE0_DEV`/`MHVTL_DRIVE1_DEV` and optical burning is
+disabled — identical to `tapectl run --dry-run` (see
+[Web UI environment variables](#web-ui-environment-variables-cmdweb) above).
+
+On success the response is `201 Created` with `{"workflowId": "backup", "runId": "..."}`
+(a `Location: /api/runs/{runId}` header points at the new run's detail endpoint). An
+invalid config, malformed request body, or a dry-run with the mhvtl variables unset is
+`400` before any Temporal RPC is made. Because backup runs are a singleton (SPEC §4.2,
+workflow ID always `backup`), a submission while one is already in progress is refused
+with `409 Conflict` rather than being queued or silently replacing the in-flight run —
+the same guard `tapectl run`'s `WorkflowIDConflictPolicy` enforces.
 
 ### Health endpoints
 
