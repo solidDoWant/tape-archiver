@@ -3,6 +3,7 @@ package runsapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -142,11 +143,17 @@ func TestListRuns(t *testing.T) {
 				listErr: assertError{"visibility unavailable"},
 			},
 			wantStatus: http.StatusBadGateway,
+			errAssert:  require.Error,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			errAssert := test.errAssert
+			if errAssert == nil {
+				errAssert = require.NoError
+			}
+
 			handler := New(test.client)
 
 			var body RunsResponse
@@ -157,7 +164,12 @@ func TestListRuns(t *testing.T) {
 			if test.wantStatus == http.StatusOK {
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 				assert.Len(t, body.Runs, test.wantRunCount)
+				errAssert(t, nil)
+
+				return
 			}
+
+			errAssert(t, decodeAPIError(t, recorder))
 		})
 	}
 
@@ -253,6 +265,7 @@ func TestGetRun(t *testing.T) {
 		client     *fakeTemporalClient
 		wantStatus int
 		wantPhase  string
+		errAssert  require.ErrorAssertionFunc
 	}{
 		{
 			name:  "a known run returns detail including the last completed phase",
@@ -273,6 +286,7 @@ func TestGetRun(t *testing.T) {
 				describeErr: &serviceerror.NotFound{Message: "not found"},
 			},
 			wantStatus: http.StatusNotFound,
+			errAssert:  require.Error,
 		},
 		{
 			name:  "a non-NotFound Temporal error is reported as a 502",
@@ -281,6 +295,7 @@ func TestGetRun(t *testing.T) {
 				describeErr: assertError{"transient RPC failure"},
 			},
 			wantStatus: http.StatusBadGateway,
+			errAssert:  require.Error,
 		},
 		{
 			name:  "a malformed run ID is reported as a 400, not a 404 or 502",
@@ -289,6 +304,7 @@ func TestGetRun(t *testing.T) {
 				describeErr: &serviceerror.InvalidArgument{Message: "Invalid RunId."},
 			},
 			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
 		},
 		{
 			name:  "a failed phase query does not fail the request; phase reports empty",
@@ -306,6 +322,11 @@ func TestGetRun(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			errAssert := test.errAssert
+			if errAssert == nil {
+				errAssert = require.NoError
+			}
+
 			handler := New(test.client)
 
 			recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+test.runID, nil)
@@ -316,9 +337,28 @@ func TestGetRun(t *testing.T) {
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &detail))
 				assert.Equal(t, test.runID, detail.RunID)
 				assert.Equal(t, test.wantPhase, detail.LastCompletedPhase)
+				errAssert(t, nil)
+
+				return
 			}
+
+			errAssert(t, decodeAPIError(t, recorder))
 		})
 	}
+}
+
+// decodeAPIError decodes a non-2xx response's JSON error body into an error,
+// so table-driven tests can assert on it with a require.ErrorAssertionFunc
+// like any other error-returning call, per this repo's testing style.
+func decodeAPIError(t *testing.T, recorder *httptest.ResponseRecorder) error {
+	t.Helper()
+
+	var body errorResponse
+
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Error)
+
+	return errors.New(body.Error)
 }
 
 // assertError is a minimal error type distinct from any serviceerror, so

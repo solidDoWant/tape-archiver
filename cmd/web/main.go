@@ -132,7 +132,23 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	if err != nil {
 		return fmt.Errorf("set up health server: %w", err)
 	}
-	defer healthShutdown()
+	// healthShutdown is called explicitly right after the main listener stops
+	// accepting connections (not deferred to the end of run()): /readyz only
+	// reflects Temporal connectivity, so if it stayed up through the
+	// metrics-scrape grace period below, it would keep reporting 200 for that
+	// whole window after the main port had already stopped accepting new
+	// connections — during which a Kubernetes Service would keep routing new
+	// traffic at a pod no longer serving it. Falling through this function
+	// without an explicit shutdown call (e.g. an early return before it) still
+	// leaks the health server; that only happens on startup failures where the
+	// process is about to exit anyway.
+	healthShutdownPending := true
+
+	defer func() {
+		if healthShutdownPending {
+			healthShutdown()
+		}
+	}()
 
 	handler, err := webserver.NewHandler(assets, runsapi.New(temporalClient))
 	if err != nil {
@@ -184,6 +200,13 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
+
+	// The main listener no longer accepts connections as of the line above;
+	// stop reporting ready now rather than waiting for the deferred shutdown
+	// at the end of run() — see the comment where healthShutdown is set up.
+	healthShutdown()
+
+	healthShutdownPending = false
 
 	// Give Prometheus a bounded window to collect a final scrape of
 	// end-of-lifecycle metrics before the deferred metricsShutdown() closes

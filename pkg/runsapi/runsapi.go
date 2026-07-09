@@ -20,9 +20,17 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
+
+// requestTimeout bounds every Temporal RPC a handler makes. r.Context() alone
+// is not enough: the net/http server's ReadTimeout/WriteTimeout govern the
+// client connection, not an in-flight handler's context, so without an
+// explicit deadline a stalled Temporal RPC would block the handler goroutine
+// (and the underlying gRPC call) indefinitely.
+const requestTimeout = 10 * time.Second
 
 // listPageSize bounds a single GET /api/runs response. Backup runs are a
 // serial singleton (one at a time, one storage host), so even generous
@@ -104,14 +112,15 @@ type handler struct {
 // advanced visibility accepts it. Sorting client-side works against both, so
 // it is the only portable choice here.
 func (h *handler) listRuns(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
 
 	response, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Query:    fmt.Sprintf("WorkflowId = %q", backup.WorkflowID),
 		PageSize: listPageSize,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Errorf("list workflow executions: %w", err))
+		writeError(w, statusForTemporalError(err), fmt.Errorf("list workflow executions: %w", err))
 
 		return
 	}
@@ -133,7 +142,9 @@ func (h *handler) listRuns(w http.ResponseWriter, r *http.Request) {
 // workflow ID is always backup.WorkflowID; the run ID disambiguates which
 // execution/attempt of it).
 func (h *handler) getRun(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+
 	runID := r.PathValue("runID")
 
 	if runID == "" {
@@ -142,34 +153,51 @@ func (h *handler) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	description, err := h.temporalClient.DescribeWorkflowExecution(ctx, backup.WorkflowID, runID)
-	if err != nil {
-		var notFound *serviceerror.NotFound
-		if errors.As(err, &notFound) {
-			writeError(w, http.StatusNotFound, fmt.Errorf("run %q not found", runID))
+	// DescribeWorkflowExecution and the last-completed-phase query are
+	// independent RPCs — neither needs the other's result, only
+	// backup.WorkflowID and runID — so they run concurrently rather than
+	// paying the sum of both RPCs' latency.
+	group, groupCtx := errgroup.WithContext(ctx)
 
-			return
+	var description *workflowservice.DescribeWorkflowExecutionResponse
+
+	group.Go(func() error {
+		var err error
+
+		description, err = h.temporalClient.DescribeWorkflowExecution(groupCtx, backup.WorkflowID, runID)
+
+		return err
+	})
+
+	var lastCompletedPhase string
+
+	group.Go(func() error {
+		lastCompletedPhase = queryLastCompletedPhase(groupCtx, h.temporalClient, runID)
+
+		return nil
+	})
+
+	if err := group.Wait(); err != nil {
+		switch status := statusForTemporalError(err); status {
+		case http.StatusNotFound:
+			writeError(w, status, fmt.Errorf("run %q not found", runID))
+		case http.StatusBadRequest:
+			// A syntactically invalid run ID (Temporal run IDs are UUIDs)
+			// comes back as InvalidArgument rather than NotFound — e.g.
+			// "Invalid RunId." — so it is a 400 (bad client input), not a
+			// 404 (well-formed ID, no such run) or a 502 (this is not an
+			// upstream failure).
+			writeError(w, status, fmt.Errorf("invalid run ID %q: %w", runID, err))
+		default:
+			writeError(w, status, fmt.Errorf("describe workflow execution: %w", err))
 		}
-
-		// A syntactically invalid run ID (Temporal run IDs are UUIDs) comes
-		// back as InvalidArgument rather than NotFound — e.g. "Invalid
-		// RunId." — so it is a 400 (bad client input), not a 404 (well-formed
-		// ID, no such run) or a 502 (this is not an upstream failure).
-		var invalidArgument *serviceerror.InvalidArgument
-		if errors.As(err, &invalidArgument) {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid run ID %q: %w", runID, err))
-
-			return
-		}
-
-		writeError(w, http.StatusBadGateway, fmt.Errorf("describe workflow execution: %w", err))
 
 		return
 	}
 
 	detail := RunDetail{
 		RunSummary:         toRunSummary(description.GetWorkflowExecutionInfo()),
-		LastCompletedPhase: queryLastCompletedPhase(ctx, h.temporalClient, runID),
+		LastCompletedPhase: lastCompletedPhase,
 	}
 
 	writeJSON(w, http.StatusOK, detail)
@@ -196,6 +224,28 @@ func queryLastCompletedPhase(ctx context.Context, temporalClient TemporalClient,
 	}
 
 	return phase
+}
+
+// statusForTemporalError classifies a Temporal RPC error into the HTTP
+// status that best represents it, shared by every runsapi handler so future
+// endpoints (submit/dry-run, resume/abort — docs/web-ui-design.md §8) extend
+// one consistent mapping instead of each hand-rolling its own: a missing
+// resource is serviceerror.NotFound (404), a malformed client-supplied
+// identifier/argument is serviceerror.InvalidArgument (400), and anything
+// else is 502 — this handler is a proxy over Temporal, so an unclassified
+// failure is upstream, not the client's fault.
+func statusForTemporalError(err error) int {
+	var notFound *serviceerror.NotFound
+	if errors.As(err, &notFound) {
+		return http.StatusNotFound
+	}
+
+	var invalidArgument *serviceerror.InvalidArgument
+	if errors.As(err, &invalidArgument) {
+		return http.StatusBadRequest
+	}
+
+	return http.StatusBadGateway
 }
 
 // toRunSummary maps a Temporal visibility record to the API's RunSummary
