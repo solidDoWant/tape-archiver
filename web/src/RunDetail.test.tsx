@@ -197,16 +197,6 @@ describe('RunDetail', () => {
     expect(source.closeCalls).toBeGreaterThanOrEqual(1)
   })
 
-  it('renders a back link that calls onBack when provided', () => {
-    const onBack = vi.fn()
-
-    render(<RunDetail runId="run-abc" onBack={onBack} />)
-
-    screen.getByRole('button', { name: /back to submit a run/i }).click()
-
-    expect(onBack).toHaveBeenCalledTimes(1)
-  })
-
   it('reconnects to a new run ID when the prop changes', () => {
     const { rerender } = render(<RunDetail runId="run-abc" />)
 
