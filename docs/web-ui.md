@@ -178,9 +178,12 @@ $ make web-dev
    appear in History over the next few minutes (tail the printed log path
    to watch progress).
 
-   Ctrl+C stops only this web server. Temporal/mhvtl/zpool, the OIDC
-   provider, and the workers stay up for the next 'make web-dev'. Run
-   'make web-dev-down' to tear everything down.
+   Ctrl+C (or SIGTERM) stops the whole dev stack: cmd/web shuts down first,
+   then the full 'make web-dev-down' teardown runs automatically —
+   Temporal/mhvtl/zpool, the OIDC provider, and the workers all come down, so
+   the next 'make web-dev' always starts from a clean slate. Run
+   'make web-dev-down' yourself only after a crash/SIGKILL, which cannot be
+   trapped.
 ==============================================================================
 ```
 
@@ -190,17 +193,22 @@ is a real run against `mhvtl` and the ZFS test pool (staging, tar, age encryptio
 LTFS write, eject, report), so History fills in progressively over the next few minutes
 rather than all at once.
 
-Ctrl+C stops only the `cmd/web` process — Temporal, `mhvtl`, the ZFS pool, the OIDC
-provider, and the control/data workers all stay up, so the next `make web-dev` (e.g.
-after a code change and rebuild) comes back in seconds instead of re-doing all of that.
-`make web-dev` is idempotent: running it again against an already-up stack skips
-anything already running and just submits a couple more sample runs on top — cheap,
-since they're dry-runs.
+Interrupting `make web-dev` (Ctrl+C, which sends `SIGINT` to the whole foreground
+process group, or `SIGTERM` sent the same way — e.g. by a supervisor) tears the entire
+stack back down: `cmd/web` shuts down gracefully first, and once it has actually
+exited, the full `web-dev-down` teardown runs — the OIDC provider, both workers, and
+any in-flight seeder are stopped, the state dir is removed, and Temporal/`mhvtl`/the
+ZFS pool come down via their own `*-down` targets. This is a deliberate change from the
+original fast-restart design (issue #265): Temporal and `mhvtl` state have to move in
+lockstep (stale `mhvtl` slot state from an interrupted seeding pass, for example, breaks
+the next run's `Load` step), and nothing enforces that if only part of the stack comes
+down. So every `make web-dev` now starts from a clean slate — dev Temporal, blank
+virtual tapes, and a freshly recreated pool — at the cost of a slower restart than the
+few-seconds turnaround the original design aimed for.
 
-When you're done, `make web-dev-down` tears down everything `make web-dev` brought up —
-the OIDC provider and workers, then Temporal/`mhvtl`/the ZFS pool via their own
-`*-down` targets — following the same naming convention those targets already
-establish.
+`make web-dev-down` remains available (and idempotent) as its own target — it's what
+`make web-dev` itself runs on interrupt, and it's also the remedy after a crash or
+`SIGKILL`, neither of which can be trapped and cleaned up automatically.
 
 **Local OIDC provider — how it works and its one real tradeoff.** `cmd/web` refuses to
 start without a real, reachable OIDC provider (see
