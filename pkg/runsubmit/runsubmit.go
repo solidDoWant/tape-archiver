@@ -34,6 +34,24 @@ const (
 	MHVTLDrive1Env  = "MHVTL_DRIVE1_DEV"
 )
 
+// MissingMHVTLEnvError is returned by ApplyDryRun when one or more of the
+// mhvtl device environment variables are unset. It is a distinguishable type
+// (rather than a bare fmt.Errorf) so a caller that needs to present this
+// specific condition differently — e.g. cmd/tapectl naming the `--dry-run`
+// flag it corresponds to, which this generic, caller-agnostic message
+// deliberately does not — can detect it via errors.As instead of matching on
+// message text.
+type MissingMHVTLEnvError struct {
+	Missing []string
+}
+
+func (e *MissingMHVTLEnvError) Error() string {
+	return fmt.Sprintf("dry-run requires the mhvtl virtual-library device(s) to be named "+
+		"explicitly, but %s %s unset; set them to the mhvtl nodes (the dev shell's `mhvtl-up` "+
+		"exports these) so a dry-run never targets real hardware",
+		strings.Join(e.Missing, ", "), pluralIsAre(len(e.Missing)))
+}
+
 // ApplyDryRun rewrites the library device targets to the mhvtl virtual library
 // so the run exercises virtual hardware instead of the real changer and drives.
 // The two mhvtl drives replace whatever drives the config named; the blank
@@ -84,10 +102,7 @@ func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writ
 	}
 
 	if len(missing) != 0 {
-		return fmt.Errorf("dry-run requires the mhvtl virtual-library device(s) to be named "+
-			"explicitly, but %s %s unset; set them to the mhvtl nodes (the dev shell's `mhvtl-up` "+
-			"exports these) so a dry-run never targets real hardware",
-			strings.Join(missing, ", "), pluralIsAre(len(missing)))
+		return &MissingMHVTLEnvError{Missing: missing}
 	}
 
 	cfg.Library.Changer = changer
@@ -97,8 +112,11 @@ func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writ
 	// only safe target is off. Enabled() is nil-safe, so this is a no-op when the
 	// section is absent or already disabled.
 	if cfg.Delivery.OpticalBurn.Enabled() {
-		// Best-effort advisory: a failed write to warnOut must not fail the dry-run.
-		_, _ = fmt.Fprintln(warnOut, "dry-run: optical burning disabled — mhvtl provides no "+
+		// Best-effort advisory: a failed write to warnOut must not fail the
+		// dry-run. The "tapectl: " prefix matches tapectl's own diagnostic
+		// convention; pkg/runsapi passes io.Discard here, so the exact text is
+		// only ever observed on the CLI path.
+		_, _ = fmt.Fprintln(warnOut, "tapectl: dry-run: optical burning disabled — mhvtl provides no "+
 			"virtual optical burner, so delivery.opticalBurn is skipped and the real burner is "+
 			"never probed, blanked, or written")
 	}
@@ -169,16 +187,34 @@ func Submit(ctx context.Context, temporalClient TemporalClient, cfg *config.Conf
 // operator-facing message. A conflict with an already-running backup (the
 // singleton guard firing) is reported as an actionable message naming the
 // in-progress run rather than an opaque Temporal error; every other error is
-// wrapped verbatim. The original error is preserved via %w in both cases, so
-// callers that need to classify the error further (e.g. pkg/runsapi mapping
-// it to an HTTP status) can still errors.As through the translated message.
+// wrapped verbatim via %w. The already-started case uses submitConflictError
+// instead of %w so its Error() text stays exactly the crafted sentence (no
+// raw Temporal error text appended) while its Unwrap() still exposes the
+// original error, so a caller that needs to classify the error further (e.g.
+// pkg/runsapi mapping it to an HTTP status) can still errors.As through it.
 func TranslateSubmitError(err error) error {
 	var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
 	if errors.As(err, &alreadyStarted) {
-		return fmt.Errorf("a backup run is already in progress (workflow ID %q, run ID %s); "+
-			"backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status`: %w",
-			backup.WorkflowID, alreadyStarted.RunId, err)
+		return &submitConflictError{
+			msg: fmt.Sprintf("a backup run is already in progress (workflow ID %q, run ID %s); "+
+				"backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status`",
+				backup.WorkflowID, alreadyStarted.RunId),
+			err: err,
+		}
 	}
 
 	return fmt.Errorf("submit backup workflow: %w", err)
 }
+
+// submitConflictError is TranslateSubmitError's already-started case: its
+// Error() is exactly the crafted operator-facing sentence, with no trailing
+// raw Temporal error text, while Unwrap() still exposes the original error
+// for errors.As-based classification.
+type submitConflictError struct {
+	msg string
+	err error
+}
+
+func (e *submitConflictError) Error() string { return e.msg }
+
+func (e *submitConflictError) Unwrap() error { return e.err }

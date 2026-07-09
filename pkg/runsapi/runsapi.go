@@ -268,9 +268,30 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
 
+	// http.MaxBytesReader (not a bare io.LimitReader): an oversized body needs
+	// a distinguishable signal, not a silent truncation that json.Decode would
+	// otherwise fail on with a generic, confusing "unexpected EOF".
+	body := http.MaxBytesReader(w, r.Body, maxSubmitBodyBytes)
+
 	var request SubmitRunRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxSubmitBodyBytes)).Decode(&request); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("parse request body: %w", err))
+
+	decoder := json.NewDecoder(body)
+	// DisallowUnknownFields: SubmitRunRequest has exactly two fields, and a
+	// misspelled/wrong "dryRun" key (e.g. "isDryRun") must fail the request
+	// rather than silently defaulting DryRun to false and submitting a real,
+	// non-dry-run run — the same fail-closed reasoning internal/config.Parse
+	// already applies one call below.
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&request); err != nil {
+		status := http.StatusBadRequest
+
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			status = http.StatusRequestEntityTooLarge
+		}
+
+		writeError(w, status, fmt.Errorf("parse request body: %w", err))
 
 		return
 	}

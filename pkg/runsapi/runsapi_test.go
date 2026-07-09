@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -497,6 +498,30 @@ func TestSubmitRun(t *testing.T) {
 			getenv:     func(string) string { return "" },
 			client:     &fakeTemporalClient{},
 			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
+			// AC: a misspelled/unrecognized envelope key (e.g. "isDryRun"
+			// instead of "dryRun") must fail the request rather than silently
+			// defaulting dryRun to false and submitting a real run (CLAUDE.md
+			// Hardware and Safety).
+			name:       "an unrecognized envelope field is rejected, not silently ignored",
+			body:       []byte(`{"config": ` + validSubmitConfigJSON + `, "isDryRun": true}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
+			// Padding lives inside the recognized "config" field (as an
+			// oversized JSON string value) rather than an extra top-level
+			// key, so this exercises the size cap in isolation from the
+			// unrecognized-field rejection above.
+			name:       "a request body over the size cap is rejected as 413, not a generic 400",
+			body:       []byte(`{"config": "` + strings.Repeat("x", maxSubmitBodyBytes) + `"}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusRequestEntityTooLarge,
 			errAssert:  require.Error,
 		},
 		{

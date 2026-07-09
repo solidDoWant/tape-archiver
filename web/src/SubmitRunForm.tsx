@@ -79,6 +79,25 @@ function SubmitRunForm() {
         return
       }
 
+      if (
+        !body ||
+        typeof body.workflowId !== 'string' ||
+        typeof body.runId !== 'string'
+      ) {
+        // A 2xx with an empty/malformed body (e.g. a proxy stripping it) is
+        // not a network failure — the run may well have been submitted — but
+        // it can't be reported as a success either, since there's no run ID
+        // to show. Report it plainly instead of letting a property access
+        // throw here and get misreported as "could not reach the server" by
+        // the catch below.
+        setState({
+          status: 'error',
+          error: 'The server accepted the submission but returned an unreadable response.',
+        })
+
+        return
+      }
+
       setState({ status: 'success', result: { workflowId: body.workflowId, runId: body.runId } })
     } catch (networkError) {
       const message = networkError instanceof Error ? networkError.message : String(networkError)

@@ -198,7 +198,7 @@ func TestSubmit(t *testing.T) {
 		cfg := parseConfig(t, validConfigJSON)
 		fake := &fakeSubmitClient{err: errors.New("connection refused")}
 
-		_, err := Submit(context.Background(), fake, cfg)
+		_, err := Submit(t.Context(), fake, cfg)
 		require.Error(t, err)
 
 		require.True(t, fake.captured)
@@ -212,7 +212,7 @@ func TestSubmit(t *testing.T) {
 		started := serviceerror.NewWorkflowExecutionAlreadyStarted("already started", "req-1", "run-abc")
 		fake := &fakeSubmitClient{err: started}
 
-		_, err := Submit(context.Background(), fake, cfg)
+		_, err := Submit(t.Context(), fake, cfg)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "already in progress")
 
