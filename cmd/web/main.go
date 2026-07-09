@@ -1,12 +1,13 @@
 // Command web is the tape-archiver web UI's HTTP server: it serves the built
 // React SPA (embedded via go:embed — see assets.go) at "/" and the JSON API
 // (pkg/runsapi) under "/api/*", backed by a real Temporal client
-// (pkg/temporalclient — same TEMPORAL_* envconfig as cmd/worker/cmd/tapectl).
-// OIDC auth lands in a later sub-issue of the web UI epic
-// (docs/web-ui-design.md §8). Serving logic lives in pkg/webserver/pkg/runsapi
-// so this command stays a thin wrapper: parse configuration, build the
-// Temporal client and handler, run health/metrics/main HTTP servers, shut
-// them all down cleanly on SIGINT/SIGTERM.
+// (pkg/temporalclient — same TEMPORAL_* envconfig as cmd/worker/cmd/tapectl),
+// gated behind OIDC authorization-code-flow authentication (pkg/webauth —
+// docs/web-ui-design.md §4, §6). Serving logic lives in
+// pkg/webserver/pkg/runsapi/pkg/webauth so this command stays a thin
+// wrapper: parse configuration, build the Temporal client and handler, run
+// health/metrics/main HTTP servers, shut them all down cleanly on
+// SIGINT/SIGTERM.
 //
 // Main listen address is configured via the WEB_LISTEN_ADDRESS environment
 // variable (e.g. ":8080" or "127.0.0.1:8080"), defaulting to ":8080" when
@@ -20,6 +21,26 @@
 // Kubernetes Deployment/pod (docs/web-ui-design.md §5), not sharing a pod
 // with the worker. Log level is configured via LOG_LEVEL (debug, info, warn,
 // error), defaulting to info — see pkg/logging.
+//
+// OIDC authentication (pkg/webauth) is required, not optional: every page
+// and API route is gated behind a valid session
+// (docs/web-ui-design.md §2 — "Auth: ... all API and page routes gated"), so
+// cmd/web refuses to start without a complete OIDC configuration, the same
+// way it refuses to start without TEMPORAL_ADDRESS. It is provider-agnostic
+// (discovered purely via OIDC discovery — no IdP-specific code) and
+// configured via:
+//
+//   - OIDC_ISSUER_URL — the identity provider's issuer URL, used for
+//     discovery.
+//   - OIDC_CLIENT_ID / OIDC_CLIENT_SECRET — this app's confidential-client
+//     credentials at that provider.
+//   - OIDC_REDIRECT_URL — this app's callback URL as registered with the
+//     provider (e.g. "https://tape-archiver.example.com/auth/callback").
+//   - WEB_SESSION_KEY — a base64-encoded 32-byte AES-256 key (e.g. the
+//     output of `openssl rand -base64 32`) encrypting the session and
+//     login-state cookies. The service holds no server-side session store
+//     (docs/web-ui-design.md §3), so losing/rotating this key just signs
+//     everyone out; nothing else depends on it.
 package main
 
 import (
@@ -41,6 +62,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/metrics"
 	"github.com/solidDoWant/tape-archiver/pkg/runsapi"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
+	"github.com/solidDoWant/tape-archiver/pkg/webauth"
 	"github.com/solidDoWant/tape-archiver/pkg/webserver"
 )
 
@@ -150,10 +172,32 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		}
 	}()
 
+	oidcConfig, err := oidcConfigFromEnv(getenv)
+	if err != nil {
+		return fmt.Errorf("configure OIDC: %w", err)
+	}
+
+	authenticator, err := webauth.New(ctx, oidcConfig)
+	if err != nil {
+		// As with temporalclient.New above, a shutdown signal cancelling ctx
+		// during OIDC discovery is an orderly stop, not a startup failure.
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		return fmt.Errorf("set up OIDC authenticator: %w", err)
+	}
+
 	handler, err := webserver.NewHandler(assets, runsapi.New(temporalClient))
 	if err != nil {
 		return fmt.Errorf("build web server handler: %w", err)
 	}
+
+	// authenticator.Wrap gates the SPA + /api/* handler above behind a valid
+	// session, and adds the /auth/login, /auth/callback, /auth/logout, and
+	// /api/me routes it needs to establish one — see pkg/webauth's package
+	// doc comment for the full route/gating contract.
+	handler = authenticator.Wrap(handler)
 
 	addr := listenAddr(getenv)
 
@@ -231,4 +275,26 @@ func listenAddr(getenv func(string) string) string {
 	}
 
 	return defaultListenAddr
+}
+
+// oidcConfigFromEnv builds a webauth.Config from OIDC_ISSUER_URL /
+// OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URL / WEB_SESSION_KEY.
+// All five are required — see the package doc comment for why OIDC
+// configuration is mandatory rather than optional. webauth.New performs its
+// own presence/format validation on the result, so this function does not
+// duplicate it beyond decoding the session key (which webauth.Config takes
+// as raw key bytes, not the env var's base64 string).
+func oidcConfigFromEnv(getenv func(string) string) (webauth.Config, error) {
+	sessionKey, err := webauth.ParseSessionKey(getenv("WEB_SESSION_KEY"))
+	if err != nil {
+		return webauth.Config{}, err
+	}
+
+	return webauth.Config{
+		IssuerURL:    getenv("OIDC_ISSUER_URL"),
+		ClientID:     getenv("OIDC_CLIENT_ID"),
+		ClientSecret: getenv("OIDC_CLIENT_SECRET"),
+		RedirectURL:  getenv("OIDC_REDIRECT_URL"),
+		SessionKey:   sessionKey,
+	}, nil
 }
