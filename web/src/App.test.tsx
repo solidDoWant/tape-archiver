@@ -3,12 +3,12 @@ import { render, screen } from '@testing-library/react'
 import App from './App'
 
 describe('App', () => {
-  it('renders the tape-archiver placeholder shell', () => {
+  it('renders the shell heading and the submit-run form', () => {
     render(<App />)
 
     expect(
       screen.getByRole('heading', { name: 'tape-archiver' }),
     ).toBeInTheDocument()
-    expect(screen.getByText(/under construction/i)).toBeInTheDocument()
+    expect(screen.getByRole('form', { name: /submit backup run/i })).toBeInTheDocument()
   })
 })

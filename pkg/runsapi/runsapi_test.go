@@ -1,11 +1,13 @@
 package runsapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -58,6 +61,11 @@ type fakeTemporalClient struct {
 
 	queryResult interface{}
 	queryErr    error
+
+	executeRun      client.WorkflowRun
+	executeErr      error
+	executeOptions  client.StartWorkflowOptions
+	executeCaptured bool
 }
 
 func (f *fakeTemporalClient) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
@@ -74,6 +82,30 @@ func (f *fakeTemporalClient) QueryWorkflow(context.Context, string, string, stri
 	}
 
 	return fakeEncodedValue{value: f.queryResult}, nil
+}
+
+func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
+	f.executeOptions = options
+	f.executeCaptured = true
+
+	return f.executeRun, f.executeErr
+}
+
+// fakeWorkflowRun is a minimal client.WorkflowRun standing in for the real
+// SDK type, so submitRun's success path can be exercised without a real
+// Temporal connection.
+type fakeWorkflowRun struct {
+	workflowID string
+	runID      string
+}
+
+func (f fakeWorkflowRun) GetID() string    { return f.workflowID }
+func (f fakeWorkflowRun) GetRunID() string { return f.runID }
+func (f fakeWorkflowRun) Get(context.Context, interface{}) error {
+	return nil
+}
+func (f fakeWorkflowRun) GetWithOptions(context.Context, interface{}, client.WorkflowRunGetOptions) error {
+	return nil
 }
 
 func executionInfo(runID string, status enumspb.WorkflowExecutionStatus, start time.Time, close *time.Time) *workflowpb.WorkflowExecutionInfo {
@@ -367,3 +399,188 @@ func decodeAPIError(t *testing.T, recorder *httptest.ResponseRecorder) error {
 type assertError struct{ msg string }
 
 func (e assertError) Error() string { return e.msg }
+
+// validSubmitConfigJSON is a minimal valid run-config document, the same
+// shape cmd/tapectl's tests use, for exercising POST /api/runs.
+const validSubmitConfigJSON = `{
+  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+  "copies": 2,
+  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
+}`
+
+// postJSON issues method/path with body as the raw request body, decoding a
+// non-nil response destination the same way doJSON does. Kept separate from
+// doJSON (which always sends a nil body) since only POST /api/runs needs a
+// request body among this package's endpoints.
+func postJSON(t *testing.T, handler http.Handler, path string, body []byte, response interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+
+	request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if response != nil {
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), response))
+	}
+
+	return recorder
+}
+
+func TestSubmitRun(t *testing.T) {
+	mhvtlEnv := func(name string) string {
+		switch name {
+		case "MHVTL_CHANGER_DEV":
+			return "/dev/sch9"
+		case "MHVTL_DRIVE0_DEV":
+			return "/dev/nst8"
+		case "MHVTL_DRIVE1_DEV":
+			return "/dev/nst9"
+		default:
+			return ""
+		}
+	}
+
+	tests := []struct {
+		name       string
+		body       []byte
+		getenv     func(string) string
+		client     *fakeTemporalClient
+		wantStatus int
+		errAssert  require.ErrorAssertionFunc
+	}{
+		{
+			name:       "a valid config submits and returns the run ID",
+			body:       []byte(`{"config": ` + validSubmitConfigJSON + `}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-xyz"}},
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name:       "dry-run with mhvtl env set redirects devices and submits",
+			body:       []byte(`{"config": ` + validSubmitConfigJSON + `, "dryRun": true}`),
+			getenv:     mhvtlEnv,
+			client:     &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-dry"}},
+			wantStatus: http.StatusCreated,
+		},
+		{
+			// AC: dry-run must fail closed rather than fall back to device
+			// nodes indistinguishable from the real library (CLAUDE.md
+			// Hardware and Safety).
+			name:       "dry-run without mhvtl env fails closed and submits nothing",
+			body:       []byte(`{"config": ` + validSubmitConfigJSON + `, "dryRun": true}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "an invalid config is rejected before any Temporal contact",
+			body:       []byte(`{"config": {"copies": 2}}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "an empty config is rejected",
+			body:       []byte(`{}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "malformed JSON is rejected, not a 500",
+			body:       []byte(`not json`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
+			// AC: a misspelled/unrecognized envelope key (e.g. "isDryRun"
+			// instead of "dryRun") must fail the request rather than silently
+			// defaulting dryRun to false and submitting a real run (CLAUDE.md
+			// Hardware and Safety).
+			name:       "an unrecognized envelope field is rejected, not silently ignored",
+			body:       []byte(`{"config": ` + validSubmitConfigJSON + `, "isDryRun": true}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
+			// Padding lives inside the recognized "config" field (as an
+			// oversized JSON string value) rather than an extra top-level
+			// key, so this exercises the size cap in isolation from the
+			// unrecognized-field rejection above.
+			name:       "a request body over the size cap is rejected as 413, not a generic 400",
+			body:       []byte(`{"config": "` + strings.Repeat("x", maxSubmitBodyBytes) + `"}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusRequestEntityTooLarge,
+			errAssert:  require.Error,
+		},
+		{
+			name:   "a run already in progress is a 409 conflict, not a 500 or silent replace",
+			body:   []byte(`{"config": ` + validSubmitConfigJSON + `}`),
+			getenv: func(string) string { return "" },
+			client: &fakeTemporalClient{
+				executeErr: serviceerror.NewWorkflowExecutionAlreadyStarted("already started", "req-1", "run-existing"),
+			},
+			wantStatus: http.StatusConflict,
+			errAssert:  require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errAssert := test.errAssert
+			if errAssert == nil {
+				errAssert = require.NoError
+			}
+
+			handler := newMux(newHandler(test.client, test.getenv))
+
+			var response SubmitRunResponse
+
+			recorder := postJSON(t, handler, "/api/runs", test.body, nil)
+			assert.Equal(t, test.wantStatus, recorder.Code)
+
+			if test.wantStatus == http.StatusCreated {
+				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+				assert.NotEmpty(t, response.RunID)
+				assert.Equal(t, backup.WorkflowID, response.WorkflowID)
+				assert.Equal(t, "/api/runs/"+response.RunID, recorder.Header().Get("Location"))
+				require.True(t, test.client.executeCaptured)
+				errAssert(t, nil)
+
+				return
+			}
+
+			// Every rejection here except the 409 happens before Temporal is
+			// ever contacted (client/server-side validation and the dry-run
+			// env gate all run first, mirroring `tapectl run`'s validate-
+			// before-connect order); the 409 case is the one where Temporal
+			// was contacted and refused the submission.
+			wantExecuted := test.wantStatus == http.StatusConflict
+			assert.Equal(t, wantExecuted, test.client.executeCaptured)
+
+			errAssert(t, decodeAPIError(t, recorder))
+		})
+	}
+
+	t.Run("a dry-run submission still honors the singleton conflict policy", func(t *testing.T) {
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-dry"}}
+		handler := newMux(newHandler(fake, mhvtlEnv))
+
+		postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`, "dryRun": true}`), nil)
+
+		require.True(t, fake.executeCaptured)
+		assert.True(t, fake.executeOptions.WorkflowExecutionErrorWhenAlreadyStarted)
+		assert.Equal(t, backup.WorkflowID, fake.executeOptions.ID)
+	})
+}

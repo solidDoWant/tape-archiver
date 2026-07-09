@@ -3,7 +3,9 @@
 package runsapi_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +24,18 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
+
+// validSubmitConfigJSON is a minimal valid run-config document (same shape
+// cmd/tapectl's integration tests submit) for exercising POST /api/runs
+// against a real Temporal.
+const validSubmitConfigJSON = `{
+  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+  "copies": 2,
+  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
+}`
 
 const (
 	// stubPhase is the value the stub workflow reports for the last completed
@@ -188,5 +202,120 @@ func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, badResp.StatusCode)
 
 	// Unblock the stub so it completes rather than lingering past the test.
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+}
+
+// postRun POSTs body to serverURL+"/api/runs" and returns the status code and
+// decoded body.
+func postRun(t *testing.T, serverURL string, body []byte) (int, runsapi.SubmitRunResponse) {
+	t.Helper()
+
+	resp, err := http.Post(serverURL+"/api/runs", "application/json", bytes.NewReader(body))
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	var submitBody runsapi.SubmitRunResponse
+
+	_ = json.Unmarshal(raw, &submitBody)
+
+	return resp.StatusCode, submitBody
+}
+
+// TestSubmitRunAgainstRealTemporal exercises POST /api/runs against a real
+// dev Temporal (make temporal-up): a valid submission actually starts the
+// backup workflow (observable via GET /api/runs), a second submission while
+// the first is still running is refused with 409 rather than silently
+// queued or replacing the in-flight run (the singleton guard, SPEC §4.2),
+// and once the first run closes a fresh submission succeeds again — the
+// same submit/conflict semantics `tapectl run` has via
+// TestConcurrentRunGuard (cmd/tapectl/main_integration_test.go), proving the
+// pkg/runsubmit extraction did not let the two front doors drift.
+func TestSubmitRunAgainstRealTemporal(t *testing.T) {
+	requireTemporalAddress(t)
+	isolateTemporalConfig(t)
+
+	ctx := t.Context()
+
+	temporalClient, shutdown, err := temporalclient.New(ctx, nil)
+	require.NoError(t, err)
+
+	defer shutdown()
+
+	backupWorker := worker.New(temporalClient, backup.TaskQueue, worker.Options{})
+	backupWorker.RegisterWorkflowWithOptions(stubBackupWorkflow, workflow.RegisterOptions{Name: backup.WorkflowType})
+	require.NoError(t, backupWorker.Start())
+
+	defer backupWorker.Stop()
+
+	// Best-effort safety net: unblock whatever backup run is current so a
+	// failed assertion does not leave the singleton ID occupied for later
+	// tests/runs.
+	t.Cleanup(func() {
+		_ = temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil)
+	})
+
+	handler := runsapi.New(temporalClient)
+	server := httptest.NewServer(handler)
+
+	defer server.Close()
+
+	submitBody := []byte(`{"config": ` + validSubmitConfigJSON + `}`)
+
+	// Start the first run. Tolerate a still-closing run from a previous test
+	// by retrying until the singleton ID is free.
+	var firstRunID string
+
+	require.Eventually(t, func() bool {
+		status, body := postRun(t, server.URL, submitBody)
+		if status != http.StatusCreated {
+			return false
+		}
+
+		firstRunID = body.RunID
+
+		return firstRunID != ""
+	}, 30*time.Second, 250*time.Millisecond, "first submission never started")
+
+	// A second concurrent submission is refused with 409, not a 500 and not
+	// a silent replace of the in-progress run.
+	status, _ := postRun(t, server.URL, submitBody)
+	assert.Equal(t, http.StatusConflict, status, "second concurrent submission must be refused with 409")
+
+	// GET /api/runs/{runID} still reports the first run as RUNNING — the
+	// refused second submission left it untouched.
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(server.URL + "/api/runs/" + firstRunID)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.StatusCode != http.StatusOK {
+			return false
+		}
+
+		var detail runsapi.RunDetail
+		if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+			return false
+		}
+
+		return detail.Status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING.String()
+	}, 30*time.Second, 250*time.Millisecond, "the first run must still be running after the refused second submission")
+
+	// Finish the first run so the singleton ID frees up.
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+
+	// Once the first run has closed, a fresh submission succeeds again.
+	require.Eventually(t, func() bool {
+		status, body := postRun(t, server.URL, submitBody)
+
+		return status == http.StatusCreated && body.RunID != "" && body.RunID != firstRunID
+	}, 30*time.Second, 250*time.Millisecond, "a new submission did not succeed after the first run closed")
+
+	// Unblock the run started by the post-close check so it does not linger.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 }

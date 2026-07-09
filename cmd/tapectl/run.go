@@ -2,16 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 
-	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/api/serviceerror"
-	"go.temporal.io/sdk/client"
-
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/runsubmit"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
@@ -22,9 +18,10 @@ import (
 // local name since it is used pervasively throughout this package. It is a
 // singleton on purpose: the backup model is serial (one data worker on one
 // storage host, one disk staging area — SPEC §4.2), so all runs must be
-// mutually exclusive. Combined with the conflict/reuse policies in submitRun, a
-// second run submitted while one is already running is refused, while a new run
-// after the previous one closes starts normally.
+// mutually exclusive. Combined with the conflict/reuse policies in
+// pkg/runsubmit.StartOptions, a second run submitted while one is already
+// running is refused, while a new run after the previous one closes starts
+// normally.
 const backupWorkflowID = backup.WorkflowID
 
 // runOptions holds the parsed flags for the `run` subcommand.
@@ -36,7 +33,8 @@ type runOptions struct {
 // submitRun implements `tapectl run`. It prepares the submission entirely
 // client-side (load, validate, dry-run override) so an invalid config or a
 // missing Temporal address fails before any connection is attempted, then
-// submits the backup workflow under the singleton ID and prints it.
+// submits the backup workflow under the singleton ID (pkg/runsubmit.Submit —
+// the same submission path pkg/runsapi's POST /api/runs uses) and prints it.
 func submitRun(ctx context.Context, args []string, out io.Writer) error {
 	options, err := parseRunArgs(args)
 	if err != nil {
@@ -58,19 +56,9 @@ func submitRun(ctx context.Context, args []string, out io.Writer) error {
 	}
 	defer shutdown()
 
-	run, err := temporalClient.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:        backupWorkflowID,
-		TaskQueue: backup.TaskQueue,
-		// Refuse to start a second run while one is already running, but allow a
-		// fresh run once the previous one has closed. WorkflowExecutionError-
-		// WhenAlreadyStarted makes ExecuteWorkflow return the conflict as an
-		// error rather than silently handing back the running run.
-		WorkflowIDConflictPolicy:                 enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
-		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
-		WorkflowExecutionErrorWhenAlreadyStarted: true,
-	}, backup.WorkflowType, cfg)
+	run, err := runsubmit.Submit(ctx, temporalClient, cfg)
 	if err != nil {
-		return translateSubmitError(err)
+		return err
 	}
 
 	_, err = fmt.Fprintln(out, run.GetID())
@@ -103,8 +91,9 @@ func parseRunArgs(args []string) (runOptions, error) {
 }
 
 // buildSubmission performs every step that must happen before contacting
-// Temporal: it loads and validates the config, applies the dry-run device
-// override, and re-validates the result.
+// Temporal: it loads and validates the config, then applies the dry-run
+// device override (which re-validates the result itself — see
+// pkg/runsubmit.ApplyDryRun).
 func buildSubmission(options runOptions) (*config.Config, error) {
 	if options.configPath == "" {
 		return nil, fmt.Errorf("--config is required")
@@ -119,29 +108,17 @@ func buildSubmission(options runOptions) (*config.Config, error) {
 		if err := applyDryRun(cfg, getenv); err != nil {
 			return nil, err
 		}
-
-		// The override changes the device set, so the result must satisfy the
-		// same invariants (e.g. copies <= drives) as the original config.
-		if err := cfg.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid config after dry-run override: %w", err)
-		}
 	}
 
 	return cfg, nil
 }
 
 // translateSubmitError converts the error returned by ExecuteWorkflow into an
-// operator-facing message. A conflict with an already-running backup (the
-// singleton guard firing) is reported as an actionable message naming the
-// in-progress run rather than an opaque Temporal error; every other error is
-// wrapped verbatim.
+// operator-facing message. It is a thin wrapper over
+// pkg/runsubmit.TranslateSubmitError — the same translation pkg/runsapi's
+// POST /api/runs applies — kept as a package-local name since submitRun no
+// longer needs it directly (runsubmit.Submit applies it internally) but it
+// stays useful, and tested, as a standalone entry point.
 func translateSubmitError(err error) error {
-	var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
-	if errors.As(err, &alreadyStarted) {
-		return fmt.Errorf("a backup run is already in progress (workflow ID %q, run ID %s); "+
-			"backup runs are mutually exclusive — wait for it to finish or inspect it with `tapectl status`",
-			backupWorkflowID, alreadyStarted.RunId)
-	}
-
-	return fmt.Errorf("submit backup workflow: %w", err)
+	return runsubmit.TranslateSubmitError(err)
 }

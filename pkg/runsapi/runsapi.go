@@ -1,8 +1,13 @@
 // Package runsapi implements the JSON HTTP API cmd/web serves under /api/runs:
-// listing past/current executions of the singleton backup workflow and
-// fetching detail for one execution. Both endpoints are read-only views over
-// Temporal visibility and the workflow's own query handlers — there is no
-// UI-owned store (SPEC §4.2; docs/web-ui-design.md §2, §3).
+// listing past/current executions of the singleton backup workflow, fetching
+// detail for one execution, and submitting a new run (optionally as a
+// dry-run against the mhvtl virtual library). Submission reuses
+// pkg/runsubmit — the same validation, dry-run override, and singleton
+// conflict handling as `tapectl run` — so the CLI and this API can never
+// drift on what a run submission means (docs/web-ui-design.md §2, §3, §8
+// item 3). The two GET endpoints are read-only views over Temporal
+// visibility and the workflow's own query handlers — there is no UI-owned
+// store (SPEC §4.2).
 package runsapi
 
 import (
@@ -10,8 +15,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"sort"
 	"time"
 
@@ -22,6 +29,8 @@ import (
 	"go.temporal.io/sdk/converter"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/runsubmit"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -41,13 +50,24 @@ const requestTimeout = 10 * time.Second
 // slice of the API (docs/web-ui-design.md §8, item 2).
 const listPageSize = 1000
 
+// maxSubmitBodyBytes bounds a POST /api/runs request body. Run configs are
+// small JSON documents (schemas/run-config.schema.json) — even a config
+// naming many sources stays well under this — so a generous fixed clamp is
+// enough to reject an obviously abusive/mistaken upload before it is read
+// into memory, without needing real streaming or size negotiation.
+const maxSubmitBodyBytes = 4 << 20 // 4 MiB
+
 // TemporalClient is the subset of client.Client the runs API needs, so
 // handlers are unit-testable against a fake without a real Temporal
-// connection. go.temporal.io/sdk/client.Client satisfies it.
+// connection. go.temporal.io/sdk/client.Client satisfies it. It embeds
+// runsubmit.TemporalClient (ExecuteWorkflow) so POST /api/runs shares the
+// exact submission call pkg/runsubmit.Submit makes on behalf of both this
+// API and `tapectl run`.
 type TemporalClient interface {
 	ListWorkflow(ctx context.Context, request *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error)
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 	QueryWorkflow(ctx context.Context, workflowID string, runID string, queryType string, args ...interface{}) (converter.EncodedValue, error)
+	runsubmit.TemporalClient
 }
 
 // Compile-time assertion that the real Temporal SDK client satisfies
@@ -87,19 +107,51 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+// SubmitRunRequest is the POST /api/runs request body: a run-config JSON
+// document (config, decoded with internal/config.Parse — the same
+// validation `tapectl run` applies) and whether to submit it as a dry-run
+// (pkg/runsubmit.ApplyDryRun — the same mhvtl override `tapectl run
+// --dry-run` applies). Config is kept as raw JSON rather than decoded
+// inline so config.Parse (not encoding/json directly) performs the decode,
+// preserving its DisallowUnknownFields behavior and validation.
+type SubmitRunRequest struct {
+	Config json.RawMessage `json:"config"`
+	DryRun bool            `json:"dryRun"`
+}
+
+// SubmitRunResponse is the POST /api/runs response body on success: enough
+// to identify the started execution and link straight to GET
+// /api/runs/{runID}.
+type SubmitRunResponse struct {
+	WorkflowID string `json:"workflowId"`
+	RunID      string `json:"runId"`
+}
+
 // New builds the /api/runs HTTP handler. temporalClient must be non-nil.
 func New(temporalClient TemporalClient) http.Handler {
-	h := &handler{temporalClient: temporalClient}
+	return newMux(newHandler(temporalClient, os.Getenv))
+}
 
+// newHandler builds a handler with an injectable getenv, so tests can drive
+// the dry-run mhvtl-env-var gate (runsubmit.ApplyDryRun) without mutating
+// the process environment. New wires this to os.Getenv for production.
+func newHandler(temporalClient TemporalClient, getenv func(string) string) *handler {
+	return &handler{temporalClient: temporalClient, getenv: getenv}
+}
+
+// newMux mounts h's handlers behind their routes.
+func newMux(h *handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/runs", h.listRuns)
 	mux.HandleFunc("GET /api/runs/{runID}", h.getRun)
+	mux.HandleFunc("POST /api/runs", h.submitRun)
 
 	return mux
 }
 
 type handler struct {
 	temporalClient TemporalClient
+	getenv         func(string) string
 }
 
 // listRuns implements GET /api/runs: every execution of the singleton backup
@@ -203,6 +255,84 @@ func (h *handler) getRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, detail)
 }
 
+// submitRun implements POST /api/runs: parse and validate the run config
+// (internal/config.Parse — identical to `tapectl run`'s config.LoadFile),
+// optionally apply the dry-run mhvtl override (runsubmit.ApplyDryRun —
+// identical to `tapectl run --dry-run`), then submit the backup workflow
+// under its fixed singleton options (runsubmit.Submit). Every failure short
+// of Temporal actually accepting the submission — a malformed request body,
+// an invalid config, a dry-run with the mhvtl env vars unset — is reported
+// as 400 before any Temporal RPC is made, mirroring `tapectl run`'s
+// client-side-first validation order.
+func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+
+	// http.MaxBytesReader (not a bare io.LimitReader): an oversized body needs
+	// a distinguishable signal, not a silent truncation that json.Decode would
+	// otherwise fail on with a generic, confusing "unexpected EOF".
+	body := http.MaxBytesReader(w, r.Body, maxSubmitBodyBytes)
+
+	var request SubmitRunRequest
+
+	decoder := json.NewDecoder(body)
+	// DisallowUnknownFields: SubmitRunRequest has exactly two fields, and a
+	// misspelled/wrong "dryRun" key (e.g. "isDryRun") must fail the request
+	// rather than silently defaulting DryRun to false and submitting a real,
+	// non-dry-run run — the same fail-closed reasoning internal/config.Parse
+	// already applies one call below.
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&request); err != nil {
+		status := http.StatusBadRequest
+
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			status = http.StatusRequestEntityTooLarge
+		}
+
+		writeError(w, status, fmt.Errorf("parse request body: %w", err))
+
+		return
+	}
+
+	if len(request.Config) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("config is required"))
+
+		return
+	}
+
+	cfg, err := config.Parse(request.Config)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+
+		return
+	}
+
+	if request.DryRun {
+		// io.Discard: there is no stderr-shaped place to surface the
+		// optical-burn advisory over HTTP; the response already reports
+		// whether the submission succeeded, and the dry-run override itself
+		// is not sensitive (unlike an operator-facing CLI, no human is
+		// watching this process's stderr).
+		if err := runsubmit.ApplyDryRun(cfg, h.getenv, io.Discard); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+
+			return
+		}
+	}
+
+	run, err := runsubmit.Submit(ctx, h.temporalClient, cfg)
+	if err != nil {
+		writeError(w, statusForTemporalError(err), err)
+
+		return
+	}
+
+	w.Header().Set("Location", "/api/runs/"+run.GetRunID())
+	writeJSON(w, http.StatusCreated, SubmitRunResponse{WorkflowID: run.GetID(), RunID: run.GetRunID()})
+}
+
 // queryLastCompletedPhase asks the workflow for its last completed phase via
 // the agreed query (workflows/backup/contract.go). A query failure (e.g. no
 // worker currently polling) is not fatal to the request — the execution
@@ -228,12 +358,19 @@ func queryLastCompletedPhase(ctx context.Context, temporalClient TemporalClient,
 
 // statusForTemporalError classifies a Temporal RPC error into the HTTP
 // status that best represents it, shared by every runsapi handler so future
-// endpoints (submit/dry-run, resume/abort — docs/web-ui-design.md §8) extend
-// one consistent mapping instead of each hand-rolling its own: a missing
-// resource is serviceerror.NotFound (404), a malformed client-supplied
-// identifier/argument is serviceerror.InvalidArgument (400), and anything
-// else is 502 — this handler is a proxy over Temporal, so an unclassified
-// failure is upstream, not the client's fault.
+// endpoints (resume/abort — docs/web-ui-design.md §8) extend one consistent
+// mapping instead of each hand-rolling its own: a missing resource is
+// serviceerror.NotFound (404), a malformed client-supplied identifier/
+// argument is serviceerror.InvalidArgument (400), a singleton-conflict
+// submission is serviceerror.WorkflowExecutionAlreadyStarted (409 Conflict —
+// runs are a singleton, SPEC §4.2, so a second submission while one is
+// in-flight is a conflict with existing state, not a missing/malformed
+// request), and anything else is 502 — this handler is a proxy over
+// Temporal, so an unclassified failure is upstream, not the client's fault.
+//
+// submitRun passes this the error returned by runsubmit.Submit, which wraps
+// (via %w, see runsubmit.TranslateSubmitError) rather than replaces the
+// underlying serviceerror, so errors.As here still recovers it.
 func statusForTemporalError(err error) int {
 	var notFound *serviceerror.NotFound
 	if errors.As(err, &notFound) {
@@ -243,6 +380,11 @@ func statusForTemporalError(err error) int {
 	var invalidArgument *serviceerror.InvalidArgument
 	if errors.As(err, &invalidArgument) {
 		return http.StatusBadRequest
+	}
+
+	var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
+	if errors.As(err, &alreadyStarted) {
+		return http.StatusConflict
 	}
 
 	return http.StatusBadGateway
