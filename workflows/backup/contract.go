@@ -9,6 +9,16 @@
 package backup
 
 const (
+	// WorkflowID is the fixed Temporal workflow ID every backup run submits
+	// under. Runs are a singleton on purpose: the backup model is serial (one
+	// data worker on one storage host, one disk staging area — SPEC §4.2), so
+	// all runs must be mutually exclusive. cmd/tapectl submits new runs under
+	// this ID, and it is the single source of truth for anything that lists or
+	// describes past/current executions via Temporal visibility (e.g.
+	// pkg/runsapi, cmd/web's GET /api/runs and /api/runs/{runID}) so those
+	// surfaces cannot drift from what tapectl actually submits under.
+	WorkflowID = "backup"
+
 	// WorkflowType is the Temporal workflow type name a backup run is started
 	// under. The control worker registers the workflow under this name.
 	WorkflowType = "Backup"
