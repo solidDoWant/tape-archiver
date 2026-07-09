@@ -4,9 +4,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,6 +22,7 @@ import (
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/solidDoWant/tape-archiver/internal/testutil"
 	"github.com/solidDoWant/tape-archiver/pkg/runsapi"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
@@ -88,12 +92,21 @@ func freeAddr(t *testing.T) string {
 }
 
 // setupEnv points cmd/web at a real dev Temporal, isolates its config
-// profile, and pins HEALTH_ADDR/METRICS_ADDR to fresh free ports so
-// concurrent test binaries never collide on the package defaults.
+// profile, pins HEALTH_ADDR/METRICS_ADDR to fresh free ports so concurrent
+// test binaries never collide on the package defaults, and configures a
+// complete, working OIDC setup (pkg/webauth is now mandatory — see
+// cmd/web/main.go's package doc comment) against an in-process fake OIDC
+// provider (no real IdP is available in this sandbox). webListenAddr is the
+// address the caller is about to pass run() as WEB_LISTEN_ADDRESS (reserved
+// up front via freeAddr, since OIDC_REDIRECT_URL must be known before run()
+// starts listening); pass any placeholder string for tests that never
+// actually establish a session (e.g. TestRunListenError). Callers that DO
+// need an authenticated request should use newAuthenticatedClient below,
+// which logs in against the fake provider this function wires up.
 // METRICS_SCRAPE_WAIT_TIMEOUT is disabled (0s): these tests never scrape
 // /metrics, and run()'s default 60s post-drain scrape wait would otherwise
 // make every test here block that long after cancellation before returning.
-func setupEnv(t *testing.T) (healthAddr, metricsAddr string) {
+func setupEnv(t *testing.T, webListenAddr string) (healthAddr, metricsAddr string) {
 	t.Helper()
 
 	requireTemporalAddress(t)
@@ -106,34 +119,83 @@ func setupEnv(t *testing.T) (healthAddr, metricsAddr string) {
 	t.Setenv("METRICS_ADDR", metricsAddr)
 	t.Setenv("METRICS_SCRAPE_WAIT_TIMEOUT", "0s")
 
+	idp := testutil.NewFakeOIDCProvider(t, "test-client", "test-secret")
+
+	sessionKey := make([]byte, 32)
+	_, err := rand.Read(sessionKey)
+	require.NoError(t, err)
+
+	t.Setenv("OIDC_ISSUER_URL", idp.Server.URL)
+	t.Setenv("OIDC_CLIENT_ID", idp.ClientID)
+	t.Setenv("OIDC_CLIENT_SECRET", idp.ClientSecret)
+	t.Setenv("OIDC_REDIRECT_URL", "http://"+webListenAddr+"/auth/callback")
+	t.Setenv("WEB_SESSION_KEY", base64.StdEncoding.EncodeToString(sessionKey))
+
 	return healthAddr, metricsAddr
 }
 
+// envGetenv builds a run() getenv function that overrides WEB_LISTEN_ADDRESS
+// to webListenAddr (the fixed address setupEnv already baked into
+// OIDC_REDIRECT_URL) and otherwise falls through to the real process
+// environment — the same delegation main() itself does in production
+// (run(ctx, os.Getenv, nil)), so every t.Setenv call in setupEnv (TEMPORAL_*
+// via isolateTemporalConfig, OIDC_*, WEB_SESSION_KEY, HEALTH_ADDR,
+// METRICS_ADDR, ...) actually reaches run().
+func envGetenv(webListenAddr string) func(string) string {
+	return func(name string) string {
+		if name == "WEB_LISTEN_ADDRESS" {
+			return webListenAddr
+		}
+
+		return os.Getenv(name)
+	}
+}
+
+// newAuthenticatedClient drives a full OIDC login against addr's own
+// /auth/login route — which redirects through the fake OIDC provider
+// setupEnv configured and back to /auth/callback — and returns an
+// http.Client whose cookie jar now holds a valid session. Every subsequent
+// request through this client reaches gated routes the same way a logged-in
+// browser tab would.
+func newAuthenticatedClient(t *testing.T, addr string) *http.Client {
+	t.Helper()
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+
+	client := &http.Client{Jar: jar}
+
+	resp, err := client.Get("http://" + addr + "/auth/login")
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode, "OIDC login against the fake provider did not complete")
+
+	return client
+}
+
 // TestRunServesAndShutsDownGracefully drives the full run() entrypoint
-// (Temporal client, health, metrics, listen, serve, ctx-cancel-triggered
-// shutdown) end to end against a real dev Temporal: the main server answers
-// "/" while running, the health server answers /healthz and /readyz, and
-// run() returns cleanly once ctx is cancelled.
+// (Temporal client, health, metrics, OIDC, listen, serve,
+// ctx-cancel-triggered shutdown) end to end against a real dev Temporal and
+// a fake OIDC provider: an unauthenticated request to "/" is redirected to
+// login (pkg/webauth gates it), a request authenticated via a real
+// login -> callback round trip against the fake provider succeeds, the
+// health server answers /healthz and /readyz (never gated — a separate,
+// always-on port), and run() returns cleanly once ctx is cancelled.
 func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	requireBuiltFrontend(t)
 
-	healthAddr, _ := setupEnv(t)
+	webListenAddr := freeAddr(t)
+	healthAddr, _ := setupEnv(t, webListenAddr)
 
 	ctx, cancel := context.WithCancel(t.Context())
-
-	getenv := func(name string) string {
-		if name == "WEB_LISTEN_ADDRESS" {
-			return "127.0.0.1:0"
-		}
-
-		return ""
-	}
 
 	readyCh := make(chan string, 1)
 	runErrCh := make(chan error, 1)
 
 	go func() {
-		runErrCh <- run(ctx, getenv, func(addr string) { readyCh <- addr })
+		runErrCh <- run(ctx, envGetenv(webListenAddr), func(addr string) { readyCh <- addr })
 	}()
 
 	var addr string
@@ -144,9 +206,23 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 		t.Fatal("server never became ready")
 	}
 
-	resp, err := http.Get("http://" + addr + "/")
+	// A plain http.Get would transparently follow the whole redirect chain
+	// (our own /auth/login -> the fake IdP auto-approving -> our
+	// /auth/callback) and land back on "/" with 200, silently defeating this
+	// check — the fake provider has no interactive login prompt to stop at,
+	// unlike a real one. Disabling redirects isolates just the first hop.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	unauthResp, err := noRedirect.Get("http://" + addr + "/")
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, http.StatusFound, unauthResp.StatusCode, "an unauthenticated page request must be gated, not served directly")
+	require.NoError(t, unauthResp.Body.Close())
+
+	authenticatedClient := newAuthenticatedClient(t, addr)
+
+	resp, err := authenticatedClient.Get("http://" + addr + "/")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "an authenticated request must be served once a session is established")
 	require.NoError(t, resp.Body.Close())
 
 	healthzResp, err := http.Get("http://" + healthAddr + "/healthz")
@@ -175,17 +251,14 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 func TestRunListenError(t *testing.T) {
 	requireBuiltFrontend(t)
 
-	setupEnv(t)
+	const badAddr = "127.0.0.1:not-a-port"
 
-	getenv := func(name string) string {
-		if name == "WEB_LISTEN_ADDRESS" {
-			return "127.0.0.1:not-a-port"
-		}
+	// OIDC discovery against the fake provider still succeeds here (it runs
+	// before net.Listen in run()) — only the listen address itself is bad.
+	// OIDC_REDIRECT_URL is never dialed, so badAddr baked into it is fine.
+	setupEnv(t, badAddr)
 
-		return ""
-	}
-
-	err := run(t.Context(), getenv, nil)
+	err := run(t.Context(), envGetenv(badAddr), nil)
 	require.Error(t, err)
 }
 
@@ -198,7 +271,8 @@ func TestRunListenError(t *testing.T) {
 func TestRunAPIRoutesAgainstRealTemporal(t *testing.T) {
 	requireBuiltFrontend(t)
 
-	setupEnv(t)
+	webListenAddr := freeAddr(t)
+	setupEnv(t, webListenAddr)
 
 	ctx := t.Context()
 
@@ -233,14 +307,6 @@ func TestRunAPIRoutesAgainstRealTemporal(t *testing.T) {
 		_ = temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil)
 	})
 
-	getenv := func(name string) string {
-		if name == "WEB_LISTEN_ADDRESS" {
-			return "127.0.0.1:0"
-		}
-
-		return ""
-	}
-
 	webCtx, cancelWeb := context.WithCancel(ctx)
 	defer cancelWeb()
 
@@ -248,7 +314,7 @@ func TestRunAPIRoutesAgainstRealTemporal(t *testing.T) {
 	runErrCh := make(chan error, 1)
 
 	go func() {
-		runErrCh <- run(webCtx, getenv, func(addr string) { readyCh <- addr })
+		runErrCh <- run(webCtx, envGetenv(webListenAddr), func(addr string) { readyCh <- addr })
 	}()
 
 	var addr string
@@ -259,8 +325,12 @@ func TestRunAPIRoutesAgainstRealTemporal(t *testing.T) {
 		t.Fatal("web server never became ready")
 	}
 
+	// /api/runs is gated (pkg/webauth) same as every other route, so these
+	// calls need an authenticated client, not a bare http.Get.
+	authenticatedClient := newAuthenticatedClient(t, addr)
+
 	require.Eventually(t, func() bool {
-		resp, err := http.Get("http://" + addr + "/api/runs")
+		resp, err := authenticatedClient.Get("http://" + addr + "/api/runs")
 		if err != nil {
 			return false
 		}
@@ -285,7 +355,7 @@ func TestRunAPIRoutesAgainstRealTemporal(t *testing.T) {
 	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs never listed the submitted run via cmd/web's own server")
 
 	require.Eventually(t, func() bool {
-		resp, err := http.Get("http://" + addr + "/api/runs/" + workflowRun.GetRunID())
+		resp, err := authenticatedClient.Get("http://" + addr + "/api/runs/" + workflowRun.GetRunID())
 		if err != nil {
 			return false
 		}

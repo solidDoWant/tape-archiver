@@ -1,0 +1,552 @@
+// Package webauth adds OIDC authorization-code-flow authentication to
+// cmd/web: a login route that redirects to the configured identity
+// provider, a callback route that exchanges the returned code, verifies the
+// ID token, and establishes a session, a logout route that clears it, and
+// session middleware gating every other route.
+//
+// The provider is discovered purely from its issuer URL (OIDC discovery,
+// coreos/go-oidc/v3) plus a client ID/secret/redirect URL — nothing here is
+// specific to any one identity provider (docs/web-ui-design.md §4, §6).
+// Authentication only: any authenticated user is authorized, matching the
+// design doc's scope — role/permission-based authorization is not
+// implemented.
+//
+// Sessions are a stateless, encrypted, tamper-evident cookie (AES-256-GCM),
+// not a server-side store — cmd/web stays stateless end to end
+// (docs/web-ui-design.md §3; SPEC §4.2 forbids a UI-owned catalog/store). A
+// second, short-lived cookie carries the CSRF state/nonce/PKCE verifier
+// between the login redirect and the callback, since there is nowhere
+// server-side to stash it between the two requests. Both cookies are
+// encrypted with the same key but under different AAD "purposes", so one
+// can never be replayed as the other.
+package webauth
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/coreos/go-oidc/v3/oidc"
+	"golang.org/x/oauth2"
+)
+
+// sessionKeyLen is the required length, in bytes, of Config.SessionKey — 32
+// bytes for AES-256.
+const sessionKeyLen = 32
+
+// stateCookieTTL bounds how long a login attempt (the redirect to the IdP
+// and back) has to complete. It is deliberately short: the state cookie only
+// needs to survive one round trip through the IdP's own login UI.
+const stateCookieTTL = 10 * time.Minute
+
+// maxSessionDuration caps how long an established session cookie stays
+// valid, even if the IdP issued an ID token with a longer expiry — an
+// operator UI session should not silently outlive a reasonable working
+// session just because a provider is configured with a very long token
+// lifetime.
+const maxSessionDuration = 24 * time.Hour
+
+// Cookie names. Both are HttpOnly and scoped to the whole app (Path "/") so
+// they are sent on every request, including the SPA's asset requests.
+const (
+	sessionCookieName = "ta_session"
+	stateCookieName   = "ta_oidc_state"
+)
+
+// AAD "purposes" distinguishing the two cookie kinds under the same
+// encryption key — see the package doc comment.
+const (
+	sessionPurpose = "session"
+	statePurpose   = "state"
+)
+
+// Config configures an Authenticator. All fields are required; New returns
+// an error if any are missing or malformed. cmd/web builds this from
+// OIDC_ISSUER_URL / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URL /
+// WEB_SESSION_KEY (docs/configuration.md).
+type Config struct {
+	// IssuerURL is the OIDC provider's issuer URL, used for discovery
+	// (GET {IssuerURL}/.well-known/openid-configuration).
+	IssuerURL string
+	// ClientID and ClientSecret identify this app to the provider as a
+	// confidential client.
+	ClientID     string
+	ClientSecret string
+	// RedirectURL is this app's callback URL as registered with the
+	// provider, e.g. "https://tape-archiver.example.com/auth/callback".
+	RedirectURL string
+	// SessionKey is 32 bytes of key material (AES-256-GCM) used to encrypt
+	// session and login-state cookies. See ParseSessionKey for turning the
+	// WEB_SESSION_KEY environment variable into this. Losing/rotating this
+	// key invalidates every outstanding session and in-flight login
+	// attempt — acceptable, since the service is otherwise stateless and a
+	// dropped session just means logging in again.
+	SessionKey []byte
+}
+
+// Identity is the authenticated user, as returned by GET /api/me and
+// attached to each gated request's context.
+type Identity struct {
+	// Subject is the OIDC "sub" claim: a stable, provider-scoped user
+	// identifier. Always present.
+	Subject string `json:"subject"`
+	// Email and Name come from the ID token's "email"/"name" claims
+	// (falling back to "preferred_username" for Name) when the provider
+	// includes them; both are omitted from the JSON body when empty rather
+	// than guessed at.
+	Email string `json:"email,omitempty"`
+	Name  string `json:"name,omitempty"`
+}
+
+// Authenticator holds a configured OIDC client and the session-cookie
+// cipher. Build one with New; mount it over the rest of the app with Wrap.
+type Authenticator struct {
+	oauth2Config oauth2.Config
+	verifier     *oidc.IDTokenVerifier
+	gcm          cipher.AEAD
+}
+
+// ParseSessionKey decodes a base64-encoded 32-byte AES-256 key (e.g. the
+// output of `openssl rand -base64 32`) for Config.SessionKey. cmd/web calls
+// this on the WEB_SESSION_KEY environment variable.
+func ParseSessionKey(encoded string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(encoded))
+	if err != nil {
+		return nil, fmt.Errorf("webauth: session key must be base64-encoded: %w", err)
+	}
+
+	if len(key) != sessionKeyLen {
+		return nil, fmt.Errorf("webauth: session key must decode to %d bytes (AES-256), got %d", sessionKeyLen, len(key))
+	}
+
+	return key, nil
+}
+
+// New discovers the OIDC provider at cfg.IssuerURL and builds an
+// Authenticator. Discovery is a network call, so a shutdown signal
+// cancelling ctx during it surfaces as ctx.Err(), same convention as
+// pkg/temporalclient.New — callers should treat that as an orderly stop, not
+// a startup failure.
+func New(ctx context.Context, cfg Config) (*Authenticator, error) {
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
+	if err != nil {
+		return nil, fmt.Errorf("webauth: discover OIDC provider %q: %w", cfg.IssuerURL, err)
+	}
+
+	block, err := aes.NewCipher(cfg.SessionKey)
+	if err != nil {
+		return nil, fmt.Errorf("webauth: build session cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("webauth: build session cipher: %w", err)
+	}
+
+	return &Authenticator{
+		oauth2Config: oauth2.Config{
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+			RedirectURL:  cfg.RedirectURL,
+			Endpoint:     provider.Endpoint(),
+			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
+		},
+		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
+		gcm:      gcm,
+	}, nil
+}
+
+// validateConfig checks that every Config field is present, so a
+// misconfigured deployment fails at startup (New) rather than on first
+// request.
+func validateConfig(cfg Config) error {
+	switch {
+	case cfg.IssuerURL == "":
+		return errors.New("webauth: issuer URL is required")
+	case cfg.ClientID == "":
+		return errors.New("webauth: client ID is required")
+	case cfg.ClientSecret == "":
+		return errors.New("webauth: client secret is required")
+	case cfg.RedirectURL == "":
+		return errors.New("webauth: redirect URL is required")
+	case len(cfg.SessionKey) != sessionKeyLen:
+		return fmt.Errorf("webauth: session key must be %d bytes (AES-256), got %d", sessionKeyLen, len(cfg.SessionKey))
+	default:
+		return nil
+	}
+}
+
+// Wrap returns the handler cmd/web serves: the auth routes below, plus next
+// (the SPA + /api/* mux built by pkg/webserver) gated behind a valid
+// session. Auth routes are registered on a more specific pattern than "/",
+// so http.ServeMux matches them ahead of the catch-all regardless of
+// registration order.
+//
+//   - GET /auth/login — starts the OIDC flow: redirects to the provider's
+//     authorization endpoint. Not gated (that would be circular).
+//   - GET /auth/callback — the provider's redirect target: exchanges the
+//     code, verifies the ID token, and sets the session cookie. Not gated,
+//     for the same reason.
+//   - GET /auth/logout — clears the session cookie and redirects to "/".
+//     Not gated: logging out an already-logged-out session is a no-op, not
+//     an error.
+//   - GET /api/me — the authenticated identity (Identity, as JSON). Gated.
+//   - everything else (next) — gated. An unauthenticated request under
+//     "/api/" gets 401 with a JSON body; anything else is redirected to
+//     /auth/login (see requireSession) — a plain, unstyled redirect
+//     straight to the IdP is the "functional login trigger" this sub-issue
+//     ships; sub-issue 7 owns any in-app login page polish.
+func (a *Authenticator) Wrap(next http.Handler) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /auth/login", a.handleLogin)
+	mux.HandleFunc("GET /auth/callback", a.handleCallback)
+	mux.HandleFunc("GET /auth/logout", a.handleLogout)
+	mux.Handle("GET /api/me", a.requireSession(http.HandlerFunc(a.handleMe)))
+	mux.Handle("/", a.requireSession(next))
+
+	return mux
+}
+
+// requireSession gates next behind a valid session cookie: authenticated
+// requests are forwarded to next with the Identity attached to the request
+// context (see IdentityFromContext); unauthenticated ones are rejected —
+// 401 JSON under "/api/", a redirect to the login route otherwise.
+func (a *Authenticator) requireSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		identity, ok := a.identityFromSessionCookie(r)
+		if !ok {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+
+				return
+			}
+
+			redirectToLogin(w, r)
+
+			return
+		}
+
+		next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
+	})
+}
+
+// handleLogin starts the OIDC authorization-code flow: it mints CSRF
+// state, an OIDC nonce, and a PKCE verifier, stashes all three (plus where
+// to send the browser back to) in the short-lived, encrypted state cookie,
+// then redirects to the provider's authorization endpoint.
+func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
+	state, err := randomToken()
+	if err != nil {
+		http.Error(w, "failed to start login", http.StatusInternalServerError)
+
+		return
+	}
+
+	nonce, err := randomToken()
+	if err != nil {
+		http.Error(w, "failed to start login", http.StatusInternalServerError)
+
+		return
+	}
+
+	verifier := oauth2.GenerateVerifier()
+
+	claims := stateClaims{
+		State:        state,
+		Nonce:        nonce,
+		PKCEVerifier: verifier,
+		RedirectPath: sanitizeRedirectPath(r.URL.Query().Get("redirect")),
+		ExpiresAt:    time.Now().Add(stateCookieTTL).Unix(),
+	}
+
+	value, err := a.encrypt(statePurpose, claims)
+	if err != nil {
+		http.Error(w, "failed to start login", http.StatusInternalServerError)
+
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     stateCookieName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   int(stateCookieTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	authURL := a.oauth2Config.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// handleCallback is the provider's redirect target: it validates the state
+// cookie and CSRF state, exchanges the authorization code (with the PKCE
+// verifier from the state cookie), verifies the returned ID token's
+// signature/issuer/audience/expiry (coreos/go-oidc) and nonce, and, on
+// success, sets the session cookie and redirects to wherever the login
+// attempt started from.
+func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
+	state, ok := a.consumeStateCookie(w, r)
+	if !ok {
+		http.Redirect(w, r, "/auth/login", http.StatusFound)
+
+		return
+	}
+
+	query := r.URL.Query()
+
+	if errParam := query.Get("error"); errParam != "" {
+		http.Error(w, fmt.Sprintf("OIDC provider returned an error: %s", errParam), http.StatusBadGateway)
+
+		return
+	}
+
+	if query.Get("state") == "" || query.Get("state") != state.State {
+		http.Error(w, "invalid or expired login attempt, please try again", http.StatusBadRequest)
+
+		return
+	}
+
+	code := query.Get("code")
+	if code == "" {
+		http.Error(w, "missing authorization code", http.StatusBadRequest)
+
+		return
+	}
+
+	token, err := a.oauth2Config.Exchange(r.Context(), code, oauth2.VerifierOption(state.PKCEVerifier))
+	if err != nil {
+		http.Error(w, "failed to exchange authorization code", http.StatusBadGateway)
+
+		return
+	}
+
+	rawIDToken, ok := token.Extra("id_token").(string)
+	if !ok || rawIDToken == "" {
+		http.Error(w, "OIDC provider did not return an ID token", http.StatusBadGateway)
+
+		return
+	}
+
+	idToken, err := a.verifier.Verify(r.Context(), rawIDToken)
+	if err != nil {
+		http.Error(w, "failed to verify ID token", http.StatusBadGateway)
+
+		return
+	}
+
+	if idToken.Nonce != state.Nonce {
+		http.Error(w, "ID token nonce mismatch", http.StatusBadRequest)
+
+		return
+	}
+
+	var claims struct {
+		Email             string `json:"email"`
+		Name              string `json:"name"`
+		PreferredUsername string `json:"preferred_username"`
+	}
+
+	if err := idToken.Claims(&claims); err != nil {
+		http.Error(w, "failed to decode ID token claims", http.StatusBadGateway)
+
+		return
+	}
+
+	name := claims.Name
+	if name == "" {
+		name = claims.PreferredUsername
+	}
+
+	expiresAt := idToken.Expiry
+	if maxExpiry := time.Now().Add(maxSessionDuration); expiresAt.After(maxExpiry) {
+		expiresAt = maxExpiry
+	}
+
+	session := sessionClaims{
+		Subject:   idToken.Subject,
+		Email:     claims.Email,
+		Name:      name,
+		ExpiresAt: expiresAt.Unix(),
+	}
+
+	value, err := a.encrypt(sessionPurpose, session)
+	if err != nil {
+		http.Error(w, "failed to establish session", http.StatusInternalServerError)
+
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    value,
+		Path:     "/",
+		Expires:  expiresAt,
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	redirectPath := state.RedirectPath
+	if redirectPath == "" {
+		redirectPath = "/"
+	}
+
+	http.Redirect(w, r, redirectPath, http.StatusFound)
+}
+
+// handleLogout clears the session cookie and sends the browser back to "/",
+// which (with no session left) immediately redirects to /auth/login again —
+// so a caller does not need to special-case the post-logout landing page.
+func (a *Authenticator) handleLogout(w http.ResponseWriter, r *http.Request) {
+	clearCookie(w, sessionCookieName)
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// handleMe implements GET /api/me: the caller's Identity, as attached to
+// the request context by requireSession. It is only ever reached once
+// requireSession has already confirmed a valid session (Wrap gates it), so
+// the "missing identity" branch below is a defensive fallback, not a
+// reachable API contract.
+func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
+	identity, ok := IdentityFromContext(r.Context())
+	if !ok {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized")
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	if err := json.NewEncoder(w).Encode(identity); err != nil {
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+// consumeStateCookie reads and decrypts the login-state cookie set by
+// handleLogin, clearing it either way (it is single-use: valid for exactly
+// one callback, successful or not) so a replayed callback request can never
+// reuse it.
+func (a *Authenticator) consumeStateCookie(w http.ResponseWriter, r *http.Request) (stateClaims, bool) {
+	clearCookie(w, stateCookieName)
+
+	cookie, err := r.Cookie(stateCookieName)
+	if err != nil {
+		return stateClaims{}, false
+	}
+
+	var claims stateClaims
+
+	if err := a.decrypt(statePurpose, cookie.Value, &claims); err != nil {
+		return stateClaims{}, false
+	}
+
+	if time.Now().Unix() >= claims.ExpiresAt {
+		return stateClaims{}, false
+	}
+
+	return claims, true
+}
+
+// identityFromSessionCookie reads and decrypts the session cookie, if any.
+// Any failure — no cookie, tampered/corrupt value, expired session — is
+// reported the same way (ok == false): the caller cannot and should not
+// distinguish "no session" from "invalid session", both just mean
+// "not authenticated".
+func (a *Authenticator) identityFromSessionCookie(r *http.Request) (Identity, bool) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return Identity{}, false
+	}
+
+	var claims sessionClaims
+
+	if err := a.decrypt(sessionPurpose, cookie.Value, &claims); err != nil {
+		return Identity{}, false
+	}
+
+	if time.Now().Unix() >= claims.ExpiresAt {
+		return Identity{}, false
+	}
+
+	return Identity{Subject: claims.Subject, Email: claims.Email, Name: claims.Name}, true
+}
+
+// redirectToLogin sends an unauthenticated page request to /auth/login,
+// preserving the originally requested path (only) so the post-login
+// redirect (handleCallback) can send the browser back to it.
+func redirectToLogin(w http.ResponseWriter, r *http.Request) {
+	target := url.URL{Path: "/auth/login"}
+
+	query := url.Values{}
+	query.Set("redirect", r.URL.Path)
+	target.RawQuery = query.Encode()
+
+	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+// sanitizeRedirectPath restricts a caller-supplied post-login redirect to a
+// same-origin absolute path, defaulting to "/" for anything else — in
+// particular rejecting a protocol-relative "//attacker.example" value,
+// which browsers treat as an absolute URL despite the leading "/" (an open
+// redirect otherwise).
+func sanitizeRedirectPath(path string) string {
+	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+		return "/"
+	}
+
+	return path
+}
+
+// randomToken returns a URL-safe random string suitable for CSRF state and
+// OIDC nonce values.
+func randomToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("webauth: generate random token: %w", err)
+	}
+
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// clearCookie expires a cookie immediately, matching the attributes it was
+// set with (Path "/") so the browser actually removes it rather than
+// leaving the original alongside an unrelated new one.
+func clearCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// writeJSONError writes a {"error": message} JSON body with the given
+// status code, mirroring pkg/runsapi's error envelope so API responses look
+// consistent regardless of which package under /api/ produced them.
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	_ = json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{Error: message})
+}

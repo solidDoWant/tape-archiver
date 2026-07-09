@@ -423,8 +423,9 @@ separate process from `worker`/`tapectl` and reads its own environment variables
 it shares the Temporal client factory (`pkg/temporalclient`) and the
 `METRICS_ADDR`/`HEALTH_ADDR` conventions with `worker`. It serves the SPA, a read-only
 JSON API under `/api/*` (listing/describing backup runs via Temporal visibility), and
-run submission (including dry-run); live updates, resume/abort, and OIDC auth land in
-later sub-issues and will extend this table further.
+run submission (including dry-run), gated behind OIDC authentication (`pkg/webauth`) —
+see [OIDC authentication](#oidc-authentication-cmdweb) below. Live updates and
+resume/abort land in later sub-issues and will extend this table further.
 
 | Variable | Required | Description |
 |----------|----------|--------------|
@@ -435,11 +436,18 @@ later sub-issues and will extend this table further.
 | `TEMPORAL_ADDRESS` / `TEMPORAL_NAMESPACE` / `TEMPORAL_API_KEY` / `TEMPORAL_TLS` | yes (`TEMPORAL_ADDRESS`) | Same envconfig-driven Temporal client settings documented above for `worker`/`tapectl` (`pkg/temporalclient`) — `cmd/web` connects to the same Temporal frontend to serve `/api/runs` and `/api/runs/{runID}`. |
 | `LOG_LEVEL` | no | Same semantics as the worker's `LOG_LEVEL` above: `debug`, `info`, `warn` (or `warning`), or `error`, case-insensitive, defaulting to `info`. |
 | `MHVTL_CHANGER_DEV` / `MHVTL_DRIVE0_DEV` / `MHVTL_DRIVE1_DEV` | only for dry-run submissions | Same mhvtl device nodes `tapectl run --dry-run` requires (see above). `POST /api/runs` with `"dryRun": true` fails closed with `400` unless all three are set on `cmd/web`'s own environment — a dry-run submitted through the browser never falls back to real hardware. |
+| `OIDC_ISSUER_URL` | yes | The OIDC identity provider's issuer URL, used for discovery (`GET {OIDC_ISSUER_URL}/.well-known/openid-configuration`). Any standards-compliant provider works (Keycloak, Authentik, Dex, ...) — `cmd/web` contains no IdP-specific code. |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | yes | This app's confidential-client credentials at the provider above. |
+| `OIDC_REDIRECT_URL` | yes | This app's OIDC callback URL, exactly as registered with the provider (e.g. `https://tape-archiver.example.com/auth/callback`) — see [OIDC authentication](#oidc-authentication-cmdweb) below. |
+| `WEB_SESSION_KEY` | yes | A base64-encoded 32-byte AES-256 key (e.g. the output of `openssl rand -base64 32`) encrypting the session and login-state cookies. `cmd/web` holds no server-side session store (`docs/web-ui-design.md` §3), so losing or rotating this key just signs every operator out — nothing else depends on it. |
 
 `cmd/web` fails to start if it cannot reach Temporal (same startup health check as
 `worker`/`tapectl` — `pkg/temporalclient.New` — since a run browser that cannot reach
-Temporal cannot do anything useful). `/readyz` subsequently reflects connectivity going
-forward, e.g. if Temporal becomes unreachable after startup.
+Temporal cannot do anything useful), or if the OIDC configuration above is incomplete or
+malformed (`pkg/webauth.New`, including OIDC discovery against `OIDC_ISSUER_URL`) — every
+route is gated behind a valid session, so a working OIDC setup is not optional.
+`/readyz` subsequently reflects Temporal connectivity going forward, e.g. if Temporal
+becomes unreachable after startup.
 
 #### `GET /api/runs` and `GET /api/runs/{runID}`
 
@@ -449,6 +457,38 @@ of the singleton `backup` workflow ID, newest first; `GET /api/runs/{runID}` (Te
 run ID, which disambiguates individual executions of that one workflow ID) additionally
 reports the last completed phase via the existing `lastCompletedPhase` query. An unknown
 but well-formed run ID is `404`; a malformed one (Temporal run IDs are UUIDs) is `400`.
+Both, like every `/api/*` route, require an authenticated session (see below) — an
+unauthenticated request gets `401`, not `404`/`400`.
+
+### OIDC authentication (`cmd/web`)
+
+Every page route (the SPA at `/`) and every `/api/*` route is gated behind an OIDC
+authorization-code-flow session (`pkg/webauth`), authentication only — any authenticated
+user is authorized; there is no role/permission model. The provider is entirely
+configured via `OIDC_ISSUER_URL`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`/`OIDC_REDIRECT_URL`
+above (OIDC discovery + a standard authorization-code exchange), so any compliant identity
+provider works without code changes.
+
+Routes:
+
+| Route | Method | Gated? | Purpose |
+|-------|--------|--------|---------|
+| `/auth/login` | `GET` | no | Starts the flow: sets a short-lived (10 minute), encrypted login-state cookie (CSRF state, OIDC nonce, PKCE verifier, and the originally requested path) and redirects to the provider's authorization endpoint. An optional `?redirect=/some/path` query parameter controls where the browser lands after a successful login (must be a same-origin absolute path; anything else is ignored in favor of `/`). |
+| `/auth/callback` | `GET` | no | The provider's redirect target: validates the CSRF state, exchanges the authorization code (with the PKCE verifier from the state cookie), verifies the returned ID token's signature/issuer/audience/expiry/nonce, sets the session cookie, and redirects into the app. |
+| `/auth/logout` | `GET` | no | Clears the session cookie and redirects to `/` (which, now unauthenticated, immediately redirects to `/auth/login`). Logging out an already-logged-out session is a no-op, not an error. |
+| `/api/me` | `GET` | yes | The authenticated identity: `{"subject": "...", "email": "...", "name": "..."}`, taken from the ID token's `sub`/`email`/`name` claims (`name` falls back to `preferred_username` when absent; `email`/`name` are omitted from the response when the provider does not supply them). |
+
+Gating split: an unauthenticated request under `/api/` gets `401` with a JSON
+`{"error": "..."}` body (a `fetch()`/XHR caller cannot usefully follow an HTML redirect);
+an unauthenticated request to any other route (the SPA at `/`, or any client-side route
+under it) gets a `302` redirect to `/auth/login?redirect={original path}`. A tampered or
+expired session cookie is rejected exactly like a missing one — never a `500`.
+
+The session is a stateless, encrypted, tamper-evident cookie (AES-256-GCM, keyed by
+`WEB_SESSION_KEY`), not a server-side store, so `cmd/web` stays fully stateless and can
+scale or restart freely (`docs/web-ui-design.md` §3; SPEC §4.2). A session's lifetime
+follows the ID token's `exp` claim, capped at 24 hours even if the provider issues a
+longer-lived token.
 
 #### `POST /api/runs`
 
