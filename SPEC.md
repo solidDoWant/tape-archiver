@@ -629,14 +629,23 @@ refinement as issues are implemented.
   activities.
 - `cmd/tapectl` — CLI to submit a run config to Temporal, trigger dry-runs, inspect.
 - `cmd/gen-config-schema` — emits the committed JSON schema for the run config.
+- `cmd/web` — web UI HTTP server (epic #239): serves the embedded React SPA and
+  `/healthz`; later sub-issues add `/api/*`, Temporal wiring, and OIDC. Thin wrapper
+  over `pkg/webserver`; the SPA build is embedded via `go:embed` from `cmd/web/dist`
+  (populated by `web/`'s build — see `web/`, below).
 - `pkg/` — one concern per package: `tape` (changer via SG_IO, `mt`), `ltfs`, `agewrap`, `par2`,
   `archive` (tar), `zfs`, `k8ssnap` (VolumeSnapshot discovery), `report` (PDF),
   `recoverykit` (ISO), `webhook` (Discord), `checksum`, `logging`, `metrics`,
-  `temporalclient`.
+  `temporalclient`, `webserver` (`cmd/web`'s HTTP handler: embedded-SPA serving +
+  `/healthz`).
 - `internal/config` — run-config types and env parsing.
 - `workflows/backup/` — the backup workflow and activities, split by concern
   (`resolve.go`, `plan.go`, `prepare.go`, `verify.go`, `write.go`, `library.go`,
   `report.go`, `deliver.go`) with co-located tests.
+- `web/` — the web UI frontend: Vite + React + TypeScript + Tailwind CSS, `npm`
+  project with a committed `package-lock.json`. `npm run build` writes its output
+  into `cmd/web/dist`, not `web/dist` (a `go:embed` pattern can only reach the
+  embedding file's own directory subtree); see `docs/web-ui-design.md`.
 - `schemas/` — generated config schema. `deploy/charts/` — Helm chart for the control
   worker. `docs/` — operator docs. `e2e/` — end-to-end tests.
 - `nix/` — build derivations: `ltfs.nix`, the `mhvtl` userspace/kernel modules, and

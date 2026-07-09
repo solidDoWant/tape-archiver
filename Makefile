@@ -8,6 +8,19 @@ BIN_DIR := $(PROJECT_DIR)/bin
 
 GO_SOURCE_FILES := $(shell find cmd pkg \( -name '*.go' ! -name '*_test.go' \) 2>/dev/null)
 
+# web/ (Vite + React + TypeScript) frontend, embedded into cmd/web via
+# go:embed (cmd/web/assets.go). WEB_DIR is the npm project root; vite.config.ts
+# writes `npm run build`'s output directly into CMD_WEB_DIST (go:embed can only
+# reach the embedding file's own directory subtree, so the build output has to
+# land inside cmd/web/, not WEB_DIR itself — see cmd/web/assets.go).
+WEB_DIR := web
+CMD_WEB_DIST := cmd/web/dist
+CMD_WEB_DIST_STAMP := $(CMD_WEB_DIST)/.build-stamp
+WEB_SRC_FILES := $(shell find $(WEB_DIR)/src $(WEB_DIR)/public -type f 2>/dev/null) \
+	$(WEB_DIR)/package.json $(WEB_DIR)/index.html $(WEB_DIR)/vite.config.ts \
+	$(WEB_DIR)/tsconfig.json $(WEB_DIR)/tsconfig.app.json $(WEB_DIR)/tsconfig.node.json \
+	$(WEB_DIR)/eslint.config.js
+
 ##@ General
 
 .PHONY: help
@@ -25,19 +38,22 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: lint
-lint: ## Run golangci-lint.
+lint: $(CMD_WEB_DIST_STAMP) frontend-lint ## Run golangci-lint (Go) and eslint + tsc --noEmit (frontend).
 	golangci-lint run ./...
 
 .PHONY: lint-fix
-lint-fix: ## Run golangci-lint and perform fixes.
+lint-fix: $(CMD_WEB_DIST_STAMP) ## Run golangci-lint and perform fixes.
 	golangci-lint run --fix ./...
 
 .PHONY: test
-test: fmt vet ## Run unit tests with race detector.
+# $(CMD_WEB_DIST_STAMP) must come before fmt/vet: they run `go vet ./...`,
+# which compiles cmd/web, and that needs a real (non-placeholder) embedded
+# dist/ — make builds prerequisites left to right, so order matters here.
+test: $(CMD_WEB_DIST_STAMP) fmt vet frontend-test ## Run unit tests with race detector (Go + frontend vitest).
 	go test -race -count=1 ./...
 
 .PHONY: test-integration
-test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests against mhvtl + ephemeral ZFS pool + local Temporal dev stack (brings all up, tears all down after).
+test-integration: $(CMD_WEB_DIST_STAMP) fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests against mhvtl + ephemeral ZFS pool + local Temporal dev stack (brings all up, tears all down after).
 	@{ \
 	  gocache=$$(mktemp -d); \
 	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; $(MAKE) zpool-down; $(MAKE) mhvtl-down; $(MAKE) temporal-down; exit $$rc; }; \
@@ -56,7 +72,7 @@ test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests
 	}
 
 .PHONY: test-e2e
-test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: control worker in a kind cluster (Helm chart + image), data worker as its OCI container on the host, against mhvtl + ZFS pool + Temporal (brings host resources up/down; the suite manages the cluster + containers).
+test-e2e: $(CMD_WEB_DIST_STAMP) fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: control worker in a kind cluster (Helm chart + image), data worker as its OCI container on the host, against mhvtl + ZFS pool + Temporal (brings host resources up/down; the suite manages the cluster + containers).
 	@{ \
 	  gocache=$$(mktemp -d); \
 	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; \
@@ -211,6 +227,33 @@ $(HELM_PACKAGE): $(HELM_CHART_FILES)
 .PHONY: helm
 helm: $(HELM_PACKAGE) ## Package the control-worker Helm chart into bin/helm/ (PUSH_ALL=true also pushes it to the OCI chart registry).
 
+##@ Frontend
+
+$(WEB_DIR)/node_modules/.package-lock.json: $(WEB_DIR)/package.json $(WEB_DIR)/package-lock.json
+	cd $(WEB_DIR) && npm ci
+	@touch $@
+
+# Rebuilds only when frontend sources (or the installed deps) actually
+# changed, same file-target caching pattern as the $(BIN_DIR)/* Go targets
+# below. `npm run build` (tsc -b && vite build) empties CMD_WEB_DIST before
+# writing, which is why the stamp file is (re)touched after the build rather
+# than tracked as a build output itself.
+$(CMD_WEB_DIST_STAMP): $(WEB_DIR)/node_modules/.package-lock.json $(WEB_SRC_FILES)
+	cd $(WEB_DIR) && npm run build
+	@touch $@
+
+.PHONY: frontend-build
+frontend-build: $(CMD_WEB_DIST_STAMP) ## Build the web/ frontend; output lands in cmd/web/dist (embedded by cmd/web).
+
+.PHONY: frontend-test
+frontend-test: $(WEB_DIR)/node_modules/.package-lock.json ## Run the frontend's vitest unit tests.
+	cd $(WEB_DIR) && npm test
+
+.PHONY: frontend-lint
+frontend-lint: $(WEB_DIR)/node_modules/.package-lock.json ## Run eslint and tsc --noEmit over the frontend.
+	cd $(WEB_DIR) && npm run lint
+	cd $(WEB_DIR) && npm run typecheck
+
 ##@ Build
 
 $(BIN_DIR)/worker: $(GO_SOURCE_FILES)
@@ -225,8 +268,14 @@ $(BIN_DIR)/tapectl: $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/tapectl
 
+# cmd/web embeds CMD_WEB_DIST at compile time (go:embed), so it must exist
+# (and be current) before this compiles; see the Frontend section above.
+$(BIN_DIR)/web: $(CMD_WEB_DIST_STAMP) $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/web
+
 .PHONY: build
-build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl ## Build all binaries into bin/.
+build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl $(BIN_DIR)/web ## Build all binaries into bin/.
 
 .PHONY: clean
 clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts).
