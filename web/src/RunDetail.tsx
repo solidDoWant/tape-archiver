@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 
 // RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
 // both the "update" and "done" Server-Sent Events GET
@@ -10,6 +11,13 @@ export interface RunEventDetail {
   startTime: string
   closeTime?: string
   lastCompletedPhase: string
+  // currentPause is which operator-in-the-loop pause (if any) is blocking
+  // this run right now (backup.CurrentPauseQuery via pkg/runsapi). The SSE
+  // poll loop behind this stream compares it on every tick alongside status/
+  // phase (pkg/runsapi/events.go), so a pause starting or clearing (e.g.
+  // after PauseActions below sends a resume/abort) shows up here live,
+  // without a manual refresh.
+  currentPause: CurrentPauseInfo
 }
 
 type ConnectionState = 'connecting' | 'live' | 'terminal' | 'error'
@@ -143,6 +151,15 @@ function RunDetail({ runId, onBack }: RunDetailProps) {
             </>
           ) : null}
         </dl>
+      ) : null}
+
+      {detail ? (
+        // Fallback to "not paused" if an older/unexpected event body ever
+        // omits currentPause (pkg/runsapi always includes it as of this
+        // sub-issue, but this keeps a malformed frame from crashing the
+        // view rather than just showing stale data, matching parseDetail's
+        // own defensive stance above).
+        <PauseActions runId={runId} pause={detail.currentPause ?? { kind: '' }} />
       ) : null}
 
       {state === 'terminal' ? (

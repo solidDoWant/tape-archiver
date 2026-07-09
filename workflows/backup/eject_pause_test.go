@@ -24,9 +24,19 @@ type ejectPauseParams struct {
 
 // ejectPauseTestWorkflow drives only the Eject phase so its operator-in-the-loop
 // pause/resume loop can be tested with mocked Eject/IOStationStatus activities,
-// signals, and the test env's time-skipping — without the full tape path.
+// signals, and the test env's time-skipping — without the full tape path. It
+// registers CurrentPauseQuery against its own local state, mirroring the real
+// Backup entry point (workflow.go), so tests can query pause state mid-pause.
 func ejectPauseTestWorkflow(ctx workflow.Context, params ejectPauseParams) error {
-	return ejectPhase(ctx, params.Cfg, params.Written)
+	state := &runState{}
+
+	if err := workflow.SetQueryHandler(ctx, CurrentPauseQuery, func() (CurrentPause, error) {
+		return state.currentPause, nil
+	}); err != nil {
+		return err
+	}
+
+	return ejectPhase(ctx, params.Cfg, state, params.Written)
 }
 
 // ejectPauseConfig returns a library config with the given operator wait bound.
@@ -131,6 +141,64 @@ func TestEjectPhaseSignalResume(t *testing.T) {
 
 	assert.Equal(t, 2, ejectCalls, "Eject runs once, pauses, then resumes")
 	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
+}
+
+// TestEjectPhaseCurrentPauseQuery covers the CurrentPauseQuery contract for the
+// Eject pause: while paused it reports PauseEject with the tapes ready for
+// removal and how many still await export, and once resumed to completion it
+// reports no pause.
+func TestEjectPhaseCurrentPauseQuery(t *testing.T) {
+	env := newEjectPauseEnv(t)
+
+	var ejectCalls int
+
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input EjectInput) (EjectResult, error) {
+			ejectCalls++
+
+			if ejectCalls == 1 {
+				return EjectResult{
+					InIOStation: []tape.Barcode{"TA0001L6"},
+					Remaining:   input.WrittenTapes[1:],
+				}, nil
+			}
+
+			return EjectResult{InIOStation: []tape.Barcode{"TA0001L6", "TA0002L6"}}, nil
+		})
+
+	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
+		IOStatus{FreeSlots: 0, AccessReported: false}, nil)
+
+	env.OnActivity((&FailureActivities{}).NotifyOperatorPause, mock.Anything, mock.Anything).Return(nil)
+
+	env.RegisterDelayedCallback(func() {
+		value, err := env.QueryWorkflow(CurrentPauseQuery)
+		require.NoError(t, err)
+
+		var pause CurrentPause
+		require.NoError(t, value.Get(&pause))
+
+		assert.Equal(t, PauseEject, pause.Kind)
+		assert.Equal(t, []string{"TA0001L6"}, pause.AffectedTapes)
+		assert.Equal(t, 1, pause.AwaitingExport)
+
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 10*time.Second)
+
+	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{
+		Cfg:     ejectPauseConfig(3600),
+		Written: twoWrittenTapes(),
+	})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	value, err := env.QueryWorkflow(CurrentPauseQuery)
+	require.NoError(t, err)
+
+	var pause CurrentPause
+	require.NoError(t, value.Get(&pause))
+	assert.Equal(t, PauseNone, pause.Kind, "pause state clears once the run completes")
 }
 
 // TestEjectResumeInAlertToWaitGapResumes covers issue #216 AC2 for the Eject I/O

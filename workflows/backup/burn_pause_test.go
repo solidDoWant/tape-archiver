@@ -48,9 +48,18 @@ type burnPauseResult struct {
 // burnPauseTestWorkflow drives runBurnPath for a config so its burn-set loop can
 // be tested with mocked activities, signals, and time-skipping — without the full
 // pipeline. It seeds the staged ISO/manifest paths the Burn phase consumes and
-// returns the discs it recorded.
+// returns the discs it recorded. It registers CurrentPauseQuery against its own
+// local state, mirroring the real Backup entry point (workflow.go), so tests can
+// query pause state mid-pause.
 func burnPauseTestWorkflow(ctx workflow.Context, cfg config.Config) (burnPauseResult, error) {
 	state := &runState{uncompressedISOPath: stagedISO, discManifestPath: stagedManifest}
+
+	if err := workflow.SetQueryHandler(ctx, CurrentPauseQuery, func() (CurrentPause, error) {
+		return state.currentPause, nil
+	}); err != nil {
+		return burnPauseResult{}, err
+	}
+
 	err := runBurnPath(ctx, cfg, state)
 
 	return burnPauseResult{Burned: state.burnedDiscs}, err
@@ -150,6 +159,64 @@ func TestBurnSetFailurePauseResume(t *testing.T) {
 	assert.Equal(t, 1, burnsByDev["/dev/sr0"], "the disc that succeeded is never re-burned")
 	assert.Equal(t, 2, burnsByDev["/dev/sr1"], "the failed disc is re-burned once on resume")
 	assert.Len(t, result.Burned, 2, "both copies are recorded once burned and verified")
+}
+
+// TestBurnCurrentPauseQuery covers the CurrentPauseQuery contract for a Burn
+// pause: while paused it reports PauseBurn with the burner device needing
+// attention and an error summary, and once resumed to completion it reports no
+// pause.
+func TestBurnCurrentPauseQuery(t *testing.T) {
+	cfg := burnConfig(2, []string{"/dev/sr0", "/dev/sr1"}, false, 3600)
+	env := newBurnPauseEnv(t)
+
+	var (
+		mu         sync.Mutex
+		burnsByDev = map[string]int{}
+	)
+
+	// /dev/sr1 fails its first burn attempt, then succeeds on the resume retry.
+	env.OnActivity((&BurnActivities{}).BurnDisc, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnDiscInput) (BurnResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			burnsByDev[input.Device]++
+
+			if input.Device == "/dev/sr1" && burnsByDev[input.Device] == 1 {
+				return BurnResult{}, errors.New("optical burn failed: drive reported a write error")
+			}
+
+			return BurnResult{Device: input.Device}, nil
+		})
+	env.OnActivity((&BurnActivities{}).VerifyDisc, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&FailureActivities{}).NotifyBurnPause, mock.Anything, mock.Anything).Return(nil)
+
+	env.RegisterDelayedCallback(func() {
+		value, err := env.QueryWorkflow(CurrentPauseQuery)
+		require.NoError(t, err)
+
+		var pause CurrentPause
+		require.NoError(t, value.Get(&pause))
+
+		assert.Equal(t, PauseBurn, pause.Kind)
+		assert.Equal(t, []string{"/dev/sr1"}, pause.Devices)
+		assert.Contains(t, pause.ErrorSummary, "drive reported a write error",
+			"ErrorSummary carries the raw failure cause, not the alert's human-phrased summary")
+
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 10*time.Second)
+
+	env.ExecuteWorkflow(burnPauseTestWorkflow, cfg)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	value, err := env.QueryWorkflow(CurrentPauseQuery)
+	require.NoError(t, err)
+
+	var pause CurrentPause
+	require.NoError(t, value.Get(&pause))
+	assert.Equal(t, PauseNone, pause.Kind, "pause state clears once the run completes")
 }
 
 // TestBurnResumeInAlertToWaitGapResumes covers issue #216 AC2 for the burn path: a

@@ -423,9 +423,9 @@ separate process from `worker`/`tapectl` and reads its own environment variables
 it shares the Temporal client factory (`pkg/temporalclient`) and the
 `METRICS_ADDR`/`HEALTH_ADDR` conventions with `worker`. It serves the SPA, a read-only
 JSON API under `/api/*` (listing/describing backup runs via Temporal visibility), and
-run submission (including dry-run), gated behind OIDC authentication (`pkg/webauth`) —
-see [OIDC authentication](#oidc-authentication-cmdweb) below. Live updates and
-resume/abort land in later sub-issues and will extend this table further.
+run submission (including dry-run), live monitoring (Server-Sent Events), and operator
+resume/abort actions, gated behind OIDC authentication (`pkg/webauth`) — see
+[OIDC authentication](#oidc-authentication-cmdweb) below.
 
 | Variable | Required | Description |
 |----------|----------|--------------|
@@ -452,13 +452,19 @@ becomes unreachable after startup.
 #### `GET /api/runs` and `GET /api/runs/{runID}`
 
 Both are read-only views over Temporal visibility and the backup workflow's own query
-handler — there is no UI-owned store (SPEC §4.2). `GET /api/runs` lists every execution
+handlers — there is no UI-owned store (SPEC §4.2). `GET /api/runs` lists every execution
 of the singleton `backup` workflow ID, newest first; `GET /api/runs/{runID}` (Temporal's
 run ID, which disambiguates individual executions of that one workflow ID) additionally
-reports the last completed phase via the existing `lastCompletedPhase` query. An unknown
-but well-formed run ID is `404`; a malformed one (Temporal run IDs are UUIDs) is `400`.
-Both, like every `/api/*` route, require an authenticated session (see below) — an
-unauthenticated request gets `401`, not `404`/`400`.
+reports the last completed phase (`lastCompletedPhase` query) and, since the `workflows/
+backup` `currentPause` query landed, whether the run is currently paused waiting on an
+operator and why (`currentPause`, an object): `{"kind": "eject"|"write-failure"|"burn"|"",
+"phase": "...", "affectedTapes": [...], "reloadSlots": [...], "awaitingExport": N,
+"devices": [...], "errorSummary": "..."}` — `kind` is `""` when the run is not paused, and
+every other field is populated only where it applies to that pause kind (e.g. `phase`/
+`reloadSlots` for a Load/Write failure, `awaitingExport` for an Eject pause, `devices` for
+a Burn pause). An unknown but well-formed run ID is `404`; a malformed one (Temporal run
+IDs are UUIDs) is `400`. Both, like every `/api/*` route, require an authenticated session
+(see below) — an unauthenticated request gets `401`, not `404`/`400`.
 
 ### OIDC authentication (`cmd/web`)
 
@@ -510,18 +516,47 @@ workflow ID always `backup`), a submission while one is already in progress is r
 with `409 Conflict` rather than being queued or silently replacing the in-flight run —
 the same guard `tapectl run`'s `WorkflowIDConflictPolicy` enforces.
 
+#### `POST /api/runs/{runID}/resume` and `POST /api/runs/{runID}/abort`
+
+Send the backup workflow's existing operator signals — `operatorResume` /
+`operatorAbort` (`workflows/backup/contract.go`) — the same two signals `tapectl
+resume`/`tapectl abort` send. Unlike the CLI, which signals unconditionally (a human
+operator has just watched the pause happen), these routes first check the run's current
+pause state (`currentPause` query, the same one `GET /api/runs/{runID}` reports) and
+refuse to send a signal a running workflow would only buffer and potentially misapply to
+a later, unrelated pause:
+
+- If the run is not currently paused, both routes return `409 Conflict` without sending
+  anything.
+- `POST /api/runs/{runID}/abort` additionally returns `409 Conflict` for an Eject pause
+  (`currentPause.kind == "eject"`): every tape is already safely written by the time that
+  pause fires, so the workflow's Eject wait never listens for the abort signal in the
+  first place — only resume applies there.
+- An unknown run ID is `404`; both, like every `/api/*` route, require an authenticated
+  session.
+
+On success the response is `202 Accepted` with `{"status": "resume signal sent"}` (or
+`"abort signal sent"`) — confirmation that the signal was sent, not that the run has
+necessarily processed it yet; poll `GET /api/runs/{runID}` or watch `GET
+/api/events/runs/{runID}` below for the pause actually clearing.
+
 #### `GET /api/events/runs/{runID}` (live monitoring)
 
 A `text/event-stream` (Server-Sent Events) view over the same data `GET
 /api/runs/{runID}` serves: `cmd/web` polls Temporal (`DescribeWorkflowExecution` +
-`lastCompletedPhase`) at a short, fixed server-side interval and pushes an `update` event
-— `{"workflowId", "runId", "status", "startTime", "closeTime", "lastCompletedPhase"}`,
-identical in shape to `GET /api/runs/{runID}`'s response body — only when the polled
-status or phase actually changed since the last event, so a quiescent run does not
-produce a stream of redundant events. Once the run reaches a terminal status (anything
-other than `RUNNING`), the server sends one final `update` followed by a `done` event
-(same body) and then closes the connection itself — the stream never polls a finished run
-forever, and a client does not need to reconnect to learn that.
+`lastCompletedPhase` + `currentPause`) at a short, fixed server-side interval and pushes
+an `update` event — identical in shape to `GET /api/runs/{runID}`'s response body
+(`{"workflowId", "runId", "status", "startTime", "closeTime", "lastCompletedPhase",
+"currentPause"}`) — only when the polled status, phase, or pause state actually changed
+since the last event, so a quiescent run does not produce a stream of redundant events.
+An operator-in-the-loop pause starting or clearing (e.g. after a resume/abort sent via
+the routes above) is exactly the kind of change that can happen with neither `status` nor
+`lastCompletedPhase` moving, so `currentPause` is compared alongside them — a client
+watching the live stream sees a pause (and its clearing) without a manual refresh. Once
+the run reaches a terminal status (anything other than `RUNNING`), the server sends one
+final `update` followed by a `done` event (same body) and then closes the connection
+itself — the stream never polls a finished run forever, and a client does not need to
+reconnect to learn that.
 
 The very first poll decides whether the response becomes a stream at all: an unknown run
 ID is a normal `404` JSON error (not a `200` stream that immediately fails), a malformed

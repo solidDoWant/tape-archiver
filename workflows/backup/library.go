@@ -705,7 +705,13 @@ const (
 // the remaining tapes into the freed slots. If the operator never responds within
 // the configured wait, it fails the run; every written tape is by then in an I/O
 // or storage slot and none is in a drive.
-func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) error {
+//
+// state.currentPause (read by CurrentPauseQuery) is set to PauseEject for the
+// duration of the wait below and cleared as soon as it returns, on every exit
+// path (resumed, timed out, or the wait itself errors) — a plain struct-field
+// assignment around the pre-existing wait call, with no effect on its timing or
+// signal handling.
+func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState, written []WrittenTape) error {
 	if len(written) == 0 {
 		return nil
 	}
@@ -732,7 +738,16 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) 
 
 		notifyOperatorPause(ctx, result.InIOStation, len(remaining))
 
+		state.currentPause = CurrentPause{
+			Kind:           PauseEject,
+			AffectedTapes:  barcodeStrings(result.InIOStation),
+			AwaitingExport: len(remaining),
+		}
+
 		resumed, err := waitForIOCleared(ctx, cfg)
+
+		state.currentPause = CurrentPause{}
+
 		if err != nil {
 			return err
 		}

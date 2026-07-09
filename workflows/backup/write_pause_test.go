@@ -63,10 +63,18 @@ type writePauseParams struct {
 // Load/Write-failure pause loop can be tested with mocked tape activities,
 // signals, and the test env's time-skipping — without the full pipeline. It seeds
 // a plan whose logical tapes carry no archives, so archivesForTape yields an empty
-// (valid) tree and the mocked WriteTree copies nothing.
+// (valid) tree and the mocked WriteTree copies nothing. It registers
+// CurrentPauseQuery against its own local state, mirroring the real Backup entry
+// point (workflow.go), so tests can query pause state mid-pause.
 func writePauseTestWorkflow(ctx workflow.Context, params writePauseParams) error {
 	state := &runState{plan: TapePlan{Copies: 2, Tapes: []PlannedTape{{}, {}}}}
 	failing := ""
+
+	if err := workflow.SetQueryHandler(ctx, CurrentPauseQuery, func() (CurrentPause, error) {
+		return state.currentPause, nil
+	}); err != nil {
+		return err
+	}
 
 	return runDriveSet(ctx, params.Cfg, state, params.Set, &failing)
 }
@@ -283,6 +291,68 @@ func TestWritePathPauseSignalResume(t *testing.T) {
 	assert.Equal(t, "/dev/nst1", retry[0].Drive, "retried on the failed tape's physical drive")
 	assert.Equal(t, 1, retry[0].DriveIndex, "retried tape carries its config drive index (AC2)")
 	assert.Equal(t, 101, retry[0].BlankSlot, "the fresh blank is reloaded into the failed tape's slot")
+}
+
+// TestWritePathCurrentPauseQuery covers the CurrentPauseQuery contract for a
+// write-failure pause: while paused it reports PauseWriteFailure with the
+// failing phase, the affected tape, the slot to restock, and an error summary,
+// and once resumed to completion it reports no pause.
+func TestWritePathCurrentPauseQuery(t *testing.T) {
+	cfg := twoDriveConfig(3600)
+	env := newWritePauseEnv(t)
+	expectHealthyWriteExceptFormat(env)
+
+	var (
+		mu           sync.Mutex
+		formatsByDev = map[string]int{}
+	)
+
+	// /dev/sg1 fails its first format attempt, then succeeds on the resume retry.
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			formatsByDev[input.Device]++
+
+			if input.Device == "/dev/sg1" && formatsByDev[input.Device] == 1 {
+				return errors.New("mkltfs: drive reported a hard write error")
+			}
+
+			return nil
+		})
+
+	mockLoadFromSet(env, cfg)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
+
+	env.RegisterDelayedCallback(func() {
+		value, err := env.QueryWorkflow(CurrentPauseQuery)
+		require.NoError(t, err)
+
+		var pause CurrentPause
+		require.NoError(t, value.Get(&pause))
+
+		assert.Equal(t, PauseWriteFailure, pause.Kind)
+		assert.Equal(t, PhaseWrite, pause.Phase)
+		assert.Equal(t, []string{string(barcodeForSlot(101))}, pause.AffectedTapes)
+		assert.Equal(t, []int{101}, pause.ReloadSlots)
+		assert.Contains(t, pause.ErrorSummary, "hard write error")
+
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 10*time.Second)
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	value, err := env.QueryWorkflow(CurrentPauseQuery)
+	require.NoError(t, err)
+
+	var pause CurrentPause
+	require.NoError(t, value.Get(&pause))
+	assert.Equal(t, PauseNone, pause.Kind, "pause state clears once the run completes")
 }
 
 // TestWritePathResumeInAlertToWaitGapResumes covers issue #216 AC1: a resume the

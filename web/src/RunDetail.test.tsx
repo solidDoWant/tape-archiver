@@ -57,6 +57,7 @@ const runningDetail = {
   status: 'Running',
   startTime: '2026-07-09T12:00:00Z',
   lastCompletedPhase: 'Stage',
+  currentPause: { kind: '' },
 }
 
 const completedDetail = {
@@ -64,6 +65,18 @@ const completedDetail = {
   status: 'Completed',
   closeTime: '2026-07-09T13:00:00Z',
   lastCompletedPhase: 'Verify',
+}
+
+const pausedDetail = {
+  ...runningDetail,
+  lastCompletedPhase: 'Load',
+  currentPause: {
+    kind: 'write-failure',
+    phase: 'Write',
+    affectedTapes: ['TA0001L6'],
+    reloadSlots: [101],
+    errorSummary: 'mkltfs: drive reported a hard write error',
+  },
 }
 
 beforeEach(() => {
@@ -205,5 +218,73 @@ describe('RunDetail', () => {
     expect(FakeEventSource.instances).toHaveLength(2)
     expect(first.closeCalls).toBeGreaterThanOrEqual(1)
     expect(FakeEventSource.instances[1].url).toBe('/api/events/runs/run-xyz')
+  })
+
+  it('shows no pause panel while the run is not paused', async () => {
+    render(<RunDetail runId="run-abc" />)
+
+    FakeEventSource.instances[0].emit('update', runningDetail)
+
+    await waitFor(() => expect(screen.getByText('Running')).toBeInTheDocument())
+
+    expect(screen.queryByText(/^paused:/i)).not.toBeInTheDocument()
+  })
+
+  it('shows the pause panel and lets an operator resume a paused run', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ status: 'resume signal sent' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
+
+    render(<RunDetail runId="run-abc" />)
+
+    const source = FakeEventSource.instances[0]
+
+    source.emit('update', pausedDetail)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Load\/Write failure/)).toBeInTheDocument()
+    })
+
+    expect(screen.getByText(/TA0001L6/)).toBeInTheDocument()
+
+    screen.getByRole('button', { name: /^resume$/i }).click()
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/runs/run-abc/resume',
+        expect.objectContaining({ method: 'POST' }),
+      )
+    })
+
+    // The pause panel itself does not clear on its own — that happens when
+    // the SSE stream's next poll observes CurrentPause changed and pushes a
+    // fresh update event (pkg/runsapi/events.go), which this test proves
+    // separately by driving that event directly:
+    source.emit('update', runningDetail)
+
+    await waitFor(() => {
+      expect(screen.queryByText(/^paused:/i)).not.toBeInTheDocument()
+    })
+  })
+
+  it('hides the Abort button for an eject pause', async () => {
+    render(<RunDetail runId="run-abc" />)
+
+    FakeEventSource.instances[0].emit('update', {
+      ...runningDetail,
+      lastCompletedPhase: 'Eject',
+      currentPause: { kind: 'eject', affectedTapes: ['TA0001L6'], awaitingExport: 1 },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/Eject — import\/export station full/)).toBeInTheDocument()
+    })
+
+    expect(screen.getByRole('button', { name: /^resume$/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^abort$/i })).not.toBeInTheDocument()
   })
 })

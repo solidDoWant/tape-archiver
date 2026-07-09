@@ -58,7 +58,7 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 		loaded, err := loadPhase(ctx, cfg, pending)
 		if err != nil {
 			// The whole set failed to load. Pause; on resume retry the same set.
-			switch waitForOperator(ctx, cfg, PhaseLoad, nil, slotsOf(pending), err) {
+			switch waitForOperator(ctx, cfg, state, PhaseLoad, nil, slotsOf(pending), err) {
 			case pauseResumed:
 				continue
 			case pauseAborted:
@@ -87,7 +87,7 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 		// recorded in the run.
 		*failingPhase = PhaseEject
 
-		if err := ejectPhase(ctx, cfg, append(ejectProjection(written), failedAsWritten(failed)...)); err != nil {
+		if err := ejectPhase(ctx, cfg, state, append(ejectProjection(written), failedAsWritten(failed)...)); err != nil {
 			return err
 		}
 
@@ -104,7 +104,7 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 		*failingPhase = PhaseWrite
 		cause := joinFailed(failed)
 
-		switch waitForOperator(ctx, cfg, PhaseWrite, barcodesOfFailed(failed), reloadSlots(failed), cause) {
+		switch waitForOperator(ctx, cfg, state, PhaseWrite, barcodesOfFailed(failed), reloadSlots(failed), cause) {
 		case pauseResumed:
 			pending = retrySet(cfg, failed)
 
@@ -122,7 +122,12 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 // their decision. It fires the best-effort pause alert (SPEC §11), then blocks on
 // the resume signal, the abort signal, or the configured wait-timeout, returning
 // which one fired.
-func waitForOperator(ctx workflow.Context, cfg config.Config, phase string, affectedBarcodes []string, reloadSlots []int, cause error) pauseOutcome {
+//
+// state.currentPause (read by CurrentPauseQuery) is set to PauseWriteFailure for
+// the duration of the wait and cleared as soon as it returns — a plain
+// struct-field assignment around the pre-existing wait call, with no effect on
+// its timing or signal handling.
+func waitForOperator(ctx workflow.Context, cfg config.Config, state *runState, phase string, affectedBarcodes []string, reloadSlots []int, cause error) pauseOutcome {
 	// Drain before the alert is dispatched: any resume buffered now predates this
 	// pause's alert and is therefore stale, while a resume the operator sends in
 	// response to the alert lands strictly afterwards and survives (issue #216).
@@ -130,7 +135,24 @@ func waitForOperator(ctx workflow.Context, cfg config.Config, phase string, affe
 
 	notifyWritePathPause(ctx, phase, affectedBarcodes, reloadSlots, cause)
 
-	return waitForWritePathCleared(ctx, cfg)
+	errSummary := ""
+	if cause != nil {
+		errSummary = cause.Error()
+	}
+
+	state.currentPause = CurrentPause{
+		Kind:          PauseWriteFailure,
+		Phase:         phase,
+		AffectedTapes: affectedBarcodes,
+		ReloadSlots:   reloadSlots,
+		ErrorSummary:  errSummary,
+	}
+
+	outcome := waitForWritePathCleared(ctx, cfg)
+
+	state.currentPause = CurrentPause{}
+
+	return outcome
 }
 
 // waitForWritePathCleared blocks until the operator resumes or aborts the run, or

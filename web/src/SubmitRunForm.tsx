@@ -26,11 +26,11 @@ export interface SubmitRunFormProps {
 // the same validation, dry-run override, and singleton-conflict handling
 // `tapectl run [--dry-run]` uses (pkg/runsubmit), so this form and the CLI
 // can never diverge on what a submission means
-// (docs/web-ui-design.md §2, §3, §8 item 3). Resume/abort actions land in a
-// later sub-issue of the web UI epic; today a successful submission shows
+// (docs/web-ui-design.md §2, §3, §8 item 3). A successful submission shows
 // the returned run ID and, when onViewRun is given, a link straight to its
-// live RunDetail view (sub-issue 4), and a failure shows the API's error
-// message verbatim.
+// live RunDetail view (sub-issue 4), which also surfaces operator pause
+// actions (PauseActions.tsx, sub-issue 5) once/if the run pauses. A failure
+// shows the API's error message verbatim.
 function SubmitRunForm({ onViewRun }: SubmitRunFormProps) {
   const [configText, setConfigText] = useState('')
   const [dryRun, setDryRun] = useState(false)
