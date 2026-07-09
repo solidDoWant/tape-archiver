@@ -1,1 +1,7 @@
 @import 'tailwindcss';
+
+/* Dark mode is class-based ("dark" on <html>) rather than Tailwind v4's
+   default prefers-color-scheme-only strategy, so theme.ts can offer a
+   manual override toggle on top of OS-preference detection (still the
+   default — see theme.ts's resolveInitialTheme/useTheme). */
+@custom-variant dark (&:where(.dark, .dark *));

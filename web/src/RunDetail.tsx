@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { formatTimestamp } from './api'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 
 // RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
@@ -24,10 +25,6 @@ type ConnectionState = 'connecting' | 'live' | 'terminal' | 'error'
 
 export interface RunDetailProps {
   runId: string
-  // onBack, if given, renders a link back to whatever view navigated here
-  // (SubmitRunForm's success state, today). Optional so this component
-  // stays usable standalone (e.g. a future direct-link/history view).
-  onBack?: () => void
 }
 
 // RunDetail shows a single run's live status/phase, fed by GET
@@ -56,7 +53,12 @@ export interface RunDetailProps {
 // callback reacting to an external event) is the exact anti-pattern
 // react-hooks/set-state-in-effect flags, and the "remount to reset" pattern
 // it points at is what App.tsx's key does instead.
-function RunDetail({ runId, onBack }: RunDetailProps) {
+//
+// This component no longer renders its own "back" link (it used to, to
+// whatever view had navigated here) — App.tsx's persistent shell nav
+// (sub-issue 7) makes Submit and History reachable from every view,
+// including this one, so a special-cased in-page back link is redundant.
+function RunDetail({ runId }: RunDetailProps) {
   const [state, setState] = useState<ConnectionState>('connecting')
   const [detail, setDetail] = useState<RunEventDetail | null>(null)
 
@@ -109,16 +111,6 @@ function RunDetail({ runId, onBack }: RunDetailProps) {
 
   return (
     <div className="flex w-full max-w-2xl flex-col gap-4 text-left">
-      {onBack ? (
-        <button
-          type="button"
-          onClick={onBack}
-          className="self-start text-sm font-medium text-slate-600 underline dark:text-slate-300"
-        >
-          ← Back to submit a run
-        </button>
-      ) : null}
-
       <h2 className="text-xl font-semibold">Run {runId}</h2>
 
       {state === 'connecting' ? (
@@ -143,11 +135,11 @@ function RunDetail({ runId, onBack }: RunDetailProps) {
           <dt className="font-medium">Last completed phase</dt>
           <dd>{detail.lastCompletedPhase || '—'}</dd>
           <dt className="font-medium">Started</dt>
-          <dd>{new Date(detail.startTime).toLocaleString()}</dd>
+          <dd>{formatTimestamp(detail.startTime)}</dd>
           {detail.closeTime ? (
             <>
               <dt className="font-medium">Closed</dt>
-              <dd>{new Date(detail.closeTime).toLocaleString()}</dd>
+              <dd>{formatTimestamp(detail.closeTime)}</dd>
             </>
           ) : null}
         </dl>

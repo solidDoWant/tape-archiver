@@ -43,3 +43,20 @@ export async function apiFetch<T>(input: string, init?: RequestInit): Promise<T>
 
   return (body ?? {}) as T
 }
+
+// describeNetworkError renders a non-ApiError failure from apiFetch (fetch
+// itself rejecting — the server is unreachable, DNS failure, offline, etc.)
+// as operator-facing text. The usual call-site pattern is
+// `error instanceof ApiError ? error.message : describeNetworkError(error)`.
+export function describeNetworkError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+
+  return `Could not reach the server: ${message}`
+}
+
+// formatTimestamp renders an optional ISO timestamp (as pkg/runsapi's JSON
+// responses carry start/close times) in the operator's local timezone, or an
+// em dash when absent (e.g. a run that has not closed yet).
+export function formatTimestamp(value?: string): string {
+  return value ? new Date(value).toLocaleString() : '—'
+}
