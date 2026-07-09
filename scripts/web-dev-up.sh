@@ -102,34 +102,77 @@ mkdir -p "$LOG_DIR" "$WEB_DEV_STATE_DIR/staging"
 #
 # A trap is required because bash's default action for an untrapped
 # SIGINT/SIGTERM is to terminate this script immediately, which would race
-# cmd/web's own graceful drain (observed 25-70s with a browser SSE
-# connection open) and skip teardown entirely. The handler only records that
-# a signal arrived; run_teardown (defined below, called once cmd/web has
-# actually exited) does the real work.
+# cmd/web's own graceful drain (see the grace-period comment further down)
+# and skip teardown entirely. The INT/TERM handler only records that a
+# signal arrived (and forwards it to cmd/web — see the comment inside); the
+# teardown itself runs from the EXIT trap below, so that EVERY exit path
+# with an interrupt pending tears down — crucially including `set -e`
+# aborts caused by the group-delivered signal killing whatever child
+# command this script happened to be running at that moment (a `sleep`
+# inside a poll loop, zpool-up.sh, the `nix build` command substitution,
+# ...), not just the deliberate exit points.
 # ---------------------------------------------------------------------------
 
 INTERRUPTED=0
+WEB_PID=""
+
 on_interrupt() {
   INTERRUPTED=1
+  # Forward the signal to cmd/web (always as SIGTERM — cmd/web treats
+  # INT/TERM identically via signal.NotifyContext, cmd/web/main.go). This
+  # matters for a supervisor that signals only this script's lone PID:
+  # cmd/web is a separate process (a background job, not an exec), so
+  # without forwarding it would never hear the signal, sit un-drained
+  # through the whole grace period below, and get SIGKILLed. Harmless on
+  # the Ctrl+C path, where cmd/web already received the group-delivered
+  # signal directly — NotifyContext swallows the duplicate.
+  if [ -n "$WEB_PID" ]; then
+    kill -TERM "$WEB_PID" 2> /dev/null || true
+  fi
 }
 trap on_interrupt INT TERM
 
 # run_teardown hands off to the `web-dev-down` Make target — the same
-# scripts/web-dev-up.sh + temporal-down/mhvtl-down/zpool-down composition
+# scripts/web-dev-down.sh + zpool-down/mhvtl-down/temporal-down composition
 # `make web-dev-down` already runs standalone — rather than forking a second
-# teardown implementation here. MAKEFLAGS/MAKELEVEL are stripped so this
-# nested invocation never tries to negotiate a jobserver token with (or
-# otherwise depend on) the outer `make web-dev` invocation that ran this
-# script; WEB_DEV_STATE_DIR is threaded through explicitly since the
-# Makefile's `WEB_DEV_STATE_DIR ?= ...` only takes the environment value
-# when one is present.
+# teardown implementation here.
+#
+# setsid --wait: the teardown must survive a second, impatient Ctrl+C — a
+# group-delivered signal must not abort it mid-sequence, so it runs in its
+# own session, outside the foreground process group, while --wait keeps the
+# call synchronous and preserves the exit code. (If that second Ctrl+C
+# kills this script itself, the detached teardown still runs to
+# completion on its own.)
+#
+# MAKEFLAGS/MAKELEVEL/MFLAGS are stripped so this nested invocation never
+# tries to negotiate a jobserver token with (or otherwise depend on) the
+# outer `make web-dev` invocation that ran this script. WEB_DEV_STATE_DIR
+# is already in this script's environment (the Makefile recipe sets it), so
+# the nested make would inherit it anyway — passing it explicitly is
+# belt-and-braces against a future caller that doesn't export it, not a
+# requirement of the Makefile's `?=` default.
 run_teardown() {
   echo ""
   echo "==> caught interrupt; running full 'make web-dev-down' teardown..." >&2
-  env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS \
+  setsid --wait env -u MAKEFLAGS -u MAKELEVEL -u MFLAGS \
     WEB_DEV_STATE_DIR="$WEB_DEV_STATE_DIR" \
     make -C "$PROJECT_DIR" web-dev-down
 }
+
+# The EXIT trap is the single place the teardown is invoked from: any exit
+# whatsoever — deliberate, or a set -e abort from a signal-killed child —
+# tears down iff an interrupt is pending. A genuine startup failure with no
+# interrupt (INTERRUPTED=0) deliberately does NOT tear down; it leaves the
+# stack up for debugging, exactly as before this issue.
+on_exit() {
+  # Reset the trap first so nothing run_teardown does can re-enter this
+  # handler.
+  trap - EXIT
+  if [ "$INTERRUPTED" -eq 1 ]; then
+    run_teardown
+  fi
+}
+trap on_exit EXIT
 
 # ---------------------------------------------------------------------------
 # ZFS test pool: only bring it up if it isn't already there. Unlike
@@ -248,7 +291,13 @@ wait_for_ready() {
       return 0
     fi
     echo -n "."
-    sleep 0.5
+    # || true: a group-delivered interrupt kills this sleep, and under
+    # set -e an unguarded nonzero sleep would abort the script from inside
+    # this poll loop (the EXIT trap would still tear down, but the readiness
+    # phase shouldn't die early when the teardown is about to run anyway —
+    # and every sleep in this script is guarded uniformly for the same
+    # reason).
+    sleep 0.5 || true
   done
   echo ""
   echo "warning: $name did not report ready in time; continuing anyway (see $LOG_DIR/$name.log)" >&2
@@ -335,12 +384,12 @@ SEED_LOG="$LOG_DIR/webdevseed.log"
 
 # ---------------------------------------------------------------------------
 # Interrupted before cmd/web even started (e.g. during webdevseed startup
-# above)? Nothing to wait for — go straight to teardown instead of printing
-# a "stack is up" banner for a stack that's about to come right back down.
+# above)? Nothing to wait for — exit now (the EXIT trap runs the teardown)
+# instead of printing a "stack is up" banner for a stack that's about to
+# come right back down.
 # ---------------------------------------------------------------------------
 
 if [ "$INTERRUPTED" -eq 1 ]; then
-  run_teardown
   exit 0
 fi
 
@@ -394,33 +443,38 @@ env \
   "$BIN_DIR/web" &
 WEB_PID=$!
 
-# Wait for cmd/web to exit on its own — this must block indefinitely while
+# web.pid: only consumed by web-dev-down.sh's crash-remedy path. This
+# script's own interrupt flow never needs it (WEB_PID is in hand), but if
+# this script and make are SIGKILLed — which cannot be trapped — cmd/web
+# survives as an orphan holding the web port, and without a pidfile
+# `make web-dev-down` (the documented crash remedy) would have no way to
+# find and stop it.
+echo "$WEB_PID" > "$WEB_DEV_STATE_DIR/web.pid"
+
+# Wait for cmd/web to exit on its own — this must wait indefinitely while
 # nothing has interrupted it: a healthy, long-running dev session (this is
 # meant to stay up for however long the developer is working) must never be
-# killed just for running a while. A plain single `wait "$WEB_PID"` is not
-# quite enough by itself: bash interrupts (returns early from) a blocking
-# `wait` as soon as a trapped signal's handler runs, before cmd/web has
-# actually exited — so this loops on `wait` until either cmd/web is truly
-# gone (kill -0 fails) or a signal has been caught (INTERRUPTED flips to 1,
-# which also breaks the loop even though cmd/web is still draining).
-WEB_EXIT=0
+# killed just for running a while. A poll (kill -0 + sleep), not a blocking
+# `wait`, deliberately: a signal landing in the window between this loop's
+# condition check and a blocking `wait` would leave the script stuck in
+# that wait until cmd/web actually exits, silently defeating the bounded
+# grace period below if cmd/web wedges mid-drain. The 1s detection latency
+# for a normal cmd/web exit is irrelevant for dev tooling.
 while kill -0 "$WEB_PID" 2> /dev/null && [ "$INTERRUPTED" -eq 0 ]; do
-  if wait "$WEB_PID" 2> /dev/null; then
-    WEB_EXIT=0
-  else
-    WEB_EXIT=$?
-  fi
+  sleep 1 || true
 done
 
 # Only once actually interrupted does a bounded grace period apply, counted
-# from the moment the signal arrived (not from when cmd/web started) — cmd/web's
-# own graceful shutdown has been observed to take 25-70s with a browser SSE
-# connection open, so this must be generous, but an interrupt must still
-# never hang forever even if cmd/web itself wedges mid-drain. This is a
-# genuine poll (kill -0 + sleep), not another blocking `wait`: a blocking
-# `wait` only wakes on the process actually exiting or on another trapped
-# signal arriving, neither of which is guaranteed within any fixed deadline.
-if [ "$INTERRUPTED" -eq 1 ] && kill -0 "$WEB_PID" 2> /dev/null; then
+# from the moment the signal arrived (not from when cmd/web started).
+# cmd/web's total process lifetime after a shutdown signal has been
+# observed at 25-70s (longer with a browser SSE connection open) — note
+# that is NOT fully attributed: cmd/web's srv.Shutdown is hard-capped at
+# shutdownTimeout=10s (cmd/web/main.go), so the remainder is going to the
+# post-Shutdown health/metrics/Temporal-client cleanup; tracked separately,
+# not investigated in this script. 90s is the generous bound over that
+# observed range, after which SIGKILL guarantees an interrupt can never
+# hang forever even if cmd/web wedges mid-drain.
+if [ "$INTERRUPTED" -eq 1 ]; then
   WEB_GRACE_PERIOD_S=90
   WEB_GRACE_DEADLINE=$((SECONDS + WEB_GRACE_PERIOD_S))
   while kill -0 "$WEB_PID" 2> /dev/null; do
@@ -429,17 +483,18 @@ if [ "$INTERRUPTED" -eq 1 ] && kill -0 "$WEB_PID" 2> /dev/null; then
       kill -KILL "$WEB_PID" 2> /dev/null || true
       break
     fi
-    sleep 1
+    sleep 1 || true
   done
-  if wait "$WEB_PID" 2> /dev/null; then
-    WEB_EXIT=0
-  else
-    WEB_EXIT=$?
-  fi
 fi
 
+# Single final reap of the (now dead, or just-SIGKILLed) cmd/web job. Its
+# exit code only matters on the un-interrupted path, where cmd/web exiting
+# on its own is the whole script's outcome; on the interrupt path the exit
+# below is an orderly stop and the EXIT trap runs the teardown.
+WEB_EXIT=0
+wait "$WEB_PID" 2> /dev/null || WEB_EXIT=$?
+
 if [ "$INTERRUPTED" -eq 1 ]; then
-  run_teardown
   exit 0
 fi
 
