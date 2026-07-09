@@ -146,3 +146,85 @@ ended; a run's PDF report (delivered to Discord on completion, see
 History has no pagination and no filtering — it lists everything Temporal's visibility
 still retains, newest first. Given backup runs are singleton and serial (SPEC §4.2),
 this stays well within a single page for any realistic retention window.
+
+## Local development
+
+Everything above assumes a real deployment (a real Temporal cluster, a real identity
+provider, a real tape library). For iterating on the UI itself, `make web-dev` brings up
+a complete local stand-in with a couple of clicks: dev Temporal, `mhvtl`, and an ephemeral
+ZFS test pool (reusing the existing `temporal-up`/`mhvtl-up`/`zpool-up` targets and
+scripts unchanged), a local OIDC provider, real control and data workers, and `cmd/web`
+itself — with a few sample dry-run backups submitted automatically so History has
+something in it right away.
+
+```console
+$ make web-dev
+...
+==============================================================================
+ tape-archiver web UI dev stack is up.
+
+   URL:      http://127.0.0.1:8080
+   Log in with:
+     subject: dev-operator
+     email:   dev-operator@tape-archiver.local
+     name:    Dev Operator
+
+   The local OIDC provider has no interactive login form (issue #265's
+   documented tradeoff for zero new Go/Docker dependencies) — opening the URL
+   and following the redirect signs you in as the user above automatically;
+   there is nothing to type.
+
+   Sample dry-run backups are being submitted in the background and will
+   appear in History over the next few minutes (tail the printed log path
+   to watch progress).
+
+   Ctrl+C stops only this web server. Temporal/mhvtl/zpool, the OIDC
+   provider, and the workers stay up for the next 'make web-dev'. Run
+   'make web-dev-down' to tear everything down.
+==============================================================================
+```
+
+Open the printed URL. Since backup runs are a Temporal singleton (SPEC §4.2), the 2-3
+sample dry-runs seed sequentially in the background rather than blocking startup — each
+is a real run against `mhvtl` and the ZFS test pool (staging, tar, age encryption, PAR2,
+LTFS write, eject, report), so History fills in progressively over the next few minutes
+rather than all at once.
+
+Ctrl+C stops only the `cmd/web` process — Temporal, `mhvtl`, the ZFS pool, the OIDC
+provider, and the control/data workers all stay up, so the next `make web-dev` (e.g.
+after a code change and rebuild) comes back in seconds instead of re-doing all of that.
+`make web-dev` is idempotent: running it again against an already-up stack skips
+anything already running and just submits a couple more sample runs on top — cheap,
+since they're dry-runs.
+
+When you're done, `make web-dev-down` tears down everything `make web-dev` brought up —
+the OIDC provider and workers, then Temporal/`mhvtl`/the ZFS pool via their own
+`*-down` targets — following the same naming convention those targets already
+establish.
+
+**Local OIDC provider — how it works and its one real tradeoff.** `cmd/web` refuses to
+start without a real, reachable OIDC provider (see
+[OIDC authentication](configuration.md#oidc-authentication-cmdweb)), so `make web-dev`
+starts one: a small dev-only binary (`cmd/webdevoidc`) wrapping the same real, in-process,
+standards-compliant OpenID Connect implementation (`internal/testutil`) already exercised
+end to end by `pkg/webauth`'s own tests — real discovery, JWKS, and a real
+authorize/token exchange with PKCE, not a mock. This was chosen over running a real
+identity provider (e.g. [Dex](https://dexidp.io/)) in Docker specifically to avoid a new
+external dependency and image pull; the tradeoff, called out explicitly since it differs
+from a real deployment, is that this provider's `/authorize` endpoint has **no
+interactive login form** — it immediately authenticates the fixed test user
+`make web-dev` prints and redirects back. Opening the URL and reaching the app *is*
+"logging in" here; there is nothing to type. This provider is dev-tooling only — it is
+never built into a shipped image and is not meant to be reachable from anywhere but your
+own machine.
+
+Seed configs deliberately set `library.allowNonBlankTapes` on a small, fixed pool of
+`mhvtl` storage slots, so repeat `make web-dev` invocations can keep reusing them
+indefinitely without needing to track which slots are still blank — these are disposable
+dev archives, not real backups, so reclaiming them the same way an operator deliberately
+would (see [`docs/configuration.md`](configuration.md)'s `library.allowNonBlankTapes`) is
+the simplest correct choice here.
+
+`make web-dev` is dev tooling only: it is not part of `make test-e2e` (which already
+covers the real, automated, torn-down-after-itself verification path) and is not meant to
+run in CI.

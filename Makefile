@@ -359,6 +359,18 @@ $(BIN_DIR)/web: $(CMD_WEB_DIST_STAMP) $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/web
 
+# webdevoidc/webdevseed (issue #265, `make web-dev`) are dev-tooling-only
+# binaries — deliberately NOT part of `build`'s default binary set below (they
+# are never shipped in an image or used outside a developer's own machine);
+# the web-dev target below builds them directly as its own prerequisites.
+$(BIN_DIR)/webdevoidc: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/webdevoidc
+
+$(BIN_DIR)/webdevseed: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/webdevseed
+
 .PHONY: build
 build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl $(BIN_DIR)/web ## Build all binaries into bin/.
 
@@ -416,3 +428,26 @@ zpool-up: ## Create an ephemeral file-backed ZFS pool for integration tests.
 .PHONY: zpool-down
 zpool-down: ## Destroy the ephemeral ZFS test pool.
 	@$(PROJECT_DIR)/scripts/zpool-down.sh
+
+# WEB_DEV_STATE_DIR holds web-dev-up.sh/web-dev-down.sh's PID files, logs, the
+# persisted WEB_SESSION_KEY, and the data worker's staging directory —
+# entirely outside the repo, mirroring zpool-up.sh's /var/tmp backing file and
+# mhvtl-up.sh's /opt/mhvtl media directory.
+WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
+
+.PHONY: web-dev
+# Depends on the *-up targets directly (not web-dev-up.sh calling `make`
+# itself), the same pattern test-integration/test-e2e already use, so Make's
+# own dependency graph — not ad hoc shell — decides what needs bringing up.
+# recovery-binaries provides the real static age/par2/zstd/tar the data
+# worker's Report phase requires (nix build .#recoveryBinaries, cached after
+# the first run).
+web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up zpool-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground (Ctrl+C stops only the web server — see docs/web-ui.md's "Local development").
+	@BIN_DIR=$(BIN_DIR) WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-up.sh
+
+.PHONY: web-dev-down
+web-dev-down: ## Tear down everything `make web-dev` brought up: the OIDC provider and control/data workers, then Temporal/mhvtl/zpool (via their own *-down targets).
+	@WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-down.sh
+	@$(MAKE) zpool-down
+	@$(MAKE) mhvtl-down
+	@$(MAKE) temporal-down

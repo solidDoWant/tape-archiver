@@ -122,6 +122,13 @@
             pkgs.gnumake
             pkgs.kubernetes-helm
 
+            # setsid — scripts/web-dev-up.sh (`make web-dev`, issue #265) uses it to
+            # detach the local OIDC provider, control/data workers, and sample-run
+            # seeding into their own session, so a developer's Ctrl+C (which only
+            # signals the terminal's foreground process group) stops just the
+            # foreground `cmd/web` process, not the rest of the dev stack.
+            pkgs.util-linux
+
             # kind + kubectl drive the e2e suite (e2e/, `make test-e2e`): it
             # stands up a real kind cluster and deploys the control worker via
             # the Helm chart + control-worker image, then talks to it with

@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -36,9 +37,13 @@ import (
 // (and IDTokenLifetime) may be changed after construction, before driving a
 // login, to control what the next issued ID token claims.
 type FakeOIDCProvider struct {
-	// Server is the fake provider's HTTP server. Server.URL is both its
+	// Server is the fake provider's HTTP server when constructed via
+	// NewFakeOIDCProvider/NewFakeOIDCProviderOn. Server.URL is both its
 	// issuer URL (for OIDC discovery) and the base of its
-	// authorize/token/JWKS endpoints.
+	// authorize/token/JWKS endpoints. Nil when constructed via
+	// NewStandaloneFakeOIDCProvider — use baseURL() internally, and the
+	// issuerURL passed to that constructor externally, instead of reading
+	// this field directly in that case.
 	Server *httptest.Server
 
 	// ClientID/ClientSecret are the confidential-client credentials this
@@ -47,6 +52,13 @@ type FakeOIDCProvider struct {
 	ClientSecret string
 
 	key *rsa.PrivateKey
+
+	// issuerURL is the provider's base URL when it is NOT backed by Server
+	// (i.e. built by NewStandaloneFakeOIDCProvider for a long-lived,
+	// non-test caller — see cmd/webdevoidc). baseURL() prefers Server.URL
+	// whenever Server is set, so this field is only ever consulted in the
+	// standalone case.
+	issuerURL string
 
 	mu    sync.Mutex
 	codes map[string]fakeAuthCode
@@ -113,13 +125,61 @@ func NewFakeOIDCProviderOn(t testing.TB, clientID, clientSecret string, listener
 // newUnstartedFakeOIDCProvider builds the fake provider and its mux, wired
 // into an unstarted httptest.Server so both NewFakeOIDCProvider (default
 // loopback listener) and NewFakeOIDCProviderOn (caller-supplied listener)
-// share one construction path.
+// share one construction path. It is a thin testing.TB-aware wrapper over
+// buildFakeOIDCProvider, which does the actual (TB-free) construction work —
+// see that function's doc comment for why the split exists.
 func newUnstartedFakeOIDCProvider(t testing.TB, clientID, clientSecret string) (*FakeOIDCProvider, *httptest.Server) {
 	t.Helper()
 
+	idp, mux, err := buildFakeOIDCProvider(clientID, clientSecret)
+	if err != nil {
+		t.Fatalf("testutil: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(mux)
+	idp.Server = server
+
+	return idp, server
+}
+
+// NewStandaloneFakeOIDCProvider builds a FakeOIDCProvider usable outside a Go
+// test binary. NewFakeOIDCProvider/NewFakeOIDCProviderOn cannot serve this:
+// both require a testing.TB, and testing.TB has an unexported method
+// specifically so nothing outside package testing can implement it — a
+// long-lived, non-test caller (cmd/webdevoidc, for `make web-dev`) has no
+// value to pass. This returns a plain, unstarted *http.Server instead of an
+// httptest.Server: the caller binds its own listener and Serve()s it, and is
+// responsible for shutting it down (nothing here registers a t.Cleanup or
+// calls t.Fatalf — errors are returned instead).
+//
+// issuerURL must be the exact base URL the caller will make this server
+// reachable at (e.g. "http://127.0.0.1:9998") — it is baked into OIDC
+// discovery responses and signed ID tokens' issuer claim up front, before the
+// caller has necessarily bound a listener. This sidesteps the
+// ephemeral-port chicken-and-egg NewFakeOIDCProvider/NewFakeOIDCProviderOn
+// avoid differently (via a real httptest.Server, which learns its own address
+// from the listener it starts on): a long-lived dev command instead picks a
+// fixed, well-known local port up front and passes the matching URL here.
+func NewStandaloneFakeOIDCProvider(clientID, clientSecret, issuerURL string) (*FakeOIDCProvider, *http.Server, error) {
+	idp, mux, err := buildFakeOIDCProvider(clientID, clientSecret)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	idp.issuerURL = issuerURL
+
+	return idp, &http.Server{Handler: mux}, nil
+}
+
+// buildFakeOIDCProvider does the actual construction work shared by all three
+// constructors above (generate the signing key, default the claims, wire the
+// mux) without depending on testing.TB, so NewStandaloneFakeOIDCProvider can
+// use it directly and the two testing.TB-based constructors can wrap it with
+// t.Fatalf on error.
+func buildFakeOIDCProvider(clientID, clientSecret string) (*FakeOIDCProvider, *http.ServeMux, error) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		t.Fatalf("testutil: generate fake IdP signing key: %v", err)
+		return nil, nil, fmt.Errorf("generate fake IdP signing key: %w", err)
 	}
 
 	idp := &FakeOIDCProvider{
@@ -139,18 +199,29 @@ func newUnstartedFakeOIDCProvider(t testing.TB, clientID, clientSecret string) (
 	mux.HandleFunc("GET /authorize", idp.handleAuthorize)
 	mux.HandleFunc("POST /token", idp.handleToken)
 
-	server := httptest.NewUnstartedServer(mux)
-	idp.Server = server
+	return idp, mux, nil
+}
 
-	return idp, server
+// baseURL returns the provider's issuer/base URL, preferring the live
+// Server.URL (which e2e/web_test.go mutates after Start() to rebind the
+// advertised address for cross-container reachability — reading it fresh
+// here, rather than caching it at construction time, preserves that) and
+// falling back to the fixed issuerURL set by NewStandaloneFakeOIDCProvider
+// when there is no Server at all.
+func (idp *FakeOIDCProvider) baseURL() string {
+	if idp.Server != nil {
+		return idp.Server.URL
+	}
+
+	return idp.issuerURL
 }
 
 func (idp *FakeOIDCProvider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, map[string]any{
-		"issuer":                                idp.Server.URL,
-		"authorization_endpoint":                idp.Server.URL + "/authorize",
-		"token_endpoint":                        idp.Server.URL + "/token",
-		"jwks_uri":                              idp.Server.URL + "/keys",
+		"issuer":                                idp.baseURL(),
+		"authorization_endpoint":                idp.baseURL() + "/authorize",
+		"token_endpoint":                        idp.baseURL() + "/token",
+		"jwks_uri":                              idp.baseURL() + "/keys",
 		"response_types_supported":              []string{"code"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
@@ -289,7 +360,7 @@ func (idp *FakeOIDCProvider) signIDToken(nonce string) (string, error) {
 	now := time.Now()
 
 	standardClaims := jwt.Claims{
-		Issuer:   idp.Server.URL,
+		Issuer:   idp.baseURL(),
 		Subject:  idp.Subject,
 		Audience: jwt.Audience{idp.ClientID},
 		Expiry:   jwt.NewNumericDate(now.Add(idp.IDTokenLifetime)),
