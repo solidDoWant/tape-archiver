@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -76,6 +77,46 @@ type fakeAuthCode struct {
 func NewFakeOIDCProvider(t testing.TB, clientID, clientSecret string) *FakeOIDCProvider {
 	t.Helper()
 
+	idp, server := newUnstartedFakeOIDCProvider(t, clientID, clientSecret)
+	server.Start()
+	t.Cleanup(server.Close)
+
+	return idp
+}
+
+// NewFakeOIDCProviderOn behaves exactly like NewFakeOIDCProvider, but binds
+// the fake provider's HTTP server to the given listener instead of an
+// ephemeral loopback port. e2e/web_test.go uses this to bind the fake IdP to
+// the kind bridge's gateway IP, so it is reachable both from pods inside the
+// kind cluster (cmd/web's own OIDC discovery/token-exchange calls) and from
+// the host browser (the /authorize redirect hop a real browser follows) —
+// the same reachability trick the existing e2e suite's mock webhook uses
+// (e2e/harness_test.go's startWebhook). Ownership of listener transfers to
+// the returned FakeOIDCProvider's httptest.Server, which closes it via
+// t.Cleanup.
+func NewFakeOIDCProviderOn(t testing.TB, clientID, clientSecret string, listener net.Listener) *FakeOIDCProvider {
+	t.Helper()
+
+	idp, server := newUnstartedFakeOIDCProvider(t, clientID, clientSecret)
+
+	// Discard the default ephemeral loopback listener httptest.NewUnstartedServer
+	// already created, and start on the caller's listener instead — the
+	// documented way to bind an httptest.Server to a specific address.
+	_ = server.Listener.Close()
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+
+	return idp
+}
+
+// newUnstartedFakeOIDCProvider builds the fake provider and its mux, wired
+// into an unstarted httptest.Server so both NewFakeOIDCProvider (default
+// loopback listener) and NewFakeOIDCProviderOn (caller-supplied listener)
+// share one construction path.
+func newUnstartedFakeOIDCProvider(t testing.TB, clientID, clientSecret string) (*FakeOIDCProvider, *httptest.Server) {
+	t.Helper()
+
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("testutil: generate fake IdP signing key: %v", err)
@@ -98,10 +139,10 @@ func NewFakeOIDCProvider(t testing.TB, clientID, clientSecret string) *FakeOIDCP
 	mux.HandleFunc("GET /authorize", idp.handleAuthorize)
 	mux.HandleFunc("POST /token", idp.handleToken)
 
-	idp.Server = httptest.NewServer(mux)
-	t.Cleanup(idp.Server.Close)
+	server := httptest.NewUnstartedServer(mux)
+	idp.Server = server
 
-	return idp
+	return idp, server
 }
 
 func (idp *FakeOIDCProvider) handleDiscovery(w http.ResponseWriter, _ *http.Request) {

@@ -194,6 +194,20 @@
             # (Vite + React + TypeScript + Tailwind, cmd/web's embedded SPA).
             # Ships npm, used for the committed package-lock.json.
             pkgs.nodejs_24
+
+            # Chromium for the Playwright e2e suite (web/e2e/, driven by
+            # e2e/web_test.go's TestWebUIEndToEnd — issue #260). Playwright's
+            # own `npx playwright install` browser-download step produces a
+            # binary that cannot run in this repo's NixOS-style sandbox
+            # (missing system libs the dynamic linker can't resolve outside a
+            # nixpkgs-patched RPATH) — confirmed first during sub-issue 7's ad
+            # hoc browser verification. playwright-driver.browsers ships a
+            # nixpkgs-patched Chromium built for exactly the @playwright/test
+            # version pinned in web/package.json (kept in lockstep — see that
+            # file), wired in below via PLAYWRIGHT_BROWSERS_PATH +
+            # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD, the standard nixpkgs pattern
+            # for using Playwright without its own browser download.
+            pkgs.playwright-driver.browsers
           ];
 
           # Expose the built kernel modules so the up-scripts can load them
@@ -204,6 +218,13 @@
           shellHook = ''
             export MHVTL_KO="${mhvtlKernel}/lib/modules/$(ls ${mhvtlKernel}/lib/modules)/kernel/drivers/scsi/mhvtl.ko"
             export ZFS_MODULES="${zfsKernel}"
+
+            # Point @playwright/test at the nixpkgs-provided, pre-patched
+            # Chromium instead of trying (and failing, in this sandbox) to
+            # download its own — see the playwright-driver.browsers comment
+            # above and web/playwright.config.ts.
+            export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+            export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
           '';
         };
       });

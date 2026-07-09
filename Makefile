@@ -77,6 +77,11 @@ test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests
 	}
 
 .PHONY: test-e2e
+# -timeout 40m (bumped from 30m): TestWebUIEndToEnd (e2e/web_test.go, issue
+# #260) adds a second Helm chart deploy (the web UI) into the same kind
+# cluster plus a real, real-mhvtl-backed backup run driven through a browser
+# on top of the existing suite's own real-run tests, so the whole binary's
+# aggregate budget needs headroom beyond the pre-existing 30m.
 test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: control worker in a kind cluster (Helm chart + image), data worker as its OCI container on the host, against mhvtl + ZFS pool + Temporal (brings host resources up/down; the suite manages the cluster + containers).
 	@{ \
 	  gocache=$$(mktemp -d); \
@@ -89,13 +94,19 @@ test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: con
 	  : "shared kind cluster + Temporal, so package binaries must not run"; \
 	  : "concurrently. Runs under sudo so the test process can drive the tape"; \
 	  : "devices and corrupt the root-owned staged slices (AC4)."; \
+	  : "PLAYWRIGHT_BROWSERS_PATH/PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD are passed"; \
+	  : "through explicitly (sudo strips the rest of the environment by"; \
+	  : "default) so TestWebUIEndToEnd (e2e/web_test.go) finds the"; \
+	  : "nix-provided Chromium instead of skipping — see flake.nix's devShell."; \
 	  sudo env \
 	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
 	    TAPE_POOL_MOUNT=/mnt/tape-test-pool/archive TAPE_POOL_DATASET=tape_test/archive \
 	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
 	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
+	    PLAYWRIGHT_BROWSERS_PATH="$$PLAYWRIGHT_BROWSERS_PATH" \
+	    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="$$PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" \
 	    PATH="$$PATH" HOME="$$HOME" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
-	    go test -count=1 -p 1 -timeout 30m -tags e2e ./e2e/...; \
+	    go test -count=1 -p 1 -timeout 40m -tags e2e ./e2e/...; \
 	}
 
 .PHONY: benchmark
