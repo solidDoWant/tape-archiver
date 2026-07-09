@@ -171,6 +171,7 @@ Operator and reference docs live under [`docs/`](docs/):
 - [`maintenance.md`](docs/maintenance.md) — barcode convention, re-burn cadence, operator procedures.
 - [`report.md`](docs/report.md) — the PDF report contents.
 - [`control-worker-helm.md`](docs/control-worker-helm.md), [`control-worker-image.md`](docs/control-worker-image.md), [`data-worker-image.md`](docs/data-worker-image.md) — deployment.
+- [`web-ui.md`](docs/web-ui.md) — the web UI (submit / monitor / pause actions / run history).
 - [`web-helm.md`](docs/web-helm.md), [`web-image.md`](docs/web-image.md) — web UI deployment.
 
 ## License
