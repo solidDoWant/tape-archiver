@@ -3,10 +3,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -27,6 +29,17 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
+
+// validRunConfigJSON is a minimal valid run-config document, the same shape
+// pkg/runsapi's own tests use, for exercising POST /api/runs.
+const validRunConfigJSON = `{
+  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+  "copies": 2,
+  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
+}`
 
 const (
 	// stubPhase is the value the stub workflow reports for the last completed
@@ -181,13 +194,15 @@ func newAuthenticatedClient(t *testing.T, addr string) *http.Client {
 // a fake OIDC provider: an unauthenticated request to "/" is redirected to
 // login (pkg/webauth gates it), a request authenticated via a real
 // login -> callback round trip against the fake provider succeeds, the
-// health server answers /healthz and /readyz (never gated — a separate,
-// always-on port), and run() returns cleanly once ctx is cancelled.
+// health server answers /healthz and /readyz and /metrics stays reachable
+// unauthenticated (all three are separate, always-on ports pkg/webauth's
+// Wrap never touches — Kubernetes probes and Prometheus scrapes cannot
+// perform an OIDC login), and run() returns cleanly once ctx is cancelled.
 func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	requireBuiltFrontend(t)
 
 	webListenAddr := freeAddr(t)
-	healthAddr, _ := setupEnv(t, webListenAddr)
+	healthAddr, metricsAddr := setupEnv(t, webListenAddr)
 
 	ctx, cancel := context.WithCancel(t.Context())
 
@@ -234,6 +249,11 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, readyzResp.StatusCode, "readyz must be 200 while Temporal is reachable")
 	require.NoError(t, readyzResp.Body.Close())
+
+	metricsResp, err := http.Get("http://" + metricsAddr + "/metrics")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, metricsResp.StatusCode, "Prometheus cannot perform an OIDC login, so /metrics must stay reachable unauthenticated")
+	require.NoError(t, metricsResp.Body.Close())
 
 	cancel()
 
@@ -374,6 +394,118 @@ func TestRunAPIRoutesAgainstRealTemporal(t *testing.T) {
 	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never reported the stub's phase via cmd/web's own server")
 
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+
+	cancelWeb()
+
+	select {
+	case err := <-runErrCh:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return after ctx cancellation")
+	}
+}
+
+// TestSubmitRunAgainstRealTemporal proves POST /api/runs works through
+// cmd/web's actual, authenticated HTTP layer — pkg/webauth's session gate,
+// then pkg/webserver, then pkg/runsapi's submit handler, then
+// pkg/runsubmit — not just pkg/runsapi's own integration test, which drives
+// runsapi.New's handler directly and never exercises pkg/webauth at all. A
+// prior sub-issue-3 review finding flagged this specific gap: an
+// authenticated GET was covered end to end, but an authenticated POST
+// wasn't, so a future change that broke auth for POST specifically (e.g. one
+// that consumed the request body before it reached pkg/runsapi) would not
+// have been caught by any test.
+func TestSubmitRunAgainstRealTemporal(t *testing.T) {
+	requireBuiltFrontend(t)
+
+	webListenAddr := freeAddr(t)
+	setupEnv(t, webListenAddr)
+
+	ctx := t.Context()
+
+	temporalClient, shutdown, err := temporalclient.New(ctx, nil)
+	require.NoError(t, err)
+
+	defer shutdown()
+
+	backupWorker := worker.New(temporalClient, backup.TaskQueue, worker.Options{})
+	backupWorker.RegisterWorkflowWithOptions(stubBackupWorkflow, workflow.RegisterOptions{Name: backup.WorkflowType})
+	require.NoError(t, backupWorker.Start())
+
+	defer backupWorker.Stop()
+
+	// Guarantee a clean slate (same TERMINATE_EXISTING reasoning as the
+	// other tests in this file), then wait for the fresh replacement to
+	// actually close: POST /api/runs submits with a FAIL conflict policy
+	// (pkg/runsubmit.StartOptions, matching `tapectl run`), which only
+	// succeeds once the workflow ID has no running execution.
+	resetRun, err := temporalClient.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       backup.WorkflowID,
+		TaskQueue:                backup.TaskQueue,
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_TERMINATE_EXISTING,
+	}, backup.WorkflowType, nil)
+	require.NoError(t, err)
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+	require.NoError(t, resetRun.Get(ctx, nil))
+
+	webCtx, cancelWeb := context.WithCancel(ctx)
+	defer cancelWeb()
+
+	readyCh := make(chan string, 1)
+	runErrCh := make(chan error, 1)
+
+	go func() {
+		runErrCh <- run(webCtx, envGetenv(webListenAddr), func(addr string) { readyCh <- addr })
+	}()
+
+	var addr string
+
+	select {
+	case addr = <-readyCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("web server never became ready")
+	}
+
+	authenticatedClient := newAuthenticatedClient(t, addr)
+
+	requestBody, err := json.Marshal(runsapi.SubmitRunRequest{Config: json.RawMessage(validRunConfigJSON)})
+	require.NoError(t, err)
+
+	resp, err := authenticatedClient.Post("http://"+addr+"/api/runs", "application/json", bytes.NewReader(requestBody))
+	require.NoError(t, err)
+
+	responseBody, _ := io.ReadAll(resp.Body)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "POST /api/runs through cmd/web's authenticated layer failed: %s", responseBody)
+
+	var submitted runsapi.SubmitRunResponse
+	require.NoError(t, json.Unmarshal(responseBody, &submitted))
+	assert.Equal(t, backup.WorkflowID, submitted.WorkflowID)
+	assert.NotEmpty(t, submitted.RunID)
+
+	t.Cleanup(func() {
+		_ = temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil)
+	})
+
+	// Confirm the submitted run is genuinely visible through the same
+	// authenticated GET path — proving the whole authenticated round trip,
+	// not just that some 201 came back.
+	require.Eventually(t, func() bool {
+		resp, err := authenticatedClient.Get("http://" + addr + "/api/runs/" + submitted.RunID)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		return resp.StatusCode == http.StatusOK
+	}, 30*time.Second, 250*time.Millisecond, "the run submitted via POST /api/runs never became visible via GET /api/runs/{runID}")
+
+	// An unauthenticated caller must not be able to submit a run.
+	unauthResp, err := http.Post("http://"+addr+"/api/runs", "application/json", bytes.NewReader(requestBody))
+	require.NoError(t, err)
+
+	_ = unauthResp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, unauthResp.StatusCode, "an unauthenticated POST /api/runs must be rejected, not accepted")
 
 	cancelWeb()
 

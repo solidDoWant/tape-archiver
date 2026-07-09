@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
 )
@@ -478,4 +480,243 @@ func newCookieClient(t *testing.T) *http.Client {
 	require.NoError(t, err)
 
 	return &http.Client{Jar: jar}
+}
+
+// TestCallback_idpError_isRejected covers the IdP declining the login
+// (e.g. the user cancels, or the provider rejects the request) reported back
+// as an "error" query parameter on the callback — this must fail the
+// request, not be ignored.
+func TestCallback_idpError_isRejected(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	authenticator, err := New(t.Context(), testConfig(t, idp))
+	require.NoError(t, err)
+
+	server := newGatedServer(t, authenticator)
+
+	stateCookieValue, err := authenticator.encrypt(statePurpose, stateClaims{
+		State:        "the-state",
+		Nonce:        "the-nonce",
+		PKCEVerifier: "verifier",
+		RedirectPath: "/",
+		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/auth/callback?error=access_denied&state=the-state", nil)
+	require.NoError(t, err)
+	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+// TestCallback_pkceMismatch_isRejected covers the PKCE verifier in the state
+// cookie not matching the code_challenge presented at the authorization
+// endpoint — the fake IdP's token endpoint enforces RFC 7636 S256 PKCE for
+// real, so this exercises the real rejection path, not a stub.
+func TestCallback_pkceMismatch_isRejected(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	authenticator, err := New(t.Context(), testConfig(t, idp))
+	require.NoError(t, err)
+
+	server := newGatedServer(t, authenticator)
+
+	code := fakeAuthorize(t, idp, "the-state", "the-nonce", oauth2.S256ChallengeFromVerifier("real-verifier"))
+
+	stateCookieValue, err := authenticator.encrypt(statePurpose, stateClaims{
+		State: "the-state",
+		Nonce: "the-nonce",
+		// Does not match the verifier fakeAuthorize's challenge above was
+		// derived from, so the IdP's PKCE check at the token endpoint fails.
+		PKCEVerifier: "wrong-verifier",
+		RedirectPath: "/",
+		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/auth/callback?code="+code+"&state=the-state", nil)
+	require.NoError(t, err)
+	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+}
+
+// TestCallback_nonceMismatch_isRejected covers the OIDC nonce recorded in
+// the state cookie not matching the nonce embedded in the returned,
+// correctly-signed ID token — the replay/token-substitution defense the
+// nonce exists for.
+func TestCallback_nonceMismatch_isRejected(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	authenticator, err := New(t.Context(), testConfig(t, idp))
+	require.NoError(t, err)
+
+	server := newGatedServer(t, authenticator)
+
+	verifier := oauth2.GenerateVerifier()
+	code := fakeAuthorize(t, idp, "the-state", "real-nonce", oauth2.S256ChallengeFromVerifier(verifier))
+
+	stateCookieValue, err := authenticator.encrypt(statePurpose, stateClaims{
+		State: "the-state",
+		// Does not match the nonce fakeAuthorize embedded in the signed ID
+		// token above.
+		Nonce:        "different-nonce",
+		PKCEVerifier: verifier,
+		RedirectPath: "/",
+		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/auth/callback?code="+code+"&state=the-state", nil)
+	require.NoError(t, err)
+	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// TestCallback_expiredIDToken_isRejected covers a syntactically valid,
+// correctly-signed ID token that ID-token verification (coreos/go-oidc, not
+// anything hand-rolled in this package) rejects on its merits — expiry here,
+// standing in for the whole class of signature/issuer/audience/expiry
+// checks Verify performs.
+func TestCallback_expiredIDToken_isRejected(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	idp.IDTokenLifetime = -time.Hour // already expired at issuance
+
+	server, _ := newGatedServerWithRealRedirect(t, idp)
+	client := newCookieClient(t)
+
+	resp, err := client.Get(server.URL + "/auth/login")
+	require.NoError(t, err)
+
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	assert.Equal(t, http.StatusBadGateway, resp.StatusCode, "an expired ID token must be rejected by verification: %s", body)
+}
+
+// fakeAuthorize drives the fake IdP's authorization endpoint directly (not
+// through webauth's own /auth/login, which would mint its own
+// state/nonce/verifier this test needs to control independently) and returns
+// the issued authorization code, for tests that need a real code tied to a
+// specific nonce/code_challenge they deliberately mismatch against a forged
+// state cookie.
+func fakeAuthorize(t *testing.T, idp *testutil.FakeOIDCProvider, state, nonce, codeChallenge string) string {
+	t.Helper()
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	authorizeURL := idp.Server.URL + "/authorize?" + url.Values{
+		"client_id":             {idp.ClientID},
+		"redirect_uri":          {"http://app.example.com/auth/callback"},
+		"response_type":         {"code"},
+		"state":                 {state},
+		"nonce":                 {nonce},
+		"code_challenge":        {codeChallenge},
+		"code_challenge_method": {"S256"},
+	}.Encode()
+
+	resp, err := client.Get(authorizeURL)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	location, err := resp.Location()
+	require.NoError(t, err)
+
+	code := location.Query().Get("code")
+	require.NotEmpty(t, code)
+
+	return code
+}
+
+// TestSanitizeRedirectPath covers the post-login open-redirect defense
+// directly: a same-origin absolute path is preserved, everything else
+// (including a bare "//" and, since browsers normalize "\" to "/" for
+// http(s) URLs per the WHATWG URL spec, a "\"-containing path) defaults to
+// "/".
+func TestSanitizeRedirectPath(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty defaults to root", in: "", want: "/"},
+		{name: "relative without a leading slash defaults to root", in: "runs/abc", want: "/"},
+		{name: "a normal same-origin path is preserved", in: "/runs/abc", want: "/runs/abc"},
+		{name: "protocol-relative // is rejected", in: "//evil.example", want: "/"},
+		{name: "a backslash-prefixed path is rejected", in: "/\\evil.example", want: "/"},
+		{name: "a backslash anywhere in the path is rejected", in: "/runs/\\evil.example", want: "/"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, sanitizeRedirectPath(test.in))
+		})
+	}
+}
+
+// TestCookieSecureFlag_honorsForwardedProto covers the Secure cookie
+// attribute reflecting X-Forwarded-Proto, not just r.TLS — cmd/web never
+// terminates TLS itself (docs/web-ui-design.md §5's TLS-terminating Ingress
+// deployment model), so r.TLS alone would leave Secure permanently false in
+// every real deployment.
+func TestCookieSecureFlag_honorsForwardedProto(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	authenticator, err := New(t.Context(), testConfig(t, idp))
+	require.NoError(t, err)
+
+	server := newGatedServer(t, authenticator)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	t.Run("plain HTTP with no forwarded-proto header is not marked Secure", func(t *testing.T) {
+		resp, err := client.Get(server.URL + "/auth/login")
+		require.NoError(t, err)
+
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.False(t, findCookie(t, resp.Cookies(), stateCookieName).Secure)
+	})
+
+	t.Run("X-Forwarded-Proto: https marks the cookie Secure", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/auth/login", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-Forwarded-Proto", "https")
+
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.True(t, findCookie(t, resp.Cookies(), stateCookieName).Secure)
+	})
+}
+
+func findCookie(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
+	t.Helper()
+
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+
+	t.Fatalf("cookie %q not found among %d response cookies", name, len(cookies))
+
+	return nil
 }

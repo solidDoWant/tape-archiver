@@ -25,7 +25,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -54,6 +54,15 @@ const stateCookieTTL = 10 * time.Minute
 // session just because a provider is configured with a very long token
 // lifetime.
 const maxSessionDuration = 24 * time.Hour
+
+// discoveryTimeout bounds the OIDC discovery call New makes at startup — the
+// same defensive pattern pkg/temporalclient.New uses for its own startup
+// health check. Without it, a misconfigured or unreachable issuer would hang
+// cmd/web's startup indefinitely: the main listener would never open, yet
+// the health server (already serving /readyz by that point) has no way to
+// know, so Kubernetes could keep routing traffic at a pod whose main port
+// will never accept a connection.
+const discoveryTimeout = 10 * time.Second
 
 // Cookie names. Both are HttpOnly and scoped to the whole app (Path "/") so
 // they are sent on every request, including the SPA's asset requests.
@@ -141,7 +150,10 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 		return nil, err
 	}
 
-	provider, err := oidc.NewProvider(ctx, cfg.IssuerURL)
+	discoveryCtx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	defer cancel()
+
+	provider, err := oidc.NewProvider(discoveryCtx, cfg.IssuerURL)
 	if err != nil {
 		return nil, fmt.Errorf("webauth: discover OIDC provider %q: %w", cfg.IssuerURL, err)
 	}
@@ -249,20 +261,8 @@ func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 // to send the browser back to) in the short-lived, encrypted state cookie,
 // then redirects to the provider's authorization endpoint.
 func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
-	state, err := randomToken()
-	if err != nil {
-		http.Error(w, "failed to start login", http.StatusInternalServerError)
-
-		return
-	}
-
-	nonce, err := randomToken()
-	if err != nil {
-		http.Error(w, "failed to start login", http.StatusInternalServerError)
-
-		return
-	}
-
+	state := randomToken()
+	nonce := randomToken()
 	verifier := oauth2.GenerateVerifier()
 
 	claims := stateClaims{
@@ -286,7 +286,7 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   int(stateCookieTTL.Seconds()),
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isTLS(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -316,7 +316,8 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if query.Get("state") == "" || query.Get("state") != state.State {
+	returnedState := query.Get("state")
+	if returnedState == "" || subtle.ConstantTimeCompare([]byte(returnedState), []byte(state.State)) != 1 {
 		http.Error(w, "invalid or expired login attempt, please try again", http.StatusBadRequest)
 
 		return
@@ -350,7 +351,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if idToken.Nonce != state.Nonce {
+	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(state.Nonce)) != 1 {
 		http.Error(w, "ID token nonce mismatch", http.StatusBadRequest)
 
 		return
@@ -398,7 +399,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  expiresAt,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isTLS(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -414,7 +415,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 // which (with no session left) immediately redirects to /auth/login again —
 // so a caller does not need to special-case the post-logout landing page.
 func (a *Authenticator) handleLogout(w http.ResponseWriter, r *http.Request) {
-	clearCookie(w, sessionCookieName)
+	clearCookie(w, r, sessionCookieName)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -444,7 +445,7 @@ func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
 // one callback, successful or not) so a replayed callback request can never
 // reuse it.
 func (a *Authenticator) consumeStateCookie(w http.ResponseWriter, r *http.Request) (stateClaims, bool) {
-	clearCookie(w, stateCookieName)
+	clearCookie(w, r, stateCookieName)
 
 	cookie, err := r.Cookie(stateCookieName)
 	if err != nil {
@@ -503,11 +504,15 @@ func redirectToLogin(w http.ResponseWriter, r *http.Request) {
 
 // sanitizeRedirectPath restricts a caller-supplied post-login redirect to a
 // same-origin absolute path, defaulting to "/" for anything else — in
-// particular rejecting a protocol-relative "//attacker.example" value,
-// which browsers treat as an absolute URL despite the leading "/" (an open
-// redirect otherwise).
+// particular rejecting a protocol-relative "//attacker.example" value, which
+// browsers treat as an absolute URL despite the leading "/", and any
+// backslash, which browsers normalize to a forward slash for http(s) URLs
+// (WHATWG URL spec) — so "/\attacker.example" resolves identically to
+// "//attacker.example" and would otherwise be an equivalent open redirect
+// that this function's "//" check alone does not catch.
 func sanitizeRedirectPath(path string) string {
-	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
+	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") ||
+		strings.ContainsRune(path, '\\') {
 		return "/"
 	}
 
@@ -515,26 +520,41 @@ func sanitizeRedirectPath(path string) string {
 }
 
 // randomToken returns a URL-safe random string suitable for CSRF state and
-// OIDC nonce values.
-func randomToken() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("webauth: generate random token: %w", err)
-	}
-
-	return base64.RawURLEncoding.EncodeToString(buf), nil
+// OIDC nonce values — the same generator oauth2.GenerateVerifier() uses for
+// PKCE verifiers (crypto/rand-backed, never fails), reused here rather than
+// a second hand-rolled copy of the same "N random bytes, base64" primitive.
+func randomToken() string {
+	return oauth2.GenerateVerifier()
 }
 
-// clearCookie expires a cookie immediately, matching the attributes it was
-// set with (Path "/") so the browser actually removes it rather than
-// leaving the original alongside an unrelated new one.
-func clearCookie(w http.ResponseWriter, name string) {
+// isTLS reports whether r arrived over TLS, directly or via a reverse proxy.
+// cmd/web never terminates TLS itself (docs/web-ui-design.md §5's
+// TLS-terminating Ingress deployment model), so r.TLS is nil on every
+// request the process ever sees in that topology; relying on it alone would
+// mean the Secure cookie attribute below is never actually set in
+// production. X-Forwarded-Proto is the standard signal a TLS-terminating
+// proxy sets for exactly this — trusted here the same way ingress
+// controllers/load balancers are already trusted for every other aspect of
+// the connection (the pod is not expected to be reachable except through
+// it).
+func isTLS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// clearCookie expires a cookie immediately, matching the same Path and
+// Secure attributes it was set with (see isTLS) — a modern browser on a
+// non-secure connection silently refuses to modify a cookie that has Secure
+// set ("Leave Secure Cookies Alone"), so this must compute Secure the same
+// way handleLogin/handleCallback did or a clear issued over plain HTTP could
+// fail to remove a cookie that was set as Secure.
+func clearCookie(w http.ResponseWriter, r *http.Request, name string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   isTLS(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
