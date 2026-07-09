@@ -37,7 +37,7 @@ buildGoModule {
   # Pinned vendor hash: refresh with `make update-dependencies` (or by setting
   # this to lib.fakeHash and reading the value nix reports on the failed build)
   # whenever go.mod/go.sum change.
-  vendorHash = "sha256-33bITetYvFYgsNkUFfts18pI6c75DTIvfXMIDrce7Ao=";
+  vendorHash = "sha256-0M0WKVBYzY2W1lnWG6w0AWNi8bZKlRwyoxpKxv1gxjA=";
 
   subPackages = [ "cmd/worker" ];
 

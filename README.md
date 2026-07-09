@@ -86,9 +86,9 @@ pkg/          one concern per package: tape, ltfs, agewrap, par2, archive (tar),
               logging, metrics, temporalclient
 workflows/    backup/ — the backup workflow and activities, split by concern
 schemas/      generated JSON config schema (committed)
-deploy/       Helm chart (control worker) + data-worker systemd unit
+deploy/       Helm charts (control worker, web UI) + data-worker systemd unit
 docs/         operator documentation
-nix/          build derivations (ltfs, mhvtl, recovery-binaries, worker images)
+nix/          build derivations (ltfs, mhvtl, recovery-binaries, worker + web images)
 e2e/          end-to-end tests
 ```
 
@@ -113,8 +113,8 @@ Common Make targets (see the [`Makefile`](Makefile) for the full list):
 | `make test-e2e` | End-to-end tests. |
 | `make benchmark` | Write-rate / shoe-shining benchmarks (real hardware) — **not yet implemented** (stub; exits non-zero). |
 | `make generate-schema` | Regenerate the committed config JSON schema. |
-| `make build-images` | Build the worker OCI image(s) via Nix. |
-| `make helm` | Package the control-worker Helm chart. |
+| `make build-images` | Build the data-worker, control-worker, and web OCI images via Nix. |
+| `make helm` | Package the control-worker and web Helm charts. |
 | `make temporal-up` / `make mhvtl-up` / `make zpool-up` | Bring up local Temporal, a virtual tape library, and an ephemeral ZFS pool for tests. |
 
 ### Dry-run and the virtual library
@@ -171,6 +171,7 @@ Operator and reference docs live under [`docs/`](docs/):
 - [`maintenance.md`](docs/maintenance.md) — barcode convention, re-burn cadence, operator procedures.
 - [`report.md`](docs/report.md) — the PDF report contents.
 - [`control-worker-helm.md`](docs/control-worker-helm.md), [`control-worker-image.md`](docs/control-worker-image.md), [`data-worker-image.md`](docs/data-worker-image.md) — deployment.
+- [`web-helm.md`](docs/web-helm.md), [`web-image.md`](docs/web-image.md) — web UI deployment.
 
 ## License
 

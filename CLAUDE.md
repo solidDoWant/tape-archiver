@@ -59,7 +59,7 @@ See `SPEC.md` §15 for the full layout. In brief:
 - `internal/config` — run-config types and env parsing.
 - `workflows/backup/` — the backup workflow and activities, split by concern, with
   co-located tests.
-- `schemas/` — generated JSON config schema (committed). `deploy/charts/` — Helm chart.
+- `schemas/` — generated JSON config schema (committed). `deploy/charts/` — Helm charts.
   `docs/` — operator docs. `e2e/` — end-to-end tests. `bin/` — build output.
 - `.claude/` — slash commands and gitignored per-issue task files.
 
@@ -76,14 +76,16 @@ as the project is implemented; keep this list current):
 - `make benchmark` — write-rate / shoe-shining benchmarks (real hardware).
 - `make generate-schema` — regenerate the committed config JSON schema.
 - `make update-dependencies` — update deps, `go mod tidy`, refresh Nix vendor hashes.
-- `make build-images` — build worker OCI image(s) via Nix.
-- `make helm` — package the control-worker Helm chart into `bin/helm/`
-  (`PUSH_ALL=true` also pushes it to the OCI chart registry).
-- `make build-all` — build both worker images and package the chart in one command.
+- `make build-images` — build the data-worker, control-worker, and web OCI images via
+  Nix.
+- `make helm` — package the control-worker and web Helm charts into `bin/helm/`
+  (`PUSH_ALL=true` also pushes them to the OCI chart registry).
+- `make build-all` — build all worker/web images and package both charts in one
+  command.
 - `make release` — cut the `v$(VERSION)` git tag + GitHub release (dry run unless
   `PUSH_ALL=true`; requires an authenticated `gh`).
-- `make chart-lint` — fetch deps, lint, and render the control-worker Helm chart
-  (`deploy/charts/`); no cluster required.
+- `make chart-lint` — fetch deps, lint, and render both the control-worker and web
+  Helm charts (`deploy/charts/`); no cluster required.
 - `make temporal-up` / `make temporal-down` — local Temporal for integration tests.
 - `make mhvtl-up` / `make mhvtl-down` — virtual tape library for tests/dry-run.
 - `make zpool-up` / `make zpool-down` — ephemeral file-backed ZFS pool for `pkg/zfs`

@@ -73,6 +73,28 @@
           inherit worker;
           nixpkgsRev = nixpkgs.shortRev or "dirty";
         };
+
+        # Hermetic build of the web/ frontend (Vite + React + TypeScript SPA):
+        # `npm ci`-equivalent dependency fetch pinned by npmDepsHash, then
+        # `npm run build`, entirely inside the Nix sandbox — no network access
+        # at build time (docs/web-ui-design.md §4). Consumed by `web` below.
+        webFrontend = pkgs.callPackage ./nix/web-frontend.nix { };
+
+        # The web UI HTTP server binary (`cmd/web`): the built frontend above,
+        # embedded via go:embed. Built once here and bundled into the web OCI
+        # image below.
+        web = pkgs.callPackage ./nix/web.nix { inherit webFrontend; };
+
+        # Reproducible OCI image for the web UI (docs/web-ui-design.md §5): the
+        # `web` binary plus TLS roots and a minimal HTTP client for the
+        # container HEALTHCHECK — no tape/bulk-data tooling, same "lightweight,
+        # no bulk data" posture as the control-worker image. streamLayeredImage
+        # emits a script that streams the image tarball to stdout, so `make
+        # build-images` pipes it straight into `docker load`.
+        webImage = pkgs.callPackage ./nix/web-image.nix {
+          inherit web;
+          nixpkgsRev = nixpkgs.shortRev or "dirty";
+        };
       in
       {
         # Expose as flake packages so `nix build .#mhvtl`, `.#mhvtlKernel`,
@@ -87,6 +109,9 @@
           inherit worker;
           inherit dataWorkerImage;
           inherit controlWorkerImage;
+          inherit webFrontend;
+          inherit web;
+          inherit webImage;
           default = mhvtlUserspace;
         };
 
