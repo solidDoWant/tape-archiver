@@ -8,6 +8,19 @@ BIN_DIR := $(PROJECT_DIR)/bin
 
 GO_SOURCE_FILES := $(shell find cmd pkg \( -name '*.go' ! -name '*_test.go' \) 2>/dev/null)
 
+# web/ (Vite + React + TypeScript) frontend, embedded into cmd/web via
+# go:embed (cmd/web/assets.go). WEB_DIR is the npm project root; vite.config.ts
+# writes `npm run build`'s output directly into CMD_WEB_DIST (go:embed can only
+# reach the embedding file's own directory subtree, so the build output has to
+# land inside cmd/web/, not WEB_DIR itself — see cmd/web/assets.go).
+WEB_DIR := web
+CMD_WEB_DIST := cmd/web/dist
+CMD_WEB_DIST_STAMP := $(CMD_WEB_DIST)/.build-stamp
+WEB_SRC_FILES := $(shell find $(WEB_DIR)/src $(WEB_DIR)/public -type f 2>/dev/null) \
+	$(WEB_DIR)/package.json $(WEB_DIR)/index.html $(WEB_DIR)/vite.config.ts \
+	$(WEB_DIR)/tsconfig.json $(WEB_DIR)/tsconfig.app.json $(WEB_DIR)/tsconfig.node.json \
+	$(WEB_DIR)/eslint.config.js
+
 ##@ General
 
 .PHONY: help
@@ -25,7 +38,11 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: lint
-lint: ## Run golangci-lint.
+# golangci-lint (like go vet/go build — see cmd/web/assets.go) compiles fine
+# against the committed dist/.gitkeep placeholder, so it has no dependency on
+# a real frontend build; only frontend-lint (eslint + tsc, which lint web/'s
+# sources directly) needs the frontend's node_modules installed.
+lint: frontend-lint ## Run golangci-lint (Go) and eslint + tsc --noEmit (frontend).
 	golangci-lint run ./...
 
 .PHONY: lint-fix
@@ -33,7 +50,11 @@ lint-fix: ## Run golangci-lint and perform fixes.
 	golangci-lint run --fix ./...
 
 .PHONY: test
-test: fmt vet ## Run unit tests with race detector.
+# go vet/go test compile cmd/web fine against the committed dist/.gitkeep
+# placeholder (see cmd/web/assets.go), so fmt/vet have no dependency on a real
+# frontend build; frontend-test (vitest, which needs node_modules but not a
+# built dist/) still makes this target exercise the frontend too.
+test: fmt vet frontend-test ## Run unit tests with race detector (Go + frontend vitest).
 	go test -race -count=1 ./...
 
 .PHONY: test-integration
@@ -211,6 +232,37 @@ $(HELM_PACKAGE): $(HELM_CHART_FILES)
 .PHONY: helm
 helm: $(HELM_PACKAGE) ## Package the control-worker Helm chart into bin/helm/ (PUSH_ALL=true also pushes it to the OCI chart registry).
 
+##@ Frontend
+
+$(WEB_DIR)/node_modules/.package-lock.json: $(WEB_DIR)/package.json $(WEB_DIR)/package-lock.json
+	cd $(WEB_DIR) && npm ci
+	@touch $@
+
+# Rebuilds only when frontend sources (or the installed deps) actually
+# changed, same file-target caching pattern as the $(BIN_DIR)/* Go targets
+# below. `npm run build` (tsc -b && vite build) empties CMD_WEB_DIST before
+# writing, which is why the stamp file is (re)touched after the build rather
+# than tracked as a build output itself. emptyOutDir also deletes the
+# committed CMD_WEB_DIST/.gitkeep placeholder (see cmd/web/assets.go), so it
+# is recreated afterward — otherwise every build would dirty the working
+# tree with a spurious "deleted: .gitkeep".
+$(CMD_WEB_DIST_STAMP): $(WEB_DIR)/node_modules/.package-lock.json $(WEB_SRC_FILES)
+	cd $(WEB_DIR) && npm run build
+	@touch $(CMD_WEB_DIST)/.gitkeep
+	@touch $@
+
+.PHONY: frontend-build
+frontend-build: $(CMD_WEB_DIST_STAMP) ## Build the web/ frontend; output lands in cmd/web/dist (embedded by cmd/web).
+
+.PHONY: frontend-test
+frontend-test: $(WEB_DIR)/node_modules/.package-lock.json ## Run the frontend's vitest unit tests.
+	cd $(WEB_DIR) && npm test
+
+.PHONY: frontend-lint
+frontend-lint: $(WEB_DIR)/node_modules/.package-lock.json ## Run eslint and tsc --noEmit over the frontend.
+	cd $(WEB_DIR) && npm run lint
+	cd $(WEB_DIR) && npm run typecheck
+
 ##@ Build
 
 $(BIN_DIR)/worker: $(GO_SOURCE_FILES)
@@ -225,12 +277,22 @@ $(BIN_DIR)/tapectl: $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/tapectl
 
+# cmd/web embeds CMD_WEB_DIST at compile time (go:embed), so it must exist
+# (and be current) before this compiles; see the Frontend section above.
+$(BIN_DIR)/web: $(CMD_WEB_DIST_STAMP) $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/web
+
 .PHONY: build
-build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl ## Build all binaries into bin/.
+build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl $(BIN_DIR)/web ## Build all binaries into bin/.
 
 .PHONY: clean
-clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts).
+# find, not rm -rf $(CMD_WEB_DIST)/*: dist/.build-stamp is a dotfile, and a
+# shell glob doesn't match those, so a glob-based rm would silently leave the
+# stamp in place and cause the next build to skip a fresh frontend build.
+clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts, frontend build output).
 	@rm -rf $(BIN_DIR) $(CONTROL_WORKER_CHART)/charts
+	@find $(CMD_WEB_DIST) -mindepth 1 -not -name '.gitkeep' -delete
 
 ##@ Release
 

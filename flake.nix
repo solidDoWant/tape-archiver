@@ -164,6 +164,11 @@
             # health`, etc. The version is pinned to match the server image in
             # docker-compose.yml so the client/server wire protocol stays in sync.
             pkgs.temporal-cli
+
+            # Node.js (current Active LTS) — builds and tests the web/ frontend
+            # (Vite + React + TypeScript + Tailwind, cmd/web's embedded SPA).
+            # Ships npm, used for the committed package-lock.json.
+            pkgs.nodejs_24
           ];
 
           # Expose the built kernel modules so the up-scripts can load them
