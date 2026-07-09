@@ -1,0 +1,185 @@
+---
+config:
+  # temporal selects the Temporal frontend cmd/web connects to (pkg/temporalclient —
+  # the same envconfig-driven client cmd/worker/tapectl use to serve GET /api/runs,
+  # GET /api/runs/{runID}, and POST /api/runs). address is required and helm
+  # template fails when empty; namespace has a sensible default.
+  #
+  # Non-secret fields (address, namespace, tls.*, grpcMeta) are rendered into a
+  # temporal.toml ConfigMap consumed via TEMPORAL_CONFIG_FILE, exactly mirroring
+  # deploy/charts/tape-archiver-control-worker's config.temporal.* — see that
+  # chart's values.yaml for the full field-by-field rationale. Secret material
+  # (apiKey, TLS cert/key/CA bytes) comes from k8s Secrets, surfaced as either env
+  # vars or mounted files; never rendered in plaintext.
+  temporal:
+    # address is the Temporal frontend host:port (no scheme). Written to address in
+    # the rendered temporal.toml. Example: "temporal-frontend.temporal.svc.cluster.local:7233".
+    address: ""
+    # namespace is the Temporal namespace GET/POST /api/runs operate against.
+    # Written to namespace in the rendered temporal.toml. Defaults to Temporal's
+    # built-in "default" namespace.
+    namespace: "default"
+    # apiKey is the Temporal Cloud / authenticated frontend API key. Sets
+    # TEMPORAL_API_KEY on the web container. Use secretKeyRef in production; value
+    # is intended for dev only. Setting both is rejected. When both name and key
+    # under secretKeyRef are empty, no API key env var is set.
+    #
+    # File-mounted keys: a value of the form "file:///absolute/path" tells the
+    # binary to read the API key from disk on every Temporal RPC, picking up
+    # external rotators without a process restart. To use this, mount the backing
+    # Secret yourself via resources.controllers.main.persistence and set
+    # apiKey.value to the resulting in-container path with the file:// prefix.
+    apiKey:
+      value: ""
+      secretKeyRef:
+        name: ""
+        key: ""
+    # tls configures transport security to the Temporal frontend. enabled: false
+    # uses plaintext gRPC, even when apiKey is set. enabled: true turns on
+    # server-side TLS; mTLS and a custom CA are optional. Each reference points at
+    # an existing k8s Secret (e.g. one produced by cert-manager). References that
+    # share a Secret name share one volume mount.
+    tls:
+      enabled: false
+      # serverName overrides the SNI / cert-verification hostname (TEMPORAL_TLS_SERVER_NAME).
+      serverName: ""
+      # disableHostVerification skips server certificate hostname verification.
+      # Development / self-signed only.
+      disableHostVerification: false
+      # clientCertificate enables mTLS by pointing at a kubernetes.io/tls Secret
+      # containing the client cert and private key ("tls.crt" / "tls.key").
+      clientCertificate:
+        secretName: ""
+      # caCert overrides the trusted CA pool. Free-form secretKeyRef because CA
+      # bundles are not standardised on a single Secret layout; key defaults to
+      # "ca.crt" (cert-manager / most k8s tooling convention).
+      caCert:
+        secretKeyRef:
+          name: ""
+          key: "ca.crt"
+    # grpcMeta is a map of gRPC metadata headers added to every Temporal RPC. Keys
+    # are passed through verbatim. Rendered under [profile.default.grpc_meta] in
+    # temporal.toml.
+    grpcMeta: {}
+
+  web:
+    # logLevel is passed verbatim to the web server's logging setup via LOG_LEVEL
+    # (empty -> info).
+    logLevel: info
+    # metricsScrapeWaitTimeout overrides METRICS_SCRAPE_WAIT_TIMEOUT (a Go duration
+    # string, e.g. "60s") — how long shutdown waits for a final Prometheus scrape.
+    # Leave empty to use cmd/web's own default (60s).
+    metricsScrapeWaitTimeout: ""
+    # The web UI always exposes /metrics on port 9090 regardless of this value. The
+    # toggle controls whether a PodMonitor is created for cluster-side scraping.
+    # Leave false when running without prometheus-operator CRDs installed.
+    metrics:
+      enabled: false
+
+    # oidc configures the OIDC authorization-code-flow identity provider
+    # (pkg/webauth) that gates every page and /api/* route (docs/configuration.md
+    # "OIDC authentication (cmd/web)"). issuerUrl/clientId/redirectUrl are required
+    # plain strings — helm template fails when any is empty, since cmd/web itself
+    # refuses to start without a complete OIDC configuration.
+    oidc:
+      # issuerUrl is the identity provider's issuer URL, used for OIDC discovery
+      # (GET {issuerUrl}/.well-known/openid-configuration). Any standards-compliant
+      # provider works (Keycloak, Authentik, Dex, ...).
+      issuerUrl: ""
+      # clientId is this app's client ID at the provider above.
+      clientId: ""
+      # redirectUrl is this app's OIDC callback URL, exactly as registered with the
+      # provider (e.g. "https://tape-archiver.example.com/auth/callback").
+      redirectUrl: ""
+      # clientSecret is this app's confidential-client secret at the provider
+      # above. Unlike config.temporal.apiKey there is no plaintext `value`
+      # fallback: it must always be sourced from an existing k8s Secret via
+      # secretKeyRef (name and key both required) — helm template fails
+      # otherwise. This is a hard requirement, not a convention carried over from
+      # the control-worker chart: OIDC client secrets are the kind of credential
+      # this chart must never allow into a rendered manifest or a committed
+      # values file.
+      clientSecret:
+        secretKeyRef:
+          name: ""
+          key: ""
+
+    # sessionKey must reference an existing k8s Secret holding a base64-encoded
+    # 32-byte AES-256 key (e.g. `openssl rand -base64 32`), surfaced as
+    # WEB_SESSION_KEY (AES-256-GCM session/login-state cookie encryption — cmd/web
+    # holds no server-side session store, docs/web-ui-design.md §3). As with
+    # oidc.clientSecret, there is no plaintext `value` fallback; secretKeyRef (name
+    # and key both required) is mandatory — helm template fails otherwise.
+    sessionKey:
+      secretKeyRef:
+        name: ""
+        key: ""
+
+    # dryRun configures the mhvtl device nodes a "POST /api/runs" dry-run
+    # submission's library targets are redirected to (MHVTL_CHANGER_DEV /
+    # MHVTL_DRIVE0_DEV / MHVTL_DRIVE1_DEV — docs/configuration.md). Leave all
+    # three empty (the default) to make the web UI refuse dry-run submissions
+    # with a 400 — the right posture for a production deployment pointed at a
+    # real tape library. Only set these against a Temporal/mhvtl stack meant for
+    # dry-run testing; all three must be set together or none are (cmd/web
+    # requires all three for a dry-run to succeed).
+    dryRun:
+      mhvtlChangerDev: ""
+      mhvtlDrive0Dev: ""
+      mhvtlDrive1Dev: ""
+
+# resources follows the bjw-s app-template schema, same convention as
+# deploy/charts/tape-archiver-control-worker. Values here are deep-merged over the
+# chart-computed controller, Service, env vars, and podMonitor; user-supplied values
+# take precedence.
+#
+# The chart generates:
+#   - a single Deployment controller named "main" (image, named ports "http" (8080 —
+#     the SPA + JSON API, WEB_LISTEN_ADDRESS), "health" (8081, HEALTH_ADDR), and
+#     "metrics" (9090, METRICS_ADDR); hardened securityContext; httpGet liveness
+#     (/healthz) and readiness (/readyz) probes on the health port; a
+#     terminationGracePeriodSeconds covering cmd/web's SIGTERM drain).
+#   - a ClusterIP Service ("main") exposing the "http" port, for an Ingress (below)
+#     or any other in-cluster caller to target.
+#
+# Override the controller by adding resources.controllers.main with the standard
+# bjw-s controller schema (replicas, pod, containers.main, etc.); override or extend
+# the Service the same way under resources.service.main.
+#
+# No ScaledJob/KEDA support here (unlike the control worker) — the web UI is a
+# long-running HTTP service serving live browser/API traffic, not a queue-driven
+# job, so there is nothing to scale to zero between runs.
+resources:
+  controllers:
+    # Override the chart-generated Deployment here. For example, to pin an image
+    # tag or scale replicas:
+    #   main:
+    #     replicas: 2
+    #     containers:
+    #       main:
+    #         image:
+    #           repository: ghcr.io/soliddowant/tape-archiver/web
+    #           tag: v1.2.3
+    main: {}
+  # ingress is entirely operator-configured (bjw-s app-template's native schema) —
+  # the chart computes nothing here beyond the "main" Service above, which a
+  # single-host/single-path Ingress auto-detects as its backend when a path's
+  # `service` is left unset (bjw-s' ingress service auto-detection applies because
+  # this chart renders exactly one enabled Service). Disabled by default (no
+  # entries). Example (cert-manager + nginx-ingress):
+  #
+  #   ingress:
+  #     main:
+  #       enabled: true
+  #       className: nginx
+  #       annotations:
+  #         cert-manager.io/cluster-issuer: letsencrypt-prod
+  #       hosts:
+  #         - host: tape-archiver.example.com
+  #           paths:
+  #             - path: /
+  #       tls:
+  #         - hosts:
+  #             - tape-archiver.example.com
+  #           secretName: tape-archiver-web-tls
+  ingress: {}

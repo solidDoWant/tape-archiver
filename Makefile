@@ -148,6 +148,9 @@ DATA_WORKER_IMAGE_TAGS := $(DATA_WORKER_IMAGE):$(VERSION) $(if $(filter true,$(P
 CONTROL_WORKER_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/control-worker
 CONTROL_WORKER_IMAGE_TAGS := $(CONTROL_WORKER_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(CONTROL_WORKER_IMAGE):latest)
 
+WEB_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/web
+WEB_IMAGE_TAGS := $(WEB_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(WEB_IMAGE):latest)
+
 # Build a streamed OCI image, load it into the local Docker daemon, tag it, and
 # (when PUSH_ALL=true) push every tag. $(1)=flake attr, $(2)=tag list.
 define build-load-image
@@ -167,9 +170,10 @@ define build-load-image
 endef
 
 .PHONY: build-images
-build-images: ## Build the data- and control-worker OCI images, load them into the local Docker daemon, and tag them (PUSH_ALL=true also tags :latest and pushes).
+build-images: ## Build the data-worker, control-worker, and web OCI images, load them into the local Docker daemon, and tag them (PUSH_ALL=true also tags :latest and pushes).
 	@$(call build-load-image,dataWorkerImage,$(DATA_WORKER_IMAGE_TAGS))
 	@$(call build-load-image,controlWorkerImage,$(CONTROL_WORKER_IMAGE_TAGS))
+	@$(call build-load-image,webImage,$(WEB_IMAGE_TAGS))
 
 ##@ Deploy
 
@@ -183,8 +187,27 @@ CHART_LINT_ADDRESS ?= temporal-frontend.temporal.svc.cluster.local:7233
 CHART_LINT_SCALEDJOB_ARGS := --set resources.controllers.main.type=scaledjob \
 	--set config.temporal.keda.apiKey.value=chart-lint-placeholder
 
+WEB_CHART := deploy/charts/tape-archiver-web
+# Placeholder values only used to satisfy chart-lint's render/lint checks; none of
+# these are baked into any release artifact. secretKeyRef references point at
+# Secret names that need not actually exist for `helm template`/`helm lint`.
+WEB_CHART_LINT_ARGS := --set config.temporal.address=$(CHART_LINT_ADDRESS) \
+	--set config.web.oidc.issuerUrl=https://idp.example.com \
+	--set config.web.oidc.clientId=tape-archiver-web \
+	--set config.web.oidc.redirectUrl=https://tape-archiver.example.com/auth/callback \
+	--set config.web.oidc.clientSecret.secretKeyRef.name=chart-lint-placeholder \
+	--set config.web.oidc.clientSecret.secretKeyRef.key=clientSecret \
+	--set config.web.sessionKey.secretKeyRef.name=chart-lint-placeholder \
+	--set config.web.sessionKey.secretKeyRef.key=sessionKey
+
+# Render args for the web chart's optional Ingress shape.
+WEB_CHART_LINT_INGRESS_ARGS := --set resources.ingress.main.enabled=true \
+	--set resources.ingress.main.className=nginx \
+	--set resources.ingress.main.hosts[0].host=tape-archiver.example.com \
+	--set resources.ingress.main.hosts[0].paths[0].path=/
+
 .PHONY: chart-lint
-chart-lint: ## Fetch chart deps, lint, and render both control-worker chart shapes (Deployment + ScaledJob; no cluster needed).
+chart-lint: ## Fetch chart deps, lint, and render the control-worker chart shapes (Deployment + ScaledJob) and the web chart shapes (Deployment + Service, and Ingress when enabled); no cluster needed.
 	helm dependency update $(CONTROL_WORKER_CHART)
 	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS)
 	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $(CHART_LINT_SCALEDJOB_ARGS)
@@ -201,6 +224,25 @@ chart-lint: ## Fetch chart deps, lint, and render both control-worker chart shap
 		|| { echo "chart-lint: scaledjob without a KEDA credential must render (plaintext Temporal)"; exit 1; }
 	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) --set resources.controllers.main.type=scaledjob \
 		| grep -q '^kind: TriggerAuthentication' && { echo "chart-lint: plaintext scaledjob must not emit a TriggerAuthentication"; exit 1; } || true
+	# --- web chart ---
+	helm dependency update $(WEB_CHART)
+	helm lint $(WEB_CHART) $(WEB_CHART_LINT_ARGS)
+	helm lint $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS)
+	# Default shape: Deployment + Service, no Ingress (disabled by default), no
+	# ScaledJob (the web UI is a Deployment-only chart, no KEDA support).
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) > /tmp/tape-archiver-web-chart-lint-default.yaml
+	grep -q '^kind: Deployment' /tmp/tape-archiver-web-chart-lint-default.yaml \
+		|| { echo "chart-lint: Deployment not rendered by the web chart"; exit 1; }
+	grep -q '^kind: Service' /tmp/tape-archiver-web-chart-lint-default.yaml \
+		|| { echo "chart-lint: Service not rendered by the web chart"; exit 1; }
+	grep -q '^kind: Ingress' /tmp/tape-archiver-web-chart-lint-default.yaml \
+		&& { echo "chart-lint: Ingress rendered by the web chart despite being disabled by default"; exit 1; } || true
+	grep -q '^kind: ScaledJob' /tmp/tape-archiver-web-chart-lint-default.yaml \
+		&& { echo "chart-lint: ScaledJob rendered by the web chart — it is a Deployment-only chart"; exit 1; } || true
+	@rm -f /tmp/tape-archiver-web-chart-lint-default.yaml
+	# Opt-in Ingress shape: must render an Ingress alongside the Deployment + Service.
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS) \
+		| grep -q '^kind: Ingress' || { echo "chart-lint: Ingress not rendered by the web chart when enabled"; exit 1; }
 
 DATA_WORKER_UNIT := deploy/data-worker/tape-archiver-data-worker.service
 
@@ -210,27 +252,34 @@ unit-lint: ## Verify the reference data-worker systemd unit (no running service 
 
 ##@ Helm
 
-# Package (and optionally publish) the control-worker Helm chart, following the
-# media-processor pattern. The chart version and app version are both stamped from
-# VERSION at package time, so the packaged artifact is versioned in lockstep with the
-# worker images. HELM_PUSH defaults to PUSH_ALL: the default (false) only writes the
-# packaged .tgz under bin/helm/ — it never publishes; HELM_PUSH=true pushes it to the
-# OCI chart registry. Only the control worker has a chart; the data worker deploys via
-# a systemd unit + Docker container (SPEC §4.1).
+# Package (and optionally publish) the control-worker and web Helm charts, following
+# the media-processor pattern. Each chart's version and app version are both stamped
+# from VERSION at package time, so the packaged artifacts are versioned in lockstep
+# with the images. HELM_PUSH defaults to PUSH_ALL: the default (false) only writes
+# the packaged .tgz files under bin/helm/ — it never publishes; HELM_PUSH=true pushes
+# them to the OCI chart registry. The data worker has no chart — it deploys via a
+# systemd unit + Docker container (SPEC §4.1).
 HELM_REGISTRY := $(CONTAINER_REGISTRY)/charts
 HELM_PUSH ?= $(PUSH_ALL)
 HELM_PACKAGE := $(BIN_DIR)/helm/tape-archiver-control-worker-$(VERSION).tgz
+WEB_HELM_PACKAGE := $(BIN_DIR)/helm/tape-archiver-web-$(VERSION).tgz
 # Chart inputs, excluding fetched subcharts under charts/ so a dependency update does
 # not spuriously re-trigger packaging.
 HELM_CHART_FILES := $(shell find $(CONTROL_WORKER_CHART) -type f ! -path "*/charts/*" 2>/dev/null)
+WEB_HELM_CHART_FILES := $(shell find $(WEB_CHART) -type f ! -path "*/charts/*" 2>/dev/null)
 
 $(HELM_PACKAGE): $(HELM_CHART_FILES)
 	@mkdir -p "$(@D)"
 	helm package "$(CONTROL_WORKER_CHART)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
 	$(if $(filter true,$(HELM_PUSH)),helm push "$(HELM_PACKAGE)" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
 
+$(WEB_HELM_PACKAGE): $(WEB_HELM_CHART_FILES)
+	@mkdir -p "$(@D)"
+	helm package "$(WEB_CHART)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
+	$(if $(filter true,$(HELM_PUSH)),helm push "$(WEB_HELM_PACKAGE)" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
+
 .PHONY: helm
-helm: $(HELM_PACKAGE) ## Package the control-worker Helm chart into bin/helm/ (PUSH_ALL=true also pushes it to the OCI chart registry).
+helm: $(HELM_PACKAGE) $(WEB_HELM_PACKAGE) ## Package the control-worker and web Helm charts into bin/helm/ (PUSH_ALL=true also pushes them to the OCI chart registry).
 
 ##@ Frontend
 
@@ -290,14 +339,14 @@ build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl $(BIN_D
 # find, not rm -rf $(CMD_WEB_DIST)/*: dist/.build-stamp is a dotfile, and a
 # shell glob doesn't match those, so a glob-based rm would silently leave the
 # stamp in place and cause the next build to skip a fresh frontend build.
-clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts, frontend build output).
-	@rm -rf $(BIN_DIR) $(CONTROL_WORKER_CHART)/charts
+clean: ## Remove build artifacts (binaries, packaged Helm charts, fetched chart subcharts, frontend build output).
+	@rm -rf $(BIN_DIR) $(CONTROL_WORKER_CHART)/charts $(WEB_CHART)/charts
 	@find $(CMD_WEB_DIST) -mindepth 1 -not -name '.gitkeep' -delete
 
 ##@ Release
 
 .PHONY: build-all
-build-all: build-images helm ## Build all release artifacts: both worker images and the packaged control-worker chart (pushes when PUSH_ALL=true).
+build-all: build-images helm ## Build all release artifacts: the data-, control-, and web images, and the packaged control-worker + web Helm charts (pushes when PUSH_ALL=true).
 
 # Cut a release, mirroring media-processor: VERSION drives the tag `v$(VERSION)`. This
 # is a dry run by default — SAFETY_PREFIX is `echo` unless PUSH_ALL=true, so the tag,
