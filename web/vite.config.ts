@@ -22,5 +22,12 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/setupTests.ts'],
     globals: true,
+    // Scoped to src/: vitest's own default include glob
+    // (**/*.{test,spec}.*) would otherwise also pick up web/e2e/*.spec.ts,
+    // the real-browser Playwright suite (issue #260) — those import
+    // @playwright/test's own test()/expect (not vitest's) and need a live
+    // web UI + baseURL, so running them under vitest would just fail. They
+    // are run via `npm run test:e2e` (playwright.config.ts), not `npm test`.
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
   },
 })

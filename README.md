@@ -89,7 +89,7 @@ schemas/      generated JSON config schema (committed)
 deploy/       Helm charts (control worker, web UI) + data-worker systemd unit
 docs/         operator documentation
 nix/          build derivations (ltfs, mhvtl, recovery-binaries, worker + web images)
-e2e/          end-to-end tests
+e2e/          end-to-end tests (backup workflow); web/e2e/ holds the web UI's own (Playwright)
 ```
 
 ## Getting started
@@ -137,7 +137,10 @@ Layered and build-tag-gated (see [`SPEC.md`](SPEC.md) §13):
   MB/s and scrapes drive log pages for back-hitch / TapeAlert flags to prove the
   anti-shoe-shining rate before the tool is trusted in production.
 - **End-to-end** (`//go:build e2e`) — the whole workflow including report/ISO/delivery
-  against virtual hardware.
+  against virtual hardware. `e2e/web_test.go` additionally deploys the web UI's own Helm
+  chart + image into the same kind cluster and drives it with a real headless browser
+  (Playwright, `web/e2e/`) through OIDC login, a dry-run submission, live monitoring, and
+  run history — see `web/playwright.config.ts` for how Chromium is sourced from Nix.
 
 Acceptance criteria are Given/When/Then describing observable behavior only; tests are
 never modified to pass — the code is fixed instead.
