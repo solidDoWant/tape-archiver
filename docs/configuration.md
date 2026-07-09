@@ -416,6 +416,18 @@ alerting works even when config parsing fails.
 | `TEMPORAL_API_KEY` | no | API key for authenticating to Temporal Cloud. Accepts either an inline token or `file:///absolute/path` — the file form is re-read on every RPC so external rotators can update the file in place without restarting the worker. Non-canonical `file:` forms (missing the third slash, or a relative path) are rejected at startup. |
 | `TEMPORAL_TLS` | no | Set to `false` to disable TLS on the Temporal gRPC connection. Useful for local dev stacks; defaults to `true` when `TEMPORAL_API_KEY` is set. |
 
+### Web UI environment variables (`cmd/web`)
+
+The `web` binary (the browser UI's HTTP server — see `docs/web-ui-design.md`) is a
+separate process from `worker`/`tapectl` and reads its own environment variables. Only
+the binary's static-asset-serving surface exists so far; Temporal wiring, `/api/*`
+routes, and OIDC land in later sub-issues and will extend this table.
+
+| Variable | Required | Description |
+|----------|----------|--------------|
+| `WEB_LISTEN_ADDRESS` | no | TCP listen address for the web UI's HTTP server (e.g. `:8080` or `127.0.0.1:8080`). Defaults to `:8080` when unset or empty. |
+| `LOG_LEVEL` | no | Same semantics as the worker's `LOG_LEVEL` above: `debug`, `info`, `warn` (or `warning`), or `error`, case-insensitive, defaulting to `info`. |
+
 ### Health endpoints
 
 The worker serves two HTTP health endpoints on `HEALTH_ADDR` (default `:8080`) for

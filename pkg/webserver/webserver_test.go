@@ -74,6 +74,13 @@ func TestHandlerRoutes(t *testing.T) {
 			wantStatus:  http.StatusOK,
 			wantBodyHas: "tape-archiver shell",
 		},
+		{
+			name:        "a client-side route matching a real asset directory name falls back to the SPA shell",
+			method:      http.MethodGet,
+			path:        "/assets",
+			wantStatus:  http.StatusOK,
+			wantBodyHas: "tape-archiver shell",
+		},
 	}
 
 	for _, test := range tests {

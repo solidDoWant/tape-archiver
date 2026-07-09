@@ -62,7 +62,11 @@ func newSPAHandler(assets fs.FS) (http.Handler, error) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := assetName(r.URL.Path)
 
-		if _, err := fs.Stat(assets, name); err != nil {
+		// fs.Stat succeeds for directories too (e.g. Vite's "assets" output
+		// directory), and serving those with http.ServeFileFS redirects to a
+		// directory listing instead of falling back to the SPA shell — so the
+		// fallback must also require a regular file, not just an existing path.
+		if info, err := fs.Stat(assets, name); err != nil || info.IsDir() {
 			name = "index.html"
 		}
 

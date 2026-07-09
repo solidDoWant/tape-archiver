@@ -38,22 +38,27 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: lint
-lint: $(CMD_WEB_DIST_STAMP) frontend-lint ## Run golangci-lint (Go) and eslint + tsc --noEmit (frontend).
+# golangci-lint (like go vet/go build — see cmd/web/assets.go) compiles fine
+# against the committed dist/.gitkeep placeholder, so it has no dependency on
+# a real frontend build; only frontend-lint (eslint + tsc, which lint web/'s
+# sources directly) needs the frontend's node_modules installed.
+lint: frontend-lint ## Run golangci-lint (Go) and eslint + tsc --noEmit (frontend).
 	golangci-lint run ./...
 
 .PHONY: lint-fix
-lint-fix: $(CMD_WEB_DIST_STAMP) ## Run golangci-lint and perform fixes.
+lint-fix: ## Run golangci-lint and perform fixes.
 	golangci-lint run --fix ./...
 
 .PHONY: test
-# $(CMD_WEB_DIST_STAMP) must come before fmt/vet: they run `go vet ./...`,
-# which compiles cmd/web, and that needs a real (non-placeholder) embedded
-# dist/ — make builds prerequisites left to right, so order matters here.
-test: $(CMD_WEB_DIST_STAMP) fmt vet frontend-test ## Run unit tests with race detector (Go + frontend vitest).
+# go vet/go test compile cmd/web fine against the committed dist/.gitkeep
+# placeholder (see cmd/web/assets.go), so fmt/vet have no dependency on a real
+# frontend build; frontend-test (vitest, which needs node_modules but not a
+# built dist/) still makes this target exercise the frontend too.
+test: fmt vet frontend-test ## Run unit tests with race detector (Go + frontend vitest).
 	go test -race -count=1 ./...
 
 .PHONY: test-integration
-test-integration: $(CMD_WEB_DIST_STAMP) fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests against mhvtl + ephemeral ZFS pool + local Temporal dev stack (brings all up, tears all down after).
+test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests against mhvtl + ephemeral ZFS pool + local Temporal dev stack (brings all up, tears all down after).
 	@{ \
 	  gocache=$$(mktemp -d); \
 	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; $(MAKE) zpool-down; $(MAKE) mhvtl-down; $(MAKE) temporal-down; exit $$rc; }; \
@@ -72,7 +77,7 @@ test-integration: $(CMD_WEB_DIST_STAMP) fmt vet temporal-up mhvtl-up zpool-up ##
 	}
 
 .PHONY: test-e2e
-test-e2e: $(CMD_WEB_DIST_STAMP) fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: control worker in a kind cluster (Helm chart + image), data worker as its OCI container on the host, against mhvtl + ZFS pool + Temporal (brings host resources up/down; the suite manages the cluster + containers).
+test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: control worker in a kind cluster (Helm chart + image), data worker as its OCI container on the host, against mhvtl + ZFS pool + Temporal (brings host resources up/down; the suite manages the cluster + containers).
 	@{ \
 	  gocache=$$(mktemp -d); \
 	  cleanup() { rc=$$?; sudo rm -rf "$$gocache"; \
@@ -237,9 +242,13 @@ $(WEB_DIR)/node_modules/.package-lock.json: $(WEB_DIR)/package.json $(WEB_DIR)/p
 # changed, same file-target caching pattern as the $(BIN_DIR)/* Go targets
 # below. `npm run build` (tsc -b && vite build) empties CMD_WEB_DIST before
 # writing, which is why the stamp file is (re)touched after the build rather
-# than tracked as a build output itself.
+# than tracked as a build output itself. emptyOutDir also deletes the
+# committed CMD_WEB_DIST/.gitkeep placeholder (see cmd/web/assets.go), so it
+# is recreated afterward — otherwise every build would dirty the working
+# tree with a spurious "deleted: .gitkeep".
 $(CMD_WEB_DIST_STAMP): $(WEB_DIR)/node_modules/.package-lock.json $(WEB_SRC_FILES)
 	cd $(WEB_DIR) && npm run build
+	@touch $(CMD_WEB_DIST)/.gitkeep
 	@touch $@
 
 .PHONY: frontend-build
@@ -278,8 +287,12 @@ $(BIN_DIR)/web: $(CMD_WEB_DIST_STAMP) $(GO_SOURCE_FILES)
 build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl $(BIN_DIR)/web ## Build all binaries into bin/.
 
 .PHONY: clean
-clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts).
+# find, not rm -rf $(CMD_WEB_DIST)/*: dist/.build-stamp is a dotfile, and a
+# shell glob doesn't match those, so a glob-based rm would silently leave the
+# stamp in place and cause the next build to skip a fresh frontend build.
+clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts, frontend build output).
 	@rm -rf $(BIN_DIR) $(CONTROL_WORKER_CHART)/charts
+	@find $(CMD_WEB_DIST) -mindepth 1 -not -name '.gitkeep' -delete
 
 ##@ Release
 

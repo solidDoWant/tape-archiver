@@ -8,13 +8,15 @@
 //
 // Listen address is configured via the WEB_LISTEN_ADDRESS environment
 // variable (e.g. ":8080" or "127.0.0.1:8080"), defaulting to ":8080" when
-// unset.
+// unset. Log level is configured via LOG_LEVEL (debug, info, warn, error),
+// defaulting to info — see pkg/logging.
 package main
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -22,11 +24,22 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/solidDoWant/tape-archiver/pkg/logging"
 	"github.com/solidDoWant/tape-archiver/pkg/webserver"
 )
 
 // defaultListenAddr is used when WEB_LISTEN_ADDRESS is unset.
 const defaultListenAddr = ":8080"
+
+// Timeouts guard the server against slow/stalled clients (e.g. Slowloris-style
+// header trickling) holding a connection open indefinitely.
+const (
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = 30 * time.Second
+	idleTimeout       = 120 * time.Second
+	shutdownTimeout   = 10 * time.Second
+)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -46,6 +59,8 @@ func main() {
 // listener is open — tests use it to learn the actual port when listening on
 // ":0"; production passes nil.
 func run(ctx context.Context, getenv func(string) string, ready func(addr string)) error {
+	logging.Setup(getenv("LOG_LEVEL"))
+
 	assets, err := distFS()
 	if err != nil {
 		return fmt.Errorf("load embedded SPA assets: %w", err)
@@ -67,13 +82,21 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		ready(listener.Addr().String())
 	}
 
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 
 	serveErr := make(chan error, 1)
 
 	go func() {
 		serveErr <- srv.Serve(listener)
 	}()
+
+	slog.Info("web: listening", "addr", listener.Addr().String())
 
 	select {
 	case <-ctx.Done():
@@ -85,7 +108,9 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		return nil
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	slog.Info("web: shutting down")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {

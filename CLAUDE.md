@@ -32,7 +32,12 @@ When a change touches any of these, call it out explicitly.
 
 ## Tech Stack
 
-- **Go 1.26**, single module.
+- **Go 1.26**, single module (`go.mod` at the repo root). The one exception is
+  `web/go.mod`: a deliberately empty nested module that fences the `web/` npm project
+  (and its `node_modules`, which can ship incidental `.go` files) out of the root
+  module's `./...` package walk — see `web/go.mod`'s doc comment. It carries no real
+  Go code and is not part of the single-module Go surface described elsewhere in this
+  file.
 - **Temporal** for orchestration. Two task queues: `control` (runs in Kubernetes) and
   `data` (runs as a container on the storage host, where the bulk data lives).
 - **External tooling** bundled in the data worker image at pinned versions, matching the
