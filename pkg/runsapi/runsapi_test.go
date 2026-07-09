@@ -59,13 +59,27 @@ type fakeTemporalClient struct {
 	describeResponse *workflowservice.DescribeWorkflowExecutionResponse
 	describeErr      error
 
+	// queryResult/queryErr answer backup.LastCompletedPhaseQuery.
 	queryResult interface{}
 	queryErr    error
+
+	// currentPauseResult/currentPauseErr answer backup.CurrentPauseQuery,
+	// routed separately from queryResult/queryErr above since getRun and
+	// signalPausedRun (resume/abort) now issue both queries against the same
+	// fake client.
+	currentPauseResult interface{}
+	currentPauseErr    error
 
 	executeRun      client.WorkflowRun
 	executeErr      error
 	executeOptions  client.StartWorkflowOptions
 	executeCaptured bool
+
+	signalErr        error
+	signalCaptured   bool
+	signalWorkflowID string
+	signalRunID      string
+	signalName       string
 }
 
 func (f *fakeTemporalClient) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {
@@ -76,7 +90,15 @@ func (f *fakeTemporalClient) DescribeWorkflowExecution(context.Context, string, 
 	return f.describeResponse, f.describeErr
 }
 
-func (f *fakeTemporalClient) QueryWorkflow(context.Context, string, string, string, ...interface{}) (converter.EncodedValue, error) {
+func (f *fakeTemporalClient) QueryWorkflow(_ context.Context, _ string, _ string, queryType string, _ ...interface{}) (converter.EncodedValue, error) {
+	if queryType == backup.CurrentPauseQuery {
+		if f.currentPauseErr != nil {
+			return nil, f.currentPauseErr
+		}
+
+		return fakeEncodedValue{value: f.currentPauseResult}, nil
+	}
+
 	if f.queryErr != nil {
 		return nil, f.queryErr
 	}
@@ -89,6 +111,15 @@ func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.S
 	f.executeCaptured = true
 
 	return f.executeRun, f.executeErr
+}
+
+func (f *fakeTemporalClient) SignalWorkflow(_ context.Context, workflowID, runID, signalName string, _ interface{}) error {
+	f.signalCaptured = true
+	f.signalWorkflowID = workflowID
+	f.signalRunID = runID
+	f.signalName = signalName
+
+	return f.signalErr
 }
 
 // fakeWorkflowRun is a minimal client.WorkflowRun standing in for the real
@@ -292,12 +323,13 @@ func TestGetRun(t *testing.T) {
 	start := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name       string
-		runID      string
-		client     *fakeTemporalClient
-		wantStatus int
-		wantPhase  string
-		errAssert  require.ErrorAssertionFunc
+		name          string
+		runID         string
+		client        *fakeTemporalClient
+		wantStatus    int
+		wantPhase     string
+		wantPauseKind string
+		errAssert     require.ErrorAssertionFunc
 	}{
 		{
 			name:  "a known run returns detail including the last completed phase",
@@ -310,6 +342,34 @@ func TestGetRun(t *testing.T) {
 			},
 			wantStatus: http.StatusOK,
 			wantPhase:  "Verify",
+		},
+		{
+			name:  "a paused run's detail includes the current pause state",
+			runID: "run-1",
+			client: &fakeTemporalClient{
+				describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
+					WorkflowExecutionInfo: executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, start, nil),
+				},
+				queryResult:        "Write",
+				currentPauseResult: backup.CurrentPause{Kind: backup.PauseWriteFailure, Phase: backup.PhaseWrite, AffectedTapes: []string{"TA0001L6"}},
+			},
+			wantStatus:    http.StatusOK,
+			wantPhase:     "Write",
+			wantPauseKind: "write-failure",
+		},
+		{
+			name:  "a failed current-pause query does not fail the request; pause reports none",
+			runID: "run-1",
+			client: &fakeTemporalClient{
+				describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
+					WorkflowExecutionInfo: executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, start, nil),
+				},
+				queryResult:     "Write",
+				currentPauseErr: assertError{"no worker polling"},
+			},
+			wantStatus:    http.StatusOK,
+			wantPhase:     "Write",
+			wantPauseKind: "",
 		},
 		{
 			name:  "an unknown run returns 404, not a 500 or hang",
@@ -369,6 +429,171 @@ func TestGetRun(t *testing.T) {
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &detail))
 				assert.Equal(t, test.runID, detail.RunID)
 				assert.Equal(t, test.wantPhase, detail.LastCompletedPhase)
+				assert.Equal(t, test.wantPauseKind, detail.CurrentPause.Kind)
+				errAssert(t, nil)
+
+				return
+			}
+
+			errAssert(t, decodeAPIError(t, recorder))
+		})
+	}
+}
+
+// TestResumeRun covers POST /api/runs/{runID}/resume: it must send
+// backup.OperatorResumeSignal only when the run is actually paused (any pause
+// kind), and never signal an unpaused or nonexistent run.
+func TestResumeRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		client     *fakeTemporalClient
+		wantStatus int
+		// wantSignalAttempted is whether SignalWorkflow is called at all — true
+		// both when the request succeeds and when the signal RPC itself fails
+		// (the request is still rejected, but only after genuinely attempting
+		// the signal); false when the handler rejects the request before ever
+		// reaching SignalWorkflow (not paused, or the run does not exist).
+		wantSignalAttempted bool
+		errAssert           require.ErrorAssertionFunc
+	}{
+		{
+			name:                "a write-failure pause resumes: 202 and the resume signal is sent",
+			client:              &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseWriteFailure}},
+			wantStatus:          http.StatusAccepted,
+			wantSignalAttempted: true,
+		},
+		{
+			name:                "an eject pause resumes too",
+			client:              &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseEject}},
+			wantStatus:          http.StatusAccepted,
+			wantSignalAttempted: true,
+		},
+		{
+			name:                "a burn pause resumes too",
+			client:              &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseBurn}},
+			wantStatus:          http.StatusAccepted,
+			wantSignalAttempted: true,
+		},
+		{
+			name:       "a run that is not paused rejects resume with 409, not a signal sent into the void",
+			client:     &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseNone}},
+			wantStatus: http.StatusConflict,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "an unknown run returns 404, not a 500 or hang",
+			client:     &fakeTemporalClient{currentPauseErr: &serviceerror.NotFound{Message: "not found"}},
+			wantStatus: http.StatusNotFound,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "a non-NotFound pause-query failure is a 502",
+			client:     &fakeTemporalClient{currentPauseErr: assertError{"transient RPC failure"}},
+			wantStatus: http.StatusBadGateway,
+			errAssert:  require.Error,
+		},
+		{
+			name: "a SignalWorkflow failure is reported, not swallowed",
+			client: &fakeTemporalClient{
+				currentPauseResult: backup.CurrentPause{Kind: backup.PauseWriteFailure},
+				signalErr:          assertError{"signal RPC failed"},
+			},
+			wantStatus:          http.StatusBadGateway,
+			wantSignalAttempted: true,
+			errAssert:           require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errAssert := test.errAssert
+			if errAssert == nil {
+				errAssert = require.NoError
+			}
+
+			handler := New(test.client)
+
+			recorder := postJSON(t, handler, "/api/runs/run-1/resume", nil, nil)
+			assert.Equal(t, test.wantStatus, recorder.Code)
+			assert.Equal(t, test.wantSignalAttempted, test.client.signalCaptured)
+
+			if test.wantStatus == http.StatusAccepted {
+				assert.Equal(t, backup.WorkflowID, test.client.signalWorkflowID)
+				assert.Equal(t, "run-1", test.client.signalRunID)
+				assert.Equal(t, backup.OperatorResumeSignal, test.client.signalName)
+				errAssert(t, nil)
+
+				return
+			}
+
+			errAssert(t, decodeAPIError(t, recorder))
+		})
+	}
+}
+
+// TestAbortRun covers POST /api/runs/{runID}/abort: it must send
+// backup.OperatorAbortSignal only for a pause kind abort actually applies to
+// (write-failure, burn) — never for an eject pause (workflows/backup's
+// waitForIOCleared never listens for the abort signal) or an unpaused run.
+func TestAbortRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		client     *fakeTemporalClient
+		wantStatus int
+		// wantSignalAttempted is whether SignalWorkflow is called at all — see
+		// TestResumeRun's identically-named field for the full rationale.
+		wantSignalAttempted bool
+		errAssert           require.ErrorAssertionFunc
+	}{
+		{
+			name:                "a write-failure pause aborts: 202 and the abort signal is sent",
+			client:              &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseWriteFailure}},
+			wantStatus:          http.StatusAccepted,
+			wantSignalAttempted: true,
+		},
+		{
+			name:                "a burn pause aborts too",
+			client:              &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseBurn}},
+			wantStatus:          http.StatusAccepted,
+			wantSignalAttempted: true,
+		},
+		{
+			name:       "an eject pause rejects abort with 409; the signal is never sent",
+			client:     &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseEject}},
+			wantStatus: http.StatusConflict,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "a run that is not paused rejects abort with 409",
+			client:     &fakeTemporalClient{currentPauseResult: backup.CurrentPause{Kind: backup.PauseNone}},
+			wantStatus: http.StatusConflict,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "an unknown run returns 404, not a 500 or hang",
+			client:     &fakeTemporalClient{currentPauseErr: &serviceerror.NotFound{Message: "not found"}},
+			wantStatus: http.StatusNotFound,
+			errAssert:  require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errAssert := test.errAssert
+			if errAssert == nil {
+				errAssert = require.NoError
+			}
+
+			handler := New(test.client)
+
+			recorder := postJSON(t, handler, "/api/runs/run-1/abort", nil, nil)
+			assert.Equal(t, test.wantStatus, recorder.Code)
+			assert.Equal(t, test.wantSignalAttempted, test.client.signalCaptured)
+
+			if test.wantStatus == http.StatusAccepted {
+				assert.Equal(t, backup.WorkflowID, test.client.signalWorkflowID)
+				assert.Equal(t, "run-1", test.client.signalRunID)
+				assert.Equal(t, backup.OperatorAbortSignal, test.client.signalName)
 				errAssert(t, nil)
 
 				return

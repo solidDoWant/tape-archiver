@@ -4,6 +4,7 @@ package runsapi_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -202,6 +203,263 @@ func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, badResp.StatusCode)
 
 	// Unblock the stub so it completes rather than lingering past the test.
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+}
+
+// setPauseSignal is a test-only signal (not part of workflows/backup's real
+// contract) that stubPausableBackupWorkflow uses to let a test set the pause
+// state CurrentPauseQuery should report next.
+const setPauseSignal = "setPause"
+
+// lastSignalQuery is a test-only query (not part of workflows/backup's real
+// contract) that reports which of OperatorResumeSignal/OperatorAbortSignal
+// stubPausableBackupWorkflow most recently received, so a test can prove the
+// real signal was actually delivered and processed — not just that the pause
+// state happened to change for some other reason.
+const lastSignalQuery = "lastSignal"
+
+// stubPausableBackupWorkflow extends stubBackupWorkflow with a settable pause
+// state and the real OperatorResumeSignal/OperatorAbortSignal names, so
+// TestResumeAndAbortAgainstRealTemporal can drive POST
+// /api/runs/{runID}/resume and /abort against a real Temporal server and
+// observe the real signal being delivered and acted on — behavior no fake
+// client can prove. It is a test-only stand-in, not the real workflow: the
+// actual pause logic (Eject/Load/Write/Burn) is covered by
+// workflows/backup's own mhvtl-backed integration tests
+// (eject_pause_integration_test.go and friends); this proves only that the
+// HTTP layer queries backup.CurrentPauseQuery and sends the correct signal to
+// the correct run — the same "stub the workflow, drive the real Temporal +
+// HTTP layer" pattern stubBackupWorkflow above already uses for GET/POST
+// /api/runs.
+func stubPausableBackupWorkflow(ctx workflow.Context, _ interface{}) error {
+	phase := stubPhase
+	pause := backup.CurrentPause{}
+	lastSignal := ""
+
+	if err := workflow.SetQueryHandler(ctx, backup.LastCompletedPhaseQuery, func() (string, error) {
+		return phase, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := workflow.SetQueryHandler(ctx, backup.CurrentPauseQuery, func() (backup.CurrentPause, error) {
+		return pause, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := workflow.SetQueryHandler(ctx, lastSignalQuery, func() (string, error) {
+		return lastSignal, nil
+	}); err != nil {
+		return err
+	}
+
+	setPauseCh := workflow.GetSignalChannel(ctx, setPauseSignal)
+	resumeCh := workflow.GetSignalChannel(ctx, backup.OperatorResumeSignal)
+	abortCh := workflow.GetSignalChannel(ctx, backup.OperatorAbortSignal)
+	finishCh := workflow.GetSignalChannel(ctx, stubFinishSignal)
+
+	finished := false
+
+	for !finished {
+		selector := workflow.NewSelector(ctx)
+		selector.AddReceive(setPauseCh, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, &pause)
+		})
+		selector.AddReceive(resumeCh, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, nil)
+
+			lastSignal = "resume"
+			pause = backup.CurrentPause{}
+		})
+		selector.AddReceive(abortCh, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, nil)
+
+			lastSignal = "abort"
+			pause = backup.CurrentPause{}
+		})
+		selector.AddReceive(finishCh, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, nil)
+
+			finished = true
+		})
+		selector.Select(ctx)
+	}
+
+	return nil
+}
+
+// getRunDetail fetches and decodes GET /api/runs/{runID}, failing the test on
+// a transport error but leaving status/body assertions to the caller.
+func getRunDetail(t *testing.T, serverURL, runID string) (int, runsapi.RunDetail) {
+	t.Helper()
+
+	resp, err := http.Get(serverURL + "/api/runs/" + runID)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	var detail runsapi.RunDetail
+
+	_ = json.NewDecoder(resp.Body).Decode(&detail)
+
+	return resp.StatusCode, detail
+}
+
+// postAction POSTs to serverURL+"/api/runs/"+runID+"/"+action (resume or
+// abort) and returns the status code.
+func postAction(t *testing.T, serverURL, runID, action string) int {
+	t.Helper()
+
+	resp, err := http.Post(serverURL+"/api/runs/"+runID+"/"+action, "application/json", nil)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	return resp.StatusCode
+}
+
+// queryLastSignal asks the stub workflow directly (bypassing the HTTP layer)
+// which of resume/abort it most recently received, so a test can prove a
+// rejected request never reached the workflow at all — a 409 alone does not
+// distinguish "correctly rejected" from "sent, then coincidentally had no
+// effect".
+func queryLastSignal(t *testing.T, temporalClient client.Client, ctx context.Context, runID string) string {
+	t.Helper()
+
+	value, err := temporalClient.QueryWorkflow(ctx, backup.WorkflowID, runID, lastSignalQuery)
+	require.NoError(t, err)
+
+	var signal string
+	require.NoError(t, value.Get(&signal))
+
+	return signal
+}
+
+// TestResumeAndAbortAgainstRealTemporal exercises POST
+// /api/runs/{runID}/resume and /abort against a real dev Temporal (make
+// temporal-up): a request against an unpaused run is rejected (409) and never
+// reaches the workflow; once paused, resume/abort actually deliver the real
+// OperatorResumeSignal/OperatorAbortSignal and the workflow observes them
+// (CurrentPauseQuery clears, lastSignalQuery records which arrived); and an
+// abort against an Eject pause is rejected client-side and never reaches the
+// workflow at all — proving the "web API is stricter than tapectl"
+// pause-state check (signalPausedRun's doc comment) actually holds against a
+// real server, not just the fakeTemporalClient unit tests.
+func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
+	requireTemporalAddress(t)
+	isolateTemporalConfig(t)
+
+	ctx := t.Context()
+
+	temporalClient, shutdown, err := temporalclient.New(ctx, nil)
+	require.NoError(t, err)
+
+	defer shutdown()
+
+	backupWorker := worker.New(temporalClient, backup.TaskQueue, worker.Options{})
+	backupWorker.RegisterWorkflowWithOptions(stubPausableBackupWorkflow, workflow.RegisterOptions{Name: backup.WorkflowType})
+	require.NoError(t, backupWorker.Start())
+
+	defer backupWorker.Stop()
+
+	run, err := temporalClient.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       backup.WorkflowID,
+		TaskQueue:                backup.TaskQueue,
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_TERMINATE_EXISTING,
+	}, backup.WorkflowType, nil)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil)
+	})
+
+	handler := runsapi.New(temporalClient)
+	server := httptest.NewServer(handler)
+
+	defer server.Close()
+
+	runID := run.GetRunID()
+
+	// Wait for the run to be visible/queryable before driving actions.
+	require.Eventually(t, func() bool {
+		status, _ := getRunDetail(t, server.URL, runID)
+
+		return status == http.StatusOK
+	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never became reachable")
+
+	// Not yet paused: both actions are rejected with 409, not sent into the
+	// void.
+	assert.Equal(t, http.StatusConflict, postAction(t, server.URL, runID, "resume"),
+		"resume against an unpaused run must be rejected")
+	assert.Equal(t, http.StatusConflict, postAction(t, server.URL, runID, "abort"),
+		"abort against an unpaused run must be rejected")
+	assert.Empty(t, queryLastSignal(t, temporalClient, ctx, runID), "no signal must have reached the workflow yet")
+
+	// Simulate a write-failure pause and resume it through the API.
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", setPauseSignal,
+		backup.CurrentPause{Kind: backup.PauseWriteFailure, Phase: backup.PhaseWrite, AffectedTapes: []string{"TA0001L6"}}))
+
+	require.Eventually(t, func() bool {
+		status, detail := getRunDetail(t, server.URL, runID)
+
+		return status == http.StatusOK && detail.CurrentPause.Kind == string(backup.PauseWriteFailure)
+	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never reported the simulated write-failure pause")
+
+	assert.Equal(t, http.StatusAccepted, postAction(t, server.URL, runID, "resume"),
+		"resume against a paused run must succeed")
+
+	require.Eventually(t, func() bool {
+		return queryLastSignal(t, temporalClient, ctx, runID) == "resume"
+	}, 30*time.Second, 250*time.Millisecond, "the workflow never observed the real resume signal")
+
+	_, detail := getRunDetail(t, server.URL, runID)
+	assert.Equal(t, "", detail.CurrentPause.Kind, "the pause clears once the workflow processes the resume")
+
+	// Simulate a burn pause and abort it through the API.
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", setPauseSignal,
+		backup.CurrentPause{Kind: backup.PauseBurn, Devices: []string{"/dev/sr0"}}))
+
+	require.Eventually(t, func() bool {
+		status, detail := getRunDetail(t, server.URL, runID)
+
+		return status == http.StatusOK && detail.CurrentPause.Kind == string(backup.PauseBurn)
+	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never reported the simulated burn pause")
+
+	assert.Equal(t, http.StatusAccepted, postAction(t, server.URL, runID, "abort"),
+		"abort against a burn pause must succeed")
+
+	require.Eventually(t, func() bool {
+		return queryLastSignal(t, temporalClient, ctx, runID) == "abort"
+	}, 30*time.Second, 250*time.Millisecond, "the workflow never observed the real abort signal")
+
+	// Simulate an Eject pause and confirm abort is rejected client-side,
+	// never reaching the workflow (lastSignalQuery stays "abort" from the
+	// burn pause above, not overwritten).
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", setPauseSignal,
+		backup.CurrentPause{Kind: backup.PauseEject, AffectedTapes: []string{"TA0002L6"}, AwaitingExport: 1}))
+
+	require.Eventually(t, func() bool {
+		status, detail := getRunDetail(t, server.URL, runID)
+
+		return status == http.StatusOK && detail.CurrentPause.Kind == string(backup.PauseEject)
+	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never reported the simulated eject pause")
+
+	assert.Equal(t, http.StatusConflict, postAction(t, server.URL, runID, "abort"),
+		"abort against an eject pause must be rejected: the Eject wait never listens for it")
+	assert.Equal(t, "abort", queryLastSignal(t, temporalClient, ctx, runID),
+		"the rejected eject-pause abort must never reach the workflow (lastSignal is unchanged from the burn-pause abort)")
+
+	// Resume still applies to an eject pause.
+	assert.Equal(t, http.StatusAccepted, postAction(t, server.URL, runID, "resume"),
+		"resume against an eject pause must succeed")
+
+	require.Eventually(t, func() bool {
+		_, detail := getRunDetail(t, server.URL, runID)
+
+		return detail.CurrentPause.Kind == ""
+	}, 30*time.Second, 250*time.Millisecond, "the eject pause never cleared after resume")
+
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 }
 

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -38,10 +39,10 @@ var runningStatus = enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING.String()
 // SSE event names streamRunEvents emits.
 const (
 	// sseEventUpdate carries a RunDetail JSON body, sent on the first
-	// successful poll and again every time the polled status or last
-	// completed phase actually changes from what was last sent — never on a
-	// poll tick that observed no change, so a quiescent run does not turn
-	// into an endless stream of no-op events.
+	// successful poll and again every time the polled status, last completed
+	// phase, or current pause state actually changes from what was last
+	// sent — never on a poll tick that observed no change, so a quiescent run
+	// does not turn into an endless stream of no-op events.
 	sseEventUpdate = "update"
 	// sseEventDone carries the same final RunDetail body as the "update"
 	// event immediately before it, and is sent exactly once, right before
@@ -63,13 +64,18 @@ const (
 //
 // Once a run is confirmed to exist, the response becomes text/event-stream
 // and streamRunEvents polls fetchRunDetail every eventPollInterval, writing
-// an "update" event only when the polled status or phase differs from what
-// was last sent. If the run's status is (or becomes) anything other than
-// RUNNING, it writes one final "done" event and returns, closing the
-// stream — this handler never polls a finished run forever. It also returns
-// promptly once r.Context() is done (the client disconnected): there is no
-// server-side per-client state beyond this one goroutine's stack, so there
-// is nothing left to clean up either way.
+// an "update" event only when the polled status, phase, or current pause
+// state differs from what was last sent — the last is what makes an
+// operator-in-the-loop pause (workflows/backup.CurrentPauseQuery) starting or
+// clearing show up live, even though neither Status nor LastCompletedPhase
+// necessarily changes at the moment a pause begins or a resume/abort clears
+// it (SPEC §4.3; docs/web-ui-design.md §3's pause-actions sketch). If the
+// run's status is (or becomes) anything other than RUNNING, it writes one
+// final "done" event and returns, closing the stream — this handler never
+// polls a finished run forever. It also returns promptly once r.Context() is
+// done (the client disconnected): there is no server-side per-client state
+// beyond this one goroutine's stack, so there is nothing left to clean up
+// either way.
 func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 
@@ -151,7 +157,9 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			if next.Status == last.Status && next.LastCompletedPhase == last.LastCompletedPhase {
+			if next.Status == last.Status &&
+				next.LastCompletedPhase == last.LastCompletedPhase &&
+				reflect.DeepEqual(next.CurrentPause, last.CurrentPause) {
 				continue
 			}
 

@@ -219,6 +219,34 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 	}
 }
 
+// TestCurrentPauseQueryDefaultsToNone covers the CurrentPauseQuery contract at
+// the real Backup entry point: a run that completes without ever pausing
+// reports PauseNone throughout (queried here after completion), proving the
+// handler is registered and its zero value is "not paused" — the pause-active
+// contract itself (each Kind, its context fields, and clearing on resume) is
+// covered per pause site in eject_pause_test.go, write_pause_test.go, and
+// burn_pause_test.go, which drive the narrower pause-only test workflows where
+// mid-pause queries are practical to arrange.
+func TestCurrentPauseQueryDefaultsToNone(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+	expectAllPhasesSucceed(env)
+
+	env.ExecuteWorkflow(Backup, validBackupConfig())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	value, err := env.QueryWorkflow(CurrentPauseQuery)
+	require.NoError(t, err)
+
+	var pause CurrentPause
+	require.NoError(t, value.Get(&pause))
+	assert.Equal(t, PauseNone, pause.Kind)
+	assert.Equal(t, CurrentPause{}, pause, "no pause ever fired, so every field stays the zero value")
+}
+
 // failIfPrepareRuns registers the Prepare activity to fail the test if it is ever
 // invoked, proving no staging work happens. It is the observable proxy for "before
 // any staging (Prepare) work is performed": Prepare is the first phase that reads

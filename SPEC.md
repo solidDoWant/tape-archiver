@@ -632,16 +632,21 @@ refinement as issues are implemented.
 - `cmd/web` — web UI HTTP server (epic #239): serves the embedded React SPA at `/` and
   the JSON API (`pkg/runsapi`) under `/api/*` — `GET /api/runs`/`GET
   /api/runs/{runID}` (list/describe backup runs via Temporal visibility +
-  `LastCompletedPhaseQuery`) and `POST /api/runs` (submit a run, including dry-run,
-  via `pkg/runsubmit` — the same submission path `tapectl run [--dry-run]` uses, so
-  the CLI and browser can never drift). Every page and `/api/*` route is gated behind
-  OIDC authorization-code-flow authentication (`pkg/webauth`; provider-agnostic via
-  standard OIDC discovery) — `cmd/web` refuses to start without a complete OIDC
-  configuration. `/healthz` + `/readyz` (`pkg/health`, own `HEALTH_ADDR`, readiness
-  gated on Temporal connectivity) and `/metrics` (`pkg/metrics`, own `METRICS_ADDR`,
-  including Temporal SDK metrics) stay unauthenticated on their own dedicated ports,
-  since Kubernetes probes and Prometheus scrapes cannot perform an OIDC login. Later
-  sub-issues add SSE live updates and resume/abort. Thin wrapper over `pkg/webserver`
+  `LastCompletedPhaseQuery` + `CurrentPauseQuery`), `POST /api/runs` (submit a run,
+  including dry-run, via `pkg/runsubmit` — the same submission path `tapectl run
+  [--dry-run]` uses, so the CLI and browser can never drift), `POST
+  /api/runs/{runID}/resume` / `POST /api/runs/{runID}/abort` (send the same
+  `OperatorResumeSignal`/`OperatorAbortSignal` `tapectl resume`/`tapectl abort` send,
+  after confirming via `CurrentPauseQuery` that the run is actually paused and the
+  signal applies to that pause kind), and `GET /api/events/runs/{runID}` (Server-Sent
+  Events live view over the same state, including pause changes). Every page and
+  `/api/*` route is gated behind OIDC authorization-code-flow authentication
+  (`pkg/webauth`; provider-agnostic via standard OIDC discovery) — `cmd/web` refuses
+  to start without a complete OIDC configuration. `/healthz` + `/readyz`
+  (`pkg/health`, own `HEALTH_ADDR`, readiness gated on Temporal connectivity) and
+  `/metrics` (`pkg/metrics`, own `METRICS_ADDR`, including Temporal SDK metrics) stay
+  unauthenticated on their own dedicated ports, since Kubernetes probes and
+  Prometheus scrapes cannot perform an OIDC login. Thin wrapper over `pkg/webserver`
   + `pkg/runsapi` + `pkg/webauth` +
   `pkg/temporalclient`/`pkg/health`/`pkg/metrics` (the same factories `cmd/worker`
   uses); the SPA build is embedded via `go:embed` from `cmd/web/dist` (populated by
@@ -652,11 +657,11 @@ refinement as issues are implemented.
   `temporalclient`, `webserver` (`cmd/web`'s HTTP handler: mounts the embedded-SPA
   serving and the `/api/*` handler together, SPA lowest-priority), `runsapi`
   (`cmd/web`'s `/api/runs` JSON handlers, backed by Temporal visibility +
-  `LastCompletedPhaseQuery` + `pkg/runsubmit`, unit-testable against a fake Temporal
-  client interface), `runsubmit` (the submission path shared by `cmd/tapectl` and
-  `pkg/runsapi`: dry-run mhvtl device override, the fixed singleton
-  `StartWorkflowOptions`, and singleton-conflict error translation), `webauth`
-  (`cmd/web`'s OIDC session middleware: login/callback/logout routes, an
+  `LastCompletedPhaseQuery`/`CurrentPauseQuery` + `pkg/runsubmit`, unit-testable
+  against a fake Temporal client interface), `runsubmit` (the submission path shared
+  by `cmd/tapectl` and `pkg/runsapi`: dry-run mhvtl device override, the fixed
+  singleton `StartWorkflowOptions`, and singleton-conflict error translation),
+  `webauth` (`cmd/web`'s OIDC session middleware: login/callback/logout routes, an
   encrypted-cookie session with no server-side store, gating every other route).
 - `internal/config` — run-config types and env parsing.
 - `workflows/backup/` — the backup workflow and activities, split by concern

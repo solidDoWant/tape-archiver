@@ -56,6 +56,18 @@ const (
 	// those that do not, and the sole resume path for a write-path pause.
 	OperatorResumeSignal = "operatorResume"
 
+	// CurrentPauseQuery is the Temporal query that returns which operator-in-the-
+	// loop pause, if any, is currently blocking the run (SPEC §4.3 phase 8, §4.3
+	// phases 6-8, §10): the Eject phase's I/O-station-full pause, a Load/Write
+	// failure on the tape path, or a Burn-phase pause. It returns the zero-value
+	// CurrentPause (Kind PauseNone) when the run is not currently paused. The
+	// workflow registers a handler for it so an operator (or the web UI —
+	// docs/web-ui-design.md §3) can see that a run is paused and why without
+	// consulting the Temporal UI event history. It is purely additive: the pause
+	// logic itself, and the OperatorResumeSignal/OperatorAbortSignal contract
+	// above, are unchanged by its existence.
+	CurrentPauseQuery = "currentPause"
+
 	// OperatorAbortSignal is the Temporal signal an operator sends to abort a run
 	// paused because a Load or Write failed for one drive-set (SPEC §4.3): instead
 	// of swapping in fresh blanks and resuming, the operator ends the run in a

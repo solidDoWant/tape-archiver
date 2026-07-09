@@ -61,6 +61,7 @@ type dynamicTemporalClient struct {
 	mu            sync.Mutex
 	status        enumspb.WorkflowExecutionStatus
 	phase         string
+	pause         backup.CurrentPause
 	describeCalls int
 }
 
@@ -70,6 +71,17 @@ func (c *dynamicTemporalClient) setState(status enumspb.WorkflowExecutionStatus,
 
 	c.status = status
 	c.phase = phase
+}
+
+// setPause changes the pause state a subsequent CurrentPauseQuery answers
+// with, so a test can simulate an operator-in-the-loop pause starting or
+// clearing while a stream is connected — the same "state a test can change
+// at will" role setState plays for status/phase.
+func (c *dynamicTemporalClient) setPause(pause backup.CurrentPause) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pause = pause
 }
 
 func (c *dynamicTemporalClient) callCount() int {
@@ -98,12 +110,20 @@ func (c *dynamicTemporalClient) DescribeWorkflowExecution(_ context.Context, _, 
 	return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: info}, nil
 }
 
-func (c *dynamicTemporalClient) QueryWorkflow(context.Context, string, string, string, ...interface{}) (converter.EncodedValue, error) {
+// QueryWorkflow routes by queryType — backup.CurrentPauseQuery answers with
+// the dynamic pause state (setPause), anything else (LastCompletedPhaseQuery
+// in practice) with the dynamic phase (setState) — mirroring how the real
+// workflow answers two independent query handlers rather than collapsing
+// both onto one fixture value.
+func (c *dynamicTemporalClient) QueryWorkflow(_ context.Context, _, _, queryType string, _ ...interface{}) (converter.EncodedValue, error) {
 	c.mu.Lock()
-	phase := c.phase
-	c.mu.Unlock()
+	defer c.mu.Unlock()
 
-	return fakeEncodedValue{value: phase}, nil
+	if queryType == backup.CurrentPauseQuery {
+		return fakeEncodedValue{value: c.pause}, nil
+	}
+
+	return fakeEncodedValue{value: c.phase}, nil
 }
 
 // sseFrame is one parsed "event: NAME\ndata: JSON\n\n" frame.
@@ -293,6 +313,66 @@ func TestStreamRunEventsPushesOnlyOnChangeThenClosesOnTerminal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("stream did not close after the terminal done event")
 	}
+}
+
+// TestStreamRunEventsPushesOnPauseChangeAlone covers the CurrentPause half of
+// streamRunEvents' delta check (events.go): an operator-in-the-loop pause
+// starting or clearing pushes a new "update" event even when neither Status
+// nor LastCompletedPhase changes at the same moment — exactly the case a
+// Load/Write-failure or Eject pause is (SPEC §4.3): the run stays RUNNING and
+// the last *completed* phase does not advance while paused mid-phase. Without
+// the CurrentPause comparison in the delta check, a client watching the live
+// stream would never learn a pause started (or cleared) until some other,
+// unrelated field happened to change too.
+func TestStreamRunEventsPushesOnPauseChangeAlone(t *testing.T) {
+	setEventPollInterval(t, 15*time.Millisecond)
+
+	client := &dynamicTemporalClient{}
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
+
+	server := httptest.NewServer(New(client))
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	frames := readSSEFrames(resp.Body)
+
+	first := waitForFrame(t, frames, 2*time.Second)
+	assertFrame(t, first, sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
+
+	// Status and phase are unchanged for the rest of this test — only the
+	// pause state moves — so any further frame must come from the
+	// CurrentPause comparison, not the Status/LastCompletedPhase one.
+	requireNoFrame(t, frames, 150*time.Millisecond)
+
+	client.setPause(backup.CurrentPause{
+		Kind:          backup.PauseWriteFailure,
+		Phase:         backup.PhaseWrite,
+		AffectedTapes: []string{"TA0001L6"},
+	})
+
+	second := waitForFrame(t, frames, 2*time.Second)
+	assert.Equal(t, sseEventUpdate, second.event)
+
+	var pausedDetail RunDetail
+	require.NoError(t, json.Unmarshal([]byte(second.data), &pausedDetail))
+	assert.Equal(t, "write-failure", pausedDetail.CurrentPause.Kind, "the pause starting must push a new event")
+	assert.Equal(t, "Load", pausedDetail.LastCompletedPhase, "the last completed phase is genuinely unchanged")
+
+	requireNoFrame(t, frames, 150*time.Millisecond)
+
+	client.setPause(backup.CurrentPause{})
+
+	third := waitForFrame(t, frames, 2*time.Second)
+	assert.Equal(t, sseEventUpdate, third.event)
+
+	var clearedDetail RunDetail
+	require.NoError(t, json.Unmarshal([]byte(third.data), &clearedDetail))
+	assert.Equal(t, "", clearedDetail.CurrentPause.Kind, "the pause clearing (on resume) must push a new event too")
 }
 
 // TestStreamRunEventsStopsPollingOnClientDisconnect proves the server-side

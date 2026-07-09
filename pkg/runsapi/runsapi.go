@@ -67,6 +67,7 @@ type TemporalClient interface {
 	ListWorkflow(ctx context.Context, request *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error)
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 	QueryWorkflow(ctx context.Context, workflowID string, runID string, queryType string, args ...interface{}) (converter.EncodedValue, error)
+	SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error
 	runsubmit.TemporalClient
 }
 
@@ -100,6 +101,70 @@ type RunDetail struct {
 	// failing the request, since the execution status/timing above is still
 	// valid and useful on its own.
 	LastCompletedPhase string `json:"lastCompletedPhase"`
+
+	// CurrentPause is which operator-in-the-loop pause (if any) is blocking the
+	// run right now (backup.CurrentPauseQuery), with enough context for a
+	// client to act on it via POST /api/runs/{runID}/resume or /abort without
+	// consulting the Temporal UI event history. Kind is "" both when the run
+	// is not paused and when the query could not be answered — like
+	// LastCompletedPhase above, a query failure here is logged server-side
+	// rather than failing the request. Also carried over GET
+	// /api/events/runs/{runID} (events.go), whose poll loop compares this
+	// field (alongside Status/LastCompletedPhase) to detect a pause starting
+	// or clearing so a live view updates without a manual refresh.
+	CurrentPause CurrentPauseInfo `json:"currentPause"`
+}
+
+// CurrentPauseInfo is the GET /api/runs/{runID} (and SSE) JSON projection of
+// backup.CurrentPause: the same fields, translated to the API's camelCase
+// JSON convention rather than exposing the workflow package's internal Go
+// field names directly.
+type CurrentPauseInfo struct {
+	// Kind is which pause is active: "eject", "write-failure", "burn", or ""
+	// (not paused). Mirrors backup.PauseKind's string values.
+	Kind string `json:"kind"`
+	// Phase is the failing phase for a write-failure pause ("Load" or
+	// "Write"); omitted for an eject or burn pause.
+	Phase string `json:"phase,omitempty"`
+	// AffectedTapes lists barcodes to act on: the tapes to swap for a
+	// write-failure pause, or the tapes ready for removal for an eject pause.
+	AffectedTapes []string `json:"affectedTapes,omitempty"`
+	// ReloadSlots lists the storage slots to restock with fresh blanks before
+	// resuming a write-failure pause.
+	ReloadSlots []int `json:"reloadSlots,omitempty"`
+	// AwaitingExport is the count of written tapes still to be exported, for
+	// an eject pause.
+	AwaitingExport int `json:"awaitingExport,omitempty"`
+	// Devices lists the optical burner devices needing a fresh blank disc, for
+	// a burn pause.
+	Devices []string `json:"devices,omitempty"`
+	// ErrorSummary is the pause reason rendered as text — empty for an eject
+	// pause, and for a burn pause that is a between-set disc swap rather than
+	// a failure.
+	ErrorSummary string `json:"errorSummary,omitempty"`
+}
+
+// toCurrentPauseInfo maps a workflow query result to the API's JSON shape.
+func toCurrentPauseInfo(pause backup.CurrentPause) CurrentPauseInfo {
+	return CurrentPauseInfo{
+		Kind:           string(pause.Kind),
+		Phase:          pause.Phase,
+		AffectedTapes:  pause.AffectedTapes,
+		ReloadSlots:    pause.ReloadSlots,
+		AwaitingExport: pause.AwaitingExport,
+		Devices:        pause.Devices,
+		ErrorSummary:   pause.ErrorSummary,
+	}
+}
+
+// ActionResponse is the response body for POST /api/runs/{runID}/resume and
+// POST /api/runs/{runID}/abort: confirmation that the signal was sent, not
+// that the run has necessarily processed it yet — the resume/abort signals
+// are asynchronous (SPEC §4.3); GET /api/runs/{runID}'s CurrentPause (or the
+// SSE stream) is the authoritative way to observe whether the run actually
+// resumed or ended.
+type ActionResponse struct {
+	Status string `json:"status"`
 }
 
 // errorResponse is the JSON body written for a non-2xx response.
@@ -145,6 +210,8 @@ func newMux(h *handler) http.Handler {
 	mux.HandleFunc("GET /api/runs", h.listRuns)
 	mux.HandleFunc("GET /api/runs/{runID}", h.getRun)
 	mux.HandleFunc("POST /api/runs", h.submitRun)
+	mux.HandleFunc("POST /api/runs/{runID}/resume", h.resumeRun)
+	mux.HandleFunc("POST /api/runs/{runID}/abort", h.abortRun)
 	mux.HandleFunc("GET /api/events/runs/{runID}", h.streamRunEvents)
 
 	return mux
@@ -217,11 +284,13 @@ func (h *handler) getRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // fetchRunDetail fetches one execution's current detail: DescribeWorkflowExecution
-// and the last-completed-phase query, run concurrently since neither needs the
-// other's result, only backup.WorkflowID and runID. This is the single shared
-// core both getRun and streamRunEvents use to answer "what is this run's state
-// right now" — the SSE handler is a poll loop around exactly this call, so the
-// two endpoints can never drift on what "current state" means for a run.
+// and the last-completed-phase and current-pause queries, run concurrently since
+// none needs another's result, only backup.WorkflowID and runID. This is the
+// single shared core both getRun and streamRunEvents use to answer "what is this
+// run's state right now" — the SSE handler is a poll loop around exactly this
+// call, so the two endpoints can never drift on what "current state" means for a
+// run (and a pause starting/clearing is visible over the live stream for free,
+// via events.go's delta check on the returned CurrentPause).
 func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID string) (RunDetail, error) {
 	group, groupCtx := errgroup.WithContext(ctx)
 
@@ -243,6 +312,25 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 		return nil
 	})
 
+	var currentPause backup.CurrentPause
+
+	group.Go(func() error {
+		pause, err := queryCurrentPause(groupCtx, temporalClient, runID)
+		if err != nil {
+			// A query failure here (e.g. no worker currently polling) is not
+			// fatal to this request, mirroring queryLastCompletedPhase above:
+			// the execution status/timing already fetched via Describe is
+			// still valid and useful on its own.
+			slog.WarnContext(groupCtx, "runsapi: current pause query failed", "run_id", runID, "error", err)
+
+			return nil
+		}
+
+		currentPause = pause
+
+		return nil
+	})
+
 	if err := group.Wait(); err != nil {
 		return RunDetail{}, err
 	}
@@ -250,6 +338,7 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 	return RunDetail{
 		RunSummary:         toRunSummary(description.GetWorkflowExecutionInfo()),
 		LastCompletedPhase: lastCompletedPhase,
+		CurrentPause:       toCurrentPauseInfo(currentPause),
 	}, nil
 }
 
@@ -352,6 +441,85 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, SubmitRunResponse{WorkflowID: run.GetID(), RunID: run.GetRunID()})
 }
 
+// resumeRun implements POST /api/runs/{runID}/resume: send
+// backup.OperatorResumeSignal to the run, the same signal `tapectl resume`
+// sends (cmd/tapectl/resume.go). Every pause kind accepts resume, so no
+// allow-check is needed beyond "the run is currently paused" (signalPausedRun
+// itself).
+func (h *handler) resumeRun(w http.ResponseWriter, r *http.Request) {
+	h.signalPausedRun(w, r, backup.OperatorResumeSignal, "resume", func(backup.CurrentPause) error {
+		return nil
+	})
+}
+
+// abortRun implements POST /api/runs/{runID}/abort: send
+// backup.OperatorAbortSignal to the run, the same signal `tapectl abort`
+// sends (cmd/tapectl/abort.go). An Eject pause (backup.PauseEject) rejects
+// abort: see errEjectPauseCannotAbort.
+func (h *handler) abortRun(w http.ResponseWriter, r *http.Request) {
+	h.signalPausedRun(w, r, backup.OperatorAbortSignal, "abort", func(pause backup.CurrentPause) error {
+		if pause.Kind == backup.PauseEject {
+			return errEjectPauseCannotAbort
+		}
+
+		return nil
+	})
+}
+
+// signalPausedRun implements the shared resume/abort request flow. Unlike
+// `tapectl resume`/`abort`, which signal unconditionally with no pause-state
+// check (acceptable for a human operator who just watched the pause happen),
+// this handler confirms via backup.CurrentPauseQuery that the run is actually
+// paused, and lets allow reject a pause kind the signal does not apply to,
+// before sending anything — a signal a running workflow never consumes stays
+// buffered indefinitely and can be wrongly consumed by a later, unrelated
+// pause (workflows/backup's drainStaleResumeSignals doc, issues #154/#216),
+// so the web API is deliberately stricter here than the CLI.
+func (h *handler) signalPausedRun(w http.ResponseWriter, r *http.Request, signalName, verb string, allow func(backup.CurrentPause) error) {
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+
+	runID := r.PathValue("runID")
+
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("runID is required"))
+
+		return
+	}
+
+	pause, err := queryCurrentPause(ctx, h.temporalClient, runID)
+	if err != nil {
+		switch status := statusForTemporalError(err); status {
+		case http.StatusNotFound:
+			writeError(w, status, fmt.Errorf("run %q not found", runID))
+		default:
+			writeError(w, status, fmt.Errorf("query current pause state: %w", err))
+		}
+
+		return
+	}
+
+	if pause.Kind == backup.PauseNone {
+		writeError(w, statusForTemporalError(errRunNotPaused), errRunNotPaused)
+
+		return
+	}
+
+	if err := allow(pause); err != nil {
+		writeError(w, statusForTemporalError(err), err)
+
+		return
+	}
+
+	if err := h.temporalClient.SignalWorkflow(ctx, backup.WorkflowID, runID, signalName, nil); err != nil {
+		writeError(w, statusForTemporalError(err), fmt.Errorf("signal workflow to %s: %w", verb, err))
+
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, ActionResponse{Status: verb + " signal sent"})
+}
+
 // queryLastCompletedPhase asks the workflow for its last completed phase via
 // the agreed query (workflows/backup/contract.go). A query failure (e.g. no
 // worker currently polling) is not fatal to the request — the execution
@@ -375,22 +543,72 @@ func queryLastCompletedPhase(ctx context.Context, temporalClient TemporalClient,
 	return phase
 }
 
+// queryCurrentPause asks the workflow which operator-in-the-loop pause (if
+// any) is currently active, via the agreed query (backup.CurrentPauseQuery,
+// workflows/backup/contract.go). Unlike queryLastCompletedPhase above, it
+// propagates a query failure to the caller rather than swallowing it:
+// resumeRun/abortRun need to know the actual pause state before deciding
+// whether to send a signal — signalPausedRun's doc comment explains why
+// acting on an unknown pause state is unsafe here — while fetchRunDetail, the
+// other caller, degrades this to a warning log itself (mirroring its handling
+// of queryLastCompletedPhase) since the rest of that response is still
+// useful.
+func queryCurrentPause(ctx context.Context, temporalClient TemporalClient, runID string) (backup.CurrentPause, error) {
+	response, err := temporalClient.QueryWorkflow(ctx, backup.WorkflowID, runID, backup.CurrentPauseQuery)
+	if err != nil {
+		return backup.CurrentPause{}, err
+	}
+
+	var pause backup.CurrentPause
+	if err := response.Get(&pause); err != nil {
+		return backup.CurrentPause{}, err
+	}
+
+	return pause, nil
+}
+
+// errRunNotPaused is a synthetic (non-Temporal) error signalPausedRun returns
+// when a resume/abort request targets a run that backup.CurrentPauseQuery
+// reports is not currently paused. It flows through statusForTemporalError
+// like any other resume/abort failure so callers get one consistent mapping.
+var errRunNotPaused = errors.New("run is not currently paused")
+
+// errEjectPauseCannotAbort is a synthetic (non-Temporal) error abortRun
+// returns when an abort request targets an Eject pause (backup.PauseEject):
+// every tape is already safely written by the time that pause fires, so
+// workflows/backup's waitForIOCleared never listens for
+// backup.OperatorAbortSignal — only resume applies. Rejecting this before any
+// signal is sent avoids leaving an unconsumed abort signal buffered on the
+// running workflow, where it could be wrongly consumed by a later, unrelated
+// pause (see signalPausedRun's doc comment).
+var errEjectPauseCannotAbort = errors.New("this pause cannot be aborted; only resume applies to an eject pause")
+
 // statusForTemporalError classifies a Temporal RPC error into the HTTP
-// status that best represents it, shared by every runsapi handler so future
-// endpoints (resume/abort — docs/web-ui-design.md §8) extend one consistent
-// mapping instead of each hand-rolling its own: a missing resource is
-// serviceerror.NotFound (404), a malformed client-supplied identifier/
-// argument is serviceerror.InvalidArgument (400), a singleton-conflict
-// submission is serviceerror.WorkflowExecutionAlreadyStarted (409 Conflict —
-// runs are a singleton, SPEC §4.2, so a second submission while one is
-// in-flight is a conflict with existing state, not a missing/malformed
-// request), and anything else is 502 — this handler is a proxy over
-// Temporal, so an unclassified failure is upstream, not the client's fault.
+// status that best represents it, shared by every runsapi handler so every
+// endpoint extends one consistent mapping instead of each hand-rolling its
+// own: a missing resource is serviceerror.NotFound (404), a malformed
+// client-supplied identifier/argument is serviceerror.InvalidArgument (400),
+// a singleton-conflict submission is
+// serviceerror.WorkflowExecutionAlreadyStarted (409 Conflict — runs are a
+// singleton, SPEC §4.2, so a second submission while one is in-flight is a
+// conflict with existing state, not a missing/malformed request), and
+// anything else is 502 — this handler is a proxy over Temporal, so an
+// unclassified failure is upstream, not the client's fault.
 //
 // submitRun passes this the error returned by runsubmit.Submit, which wraps
 // (via %w, see runsubmit.TranslateSubmitError) rather than replaces the
 // underlying serviceerror, so errors.As here still recovers it.
+//
+// signalPausedRun (resumeRun/abortRun) additionally passes this two synthetic,
+// non-Temporal errors — errRunNotPaused and errEjectPauseCannotAbort — both
+// mapped to 409 Conflict: the request is well-formed and the run exists, but
+// the action conflicts with the run's current (pause) state, the same
+// Conflict reasoning already used below for a singleton-submission clash.
 func statusForTemporalError(err error) int {
+	if errors.Is(err, errRunNotPaused) || errors.Is(err, errEjectPauseCannotAbort) {
+		return http.StatusConflict
+	}
+
 	var notFound *serviceerror.NotFound
 	if errors.As(err, &notFound) {
 		return http.StatusNotFound

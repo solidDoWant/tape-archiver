@@ -139,7 +139,7 @@ func runBurnPath(ctx workflow.Context, cfg config.Config, state *runState) error
 		if setIndex > 0 {
 			// Every set after the first needs a manual disc swap. Pause for the
 			// operator to load fresh blanks into the set's drives, then resume.
-			switch waitForBurnOperator(ctx, cfg, devicesOf(set), nil) {
+			switch waitForBurnOperator(ctx, cfg, state, devicesOf(set), nil) {
 			case pauseResumed:
 			case pauseAborted:
 				return fmt.Errorf("run aborted by operator before burning disc-set %d of %d", setIndex+1, len(sets))
@@ -178,7 +178,7 @@ func runBurnSet(ctx workflow.Context, cfg config.Config, state *runState, set bu
 
 		cause := joinFailedDiscs(failed)
 
-		switch waitForBurnOperator(ctx, cfg, devicesOfFailed(failed), cause) {
+		switch waitForBurnOperator(ctx, cfg, state, devicesOfFailed(failed), cause) {
 		case pauseResumed:
 			pending = retryBurnSet(failed)
 

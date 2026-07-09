@@ -334,6 +334,64 @@ type Result struct {
 	CompletedPhases []string
 }
 
+// PauseKind identifies which operator-in-the-loop pause (SPEC §4.3 phase 8,
+// §4.3 phases 6-8, §10) is currently active, for the CurrentPauseQuery. The
+// zero value, PauseNone, means the run is not currently paused.
+type PauseKind string
+
+const (
+	// PauseNone means the run is not currently paused.
+	PauseNone PauseKind = ""
+	// PauseEject means the Eject phase is paused because the import/export
+	// station filled (SPEC §4.3 phase 8). Only OperatorResumeSignal applies —
+	// every tape is already safely written by the time this pause fires, so
+	// there is nothing for OperatorAbortSignal to do (waitForIOCleared never
+	// listens for it).
+	PauseEject PauseKind = "eject"
+	// PauseWriteFailure means the tape path is paused because a Load or Write
+	// failed for one drive-set (SPEC §4.3 phases 6-8). Both
+	// OperatorResumeSignal and OperatorAbortSignal apply.
+	PauseWriteFailure PauseKind = "write-failure"
+	// PauseBurn means the Burn phase is paused — a burn/verify failure within a
+	// set, or a between-set manual disc swap (SPEC §10). Both
+	// OperatorResumeSignal and OperatorAbortSignal apply.
+	PauseBurn PauseKind = "burn"
+)
+
+// CurrentPause is the CurrentPauseQuery result: which operator-in-the-loop
+// pause (if any) is blocking the run right now, and enough context for an
+// operator to act on it without consulting the Temporal UI event history. It
+// exposes only state the workflow already tracks for the pause alerts
+// (OperatorPauseInput/WritePathPauseInput/BurnPauseInput in failure.go) — no
+// new state is invented. Kind is PauseNone when the run is not currently
+// paused; every other field is then the zero value.
+type CurrentPause struct {
+	// Kind is which pause is active.
+	Kind PauseKind
+	// Phase is the failing phase for a write-failure pause ("Load" or
+	// "Write"); empty for an eject or burn pause.
+	Phase string
+	// AffectedTapes lists barcodes the operator should act on: for a
+	// write-failure pause, the tapes to remove and replace with fresh blanks
+	// (empty for a Load failure, which has no loaded tapes to name); for an
+	// eject pause, the tapes currently sitting in the I/O station ready for
+	// removal. Empty for a burn pause.
+	AffectedTapes []string
+	// ReloadSlots lists the storage slots to restock with fresh blank tapes
+	// before resuming a write-failure pause. Empty otherwise.
+	ReloadSlots []int
+	// AwaitingExport is the count of written tapes still to be exported once
+	// I/O slots free, for an eject pause. Zero otherwise.
+	AwaitingExport int
+	// Devices lists the optical burner device nodes needing a fresh blank
+	// disc, for a burn pause. Empty otherwise.
+	Devices []string
+	// ErrorSummary is the pause reason rendered as text: the Load/Write/burn
+	// failure. Empty for an eject pause, and for a burn pause that is a
+	// between-set disc swap rather than a failure.
+	ErrorSummary string
+}
+
 // runState carries data produced by each phase to the phases that follow it,
 // plus the progress marker the lastCompletedPhase query reads. It is mutated in
 // workflow (single-threaded, deterministic) order as phases complete. The typed
@@ -344,6 +402,12 @@ type runState struct {
 	// the empty string before any phase has completed. Read by the
 	// LastCompletedPhaseQuery handler.
 	lastCompletedPhase string
+	// currentPause is which operator-in-the-loop pause (if any) is active right
+	// now (PauseNone when not paused). Set immediately before a pause's wait
+	// begins (after its alert dispatches) and cleared immediately once the wait
+	// returns, by ejectPhase (library.go), waitForOperator (writepause.go), and
+	// waitForBurnOperator (burnpause.go). Read by the CurrentPauseQuery handler.
+	currentPause CurrentPause
 	// resolved is the concrete work list the Resolve phase produces (SPEC §4.3
 	// phase 1): every config Source expanded to its ZFS snapshot(s), verified and
 	// feasibility-checked. The Prepare phase consumes it.
