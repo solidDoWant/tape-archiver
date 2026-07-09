@@ -170,6 +170,49 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 		return full == ioSlots
 	}, 90*time.Second, time.Second, "the Eject phase must fill all %d I/O slots and pause", ioSlots)
 
+	// While genuinely paused with real barcodes in the I/O station, confirm
+	// CurrentPauseQuery (added alongside pkg/runsapi's pause actions, #250)
+	// reports it correctly against real mhvtl hardware — the mock-based unit
+	// tests in eject_pause_test.go already cover the query mechanically, but
+	// never with real tape.Barcode values flowing through barcodeStrings.
+	//
+	// The physical I/O station filling (confirmed above) and the workflow's
+	// query-visible pause state are updated by different actors (the data
+	// worker's transfer activity vs. the control workflow observing its
+	// result), so there is a real gap between "hardware full" and "query
+	// reports paused" — poll the query itself rather than assume it is
+	// already consistent the instant the changer looks full.
+	var currentPause CurrentPause
+
+	require.Eventuallyf(t, func() bool {
+		pauseResponse, queryErr := temporalClient.QueryWorkflow(runCtx, run.GetID(), run.GetRunID(), CurrentPauseQuery)
+		if queryErr != nil {
+			return false
+		}
+
+		if err := pauseResponse.Get(&currentPause); err != nil {
+			return false
+		}
+
+		return currentPause.Kind == PauseEject
+	}, 30*time.Second, time.Second, "CurrentPauseQuery must report the Eject pause once the I/O station is full")
+
+	assert.Len(t, currentPause.AffectedTapes, ioSlots, "AffectedTapes must list every tape actually sitting in the I/O station")
+
+	pauseCur, err := changer.Inventory(runCtx)
+	require.NoError(t, err, "inventory during pause, to cross-check CurrentPauseQuery's AffectedTapes")
+
+	var inIOAtPause []string
+
+	for _, io := range pauseCur.IOSlots {
+		if io.Full {
+			inIOAtPause = append(inIOAtPause, string(io.Barcode))
+		}
+	}
+
+	assert.ElementsMatch(t, inIOAtPause, currentPause.AffectedTapes,
+		"CurrentPauseQuery's AffectedTapes must match the real barcodes physically in the I/O station")
+
 	// Simulate the operator removing one exported tape, freeing an I/O slot. With
 	// the ACCESS bit now reported by the SG_IO changer, this alone must resume the
 	// run automatically — no OperatorResumeSignal is ever sent.

@@ -157,6 +157,20 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if next.CurrentPause.Unknown {
+				// CurrentPauseQuery itself failed this tick (fetchRunDetail
+				// still succeeded overall — Describe/LastCompletedPhase are
+				// independently valid). Carry the last known pause state
+				// forward rather than comparing against it: an unknown
+				// result must never look like "the pause cleared" to the
+				// delta check below, or a run genuinely still awaiting an
+				// operator would flash Resume/Abort away on a transient
+				// blip. If Status or LastCompletedPhase did change, the
+				// event below still fires — just with the last known
+				// (not fabricated-healthy) pause state attached.
+				next.CurrentPause = last.CurrentPause
+			}
+
 			if next.Status == last.Status &&
 				next.LastCompletedPhase == last.LastCompletedPhase &&
 				reflect.DeepEqual(next.CurrentPause, last.CurrentPause) {

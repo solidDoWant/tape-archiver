@@ -23,6 +23,7 @@ describe('PauseActions', () => {
           affectedTapes: ['TA0001L6'],
           reloadSlots: [101],
           errorSummary: 'mkltfs: drive reported a hard write error',
+          canAbort: true,
         }}
       />,
     )
@@ -39,6 +40,9 @@ describe('PauseActions', () => {
     render(
       <PauseActions
         runId="run-1"
+        // canAbort omitted: eject is the one pause kind the server rejects
+        // abort for (pkg/runsapi's pauseAcceptsAbort) — this component reads
+        // that decision from the field rather than re-deriving it from kind.
         pause={{ kind: 'eject', affectedTapes: ['TA0001L6'], awaitingExport: 1 }}
       />,
     )
@@ -50,12 +54,21 @@ describe('PauseActions', () => {
   })
 
   it('shows the burn pause detail with both actions available', () => {
-    render(<PauseActions runId="run-1" pause={{ kind: 'burn', devices: ['/dev/sr0'] }} />)
+    render(
+      <PauseActions runId="run-1" pause={{ kind: 'burn', devices: ['/dev/sr0'], canAbort: true }} />,
+    )
 
     expect(screen.getByText(/Burn phase/)).toBeInTheDocument()
     expect(screen.getByText(/\/dev\/sr0/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^resume$/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^abort$/i })).toBeInTheDocument()
+  })
+
+  it('renders a warning, not nothing, when the server could not determine pause status', () => {
+    render(<PauseActions runId="run-1" pause={{ kind: '', unknown: true }} />)
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/pause status unavailable/i)
+    expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument()
   })
 
   it('asks for confirmation before sending resume, and does not call the API when declined', () => {
@@ -101,7 +114,9 @@ describe('PauseActions', () => {
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
 
-    render(<PauseActions runId="run-1" pause={{ kind: 'burn', devices: ['/dev/sr0'] }} />)
+    render(
+      <PauseActions runId="run-1" pause={{ kind: 'burn', devices: ['/dev/sr0'], canAbort: true }} />,
+    )
 
     fireEvent.click(screen.getByRole('button', { name: /^abort$/i }))
 

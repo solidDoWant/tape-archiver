@@ -323,13 +323,14 @@ func TestGetRun(t *testing.T) {
 	start := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 
 	tests := []struct {
-		name          string
-		runID         string
-		client        *fakeTemporalClient
-		wantStatus    int
-		wantPhase     string
-		wantPauseKind string
-		errAssert     require.ErrorAssertionFunc
+		name             string
+		runID            string
+		client           *fakeTemporalClient
+		wantStatus       int
+		wantPhase        string
+		wantPauseKind    string
+		wantPauseUnknown bool
+		errAssert        require.ErrorAssertionFunc
 	}{
 		{
 			name:  "a known run returns detail including the last completed phase",
@@ -358,7 +359,12 @@ func TestGetRun(t *testing.T) {
 			wantPauseKind: "write-failure",
 		},
 		{
-			name:  "a failed current-pause query does not fail the request; pause reports none",
+			// A failed CurrentPauseQuery must not be indistinguishable from
+			// "confirmed not paused" (CurrentPause.Unknown exists exactly to
+			// prevent that): the request still succeeds, since the phase
+			// query answered fine, but the pause field must say "unknown",
+			// not silently claim the run is healthy.
+			name:  "a failed current-pause query does not fail the request; pause is reported unknown, not none",
 			runID: "run-1",
 			client: &fakeTemporalClient{
 				describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
@@ -367,9 +373,10 @@ func TestGetRun(t *testing.T) {
 				queryResult:     "Write",
 				currentPauseErr: assertError{"no worker polling"},
 			},
-			wantStatus:    http.StatusOK,
-			wantPhase:     "Write",
-			wantPauseKind: "",
+			wantStatus:       http.StatusOK,
+			wantPhase:        "Write",
+			wantPauseKind:    "",
+			wantPauseUnknown: true,
 		},
 		{
 			name:  "an unknown run returns 404, not a 500 or hang",
@@ -430,6 +437,7 @@ func TestGetRun(t *testing.T) {
 				assert.Equal(t, test.runID, detail.RunID)
 				assert.Equal(t, test.wantPhase, detail.LastCompletedPhase)
 				assert.Equal(t, test.wantPauseKind, detail.CurrentPause.Kind)
+				assert.Equal(t, test.wantPauseUnknown, detail.CurrentPause.Unknown)
 				errAssert(t, nil)
 
 				return

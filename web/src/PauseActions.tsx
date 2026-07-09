@@ -5,7 +5,14 @@ import { apiFetch, ApiError } from './api'
 // /api/runs/{runID} and SSE JSON projection of workflows/backup's
 // CurrentPause query result): which operator-in-the-loop pause, if any, is
 // blocking a run right now, and enough context to act on it. Kind is "" when
-// the run is not paused.
+// the run is not paused. unknown is true when the server's CurrentPauseQuery
+// itself failed (e.g. no worker currently polling) rather than confirming
+// the run isn't paused — kind === '' alone cannot distinguish the two, so a
+// caller must check unknown before treating an empty kind as "not paused".
+// canAbort mirrors the server's own abortRun rejection rule (pkg/runsapi's
+// pauseAcceptsAbort) — always read from here rather than re-deriving from
+// kind, so this component can never drift from what the server actually
+// accepts.
 export interface CurrentPauseInfo {
   kind: string
   phase?: string
@@ -14,6 +21,8 @@ export interface CurrentPauseInfo {
   awaitingExport?: number
   devices?: string[]
   errorSummary?: string
+  canAbort?: boolean
+  unknown?: boolean
 }
 
 export interface PauseActionsProps {
@@ -25,16 +34,6 @@ type ActionState =
   | { status: 'idle' }
   | { status: 'sending'; verb: 'resume' | 'abort' }
   | { status: 'error'; error: string }
-
-// pausesAbortApplies lists the pause kinds workflows/backup's
-// OperatorAbortSignal actually applies to (write-failure, burn) — an Eject
-// pause never listens for it (every tape is already safely written by the
-// time it pauses), and pkg/runsapi's POST /api/runs/{runID}/abort rejects it
-// with 409 for that reason. Hiding the Abort button for an eject pause here
-// is a UX nicety on top of that server-side rejection, not a substitute for
-// it — the button is a courtesy to keep an operator from getting a
-// confusing 409, not the source of truth for what is allowed.
-const pausesAbortApplies = new Set(['write-failure', 'burn'])
 
 // pauseKindLabel renders a pause Kind ("eject" | "write-failure" | "burn")
 // as operator-facing text.
@@ -65,7 +64,10 @@ function describeNetworkError(error: unknown): string {
 // confirmation (CLAUDE.md's Hardware and Safety framing: these are
 // consequential, hard-to-reverse actions against real tape hardware) before
 // calling POST /api/runs/{runID}/resume or /abort (pkg/runsapi). It renders
-// nothing when pause.kind is "" (not paused).
+// nothing when pause.kind is "" and pause.unknown is falsy (confirmed not
+// paused); when pause.unknown is true it renders a warning instead of
+// silently rendering nothing, since a run genuinely awaiting an operator
+// must never look identical to a healthy, unpaused run.
 //
 // It intentionally does not re-fetch or hold its own copy of the run's
 // state: RunDetail.tsx (its only caller) already receives live pause state
@@ -76,6 +78,18 @@ function describeNetworkError(error: unknown): string {
 // manual refresh or a second fetch call here.
 function PauseActions({ runId, pause }: PauseActionsProps) {
   const [actionState, setActionState] = useState<ActionState>({ status: 'idle' })
+
+  if (pause.unknown) {
+    return (
+      <div
+        role="alert"
+        className="rounded border border-amber-500 bg-amber-50 p-3 text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100"
+      >
+        Pause status unavailable right now — this run may be waiting on an
+        operator. Check <code>tapectl status</code> or retry shortly.
+      </div>
+    )
+  }
 
   if (pause.kind === '') {
     return null
@@ -137,19 +151,19 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
           disabled={sending}
           className="rounded bg-green-700 px-3 py-1.5 font-medium text-white disabled:opacity-50"
         >
-          {sending && actionState.status === 'sending' && actionState.verb === 'resume'
+          {actionState.status === 'sending' && actionState.verb === 'resume'
             ? 'Resuming…'
             : 'Resume'}
         </button>
 
-        {pausesAbortApplies.has(pause.kind) ? (
+        {pause.canAbort ? (
           <button
             type="button"
             onClick={() => void handleAction('abort')}
             disabled={sending}
             className="rounded bg-red-700 px-3 py-1.5 font-medium text-white disabled:opacity-50"
           >
-            {sending && actionState.status === 'sending' && actionState.verb === 'abort'
+            {actionState.status === 'sending' && actionState.verb === 'abort'
               ? 'Aborting…'
               : 'Abort'}
           </button>

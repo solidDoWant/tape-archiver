@@ -105,13 +105,18 @@ type RunDetail struct {
 	// CurrentPause is which operator-in-the-loop pause (if any) is blocking the
 	// run right now (backup.CurrentPauseQuery), with enough context for a
 	// client to act on it via POST /api/runs/{runID}/resume or /abort without
-	// consulting the Temporal UI event history. Kind is "" both when the run
-	// is not paused and when the query could not be answered — like
-	// LastCompletedPhase above, a query failure here is logged server-side
-	// rather than failing the request. Also carried over GET
+	// consulting the Temporal UI event history. Like LastCompletedPhase
+	// above, a query failure here is logged server-side rather than failing
+	// the request — but unlike LastCompletedPhase, Kind == "" alone does not
+	// mean "not paused": CurrentPauseInfo.Unknown distinguishes a confirmed
+	// not-paused run from a failed query, since collapsing the two would
+	// hide a run that genuinely needs operator action. Also carried over GET
 	// /api/events/runs/{runID} (events.go), whose poll loop compares this
 	// field (alongside Status/LastCompletedPhase) to detect a pause starting
-	// or clearing so a live view updates without a manual refresh.
+	// or clearing so a live view updates without a manual refresh — a poll
+	// tick with Unknown set carries the last known pause state forward
+	// rather than comparing against it, so a transient query blip can never
+	// look like "the pause cleared".
 	CurrentPause CurrentPauseInfo `json:"currentPause"`
 }
 
@@ -142,6 +147,21 @@ type CurrentPauseInfo struct {
 	// pause, and for a burn pause that is a between-set disc swap rather than
 	// a failure.
 	ErrorSummary string `json:"errorSummary,omitempty"`
+	// CanAbort mirrors abortRun's own errEjectPauseCannotAbort check — the
+	// single source of truth for which pause kinds accept
+	// POST /api/runs/{runID}/abort — so a client (e.g. PauseActions.tsx)
+	// decides whether to show an Abort control from this field rather than
+	// hand-duplicating the same kind-based rule and risking the two
+	// silently drifting apart. Always false when Kind == "" or Unknown.
+	CanAbort bool `json:"canAbort,omitempty"`
+	// Unknown is true when backup.CurrentPauseQuery itself failed (e.g. no
+	// worker currently polling) rather than confirming the run isn't paused.
+	// Kind == "" alone cannot distinguish "confirmed not paused" from
+	// "couldn't ask" — collapsing the two would let a run that genuinely
+	// needs operator action render as healthy on a transient query blip.
+	// Clients should treat Unknown == true as "pause status unavailable,
+	// check `tapectl status`", not as "not paused".
+	Unknown bool `json:"unknown,omitempty"`
 }
 
 // toCurrentPauseInfo maps a workflow query result to the API's JSON shape.
@@ -154,7 +174,20 @@ func toCurrentPauseInfo(pause backup.CurrentPause) CurrentPauseInfo {
 		AwaitingExport: pause.AwaitingExport,
 		Devices:        pause.Devices,
 		ErrorSummary:   pause.ErrorSummary,
+		CanAbort:       pauseAcceptsAbort(pause.Kind),
 	}
+}
+
+// pauseAcceptsAbort reports whether workflows/backup's OperatorAbortSignal
+// applies to kind — the single source of truth abortRun and
+// toCurrentPauseInfo (CurrentPauseInfo.CanAbort) both use, so the API's
+// rejection and the value clients are told to build their UI from can never
+// drift apart. Every pause kind accepts abort except Eject: every tape is
+// already safely written by the time an Eject pause happens, so there is
+// nothing left for an abort to protect against, and OperatorAbortSignal is
+// not among the signals ejectPhase's wait even listens for.
+func pauseAcceptsAbort(kind backup.PauseKind) bool {
+	return kind != backup.PauseNone && kind != backup.PauseEject
 }
 
 // ActionResponse is the response body for POST /api/runs/{runID}/resume and
@@ -312,7 +345,10 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 		return nil
 	})
 
-	var currentPause backup.CurrentPause
+	var (
+		currentPause        backup.CurrentPause
+		currentPauseUnknown bool
+	)
 
 	group.Go(func() error {
 		pause, err := queryCurrentPause(groupCtx, temporalClient, runID)
@@ -320,8 +356,15 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 			// A query failure here (e.g. no worker currently polling) is not
 			// fatal to this request, mirroring queryLastCompletedPhase above:
 			// the execution status/timing already fetched via Describe is
-			// still valid and useful on its own.
+			// still valid and useful on its own. Unlike LastCompletedPhase,
+			// though, this field gates whether an operator sees Resume/Abort
+			// controls, so the failure is recorded (CurrentPauseInfo.Unknown)
+			// rather than silently collapsed into "not paused" — a run that
+			// is genuinely paused must never render as healthy just because
+			// one query attempt hiccuped.
 			slog.WarnContext(groupCtx, "runsapi: current pause query failed", "run_id", runID, "error", err)
+
+			currentPauseUnknown = true
 
 			return nil
 		}
@@ -335,10 +378,13 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 		return RunDetail{}, err
 	}
 
+	pauseInfo := toCurrentPauseInfo(currentPause)
+	pauseInfo.Unknown = currentPauseUnknown
+
 	return RunDetail{
 		RunSummary:         toRunSummary(description.GetWorkflowExecutionInfo()),
 		LastCompletedPhase: lastCompletedPhase,
-		CurrentPause:       toCurrentPauseInfo(currentPause),
+		CurrentPause:       pauseInfo,
 	}, nil
 }
 
@@ -455,10 +501,10 @@ func (h *handler) resumeRun(w http.ResponseWriter, r *http.Request) {
 // abortRun implements POST /api/runs/{runID}/abort: send
 // backup.OperatorAbortSignal to the run, the same signal `tapectl abort`
 // sends (cmd/tapectl/abort.go). An Eject pause (backup.PauseEject) rejects
-// abort: see errEjectPauseCannotAbort.
+// abort: see errEjectPauseCannotAbort and pauseAcceptsAbort.
 func (h *handler) abortRun(w http.ResponseWriter, r *http.Request) {
 	h.signalPausedRun(w, r, backup.OperatorAbortSignal, "abort", func(pause backup.CurrentPause) error {
-		if pause.Kind == backup.PauseEject {
+		if !pauseAcceptsAbort(pause.Kind) {
 			return errEjectPauseCannotAbort
 		}
 
@@ -469,12 +515,30 @@ func (h *handler) abortRun(w http.ResponseWriter, r *http.Request) {
 // signalPausedRun implements the shared resume/abort request flow. Unlike
 // `tapectl resume`/`abort`, which signal unconditionally with no pause-state
 // check (acceptable for a human operator who just watched the pause happen),
-// this handler confirms via backup.CurrentPauseQuery that the run is actually
-// paused, and lets allow reject a pause kind the signal does not apply to,
-// before sending anything — a signal a running workflow never consumes stays
-// buffered indefinitely and can be wrongly consumed by a later, unrelated
-// pause (workflows/backup's drainStaleResumeSignals doc, issues #154/#216),
-// so the web API is deliberately stricter here than the CLI.
+// this handler confirms via backup.CurrentPauseQuery that the run is
+// currently paused, and lets allow reject a pause kind the signal does not
+// apply to, before sending anything.
+//
+// This check is NOT atomic with the signal send that follows it — they are
+// two independent Temporal RPCs, so it narrows but does not close the
+// stale-signal hazard workflows/backup's drainStaleResumeSignals doc
+// describes (issues #154/#216): if the pause resolves by other means (a
+// concurrent `tapectl`/browser action, or — for an Eject pause specifically —
+// its own auto-resume, entirely independent of any signal, see
+// waitForIOCleared) in the gap between this check and SignalWorkflow
+// returning, the signal this handler sends can still be delivered late and
+// buffered. For OperatorResumeSignal that is harmless: every pause site
+// drains stale resume signals before its next alert. For
+// OperatorAbortSignal there is currently no equivalent drain — a buffered
+// abort is, by workflows/backup's existing design, left to be consumed by
+// whatever pause next calls a wait-for-operator function, which for this
+// handler's stale-signal case means a LATER, UNRELATED pause on the same
+// run could be silently aborted. This is a known, pre-existing gap in the
+// signal-draining design (unrelated to this handler, and not something a
+// web-API-side check alone can close) — tracked as
+// https://github.com/solidDoWant/tape-archiver/issues/254, which should be
+// resolved by extending drainStaleResumeSignals to also drain abort, not by
+// adding more checks here.
 func (h *handler) signalPausedRun(w http.ResponseWriter, r *http.Request, signalName, verb string, allow func(backup.CurrentPause) error) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()

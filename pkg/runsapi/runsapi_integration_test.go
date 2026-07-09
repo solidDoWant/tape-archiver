@@ -224,13 +224,16 @@ const lastSignalQuery = "lastSignal"
 // /api/runs/{runID}/resume and /abort against a real Temporal server and
 // observe the real signal being delivered and acted on — behavior no fake
 // client can prove. It is a test-only stand-in, not the real workflow: the
-// actual pause logic (Eject/Load/Write/Burn) is covered by
-// workflows/backup's own mhvtl-backed integration tests
-// (eject_pause_integration_test.go and friends); this proves only that the
-// HTTP layer queries backup.CurrentPauseQuery and sends the correct signal to
-// the correct run — the same "stub the workflow, drive the real Temporal +
-// HTTP layer" pattern stubBackupWorkflow above already uses for GET/POST
-// /api/runs.
+// pre-existing resume/abort signal-handling behavior (drainStaleResumeSignals
+// etc.) is covered by workflows/backup's own tests, and the real workflow's
+// three pause sites setting/clearing CurrentPause around their existing wait
+// calls are covered by workflows/backup's own unit tests plus, for the Eject
+// pause specifically, eject_pause_integration_test.go's real-mhvtl
+// TestEjectAutoResumeOnAccess. This stub proves only the HTTP layer's own
+// logic: that it queries backup.CurrentPauseQuery and sends the correct
+// signal to the correct run — the same "stub the workflow, drive the real
+// Temporal + HTTP layer" pattern stubBackupWorkflow above already uses for
+// GET/POST /api/runs.
 func stubPausableBackupWorkflow(ctx workflow.Context, _ interface{}) error {
 	phase := stubPhase
 	pause := backup.CurrentPause{}
@@ -381,12 +384,23 @@ func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 
 	runID := run.GetRunID()
 
-	// Wait for the run to be visible/queryable before driving actions.
+	// Wait for the run to be visible AND for stubPausableBackupWorkflow's
+	// first workflow task to actually execute and register its query
+	// handlers, not just for DescribeWorkflowExecution to succeed:
+	// fetchRunDetail degrades gracefully when a query fails (a deliberate
+	// property this same PR added, see CurrentPauseInfo.Unknown), so GET
+	// /api/runs/{runID} can return 200 with a placeholder LastCompletedPhase
+	// before CurrentPauseQuery/lastSignalQuery exist yet — driving resume/abort
+	// that early hits "unknown queryType" against a real server instead of the
+	// behavior under test. All three query handlers are registered
+	// synchronously in the same first workflow task, so waiting for
+	// LastCompletedPhase to report the real stub value proves the others are
+	// registered too.
 	require.Eventually(t, func() bool {
-		status, _ := getRunDetail(t, server.URL, runID)
+		status, detail := getRunDetail(t, server.URL, runID)
 
-		return status == http.StatusOK
-	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never became reachable")
+		return status == http.StatusOK && detail.LastCompletedPhase == stubPhase
+	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never reported the stub workflow's query handlers as ready")
 
 	// Not yet paused: both actions are rejected with 409, not sent into the
 	// void.

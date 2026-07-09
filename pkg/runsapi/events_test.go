@@ -62,6 +62,7 @@ type dynamicTemporalClient struct {
 	status        enumspb.WorkflowExecutionStatus
 	phase         string
 	pause         backup.CurrentPause
+	pauseErr      error
 	describeCalls int
 }
 
@@ -82,6 +83,19 @@ func (c *dynamicTemporalClient) setPause(pause backup.CurrentPause) {
 	defer c.mu.Unlock()
 
 	c.pause = pause
+}
+
+// setPauseErr makes a subsequent CurrentPauseQuery fail with err (nil to go
+// back to answering normally with the current setPause value) — a test can
+// toggle this to simulate a transient query blip mid-stream without
+// disturbing DescribeWorkflowExecution/LastCompletedPhaseQuery, the same way
+// a real transient "no worker polling" failure would only ever affect the
+// one query that hit it.
+func (c *dynamicTemporalClient) setPauseErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pauseErr = err
 }
 
 func (c *dynamicTemporalClient) callCount() int {
@@ -120,6 +134,10 @@ func (c *dynamicTemporalClient) QueryWorkflow(_ context.Context, _, _, queryType
 	defer c.mu.Unlock()
 
 	if queryType == backup.CurrentPauseQuery {
+		if c.pauseErr != nil {
+			return nil, c.pauseErr
+		}
+
 		return fakeEncodedValue{value: c.pause}, nil
 	}
 
@@ -373,6 +391,68 @@ func TestStreamRunEventsPushesOnPauseChangeAlone(t *testing.T) {
 	var clearedDetail RunDetail
 	require.NoError(t, json.Unmarshal([]byte(third.data), &clearedDetail))
 	assert.Equal(t, "", clearedDetail.CurrentPause.Kind, "the pause clearing (on resume) must push a new event too")
+}
+
+// TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy covers a
+// review finding on #250/PR #252: a transient CurrentPauseQuery failure
+// mid-stream must never make a genuinely paused run look like it cleared.
+// fetchRunDetail reports this tick's CurrentPause as Unknown rather than
+// empty, and streamRunEvents must carry the last known real pause state
+// forward into the event it pushes (triggered here by an unrelated phase
+// change), not silently report "not paused".
+func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
+	setEventPollInterval(t, 15*time.Millisecond)
+
+	client := &dynamicTemporalClient{}
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
+	client.setPause(backup.CurrentPause{Kind: backup.PauseWriteFailure, Phase: backup.PhaseWrite, AffectedTapes: []string{"TA0001L6"}})
+
+	server := httptest.NewServer(New(client))
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	frames := readSSEFrames(resp.Body)
+
+	first := waitForFrame(t, frames, 2*time.Second)
+
+	var initial RunDetail
+	require.NoError(t, json.Unmarshal([]byte(first.data), &initial))
+	require.Equal(t, "write-failure", initial.CurrentPause.Kind, "test setup: the stream must start out reporting the real pause")
+	require.False(t, initial.CurrentPause.Unknown)
+
+	// Simulate the query blip, then force an observable event by changing
+	// the phase — if fetchRunDetail's Unknown result were compared directly
+	// (instead of being carried forward), this would push CurrentPause.Kind
+	// == "" alongside the phase change, exactly the bug being guarded
+	// against here.
+	client.setPauseErr(assertError{"no worker polling"})
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
+
+	second := waitForFrame(t, frames, 2*time.Second)
+	assert.Equal(t, sseEventUpdate, second.event)
+
+	var duringBlip RunDetail
+	require.NoError(t, json.Unmarshal([]byte(second.data), &duringBlip))
+	assert.Equal(t, "Verify", duringBlip.LastCompletedPhase, "the phase change that triggered this event must still be visible")
+	assert.Equal(t, "write-failure", duringBlip.CurrentPause.Kind,
+		"a transient CurrentPauseQuery failure must carry the last known real pause forward, never report the run as healthy")
+	assert.False(t, duringBlip.CurrentPause.Unknown,
+		"the carried-forward value is the last known GOOD state, not an unknown one, once it's been folded into an emitted event")
+
+	// The query recovers; a real pause-clear is still detected normally.
+	client.setPauseErr(nil)
+	client.setPause(backup.CurrentPause{})
+
+	third := waitForFrame(t, frames, 2*time.Second)
+
+	var recovered RunDetail
+	require.NoError(t, json.Unmarshal([]byte(third.data), &recovered))
+	assert.Equal(t, "", recovered.CurrentPause.Kind, "once the query recovers, a genuine pause-clear is still detected")
 }
 
 // TestStreamRunEventsStopsPollingOnClientDisconnect proves the server-side
