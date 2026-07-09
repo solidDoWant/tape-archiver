@@ -89,7 +89,7 @@ schemas/      generated JSON config schema (committed)
 deploy/       Helm charts (control worker, web UI) + data-worker systemd unit
 docs/         operator documentation
 nix/          build derivations (ltfs, mhvtl, recovery-binaries, worker + web images)
-e2e/          end-to-end tests (backup workflow); web/e2e/ holds the web UI's own (Playwright)
+e2e/          end-to-end tests (backup workflow); web/e2e/ holds the web UI's own Playwright suite
 ```
 
 ## Getting started

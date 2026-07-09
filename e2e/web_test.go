@@ -130,6 +130,18 @@ func TestWebUIEndToEnd(t *testing.T) {
 	}
 	require.NoError(t, cfg.Validate(), "run config must be valid")
 
+	// Every other submitting e2e test in this package pairs its submission
+	// with terminateOnCleanup — the backup workflow ID is a singleton, so an
+	// abandoned run (a Playwright assertion failing/timing out before the run
+	// reaches Completed) would otherwise keep running while this test's own
+	// tape-unload cleanup and the shared harness's final data-worker teardown
+	// fire, risking a race against an in-flight Load/Write on the same tape
+	// (CLAUDE.md's "never write to a non-blank tape" / handle physical
+	// operations with care). Registered here, before the run is ever
+	// submitted through the browser, so it applies regardless of how far the
+	// test gets.
+	terminateOnCleanup(t, dialTemporal(t))
+
 	// The web form's dry-run toggle overwrites Library.Changer/Drives with
 	// whatever MHVTL_*_DEV values the deployed web chart carries (below) —
 	// pkg/runsubmit.ApplyDryRun — so this config's own device paths are only
@@ -150,11 +162,20 @@ func TestWebUIEndToEnd(t *testing.T) {
 	require.NoError(t, err, "kind load web image")
 
 	// --- fake OIDC provider, reachable from both kind pods and this host's
-	// browser via the kind bridge gateway IP (same trick startWebhook uses) ---
-	idpListener, err := net.Listen("tcp", h.gatewayIP+":0")
-	require.NoError(t, err, "listen for fake OIDC provider on the kind gateway IP")
+	// browser via the kind bridge gateway IP. Binds 0.0.0.0 and advertises the
+	// gateway IP separately, the same as startWebhook above — not a listener
+	// bound directly to h.gatewayIP: that address is only guaranteed to be
+	// reachable (any docker bridge peer can dial it), not guaranteed to be
+	// locally bindable on every Docker network topology (e.g. rootless
+	// Docker/dockerd-rootless, or Docker running inside its own network
+	// namespace, can make the bridge gateway a proxied address this process's
+	// own network namespace cannot own as a local interface). Binding all
+	// interfaces avoids that failure mode entirely.
+	idpListener, err := net.Listen("tcp", "0.0.0.0:0")
+	require.NoError(t, err, "listen for fake OIDC provider")
 
 	idp := testutil.NewFakeOIDCProviderOn(t, webOIDCClientID, webOIDCClientSecret, idpListener)
+	idp.Server.URL = fmt.Sprintf("http://%s:%d", h.gatewayIP, idpListener.Addr().(*net.TCPAddr).Port)
 
 	// --- reserve the local port the browser will use, and bake it into the
 	// OIDC redirect URL before the chart (which bakes OIDC_REDIRECT_URL into
@@ -188,6 +209,16 @@ func TestWebUIEndToEnd(t *testing.T) {
 
 	imagePath := "resources.controllers.main.containers.main.image"
 
+	// Register the uninstall before installing (matching installScaledJobWorker's
+	// documented reasoning above) so a failed/partial install — e.g. a --wait
+	// timeout, a realistic CI scenario — still cleans up whatever the release
+	// did manage to create, instead of leaving a stray "ta-web-e2e" release
+	// (and its Secret) in the shared kind cluster for the rest of the process.
+	t.Cleanup(func() {
+		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", webHelmRelease,
+			"--namespace", webK8sNamespace, "--wait", "--timeout", "2m", "--ignore-not-found")
+	})
+
 	_, err = execOut(h.repoRoot, h.kubeEnv(), "helm", "install", webHelmRelease, webChartDir,
 		"--namespace", webK8sNamespace, "--create-namespace", "--wait", "--timeout", "4m",
 		"--set", "config.temporal.address="+temporalAlias+":"+temporalPort,
@@ -206,11 +237,6 @@ func TestWebUIEndToEnd(t *testing.T) {
 		"--set", imagePath+".pullPolicy=Never",
 	)
 	require.NoError(t, err, "helm install web chart")
-
-	t.Cleanup(func() {
-		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", webHelmRelease,
-			"--namespace", webK8sNamespace, "--wait", "--timeout", "2m", "--ignore-not-found")
-	})
 
 	svcName, err := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "get", "svc",
 		"-n", webK8sNamespace, "-l", "app.kubernetes.io/instance="+webHelmRelease,
