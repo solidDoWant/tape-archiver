@@ -365,17 +365,27 @@ func TestTamperedSessionCookie_isRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Swap the last character of the encrypted (base64url) value for a
+	// Swap the FIRST character of the encrypted (base64url) value for a
 	// different one, corrupting the GCM authentication tag while staying
 	// within the base64url alphabet — a raw byte-level XOR risks producing
 	// a byte the HTTP cookie encoder silently strips before the request
 	// even reaches the server, which would test transport encoding rather
 	// than webauth's own tamper detection.
+	//
+	// It must be the first character, not the last: unpadded base64 (as
+	// encoding/base64.RawURLEncoding produces) leaves the final character's
+	// low-order bits unused whenever the decoded length isn't a multiple of
+	// 3 bytes. Swapping the last character then has a real chance — this
+	// was observed flaking in CI, not just a theoretical risk — of only
+	// touching those unused bits, decoding back to the exact same bytes and
+	// silently failing to tamper anything at all. The first character's
+	// bits are always fully used by the first decoded byte, regardless of
+	// the value's total length, so this is deterministic.
 	tampered := []byte(value)
-	if last := tampered[len(tampered)-1]; last == 'A' {
-		tampered[len(tampered)-1] = 'B'
+	if first := tampered[0]; first == 'A' {
+		tampered[0] = 'B'
 	} else {
-		tampered[len(tampered)-1] = 'A'
+		tampered[0] = 'A'
 	}
 
 	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/runs", nil)
