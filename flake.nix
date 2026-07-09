@@ -122,6 +122,27 @@
             pkgs.gnumake
             pkgs.kubernetes-helm
 
+            # setsid — scripts/web-dev-up.sh (`make web-dev`, issue #265) uses it to
+            # detach the local OIDC provider, control/data workers, and sample-run
+            # seeding into their own session, so a developer's Ctrl+C (which only
+            # signals the terminal's foreground process group) stops just the
+            # foreground `cmd/web` process, not the rest of the dev stack.
+            pkgs.util-linux
+
+            # pkill/pgrep (procps) — scripts/web-dev-up.sh/web-dev-down.sh use
+            # `pkill --pgroup`/`pgrep -g` to probe/signal a whole setsid-created
+            # process group at once (needed because worker-control/worker-data
+            # run under sudo: the PID a "setsid sudo env ... worker &" launch
+            # actually records is sudo's own, not the real worker process it
+            # forks — a single-PID kill against sudo's PID, especially SIGKILL,
+            # can orphan that child instead of stopping it; signaling the whole
+            # group reaches it regardless of the fork/exec chain). util-linux's
+            # own `kill` (pkgs.util-linux, above) does NOT support the
+            # traditional POSIX "negative PID = process group" kill(2) target
+            # the way procps'/BSD kill does — confirmed the hard way — so this
+            # is a genuinely separate dependency, not redundant with it.
+            pkgs.procps
+
             # kind + kubectl drive the e2e suite (e2e/, `make test-e2e`): it
             # stands up a real kind cluster and deploys the control worker via
             # the Helm chart + control-worker image, then talks to it with

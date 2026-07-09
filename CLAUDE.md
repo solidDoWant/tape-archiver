@@ -52,7 +52,9 @@ When a change touches any of these, call it out explicitly.
 See `SPEC.md` §15 for the full layout. In brief:
 
 - `cmd/` — binaries: `worker` (Temporal worker; role selects control vs data),
-  `tapectl` (CLI to submit/inspect runs), `gen-config-schema`.
+  `tapectl` (CLI to submit/inspect runs), `gen-config-schema`, `web` (the web UI's
+  Go server), `webdevoidc`/`webdevseed` (local-only `make web-dev` dev tooling —
+  a standalone fake OIDC provider and sample-run seeder, never deployed).
 - `pkg/` — one concern per package (tape/changer, ltfs, age, par2, tar, zfs, k8s
   snapshot discovery, PDF report, recovery ISO, Discord webhook, checksums, logging,
   metrics, temporal client).
@@ -92,6 +94,12 @@ as the project is implemented; keep this list current):
   integration tests. The flake builds a version-matched ZFS kernel module
   (`$ZFS_MODULES`); `zpool-up` loads it at runtime (needs `sudo`), falling back to
   the host's own module when the flake build does not match the running kernel.
+- `make web-dev` / `make web-dev-down` — one-command local web UI: dev Temporal +
+  mhvtl + ZFS pool + a local-only fake OIDC provider (`cmd/webdevoidc`) + real
+  control/data workers, seeded with a few sample dry-run backups
+  (`cmd/webdevseed`), `cmd/web` running in the foreground. Meant to be re-run
+  repeatedly across a dev session (Ctrl+C only stops `cmd/web`); see
+  `docs/web-ui.md`'s "Local development" section.
 
 ## Dev Tools
 
