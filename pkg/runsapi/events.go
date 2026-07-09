@@ -1,0 +1,198 @@
+// This file implements GET /api/events/runs/{runID}: a Server-Sent Events
+// (text/event-stream) view over the same run detail getRun serves, pushed
+// as the server polls Temporal rather than left to client-side polling
+// (docs/web-ui-design.md §3's "no client polling storms" — the polling still
+// happens, but here, server-side, at one interval, regardless of how many
+// browser tabs are watching).
+package runsapi
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	enumspb "go.temporal.io/api/enums/v1"
+)
+
+// eventPollInterval is how often streamRunEvents re-polls Temporal for a
+// run's current status/phase. Short enough that an operator watching a run
+// sees a change promptly, long enough that moving the polling server-side
+// does not just relocate a polling storm rather than actually taming it.
+//
+// A var, not a const: pkg/runsapi's tests override it (see
+// setEventPollInterval in events_test.go) to exercise the poll loop's
+// change-detection and terminal-close behavior in milliseconds instead of
+// tying every test run to the real production interval.
+var eventPollInterval = 2 * time.Second
+
+// runningStatus is the string form of WORKFLOW_EXECUTION_STATUS_RUNNING, as
+// stored in RunSummary.Status (toRunSummary uses execution.GetStatus().String()).
+// Any other status is terminal for the purposes of this stream: the run will
+// not produce any further state change, so streamRunEvents ends the stream
+// once it observes one.
+var runningStatus = enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING.String()
+
+// SSE event names streamRunEvents emits.
+const (
+	// sseEventUpdate carries a RunDetail JSON body, sent on the first
+	// successful poll and again every time the polled status or last
+	// completed phase actually changes from what was last sent — never on a
+	// poll tick that observed no change, so a quiescent run does not turn
+	// into an endless stream of no-op events.
+	sseEventUpdate = "update"
+	// sseEventDone carries the same final RunDetail body as the "update"
+	// event immediately before it, and is sent exactly once, right before
+	// the handler returns (closing the stream) because the run reached a
+	// terminal status. A client can use this to distinguish "the run
+	// finished, stop reconnecting" from any other reason the connection
+	// might drop (network blip, server restart, tab closed).
+	sseEventDone = "done"
+)
+
+// streamRunEvents implements GET /api/events/runs/{runID}. Its very first
+// poll (fetchRunDetail, the same call getRun makes) decides whether this
+// request becomes an SSE stream at all: an unknown or malformed run ID is
+// reported as a normal JSON error response with a real HTTP status — exactly
+// like getRun — rather than a 200 text/event-stream that immediately fails
+// inside the stream body, which a browser's EventSource would otherwise
+// only ever report as an opaque connection error, with no status code or
+// message surfaced to the page.
+//
+// Once a run is confirmed to exist, the response becomes text/event-stream
+// and streamRunEvents polls fetchRunDetail every eventPollInterval, writing
+// an "update" event only when the polled status or phase differs from what
+// was last sent. If the run's status is (or becomes) anything other than
+// RUNNING, it writes one final "done" event and returns, closing the
+// stream — this handler never polls a finished run forever. It also returns
+// promptly once r.Context() is done (the client disconnected): there is no
+// server-side per-client state beyond this one goroutine's stack, so there
+// is nothing left to clean up either way.
+func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("runID is required"))
+
+		return
+	}
+
+	firstCtx, firstCancel := context.WithTimeout(r.Context(), requestTimeout)
+	detail, err := fetchRunDetail(firstCtx, h.temporalClient, runID)
+
+	firstCancel()
+
+	if err != nil {
+		writeRunDetailError(w, runID, err)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	// Not every deployment topology sits behind nginx (docs/web-ui-design.md
+	// §5's Ingress model may or may not), but the header is a no-op wherever
+	// it's not understood and prevents a real, previously-seen class of bug
+	// (a reverse proxy buffering the whole response before forwarding it,
+	// which turns a "live" stream into one big delayed burst) wherever it is.
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// cmd/web's http.Server sets a WriteTimeout to guard ordinary handlers
+	// against a stalled client, but that deadline is computed once, when the
+	// request's headers are read — not reset on each Write — so an
+	// arbitrarily long-lived SSE response would otherwise be killed
+	// mid-stream the moment the server's WriteTimeout elapses, regardless of
+	// how active the stream still is. http.ResponseController.SetWriteDeadline
+	// is the net/http-documented way to override that deadline for one
+	// specific response without touching the server-wide setting every other
+	// handler still relies on.
+	responseController := http.NewResponseController(w)
+	if err := responseController.SetWriteDeadline(time.Time{}); err != nil {
+		slog.WarnContext(r.Context(), "runsapi: could not clear write deadline for SSE stream", "run_id", runID, "error", err)
+	}
+
+	if !writeSSEEvent(w, responseController, sseEventUpdate, detail) {
+		return
+	}
+
+	if detail.Status != runningStatus {
+		writeSSEEvent(w, responseController, sseEventDone, detail)
+
+		return
+	}
+
+	last := detail
+
+	ticker := time.NewTicker(eventPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			pollCtx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+			next, err := fetchRunDetail(pollCtx, h.temporalClient, runID)
+
+			cancel()
+
+			if err != nil {
+				// A mid-stream poll failure (e.g. a transient Temporal blip)
+				// is logged and retried on the next tick rather than tearing
+				// down an otherwise-healthy stream over one bad RPC — the
+				// same "log, do not fail the caller" reasoning
+				// queryLastCompletedPhase already applies to a failed phase
+				// query within a single request.
+				slog.WarnContext(r.Context(), "runsapi: poll for run event stream failed", "run_id", runID, "error", err)
+
+				continue
+			}
+
+			if next.Status == last.Status && next.LastCompletedPhase == last.LastCompletedPhase {
+				continue
+			}
+
+			last = next
+
+			if !writeSSEEvent(w, responseController, sseEventUpdate, next) {
+				return
+			}
+
+			if next.Status != runningStatus {
+				writeSSEEvent(w, responseController, sseEventDone, next)
+
+				return
+			}
+		}
+	}
+}
+
+// writeSSEEvent writes one Server-Sent Event named event with body
+// JSON-encoded as its data, then flushes so it reaches the client
+// immediately rather than sitting in a buffer until more data accumulates —
+// an infrequent stream of updates is only useful if each one arrives
+// promptly. It reports whether the write succeeded; a failure here almost
+// always means the client disconnected (a write to a now-closed connection),
+// which streamRunEvents treats the same as r.Context().Done() being
+// signaled — stop, there is nothing left to do.
+func writeSSEEvent(w http.ResponseWriter, responseController *http.ResponseController, event string, body interface{}) bool {
+	data, err := json.Marshal(body)
+	if err != nil {
+		slog.Error("runsapi: encode SSE event failed", "event", event, "error", err)
+
+		return false
+	}
+
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
+		return false
+	}
+
+	if err := responseController.Flush(); err != nil {
+		return false
+	}
+
+	return true
+}

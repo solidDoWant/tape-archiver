@@ -11,17 +11,27 @@ interface SubmitState {
   error?: string
 }
 
+export interface SubmitRunFormProps {
+  // onViewRun, if given, renders a "View run" link on a successful
+  // submission's result that calls back with the new run's ID — the "linked
+  // run detail view" this component's doc comment used to defer to a later
+  // sub-issue (now RunDetail.tsx, sub-issue 4). Optional so this component
+  // stays usable standalone (e.g. in tests) without a navigation callback.
+  onViewRun?: (runId: string) => void
+}
+
 // SubmitRunForm lets an operator paste or upload a run-config JSON document,
 // optionally mark it as a dry-run (redirected to the mhvtl virtual library,
 // optical burning disabled), and submit it to POST /api/runs (pkg/runsapi) —
 // the same validation, dry-run override, and singleton-conflict handling
 // `tapectl run [--dry-run]` uses (pkg/runsubmit), so this form and the CLI
 // can never diverge on what a submission means
-// (docs/web-ui-design.md §2, §3, §8 item 3). Live monitoring, a linked run
-// detail view, and resume/abort actions land in later sub-issues of the web
-// UI epic; today a successful submission just shows the returned run ID, and
-// a failure shows the API's error message verbatim.
-function SubmitRunForm() {
+// (docs/web-ui-design.md §2, §3, §8 item 3). Resume/abort actions land in a
+// later sub-issue of the web UI epic; today a successful submission shows
+// the returned run ID and, when onViewRun is given, a link straight to its
+// live RunDetail view (sub-issue 4), and a failure shows the API's error
+// message verbatim.
+function SubmitRunForm({ onViewRun }: SubmitRunFormProps) {
   const [configText, setConfigText] = useState('')
   const [dryRun, setDryRun] = useState(false)
   const [state, setState] = useState<SubmitState>({ status: 'idle' })
@@ -106,6 +116,7 @@ function SubmitRunForm() {
   }
 
   const submitting = state.status === 'submitting'
+  const result = state.status === 'success' ? state.result : undefined
 
   return (
     <form
@@ -153,18 +164,27 @@ function SubmitRunForm() {
         {submitting ? 'Submitting…' : 'Submit run'}
       </button>
 
-      {state.status === 'success' && state.result ? (
+      {result ? (
         <div
           role="status"
           className="rounded border border-green-600 bg-green-50 p-3 text-green-900 dark:border-green-500 dark:bg-green-950 dark:text-green-100"
         >
           <p className="font-medium">Run submitted.</p>
           <p>
-            Run ID: <code>{state.result.runId}</code>
+            Run ID: <code>{result.runId}</code>
           </p>
           <p>
-            Workflow ID: <code>{state.result.workflowId}</code>
+            Workflow ID: <code>{result.workflowId}</code>
           </p>
+          {onViewRun ? (
+            <button
+              type="button"
+              onClick={() => onViewRun(result.runId)}
+              className="mt-2 font-medium underline"
+            >
+              View run
+            </button>
+          ) : null}
         </div>
       ) : null}
 

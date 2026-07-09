@@ -510,6 +510,31 @@ workflow ID always `backup`), a submission while one is already in progress is r
 with `409 Conflict` rather than being queued or silently replacing the in-flight run —
 the same guard `tapectl run`'s `WorkflowIDConflictPolicy` enforces.
 
+#### `GET /api/events/runs/{runID}` (live monitoring)
+
+A `text/event-stream` (Server-Sent Events) view over the same data `GET
+/api/runs/{runID}` serves: `cmd/web` polls Temporal (`DescribeWorkflowExecution` +
+`lastCompletedPhase`) at a short, fixed server-side interval and pushes an `update` event
+— `{"workflowId", "runId", "status", "startTime", "closeTime", "lastCompletedPhase"}`,
+identical in shape to `GET /api/runs/{runID}`'s response body — only when the polled
+status or phase actually changed since the last event, so a quiescent run does not
+produce a stream of redundant events. Once the run reaches a terminal status (anything
+other than `RUNNING`), the server sends one final `update` followed by a `done` event
+(same body) and then closes the connection itself — the stream never polls a finished run
+forever, and a client does not need to reconnect to learn that.
+
+The very first poll decides whether the response becomes a stream at all: an unknown run
+ID is a normal `404` JSON error (not a `200` stream that immediately fails), a malformed
+one is `400`, matching `GET /api/runs/{runID}`'s own error mapping exactly. Like every
+other `/api/*` route, an unauthenticated request is `401`, not a `200` stream — session
+cookies are sent automatically by a same-origin `EventSource`, so this requires no special
+client-side auth handling beyond what any other page fetch already needs. The connection
+closes promptly if the client disconnects; there is no server-side per-connection state
+left behind either way.
+
+The web UI's run-detail view (`RunDetail.tsx`) is the primary consumer, reachable from
+the submit form's success state.
+
 ### Health endpoints
 
 The worker (and, since sub-issue 2 of the web UI epic, `cmd/web` — see above) serves two

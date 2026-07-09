@@ -145,6 +145,7 @@ func newMux(h *handler) http.Handler {
 	mux.HandleFunc("GET /api/runs", h.listRuns)
 	mux.HandleFunc("GET /api/runs/{runID}", h.getRun)
 	mux.HandleFunc("POST /api/runs", h.submitRun)
+	mux.HandleFunc("GET /api/events/runs/{runID}", h.streamRunEvents)
 
 	return mux
 }
@@ -205,10 +206,23 @@ func (h *handler) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DescribeWorkflowExecution and the last-completed-phase query are
-	// independent RPCs — neither needs the other's result, only
-	// backup.WorkflowID and runID — so they run concurrently rather than
-	// paying the sum of both RPCs' latency.
+	detail, err := fetchRunDetail(ctx, h.temporalClient, runID)
+	if err != nil {
+		writeRunDetailError(w, runID, err)
+
+		return
+	}
+
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// fetchRunDetail fetches one execution's current detail: DescribeWorkflowExecution
+// and the last-completed-phase query, run concurrently since neither needs the
+// other's result, only backup.WorkflowID and runID. This is the single shared
+// core both getRun and streamRunEvents use to answer "what is this run's state
+// right now" — the SSE handler is a poll loop around exactly this call, so the
+// two endpoints can never drift on what "current state" means for a run.
+func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID string) (RunDetail, error) {
 	group, groupCtx := errgroup.WithContext(ctx)
 
 	var description *workflowservice.DescribeWorkflowExecutionResponse
@@ -216,7 +230,7 @@ func (h *handler) getRun(w http.ResponseWriter, r *http.Request) {
 	group.Go(func() error {
 		var err error
 
-		description, err = h.temporalClient.DescribeWorkflowExecution(groupCtx, backup.WorkflowID, runID)
+		description, err = temporalClient.DescribeWorkflowExecution(groupCtx, backup.WorkflowID, runID)
 
 		return err
 	})
@@ -224,35 +238,40 @@ func (h *handler) getRun(w http.ResponseWriter, r *http.Request) {
 	var lastCompletedPhase string
 
 	group.Go(func() error {
-		lastCompletedPhase = queryLastCompletedPhase(groupCtx, h.temporalClient, runID)
+		lastCompletedPhase = queryLastCompletedPhase(groupCtx, temporalClient, runID)
 
 		return nil
 	})
 
 	if err := group.Wait(); err != nil {
-		switch status := statusForTemporalError(err); status {
-		case http.StatusNotFound:
-			writeError(w, status, fmt.Errorf("run %q not found", runID))
-		case http.StatusBadRequest:
-			// A syntactically invalid run ID (Temporal run IDs are UUIDs)
-			// comes back as InvalidArgument rather than NotFound — e.g.
-			// "Invalid RunId." — so it is a 400 (bad client input), not a
-			// 404 (well-formed ID, no such run) or a 502 (this is not an
-			// upstream failure).
-			writeError(w, status, fmt.Errorf("invalid run ID %q: %w", runID, err))
-		default:
-			writeError(w, status, fmt.Errorf("describe workflow execution: %w", err))
-		}
-
-		return
+		return RunDetail{}, err
 	}
 
-	detail := RunDetail{
+	return RunDetail{
 		RunSummary:         toRunSummary(description.GetWorkflowExecutionInfo()),
 		LastCompletedPhase: lastCompletedPhase,
-	}
+	}, nil
+}
 
-	writeJSON(w, http.StatusOK, detail)
+// writeRunDetailError classifies and writes a fetchRunDetail failure as a JSON
+// error response, shared by getRun and streamRunEvents' initial fetch (the
+// only point in the SSE handler where a Temporal error is still reported as a
+// normal HTTP status rather than folded into the event stream itself — see
+// streamRunEvents' doc comment).
+func writeRunDetailError(w http.ResponseWriter, runID string, err error) {
+	switch status := statusForTemporalError(err); status {
+	case http.StatusNotFound:
+		writeError(w, status, fmt.Errorf("run %q not found", runID))
+	case http.StatusBadRequest:
+		// A syntactically invalid run ID (Temporal run IDs are UUIDs) comes
+		// back as InvalidArgument rather than NotFound — e.g.
+		// "Invalid RunId." — so it is a 400 (bad client input), not a 404
+		// (well-formed ID, no such run) or a 502 (this is not an upstream
+		// failure).
+		writeError(w, status, fmt.Errorf("invalid run ID %q: %w", runID, err))
+	default:
+		writeError(w, status, fmt.Errorf("describe workflow execution: %w", err))
+	}
 }
 
 // submitRun implements POST /api/runs: parse and validate the run config
