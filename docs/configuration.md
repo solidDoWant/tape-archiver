@@ -419,24 +419,46 @@ alerting works even when config parsing fails.
 ### Web UI environment variables (`cmd/web`)
 
 The `web` binary (the browser UI's HTTP server — see `docs/web-ui-design.md`) is a
-separate process from `worker`/`tapectl` and reads its own environment variables. Only
-the binary's static-asset-serving surface exists so far; Temporal wiring, `/api/*`
-routes, and OIDC land in later sub-issues and will extend this table.
+separate process from `worker`/`tapectl` and reads its own environment variables, though
+it shares the Temporal client factory (`pkg/temporalclient`) and the
+`METRICS_ADDR`/`HEALTH_ADDR` conventions with `worker`. It now serves the SPA plus a
+read-only JSON API under `/api/*` (listing/describing backup runs via Temporal
+visibility); submitting runs, live updates, resume/abort, and OIDC auth land in later
+sub-issues and will extend this table further.
 
 | Variable | Required | Description |
 |----------|----------|--------------|
-| `WEB_LISTEN_ADDRESS` | no | TCP listen address for the web UI's HTTP server (e.g. `:8080` or `127.0.0.1:8080`). Defaults to `:8080` when unset or empty. |
+| `WEB_LISTEN_ADDRESS` | no | TCP listen address for the web UI's main HTTP server — the SPA at `/` and the JSON API under `/api/*` (e.g. `:8080` or `127.0.0.1:8080`). Defaults to `:8080` when unset or empty. |
+| `HEALTH_ADDR` | no | TCP listen address for the HTTP health endpoints `/healthz` (liveness) and `/readyz` (readiness — reflects Temporal connectivity) — see [Health endpoints](#health-endpoints) below. **Defaults to `:8081`** for `cmd/web` — deliberately different from `worker`'s `:8080` default, since (unlike the worker) `cmd/web`'s main port already answers real traffic on its own `:8080` default; set to an empty value to disable the endpoints entirely. |
+| `METRICS_ADDR` | no | TCP listen address for the Prometheus `/metrics` endpoint, including Temporal SDK client metrics. Defaults to `:9090`, the same default `worker` uses — safe to share since `cmd/web` runs as its own Kubernetes Deployment/pod, not colocated with the worker. Set to an empty value to disable the endpoint entirely. |
+| `METRICS_SCRAPE_WAIT_TIMEOUT` | no | Same semantics as the worker's setting above: bounds the end-of-run wait for a final Prometheus scrape before `cmd/web` shuts its `/metrics` server down. Defaults to `60s`; set to `0s` to disable the wait. |
+| `TEMPORAL_ADDRESS` / `TEMPORAL_NAMESPACE` / `TEMPORAL_API_KEY` / `TEMPORAL_TLS` | yes (`TEMPORAL_ADDRESS`) | Same envconfig-driven Temporal client settings documented above for `worker`/`tapectl` (`pkg/temporalclient`) — `cmd/web` connects to the same Temporal frontend to serve `/api/runs` and `/api/runs/{runID}`. |
 | `LOG_LEVEL` | no | Same semantics as the worker's `LOG_LEVEL` above: `debug`, `info`, `warn` (or `warning`), or `error`, case-insensitive, defaulting to `info`. |
+
+`cmd/web` fails to start if it cannot reach Temporal (same startup health check as
+`worker`/`tapectl` — `pkg/temporalclient.New` — since a run browser that cannot reach
+Temporal cannot do anything useful). `/readyz` subsequently reflects connectivity going
+forward, e.g. if Temporal becomes unreachable after startup.
+
+#### `GET /api/runs` and `GET /api/runs/{runID}`
+
+Both are read-only views over Temporal visibility and the backup workflow's own query
+handler — there is no UI-owned store (SPEC §4.2). `GET /api/runs` lists every execution
+of the singleton `backup` workflow ID, newest first; `GET /api/runs/{runID}` (Temporal's
+run ID, which disambiguates individual executions of that one workflow ID) additionally
+reports the last completed phase via the existing `lastCompletedPhase` query. An unknown
+but well-formed run ID is `404`; a malformed one (Temporal run IDs are UUIDs) is `400`.
 
 ### Health endpoints
 
-The worker serves two HTTP health endpoints on `HEALTH_ADDR` (default `:8080`) for
-Kubernetes probes and the container `HEALTHCHECK`:
+The worker (and, since sub-issue 2 of the web UI epic, `cmd/web` — see above) serves two
+HTTP health endpoints on `HEALTH_ADDR` (default `:8080` for `worker`, `:8081` for `web`)
+for Kubernetes probes and the container `HEALTHCHECK`:
 
 | Endpoint | Meaning | Status |
 |----------|---------|--------|
-| `GET /healthz` | **Liveness** — the process is up and serving. Independent of Temporal connectivity, so a worker merely waiting on Temporal to recover is not restarted. | `200` once the server is listening. |
-| `GET /readyz` | **Readiness** — the worker is usefully connected. Re-checks the Temporal frontend health per request. | `200` when Temporal is reachable and healthy; `503` otherwise. |
+| `GET /healthz` | **Liveness** — the process is up and serving. Independent of Temporal connectivity, so a process merely waiting on Temporal to recover is not restarted. | `200` once the server is listening. |
+| `GET /readyz` | **Readiness** — the process is usefully connected. Re-checks the Temporal frontend health per request. | `200` when Temporal is reachable and healthy; `503` otherwise. |
 
 Neither endpoint gates or fails a run — they are observational only (SPEC §14). The
 endpoints are disabled (no port opened) when `HEALTH_ADDR` is set to an empty value.
@@ -445,7 +467,8 @@ The `worker healthcheck` subcommand is a self-probe used as the container `HEALT
 it `GET`s `/readyz` on the local health server and exits `0` when ready, non-zero
 otherwise, so `docker inspect` health reflects readiness. It never starts a Temporal
 worker. It targets `HEALTH_ADDR` by default; an optional positional `host:port` argument
-overrides the target.
+overrides the target. `cmd/web` has no equivalent self-probe subcommand yet — its
+container image can `curl`/equivalent its own `/healthz`/`/readyz` directly.
 
 ### Control-worker idle-exit
 

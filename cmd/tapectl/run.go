@@ -16,13 +16,16 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// backupWorkflowID is the fixed workflow ID every backup run submits under. It
-// is a singleton on purpose: the backup model is serial (one data worker on one
+// backupWorkflowID is the fixed workflow ID every backup run submits under —
+// an alias for backup.WorkflowID, the shared source of truth (also used by
+// pkg/runsapi to list/describe runs via Temporal visibility) — kept as a
+// local name since it is used pervasively throughout this package. It is a
+// singleton on purpose: the backup model is serial (one data worker on one
 // storage host, one disk staging area — SPEC §4.2), so all runs must be
 // mutually exclusive. Combined with the conflict/reuse policies in submitRun, a
 // second run submitted while one is already running is refused, while a new run
 // after the previous one closes starts normally.
-const backupWorkflowID = "backup"
+const backupWorkflowID = backup.WorkflowID
 
 // runOptions holds the parsed flags for the `run` subcommand.
 type runOptions struct {

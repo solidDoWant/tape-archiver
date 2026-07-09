@@ -22,19 +22,19 @@ func fakeAssets() fstest.MapFS {
 
 func TestNewHandler(t *testing.T) {
 	t.Run("rejects assets with no index.html", func(t *testing.T) {
-		_, err := NewHandler(fstest.MapFS{"assets/app.js": &fstest.MapFile{Data: []byte("x")}})
+		_, err := NewHandler(fstest.MapFS{"assets/app.js": &fstest.MapFile{Data: []byte("x")}}, nil)
 		require.Error(t, err)
 	})
 
 	t.Run("builds a handler for valid assets", func(t *testing.T) {
-		handler, err := NewHandler(fakeAssets())
+		handler, err := NewHandler(fakeAssets(), nil)
 		require.NoError(t, err)
 		assert.NotNil(t, handler)
 	})
 }
 
 func TestHandlerRoutes(t *testing.T) {
-	handler, err := NewHandler(fakeAssets())
+	handler, err := NewHandler(fakeAssets(), nil)
 	require.NoError(t, err)
 
 	tests := []struct {
@@ -45,13 +45,6 @@ func TestHandlerRoutes(t *testing.T) {
 		wantBodyHas    string
 		wantContentHas string
 	}{
-		{
-			name:        "healthz is 200",
-			method:      http.MethodGet,
-			path:        "/healthz",
-			wantStatus:  http.StatusOK,
-			wantBodyHas: "ok",
-		},
 		{
 			name:        "root serves the SPA shell",
 			method:      http.MethodGet,
@@ -98,4 +91,38 @@ func TestHandlerRoutes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAPIDelegation covers the /api/* routing contract: requests under
+// /api/ reach the injected api handler rather than falling back to the SPA,
+// and the SPA catch-all still serves everything else — proving the ordering
+// promised by NewHandler's doc comment without depending on any real API
+// package (pkg/webserver must not import pkg/runsapi or Temporal).
+func TestAPIDelegation(t *testing.T) {
+	var apiHit string
+
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHit = r.URL.Path
+
+		w.WriteHeader(http.StatusTeapot)
+	})
+
+	handler, err := NewHandler(fakeAssets(), api)
+	require.NoError(t, err)
+
+	request := httptest.NewRequest(http.MethodGet, "/api/runs", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	assert.Equal(t, http.StatusTeapot, recorder.Code, "an /api/ request must reach the injected api handler")
+	assert.Equal(t, "/api/runs", apiHit)
+
+	// A non-API path still falls through to the SPA even with an api handler
+	// configured.
+	request = httptest.NewRequest(http.MethodGet, "/runs/some-run-id", nil)
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "tape-archiver shell")
 }

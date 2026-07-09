@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,25 +50,25 @@ func requireBuiltFrontend(t *testing.T) fs.FS {
 	return assets
 }
 
-// TestServesHealthzAndSPA exercises cmd/web's actual wiring (distFS +
-// webserver.NewHandler) against the public HTTP surface: AC "make build
-// produces a binary that, when run, serves the SPA shell at / and 200 at
-// /healthz".
-func TestServesHealthzAndSPA(t *testing.T) {
+// TestServesSPA exercises cmd/web's actual wiring (distFS + webserver.
+// NewHandler) against the public HTTP surface: AC "make build produces a
+// binary that, when run, serves the SPA shell at /". No api handler is
+// injected here (nil) since this test only cares about SPA serving in
+// isolation, and this package must not need a Temporal connection to prove
+// it — webserver_test.go (pkg/webserver) separately proves /api/*
+// delegation, and cmd/web/main_integration_test.go proves the full run()
+// wiring (Temporal client + health + metrics + this handler) against a real
+// Temporal. Liveness/readiness now live on pkg/health's own server
+// (HEALTH_ADDR), not on this handler — see pkg/webserver's package doc for
+// why the old hand-rolled /healthz here was dropped.
+func TestServesSPA(t *testing.T) {
 	assets := requireBuiltFrontend(t)
 
-	handler, err := webserver.NewHandler(assets)
+	handler, err := webserver.NewHandler(assets, nil)
 	require.NoError(t, err)
 
 	server := httptest.NewServer(handler)
 	defer server.Close()
-
-	healthzResp, err := http.Get(server.URL + "/healthz")
-	require.NoError(t, err)
-
-	defer func() { _ = healthzResp.Body.Close() }()
-
-	assert.Equal(t, http.StatusOK, healthzResp.StatusCode)
 
 	rootResp, err := http.Get(server.URL + "/")
 	require.NoError(t, err)
@@ -82,69 +80,4 @@ func TestServesHealthzAndSPA(t *testing.T) {
 	body, err := io.ReadAll(rootResp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(body), "<html")
-}
-
-// TestRunServesAndShutsDownGracefully drives the full run() entrypoint
-// (listen, serve, ctx-cancel-triggered shutdown) end to end over a real
-// loopback listener, proving the same behavior main() relies on: the server
-// answers /healthz while running and run() returns cleanly once ctx is
-// cancelled.
-func TestRunServesAndShutsDownGracefully(t *testing.T) {
-	requireBuiltFrontend(t)
-
-	ctx, cancel := context.WithCancel(t.Context())
-
-	getenv := func(name string) string {
-		if name == "WEB_LISTEN_ADDRESS" {
-			return "127.0.0.1:0"
-		}
-
-		return ""
-	}
-
-	readyCh := make(chan string, 1)
-	runErrCh := make(chan error, 1)
-
-	go func() {
-		runErrCh <- run(ctx, getenv, func(addr string) { readyCh <- addr })
-	}()
-
-	var addr string
-
-	select {
-	case addr = <-readyCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("server never became ready")
-	}
-
-	resp, err := http.Get("http://" + addr + "/healthz")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	require.NoError(t, resp.Body.Close())
-
-	cancel()
-
-	select {
-	case err := <-runErrCh:
-		require.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("run did not return after ctx cancellation")
-	}
-}
-
-// TestRunListenError covers a bad listen address (a non-numeric port fails at
-// net.Listen) returning an error rather than hanging or panicking.
-func TestRunListenError(t *testing.T) {
-	requireBuiltFrontend(t)
-
-	getenv := func(name string) string {
-		if name == "WEB_LISTEN_ADDRESS" {
-			return "127.0.0.1:not-a-port"
-		}
-
-		return ""
-	}
-
-	err := run(t.Context(), getenv, nil)
-	require.Error(t, err)
 }

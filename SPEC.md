@@ -629,15 +629,23 @@ refinement as issues are implemented.
   activities.
 - `cmd/tapectl` — CLI to submit a run config to Temporal, trigger dry-runs, inspect.
 - `cmd/gen-config-schema` — emits the committed JSON schema for the run config.
-- `cmd/web` — web UI HTTP server (epic #239): serves the embedded React SPA and
-  `/healthz`; later sub-issues add `/api/*`, Temporal wiring, and OIDC. Thin wrapper
-  over `pkg/webserver`; the SPA build is embedded via `go:embed` from `cmd/web/dist`
-  (populated by `web/`'s build — see `web/`, below).
+- `cmd/web` — web UI HTTP server (epic #239): serves the embedded React SPA at `/`, the
+  read-only JSON API (`pkg/runsapi`) under `/api/*` (list/describe backup runs via
+  Temporal visibility — `GET /api/runs`, `GET /api/runs/{runID}`), `/healthz` +
+  `/readyz` (`pkg/health`, own `HEALTH_ADDR`, readiness gated on Temporal
+  connectivity), and `/metrics` (`pkg/metrics`, own `METRICS_ADDR`, including Temporal
+  SDK metrics). Later sub-issues add submitting runs, SSE live updates, resume/abort,
+  and OIDC. Thin wrapper over `pkg/webserver` + `pkg/runsapi` +
+  `pkg/temporalclient`/`pkg/health`/`pkg/metrics` (the same factories `cmd/worker`
+  uses); the SPA build is embedded via `go:embed` from `cmd/web/dist` (populated by
+  `web/`'s build — see `web/`, below).
 - `pkg/` — one concern per package: `tape` (changer via SG_IO, `mt`), `ltfs`, `agewrap`, `par2`,
   `archive` (tar), `zfs`, `k8ssnap` (VolumeSnapshot discovery), `report` (PDF),
   `recoverykit` (ISO), `webhook` (Discord), `checksum`, `logging`, `metrics`,
-  `temporalclient`, `webserver` (`cmd/web`'s HTTP handler: embedded-SPA serving +
-  `/healthz`).
+  `temporalclient`, `webserver` (`cmd/web`'s HTTP handler: mounts the embedded-SPA
+  serving and the `/api/*` handler together, SPA lowest-priority), `runsapi`
+  (`cmd/web`'s `/api/runs` JSON handlers, backed by Temporal visibility +
+  `LastCompletedPhaseQuery`, unit-testable against a fake Temporal client interface).
 - `internal/config` — run-config types and env parsing.
 - `workflows/backup/` — the backup workflow and activities, split by concern
   (`resolve.go`, `plan.go`, `prepare.go`, `verify.go`, `write.go`, `library.go`,
