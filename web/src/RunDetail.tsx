@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { formatTimestamp } from './api'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 
 // RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
@@ -134,11 +135,11 @@ function RunDetail({ runId }: RunDetailProps) {
           <dt className="font-medium">Last completed phase</dt>
           <dd>{detail.lastCompletedPhase || '—'}</dd>
           <dt className="font-medium">Started</dt>
-          <dd>{new Date(detail.startTime).toLocaleString()}</dd>
+          <dd>{formatTimestamp(detail.startTime)}</dd>
           {detail.closeTime ? (
             <>
               <dt className="font-medium">Closed</dt>
-              <dd>{new Date(detail.closeTime).toLocaleString()}</dd>
+              <dd>{formatTimestamp(detail.closeTime)}</dd>
             </>
           ) : null}
         </dl>

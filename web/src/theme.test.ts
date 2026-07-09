@@ -1,5 +1,6 @@
+import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { applyTheme, getStoredTheme, resolveInitialTheme } from './theme'
+import { applyTheme, getStoredTheme, resolveInitialTheme, useTheme } from './theme'
 
 // stubMatchMedia replaces window.matchMedia with one reporting matches for
 // good, standing in for a specific OS color-scheme preference.
@@ -14,6 +15,39 @@ function stubMatchMedia(matches: boolean) {
     removeEventListener: () => {},
     dispatchEvent: () => false,
   }))
+}
+
+// stubControllableMatchMedia is stubMatchMedia's more capable sibling: it
+// returns a `fireChange` function so a test can simulate the OS preference
+// actually flipping mid-session (matchMedia's real "change" event), not
+// just its value at mount time.
+function stubControllableMatchMedia(initialMatches: boolean) {
+  let matches = initialMatches
+  let changeListener: ((event: MediaQueryListEvent) => void) | null = null
+
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() {
+      return matches
+    },
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) => {
+      changeListener = listener
+    },
+    removeEventListener: () => {
+      changeListener = null
+    },
+    dispatchEvent: () => false,
+  }))
+
+  return {
+    fireChange(nextMatches: boolean) {
+      matches = nextMatches
+      changeListener?.({ matches: nextMatches } as MediaQueryListEvent)
+    },
+  }
 }
 
 beforeEach(() => {
@@ -67,5 +101,38 @@ describe('resolveInitialTheme', () => {
     window.localStorage.setItem('tape-archiver:theme', 'light')
 
     expect(resolveInitialTheme()).toBe('light')
+  })
+})
+
+describe('useTheme', () => {
+  it('keeps following the OS preference across a live change when no override is stored', () => {
+    const { fireChange } = stubControllableMatchMedia(false)
+    const { result } = renderHook(() => useTheme())
+
+    expect(result.current[0]).toBe('light')
+
+    act(() => fireChange(true))
+    expect(result.current[0]).toBe('dark')
+  })
+
+  it('does not let a later OS preference change override an explicit operator choice', () => {
+    const { fireChange } = stubControllableMatchMedia(false)
+    const { result } = renderHook(() => useTheme())
+
+    expect(result.current[0]).toBe('light')
+
+    // The operator explicitly picks dark via the toggle (setTheme), after
+    // the OS-change listener already subscribed at mount with no stored
+    // override — the exact ordering that regresses if the "an override
+    // exists" check is only made once at subscribe time instead of on
+    // every OS change event.
+    act(() => result.current[1]('dark'))
+    expect(result.current[0]).toBe('dark')
+    expect(getStoredTheme()).toBe('dark')
+
+    // The OS preference now changes (e.g. a scheduled day/night switch).
+    // The operator's explicit choice must survive it.
+    act(() => fireChange(false))
+    expect(result.current[0]).toBe('dark')
   })
 })

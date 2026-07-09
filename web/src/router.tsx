@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useState,
   type AnchorHTMLAttributes,
   type ReactNode,
@@ -41,14 +42,28 @@ export function RouterProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const navigate = useCallback((path: string) => {
-    if (path !== window.location.pathname) {
-      window.history.pushState({}, '', path)
+    if (path === window.location.pathname) {
+      // Already there: skip both the history push (would leave a no-op
+      // entry, e.g. clicking a nav link for the page you're already on)
+      // and the state update — setRoute(parseRoute(path)) would otherwise
+      // always re-render every context consumer even though parseRoute
+      // returns a brand-new object for an identical route, since React's
+      // Object.is bail-out never gets a chance to apply.
+      return
     }
 
+    window.history.pushState({}, '', path)
     setRoute(parseRoute(path))
   }, [])
 
-  return <RouterContext.Provider value={{ route, navigate }}>{children}</RouterContext.Provider>
+  // Memoized so consumers that only need `navigate` (e.g. every <Link>) do
+  // not re-render on every route change — without this, a fresh object
+  // literal here on every RouterProvider render would change the context
+  // value's identity whenever `route` changes, even though `navigate`
+  // itself is referentially stable (useCallback, empty deps).
+  const value = useMemo(() => ({ route, navigate }), [route, navigate])
+
+  return <RouterContext.Provider value={value}>{children}</RouterContext.Provider>
 }
 
 export interface LinkProps extends Omit<AnchorHTMLAttributes<HTMLAnchorElement>, 'href'> {

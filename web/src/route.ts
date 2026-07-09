@@ -28,7 +28,16 @@ export function parseRoute(pathname: string): Route {
 
   const runMatch = /^\/runs\/([^/]+)\/?$/.exec(pathname)
   if (runMatch) {
-    return { name: 'run', runId: decodeURIComponent(runMatch[1]) }
+    // decodeURIComponent throws on a malformed percent-encoded segment
+    // (e.g. a stray "%" from a hand-typed or stale URL) — this file has no
+    // ErrorBoundary above it, so an uncaught throw here would crash the
+    // whole app to a blank white screen instead of falling through to the
+    // "not-found" route this function's doc comment promises.
+    try {
+      return { name: 'run', runId: decodeURIComponent(runMatch[1]) }
+    } catch {
+      return { name: 'not-found', path: pathname }
+    }
   }
 
   return { name: 'not-found', path: pathname }

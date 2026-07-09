@@ -29,6 +29,13 @@ describe('parseRoute', () => {
   it('maps anything else to not-found, carrying the original path', () => {
     expect(parseRoute('/nope')).toEqual({ name: 'not-found', path: '/nope' })
   })
+
+  it('falls back to not-found instead of throwing on a malformed percent-encoded run ID', () => {
+    // decodeURIComponent('%E0%A4%A') throws (an incomplete UTF-8 sequence);
+    // this must not propagate out of parseRoute, since there is no
+    // ErrorBoundary above the router to catch it.
+    expect(parseRoute('/runs/%E0%A4%A')).toEqual({ name: 'not-found', path: '/runs/%E0%A4%A' })
+  })
 })
 
 describe('runPath', () => {

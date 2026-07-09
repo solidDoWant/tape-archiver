@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { apiFetch, ApiError } from './api'
+import { apiFetch, ApiError, describeNetworkError } from './api'
 
 // CurrentPauseInfo mirrors pkg/runsapi.CurrentPauseInfo (the GET
 // /api/runs/{runID} and SSE JSON projection of workflows/backup's
@@ -48,15 +48,6 @@ function pauseKindLabel(kind: string): string {
     default:
       return kind
   }
-}
-
-// describeNetworkError renders a non-ApiError failure (fetch itself
-// rejecting, e.g. the server is unreachable) as operator-facing text,
-// mirroring SubmitRunForm.tsx's equivalent handling.
-function describeNetworkError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-
-  return `Could not reach the server: ${message}`
 }
 
 // PauseActions shows why a run is currently paused (SPEC §4.3 phase 8, SPEC

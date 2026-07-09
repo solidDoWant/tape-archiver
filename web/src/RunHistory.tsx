@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { apiFetch, ApiError } from './api'
+import { apiFetch, ApiError, describeNetworkError, formatTimestamp } from './api'
 import { Link } from './router'
 import { runPath } from './route'
+import type { RunEventDetail } from './RunDetail'
 
 // RunSummary mirrors pkg/runsapi.RunSummary's JSON shape, as returned in the
 // GET /api/runs list (pkg/runsapi.RunsResponse).
@@ -34,17 +35,14 @@ interface RunRow extends RunSummary {
   lastCompletedPhase?: string
 }
 
-interface RunDetailResponse extends RunSummary {
-  lastCompletedPhase: string
-}
+// The per-row enrichment fetch below hits the same GET /api/runs/{runID}
+// endpoint RunDetail.tsx's SSE stream carries — reuse its RunEventDetail
+// type (a superset: it also carries currentPause, unused here) rather than
+// declaring a second, narrower interface for the same backend contract
+// (pkg/runsapi.RunDetail) that could silently drift from it.
+type RunDetailResponse = RunEventDetail
 
 type LoadState = { status: 'loading' } | { status: 'error'; error: string } | { status: 'loaded' }
-
-function describeNetworkError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-
-  return `Could not reach the server: ${message}`
-}
 
 function statusBadgeClass(status: string): string {
   switch (status) {
@@ -61,10 +59,6 @@ function statusBadgeClass(status: string): string {
     default:
       return 'bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-100'
   }
-}
-
-function formatTimestamp(value?: string): string {
-  return value ? new Date(value).toLocaleString() : '—'
 }
 
 // RunHistory lists past (and any currently running) executions of the

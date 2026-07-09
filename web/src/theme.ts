@@ -76,14 +76,22 @@ export function useTheme(): [Theme, (theme: Theme) => void] {
   }, [theme])
 
   useEffect(() => {
-    if (getStoredTheme() !== null) {
-      // An explicit override already exists; do not let further OS changes
-      // override the operator's own choice.
-      return
-    }
-
     const media = window.matchMedia('(prefers-color-scheme: dark)')
-    const onChange = (event: MediaQueryListEvent) => setThemeState(event.matches ? 'dark' : 'light')
+    const onChange = (event: MediaQueryListEvent) => {
+      // Re-checked on every OS change event, not just once when this effect
+      // first subscribed: this effect's deps are `[]`, so it subscribes
+      // exactly once for Shell's whole (never-unmounted) lifetime — if the
+      // "an override already exists" check only ran at subscribe time, an
+      // operator who sets an explicit override *after* mount (the toggle)
+      // would still have this same handler fire on the next OS preference
+      // change and silently revert their choice, contradicting the whole
+      // point of the override.
+      if (getStoredTheme() !== null) {
+        return
+      }
+
+      setThemeState(event.matches ? 'dark' : 'light')
+    }
 
     media.addEventListener('change', onChange)
 
