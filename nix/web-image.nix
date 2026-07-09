@@ -46,14 +46,19 @@ dockerTools.streamLayeredImage {
     ];
     # Container health via a direct /healthz probe (liveness semantics: 200 as
     # soon as the process is serving, independent of Temporal connectivity —
-    # see pkg/health). Readiness (/readyz, gated on Temporal connectivity) is
-    # deliberately not used here, matching the worker images' Healthcheck,
-    # which also probes liveness-equivalent status; Kubernetes' own httpGet
-    # readiness probe (deploy/charts/tape-archiver-web) is what actually gates
-    # traffic on Temporal connectivity. Durations are in nanoseconds per the
-    # OCI image config schema. Port 8081 matches cmd/web's HEALTH_ADDR default
-    # (docs/configuration.md); deployments overriding HEALTH_ADDR must also
-    # override this Healthcheck (e.g. via Helm chart container overrides).
+    # see pkg/health). This deliberately DIFFERS from the worker images'
+    # Healthcheck (nix/control-worker-image.nix), which probes /readyz and so
+    # reflects readiness — a worker that has lost its Temporal connection
+    # reports unhealthy there. This image has no such self-probe subcommand
+    # (see file doc comment above) and so falls back to a plain curl against
+    # /healthz, which cannot reflect Temporal connectivity. Kubernetes' own
+    # httpGet readiness probe (deploy/charts/tape-archiver-web) is what
+    # actually gates traffic on Temporal connectivity for this image; the
+    # container-level Healthcheck here only proves the process is alive and
+    # serving. Durations are in nanoseconds per the OCI image config schema.
+    # Port 8081 matches cmd/web's HEALTH_ADDR default (docs/configuration.md);
+    # deployments overriding HEALTH_ADDR must also override this Healthcheck
+    # (e.g. via Helm chart container overrides).
     Healthcheck = {
       Test = [
         "CMD"

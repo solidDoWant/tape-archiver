@@ -15,10 +15,21 @@ buildNpmPackage {
   pname = "tape-archiver-web-frontend";
   version = "0-dev";
 
-  # Only web/ is needed to build the SPA.
+  # Only web/ is needed to build the SPA — minus node_modules/ and dist/,
+  # which are host-local/derived (buildNpmPackage fetches its own pinned
+  # dependency cache via npmDepsHash below, and dist/ is this derivation's own
+  # output). Excluding them keeps every `nix build`/`make build-images`
+  # invocation from hashing and copying whatever a developer's local `npm ci`
+  # happened to leave in web/node_modules (routinely 100+ MB, thousands of
+  # files) into the Nix store as this derivation's src.
   src = lib.fileset.toSource {
     root = ../.;
-    fileset = ../web;
+    fileset = lib.fileset.difference ../web (
+      lib.fileset.unions [
+        (lib.fileset.maybeMissing ../web/node_modules)
+        (lib.fileset.maybeMissing ../web/dist)
+      ]
+    );
   };
   sourceRoot = "source/web";
 
@@ -37,14 +48,26 @@ buildNpmPackage {
   # of this derivation's writable source root, which the Nix sandbox does not
   # grant write access to (only the declared sourceRoot, "source/web", is
   # chmod u+w after unpacking) — so this build instead overrides Vite's outDir
-  # via its CLI flag (which takes precedence over vite.config.ts) to a plain
-  # "dist" directory inside the writable source root; nix/web.nix then copies
-  # this derivation's $out to cmd/web/dist itself before compiling `cmd/web`.
-  npmBuildFlags = [
-    "--" # forces npm to pass the following flags through to `vite build` itself
-    "--outDir"
-    "dist"
-  ];
+  # to a plain "dist" directory inside the writable source root; nix/web.nix
+  # then copies this derivation's $out to cmd/web/dist itself before
+  # compiling `cmd/web`.
+  #
+  # This calls `tsc`/`vite` directly rather than via `npm run build -- ...`:
+  # `npm run <script> -- <args>` appends <args> to the end of the whole
+  # compound shell command, not to a specific subcommand within it, so it
+  # only happens to land on `vite build` today because that's the last
+  # command in the "build" script. If that script ever grows a trailing step
+  # (e.g. a postbuild asset step), the flag would silently shadow onto the
+  # new last command instead, leaving `vite build` to write its default
+  # (unwritable) outDir and fail the build with an opaque error pointing
+  # nowhere near this comment. Naming the two commands explicitly avoids that
+  # coupling to web/package.json's exact script composition.
+  buildPhase = ''
+    runHook preBuild
+    ./node_modules/.bin/tsc -b
+    ./node_modules/.bin/vite build --outDir dist
+    runHook postBuild
+  '';
 
   installPhase = ''
     runHook preInstall

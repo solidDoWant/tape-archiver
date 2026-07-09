@@ -230,16 +230,26 @@ chart-lint: ## Fetch chart deps, lint, and render the control-worker chart shape
 	helm lint $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS)
 	# Default shape: Deployment + Service, no Ingress (disabled by default), no
 	# ScaledJob (the web UI is a Deployment-only chart, no KEDA support).
-	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) > /tmp/tape-archiver-web-chart-lint-default.yaml
-	grep -q '^kind: Deployment' /tmp/tape-archiver-web-chart-lint-default.yaml \
-		|| { echo "chart-lint: Deployment not rendered by the web chart"; exit 1; }
-	grep -q '^kind: Service' /tmp/tape-archiver-web-chart-lint-default.yaml \
-		|| { echo "chart-lint: Service not rendered by the web chart"; exit 1; }
-	grep -q '^kind: Ingress' /tmp/tape-archiver-web-chart-lint-default.yaml \
-		&& { echo "chart-lint: Ingress rendered by the web chart despite being disabled by default"; exit 1; } || true
-	grep -q '^kind: ScaledJob' /tmp/tape-archiver-web-chart-lint-default.yaml \
-		&& { echo "chart-lint: ScaledJob rendered by the web chart — it is a Deployment-only chart"; exit 1; } || true
-	@rm -f /tmp/tape-archiver-web-chart-lint-default.yaml
+	# A per-invocation mktemp path (not a fixed /tmp name) plus a trap-based
+	# cleanup: each Makefile recipe line otherwise runs in its own shell, so
+	# wrapping this in one `@{ ... }` block is what lets the same $$tmpfile be
+	# referenced across the render + all four assertions below, and the trap
+	# still removes it if an assertion exits early — a fixed shared path would
+	# race two concurrent `make chart-lint` runs (e.g. two CI checks on a
+	# shared runner) reading/deleting each other's rendered YAML.
+	@{ \
+	  tmpfile=$$(mktemp); \
+	  trap 'rm -f "$$tmpfile"' EXIT; \
+	  helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) > "$$tmpfile"; \
+	  grep -q '^kind: Deployment' "$$tmpfile" \
+	    || { echo "chart-lint: Deployment not rendered by the web chart"; exit 1; }; \
+	  grep -q '^kind: Service' "$$tmpfile" \
+	    || { echo "chart-lint: Service not rendered by the web chart"; exit 1; }; \
+	  grep -q '^kind: Ingress' "$$tmpfile" \
+	    && { echo "chart-lint: Ingress rendered by the web chart despite being disabled by default"; exit 1; } || true; \
+	  grep -q '^kind: ScaledJob' "$$tmpfile" \
+	    && { echo "chart-lint: ScaledJob rendered by the web chart — it is a Deployment-only chart"; exit 1; } || true; \
+	}
 	# Opt-in Ingress shape: must render an Ingress alongside the Deployment + Service.
 	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS) \
 		| grep -q '^kind: Ingress' || { echo "chart-lint: Ingress not rendered by the web chart when enabled"; exit 1; }
@@ -268,15 +278,21 @@ WEB_HELM_PACKAGE := $(BIN_DIR)/helm/tape-archiver-web-$(VERSION).tgz
 HELM_CHART_FILES := $(shell find $(CONTROL_WORKER_CHART) -type f ! -path "*/charts/*" 2>/dev/null)
 WEB_HELM_CHART_FILES := $(shell find $(WEB_CHART) -type f ! -path "*/charts/*" 2>/dev/null)
 
-$(HELM_PACKAGE): $(HELM_CHART_FILES)
+# Package (and optionally push) one chart into the target rule's own $(@D)/$@ —
+# mirrors build-load-image's parameterized-macro pattern above, so a future change
+# to the packaging/push flow (e.g. extra `helm package` flags) is made once instead
+# of hand-applied to two near-identical recipes. $(1)=chart dir.
+define package-helm-chart
 	@mkdir -p "$(@D)"
-	helm package "$(CONTROL_WORKER_CHART)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
-	$(if $(filter true,$(HELM_PUSH)),helm push "$(HELM_PACKAGE)" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
+	helm package "$(1)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
+	$(if $(filter true,$(HELM_PUSH)),helm push "$@" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
+endef
+
+$(HELM_PACKAGE): $(HELM_CHART_FILES)
+	$(call package-helm-chart,$(CONTROL_WORKER_CHART))
 
 $(WEB_HELM_PACKAGE): $(WEB_HELM_CHART_FILES)
-	@mkdir -p "$(@D)"
-	helm package "$(WEB_CHART)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
-	$(if $(filter true,$(HELM_PUSH)),helm push "$(WEB_HELM_PACKAGE)" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
+	$(call package-helm-chart,$(WEB_CHART))
 
 .PHONY: helm
 helm: $(HELM_PACKAGE) $(WEB_HELM_PACKAGE) ## Package the control-worker and web Helm charts into bin/helm/ (PUSH_ALL=true also pushes them to the OCI chart registry).
