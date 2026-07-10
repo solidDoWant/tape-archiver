@@ -263,11 +263,13 @@ so they can reach the dev workers' loopback-bound ports directly:
   the write-health gauges `workflows/backup/writehealth.go` registers.
 - `cmd/web` is started with `VICTORIALOGS_URL`, `VICTORIALOGS_STREAM_FILTER`, and
   `VICTORIAMETRICS_URL` already pointed at these containers (`http://127.0.0.1:9428`,
-  `*`, and `http://127.0.0.1:8428` respectively) — it does not read them yet (that's
-  issues #274 and #275), but the dev stack is already wired for whichever lands first.
-  In the meantime, query either service directly (`curl` against the URLs the startup
-  banner prints, e.g. `.../select/logsql/query` or `.../api/v1/query`) to see real
-  dev-worker data.
+  `*`, and `http://127.0.0.1:8428` respectively). `VICTORIAMETRICS_URL` backs the live
+  drive metrics endpoints (issue #275 — see
+  [Live drive metrics (VictoriaMetrics)](configuration.md#live-drive-metrics-victoriametrics)),
+  wired into a run's Write phase view. `VICTORIALOGS_URL`/`VICTORIALOGS_STREAM_FILTER`
+  are not read yet (issue #274); in the meantime, query VictoriaLogs directly (`curl`
+  against the URL the startup banner prints, e.g. `.../select/logsql/query`) to see
+  real dev-worker log data.
 
 Both containers, the log shipper, and their volumes come down as part of the same
 `web-dev-down` teardown described above (`make web-dev-observability-up`/

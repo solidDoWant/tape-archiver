@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { formatTimestamp } from './api'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
+import DriveMetricsPanel from './DriveMetricsPanel'
 
 // RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
 // both the "update" and "done" Server-Sent Events GET
@@ -152,6 +153,21 @@ function RunDetail({ runId }: RunDetailProps) {
         // view rather than just showing stale data, matching parseDetail's
         // own defensive stance above).
         <PauseActions runId={runId} pause={detail.currentPause ?? { kind: '' }} />
+      ) : null}
+
+      {detail ? (
+        // Live VictoriaMetrics-backed drive metrics (issue #275): shown
+        // whenever the run is being observed, not gated to the Write phase
+        // specifically — DriveMetricsPanel itself renders a graceful
+        // "no-data" placeholder outside the Write phase (the underlying
+        // per-tape metrics are simply empty then), so no phase-aware
+        // wiring is needed here. This is a minimal drop-in; issue #277's
+        // redesigned run page re-homes it into the fuller Write-phase
+        // layout (DESIGN_ANALYSIS.md §3).
+        <div>
+          <h3 className="mb-1.5 text-sm font-medium text-text-dim">Drive metrics</h3>
+          <DriveMetricsPanel runId={runId} />
+        </div>
       ) : null}
 
       {state === 'terminal' ? (
