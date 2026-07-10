@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 // theme.ts implements the app's Light/Dark/Auto theme control (the design's
 // sidebar segmented control — issue #272). Tailwind v4 defaults dark: to a
@@ -82,21 +82,17 @@ export function applyTheme(theme: Theme): void {
 // keeps following their OS setting even if it changes mid-session; picking
 // "Auto" explicitly (after having picked Light/Dark before) resumes that
 // tracking too.
+//
+// The resolved theme is derived during render rather than mirrored into its
+// own state from an effect: preference and the live OS preference are both
+// state, their combination is not. The OS-change listener always records OS
+// changes; the derivation simply ignores them unless the preference is
+// "auto".
 export function useTheme(): [ThemePreference, Theme, (preference: ThemePreference) => void] {
   const [preference, setPreferenceState] = useState<ThemePreference>(() => getStoredPreference())
-  const [resolved, setResolved] = useState<Theme>(() => resolveTheme(preference))
+  const [systemDark, setSystemDark] = useState<boolean>(() => systemPrefersDark())
 
-  // Mirrors `preference` for the OS-change listener below, which subscribes
-  // once (empty deps) for the component's whole lifetime — without this ref,
-  // that handler would only ever see the preference value from the render it
-  // subscribed in, and an operator picking "Auto" after an earlier explicit
-  // choice would not resume following OS changes.
-  const preferenceRef = useRef(preference)
-
-  useEffect(() => {
-    preferenceRef.current = preference
-    setResolved(resolveTheme(preference))
-  }, [preference])
+  const resolved: Theme = preference === 'auto' ? (systemDark ? 'dark' : 'light') : preference
 
   useEffect(() => {
     applyTheme(resolved)
@@ -105,11 +101,7 @@ export function useTheme(): [ThemePreference, Theme, (preference: ThemePreferenc
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const onChange = (event: MediaQueryListEvent) => {
-      if (preferenceRef.current !== 'auto') {
-        return
-      }
-
-      setResolved(event.matches ? 'dark' : 'light')
+      setSystemDark(event.matches)
     }
 
     media.addEventListener('change', onChange)
