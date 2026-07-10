@@ -746,18 +746,25 @@ Query parameters:
 - `phase` (optional) — one of the 11 pipeline phase names (`GET
   /api/runs/{runID}/phases`' `name` values); an unknown value is `400`. Omitted, the
   window is the whole run (its start to its close time, or now if still running).
-  Given, the window is that phase's own `[startTime, endTime)` (from the same
-  reconstruction `GET /api/runs/{runID}/phases` uses) — a phase that has not started
-  yet returns `{"lines": [], "live": false}`, a normal empty result, not the
-  "unavailable" state below.
-- `since` (optional) — an RFC3339 timestamp; only lines strictly after it are
-  returned. Intended for a client polling for new lines (e.g. `since=` the last
+  Given, only lines emitted during that phase's own activities are returned (the
+  same per-activity attribution `GET /api/runs/{runID}/phases` uses) — because the
+  Load/Write/Eject tape path interleaves per drive-set and retries after operator
+  pauses (SPEC §4.3 phases 6–8), one phase's activities are not contiguous in time,
+  and a naive earliest-to-latest window would include another phase's lines. A phase
+  that has not started yet returns `{"lines": [], "live": false}`, a normal empty
+  result, not the "unavailable" state below.
+- `since` (optional) — an RFC3339 timestamp; only lines at or after it (inclusive)
+  are returned. Intended for a client polling for new lines (e.g. `since=` the last
   line's own `time`) without re-fetching the whole window every time — this is how
   the web UI's log panel gets new lines to appear without a full page reload while
   `live` is `true`, deliberately by polling rather than Server-Sent Events: unlike
   `GET /api/events/runs/{runID}`, a browser `EventSource` has no way to expose a
   failed connection's HTTP status to JS, which would make the "unavailable" state
-  below indistinguishable from an ordinary transient drop.
+  below indistinguishable from an ordinary transient drop. The bound is inclusive
+  on purpose: log shipping into VictoriaLogs is asynchronous and batched, so with an
+  exclusive bound a poll could permanently miss lines sharing its `since` timestamp
+  that had not been ingested yet — a polling caller must instead deduplicate the
+  re-sent boundary lines (the web UI's log panel dedups by time + level + message).
 - There is no client-facing result-count limit — the server always caps a single
   response at a fixed number of lines (currently 5000) regardless of how many
   actually matched, so an operator glancing at recent activity gets a bounded
