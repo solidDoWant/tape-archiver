@@ -133,3 +133,41 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
 - 2026-07-09 (owner): stack = React/TS SPA + Go API; auth = OIDC; deployment =
   separate image + separate chart.
 - 2026-07-09 (owner): library/tape inventory views are out of scope for this epic.
+- 2026-07-10 (owner, redesign epic #271): implement the Claude Design canvas designs;
+  self-hosted fonts (npm `@fontsource` packages, Vite-bundled — no font CDN); one
+  canonical token set using the app design file's values where the login design
+  drifts; no literal IPs in footer/sample content; footer version/host line is
+  deploy-configurable and hidden entirely when unset; dark + light both required;
+  narrow viewports adapt the fixed-width desktop design by stacking (no separate
+  mobile design).
+- 2026-07-10 (#272): design tokens are CSS custom properties
+  (`web/src/design/tokens.css`) registered as Tailwind v4 theme values via
+  `@theme inline`; dark mode keeps the existing class-based `.dark` mechanism
+  (theme.ts) rather than the design's `data-theme` attribute. Theme control extended
+  to three-way Light/Dark/Auto (an explicit `auto` preference persisted in
+  localStorage).
+- 2026-07-10 (#272): unauthenticated page requests are now served the SPA (which
+  renders a styled login page at `/login`) instead of pkg/webauth 302-ing straight to
+  the IdP; the OIDC callback surfaces failures to that page via
+  `/login?error=denied|expired` (denied = the IdP's own `error` param; expired =
+  every other validation failure). `/api/*` 401 JSON behavior is unchanged, and all
+  state/nonce/PKCE/redirect-sanitization properties are preserved (the SPA mirrors
+  `sanitizeRedirectPath` client-side; the server still re-validates).
+- 2026-07-10 (#272): the login button reads "Continue with SSO" — a per-provider
+  display name (the design's `providerName` prop, default "Authentik") would need a
+  new config knob (e.g. `OIDC_PROVIDER_LABEL`) that issue #272 doesn't call for;
+  deferred until something else needs it.
+- 2026-07-10 (#272): footer version comes from the binary's embedded VCS build info
+  (`internal/buildinfo.ToolVersion`) served by a new ungated `GET /api/build-info`;
+  the optional host label is the new `WEB_FOOTER_HOST` env var (omitted from the
+  response — and the footer — when unset). Never the design's hardcoded
+  `v0.4.1`/`homelab · 10.0.0.4` samples.
+- 2026-07-10 (#272): icons are a small set of hand-drawn inline SVG components
+  (`web/src/icons.tsx`) replacing the design's bare Unicode glyphs — no icon-library
+  dependency until the fuller redesign surface justifies one.
+- 2026-07-10 (#272): interim nav mapping until the dashboard/tapes redesign issues
+  land: sidebar "Dashboard" routes to `/history` (the existing run-history view),
+  "Start new run" to `/` (the existing JSON submit form), "Tapes" to a minimal
+  placeholder page. The sidebar's active-run check ("Start new run" disabled while a
+  run is in progress) is a one-shot `GET /api/runs` at shell mount, not a live
+  subscription — accepted minimal-scope gap for the foundation issue.

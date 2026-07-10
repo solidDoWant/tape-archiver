@@ -58,8 +58,13 @@ function Sidebar({ identity, preference, onPreferenceChange }: SidebarProps) {
 
   const runActive = activeRunState.status === 'loaded' && activeRunState.activeRun !== null
 
+  // Narrow viewports (below md) stack the sidebar as a full-width block
+  // above the content instead of a fixed 232px column — the design itself
+  // is desktop-only (a fixed 1180px canvas, no media queries), and the
+  // owner decision (docs/web-ui-design.md §9, 2026-07-10) is to adapt it by
+  // stacking rather than design a separate mobile UI.
   return (
-    <aside className="sticky top-0 flex h-screen w-[232px] flex-none flex-col border-r border-border bg-surface">
+    <aside className="flex w-full flex-none flex-col border-b border-border bg-surface md:sticky md:top-0 md:h-screen md:w-[232px] md:border-r md:border-b-0">
       <div className="flex items-center gap-[11px] px-5 pt-5 pb-[18px]">
         <div className="flex h-[30px] w-[30px] flex-none items-center justify-center rounded-lg bg-text">
           <div className="h-[13px] w-[13px] rounded-full border-[2.5px] border-surface" />

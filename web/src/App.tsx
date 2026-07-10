@@ -101,8 +101,11 @@ function Shell({ identity }: { identity: Identity }) {
   const navigate = useNavigate()
   const [preference, , setPreference] = useTheme()
 
+  // flex-col below md: the sidebar stacks as a full-width block above the
+  // content on narrow viewports (see Sidebar.tsx's own comment) so nothing
+  // ever needs horizontal page scrolling.
   return (
-    <div className="flex min-h-screen bg-bg text-text">
+    <div className="flex min-h-screen flex-col bg-bg text-text md:flex-row">
       <Sidebar identity={identity} preference={preference} onPreferenceChange={setPreference} />
 
       <main className="flex min-w-0 flex-1 flex-col">

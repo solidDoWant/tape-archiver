@@ -28,14 +28,18 @@ function lastCompletedPhaseCell(scope: Page | Locator): Locator {
 }
 
 test('submit a dry-run, watch it progress live, then see it in history', async ({ page, context }) => {
-  // Navigating to "/" while unauthenticated round-trips through the entire
-  // OIDC authorization-code flow — pkg/webauth's /auth/login redirects to
-  // the fake IdP's /authorize, which immediately redirects back to
-  // /auth/callback with a code, which is exchanged and lands back on "/" —
-  // before the submit form ever renders. Reaching the form at all is
-  // this test's proof that the login leg of AC1 actually works, not a
-  // separate assertion.
+  // Navigating to "/" while unauthenticated now lands on the SPA's own
+  // styled login page (issue #272 — the server serves the SPA rather than
+  // 302-ing straight to the IdP). Activating the sign-in control starts
+  // the full OIDC authorization-code flow — pkg/webauth's /auth/login
+  // redirects to the fake IdP's /authorize, which immediately redirects
+  // back to /auth/callback with a code, which is exchanged and lands back
+  // on "/" — before the submit form ever renders. Completing that
+  // round-trip into the form is this test's proof that the login leg of
+  // AC1 actually works, not a separate assertion.
   await page.goto('/')
+
+  await page.getByRole('button', { name: /continue with sso/i }).click()
 
   const configTextarea = page.getByLabel('Run config (JSON)')
   await expect(configTextarea).toBeVisible({ timeout: 30_000 })
@@ -100,7 +104,9 @@ test('submit a dry-run, watch it progress live, then see it in history', async (
   // "Last completed phase" cell shows "—" rather than being re-queried; the
   // mid-run assertion above already proved that data is real and genuinely
   // surfaced through this same view while the row was still Running.
-  await page.getByRole('link', { name: 'History' }).click()
+  // "Dashboard" is the sidebar's name for the run-history view since the
+  // issue #272 shell redesign (the /history route is unchanged).
+  await page.getByRole('link', { name: 'Dashboard' }).click()
   await expect(page).toHaveURL(/\/history\/?$/)
 
   const finishedRow = page.locator('li').filter({ hasText: runId }).first()

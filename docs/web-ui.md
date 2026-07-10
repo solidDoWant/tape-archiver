@@ -29,26 +29,50 @@ CLI cannot also do, and vice versa.
 
 Open the URL your deployment's Ingress (or `Service`, for a port-forward/internal-only
 setup) exposes for the `tape-archiver-web` chart release — see
-[`docs/web-helm.md`](web-helm.md) for how that's configured. Every page and every
-`/api/*` route requires a signed-in session; visiting any URL while unauthenticated
-redirects to the configured OIDC identity provider's login page, then back into the UI
-once you sign in. There is no separate "public" view.
+[`docs/web-helm.md`](web-helm.md) for how that's configured. All data requires a
+signed-in session; visiting any URL while unauthenticated shows the UI's own login page,
+whose single **Continue with SSO** control hands you to the configured OIDC identity
+provider to sign in, then returns you to wherever you were headed. There is no separate
+"public" view, and no username/password form of its own — credentials are always entered
+at the identity provider, never in this UI.
 
-The app shell — the header with the `tape-archiver` title, **Submit** / **History**
-navigation, and a light/dark toggle — is present on every page and reachable from
-anywhere in the UI:
+The login page also reports sign-in problems rather than leaving you on a provider error
+page: **Access denied** when your account authenticated but is not authorized for this
+archive, and **Session expired** when a login attempt went stale or your previous
+session timed out — both with a control to retry (or try a different account).
+
+The app shell — a persistent left sidebar with the `tape-archiver` brand,
+**Dashboard** / **Start new run** / **Tapes** navigation, a **Light/Dark/Auto** theme
+control, your signed-in name/email, and a build-version footer — is present on every
+page and reachable from anywhere in the UI. While a run is in progress, **Start new
+run** is disabled (with an explanation on hover) since backup runs are a singleton
+(SPEC §4.2) — finish or abort the current run first. **Tapes** is a placeholder page
+for now — its live library view lands later in the redesign (epic #271). The footer
+shows the deployed
+build's version and, when the deployment sets `WEB_FOOTER_HOST`
+([configuration.md](configuration.md#web-ui-environment-variables-cmdweb)), a
+deploy-specific label after it; with the variable unset the label is simply absent.
+
+The theme control switches immediately and remembers your choice (stored in the
+browser, per-browser — not an account-wide setting) across visits; **Auto** (the
+default) follows your OS/browser's light/dark preference, including live changes
+mid-session.
+
+Navigating to a URL that doesn't exist (a mistyped path, a stale bookmark) shows a
+404 page inside the same shell, with a way back to the dashboard — never a blank page.
+
+The screenshots below predate the issue #272 shell redesign (they show the old
+header-based shell); they will be refreshed as the redesigned pages land
+(epic #271's documentation pass):
 
 | Light | Dark |
 | --- | --- |
 | ![Submit form, light mode](images/web-ui-submit-light.png) | ![Submit form, dark mode](images/web-ui-submit-dark.png) |
 
-The toggle switches between light and dark immediately and remembers your choice
-(stored in the browser, per-browser — not an account-wide setting) across visits; until
-you touch it, the UI follows your OS/browser's light/dark preference automatically.
-
 ## Submitting a run
 
-The **Submit** page (the UI's home page, `/`) takes a run-config JSON document — the
+The submit page (the UI's home page, `/` — the sidebar's **Start new run** item) takes
+a run-config JSON document — the
 same document `tapectl run --config <file>` takes (see
 [`docs/configuration.md`](configuration.md) for the full config reference). Either paste
 it directly into the text area, or use the file picker to load it from disk (the picker
@@ -124,7 +148,8 @@ shortly in that case.
 
 ## Browsing run history
 
-The **History** page (`/history`) lists every execution of the singleton backup
+The run-history page (`/history` — the sidebar's **Dashboard** item, pending the full
+dashboard redesign landing) lists every execution of the singleton backup
 workflow within Temporal's visibility retention window — the same executions
 `temporal workflow list` (or the Temporal Web UI) would show against workflow ID
 `backup`, presented as a list with each run's status, start/close time, and (for the
