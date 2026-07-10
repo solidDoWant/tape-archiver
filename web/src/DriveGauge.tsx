@@ -108,7 +108,11 @@ function DriveGauge({
         ) : status === 'loading' ? (
           <p className="mt-0.5 text-text-faint">Loading drive metrics…</p>
         ) : !hasReading ? (
-          <p className="mt-0.5 text-text-faint">Not writing yet — no reading</p>
+          // "No measurement yet" — deliberately NOT "not writing":
+          // hasData:false also covers a tape currently mid-write, since
+          // write health is measured once, after the tape's write window
+          // closes (workflows/backup/writehealth.go), not continuously.
+          <p className="mt-0.5 text-text-faint">No measurement yet — write health is measured after each tape completes</p>
         ) : (
           <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono">
             <span className="text-[13px] font-semibold text-text">{throughputMBps!.toFixed(0)} MB/s</span>

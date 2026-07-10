@@ -156,17 +156,22 @@ function RunDetail({ runId }: RunDetailProps) {
       ) : null}
 
       {detail ? (
-        // Live VictoriaMetrics-backed drive metrics (issue #275): shown
-        // whenever the run is being observed, not gated to the Write phase
-        // specifically — DriveMetricsPanel itself renders a graceful
-        // "no-data" placeholder outside the Write phase (the underlying
-        // per-tape metrics are simply empty then), so no phase-aware
-        // wiring is needed here. This is a minimal drop-in; issue #277's
-        // redesigned run page re-homes it into the fuller Write-phase
-        // layout (DESIGN_ANALYSIS.md §3).
+        // Drive write-health (issue #275): while the run is in progress this
+        // polls the live VictoriaMetrics-backed endpoints; once the run is
+        // terminal (the SSE stream's "done" event — exactly the same signal
+        // that renders "Run finished." below) it switches to the final
+        // per-tape measurements from the run's own history and never
+        // touches VictoriaMetrics again — a closed run must not poll
+        // forever, and a barcode reused by a later run must never have that
+        // later run's samples attributed to this page (see
+        // DriveMetricsPanelProps.terminal). Not gated to the Write phase —
+        // the panel renders a graceful "no measurement yet" placeholder
+        // outside it. This is a minimal drop-in; issue #277's redesigned
+        // run page re-homes it into the fuller Write-phase layout
+        // (DESIGN_ANALYSIS.md §3).
         <div>
-          <h3 className="mb-1.5 text-sm font-medium text-text-dim">Drive metrics</h3>
-          <DriveMetricsPanel runId={runId} />
+          <h3 className="mb-1.5 text-sm font-medium text-text-dim">Drive write-health</h3>
+          <DriveMetricsPanel runId={runId} terminal={state === 'terminal'} />
         </div>
       ) : null}
 

@@ -703,7 +703,14 @@ failure actually reaching or parsing a VictoriaMetrics response — a misbehavin
 unreachable metrics backend never makes the rest of the run detail API look broken.
 The frontend polls these endpoints every 5 seconds (a plain interval, not
 Server-Sent Events — this data is optional best-effort observability that may be
-entirely unconfigured, unlike run status/phase) rather than opening a second stream.
+entirely unconfigured, unlike run status/phase) rather than opening a second stream —
+but only while the run is still in progress. Once a run reaches a terminal status, the
+UI stops querying VictoriaMetrics for it entirely and instead renders the final
+per-tape write-health from the run's own history (`GET /api/runs/{runID}/tapes`'s
+`writeHealth`, labeled as final measurements): a closed run must not poll forever, and
+VictoriaMetrics samples are only attributable to a run by which barcode is loaded
+*right now* — a barcode reused by a later run would otherwise have that later run's
+readings shown on an old run's page.
 
 `GET /api/runs/{runID}/metrics/drives` returns `{"runId": "...", "drives": [...]}` —
 one entry per tape barcode the run has loaded (same set `GET /api/runs/{runID}/tapes`

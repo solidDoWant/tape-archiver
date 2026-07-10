@@ -15,10 +15,14 @@ describe('DriveGauge', () => {
     expect(screen.getByText(/metrics unavailable/i)).toBeInTheDocument()
   })
 
-  it('shows a no-data placeholder for a drive with no reading yet', () => {
+  it('shows an honest no-measurement placeholder for a drive with no reading yet', () => {
     render(<DriveGauge driveIndex={1} barcode="TA0001L6" status="no-data" />)
 
-    expect(screen.getByText(/not writing yet/i)).toBeInTheDocument()
+    // The copy must not claim the drive is "not writing" — hasData:false
+    // also covers a tape currently mid-write (write health is measured
+    // after each tape completes, not continuously).
+    expect(screen.getByText(/no measurement yet — write health is measured after each tape completes/i)).toBeInTheDocument()
+    expect(screen.queryByText(/not writing/i)).not.toBeInTheDocument()
     expect(screen.getByText(/TA0001L6/)).toBeInTheDocument()
   })
 
