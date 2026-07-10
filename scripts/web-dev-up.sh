@@ -237,12 +237,16 @@ fi
 # docker-compose.yml's default project, so neither side's
 # `down --remove-orphans` removes the other's containers; see
 # docker-compose.web-dev.yml's header comment.
+#
+# --wait-timeout: with restart: on-failure + healthchecks, a container that
+# can never become healthy (e.g. a bad shipper config) would otherwise hang
+# this --wait indefinitely; bounding it turns that into a visible failure.
 # ---------------------------------------------------------------------------
 
 echo "==> starting VictoriaLogs/VictoriaMetrics dev-observability stack..."
 WEB_DEV_LOG_DIR="$LOG_DIR" docker compose \
   -p "$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')-obs" \
-  -f "$PROJECT_DIR/docker-compose.web-dev.yml" up -d --wait
+  -f "$PROJECT_DIR/docker-compose.web-dev.yml" up -d --wait --wait-timeout 120
 
 # ---------------------------------------------------------------------------
 # Recovery binaries (real static age/par2/zstd/tar — the data worker's Report

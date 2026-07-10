@@ -26,9 +26,11 @@
 # wired in by workflow.GetLogger/activity.GetLogger) survives into
 # VictoriaLogs unflattened and matchable by LogsQL. A line that isn't valid
 # JSON (a stray Temporal SDK banner, a panic, etc.) is deliberately NOT
-# dropped — it still ships with Vector's own `message`/`host`/`timestamp`
-# fields intact, so nothing worth debugging silently vanishes; it just won't
-# have parsed fields to filter on.
+# dropped — it still ships with Vector's own `message` and `timestamp`
+# fields intact (`host`/`file`/`source_type` are stripped unconditionally,
+# JSON or not — constant noise in a single-host dev stack), so nothing worth
+# debugging silently vanishes; it just won't have parsed fields to filter
+# on.
 #
 # The `victorialogs` sink POSTs newline-delimited JSON to VictoriaLogs'
 # `/insert/jsonline` endpoint (see

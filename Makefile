@@ -449,16 +449,22 @@ WEB_DEV_OBS_COMPOSE = WEB_DEV_LOG_DIR=$(WEB_DEV_STATE_DIR)/logs docker compose \
 	-f $(PROJECT_DIR)/docker-compose.web-dev.yml
 
 .PHONY: web-dev-observability-up
-# WEB_DEV_LOG_DIR must already exist (and be writable by the invoking user,
-# not just root) before this runs — the vector service bind-mounts it — so
-# this is deliberately NOT a `web-dev` Makefile prerequisite the way
-# temporal-up/mhvtl-up are (which have no such ordering constraint):
-# web-dev-up.sh calls this compose stack directly, after its own `mkdir -p
-# "$LOG_DIR"`, the same reason zpool-up.sh is invoked directly rather than
-# via a `zpool-up` prerequisite. Still exposed as its own target for manual
-# use/discoverability and as the counterpart web-dev-down invokes below.
+# The mkdir matters: the vector service bind-mounts the logs directory, and
+# if it doesn't exist before `compose up`, Docker auto-creates it as
+# root:root — which then breaks web-dev-up.sh's later unprivileged daemons
+# (webdevoidc in particular) trying to create their log files in it. The
+# mkdir runs as the invoking user, matching web-dev-up.sh's own `mkdir -p
+# "$LOG_DIR"`, so the directory ends up correctly owned whichever entry
+# point (this target standalone, or web-dev-up.sh's direct compose call)
+# creates it first. This target is still deliberately NOT a `web-dev`
+# Makefile prerequisite: web-dev-up.sh calls the compose stack directly, the
+# same reason zpool-up.sh is invoked directly rather than via a `zpool-up`
+# prerequisite (see web-dev's own comment below). Exposed as its own target
+# for manual use/discoverability and as the counterpart web-dev-down invokes
+# below.
 web-dev-observability-up: ## Start the web-dev-only VictoriaLogs + VictoriaMetrics + log-shipper stack (issue #280; never a dependency of test-integration/test-e2e — see docker-compose.web-dev.yml).
-	$(WEB_DEV_OBS_COMPOSE) up -d --wait
+	mkdir -p $(WEB_DEV_STATE_DIR)/logs
+	$(WEB_DEV_OBS_COMPOSE) up -d --wait --wait-timeout 120
 	@echo "VictoriaLogs is ready: http://localhost:9428  VictoriaMetrics: http://localhost:8428"
 
 .PHONY: web-dev-observability-down
