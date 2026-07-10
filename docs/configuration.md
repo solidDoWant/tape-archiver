@@ -436,6 +436,7 @@ resume/abort actions, gated behind OIDC authentication (`pkg/webauth`) — see
 | `TEMPORAL_ADDRESS` / `TEMPORAL_NAMESPACE` / `TEMPORAL_API_KEY` / `TEMPORAL_TLS` | yes (`TEMPORAL_ADDRESS`) | Same envconfig-driven Temporal client settings documented above for `worker`/`tapectl` (`pkg/temporalclient`) — `cmd/web` connects to the same Temporal frontend to serve `/api/runs` and `/api/runs/{runID}`. |
 | `LOG_LEVEL` | no | Same semantics as the worker's `LOG_LEVEL` above: `debug`, `info`, `warn` (or `warning`), or `error`, case-insensitive, defaulting to `info`. |
 | `MHVTL_CHANGER_DEV` / `MHVTL_DRIVE0_DEV` / `MHVTL_DRIVE1_DEV` | only for dry-run submissions | Same mhvtl device nodes `tapectl run --dry-run` requires (see above). `POST /api/runs` with `"dryRun": true` fails closed with `400` unless all three are set on `cmd/web`'s own environment — a dry-run submitted through the browser never falls back to real hardware. |
+| `VICTORIAMETRICS_URL` | no | Base URL of a VictoriaMetrics instance scraping the workers' `METRICS_ADDR` endpoints (e.g. `http://127.0.0.1:8428`), backing the live drive metrics endpoints — see [Live drive metrics (VictoriaMetrics)](#live-drive-metrics-victoriametrics) above. Unset disables live drive metrics entirely: both endpoints return a stable `503` rather than falling back to any other data source. |
 | `OIDC_ISSUER_URL` | yes | The OIDC identity provider's issuer URL, used for discovery (`GET {OIDC_ISSUER_URL}/.well-known/openid-configuration`). Any standards-compliant provider works (Keycloak, Authentik, Dex, ...) — `cmd/web` contains no IdP-specific code. |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | yes | This app's confidential-client credentials at the provider above. |
 | `OIDC_REDIRECT_URL` | yes | This app's OIDC callback URL, exactly as registered with the provider (e.g. `https://tape-archiver.example.com/auth/callback`) — see [OIDC authentication](#oidc-authentication-cmdweb) below. |
@@ -679,6 +680,55 @@ history is gone (aged out) or unreadable contributes a `{"runId", "error"}` entr
 `runErrors` instead, while every other run's tapes are still listed. Runs older than
 Temporal's retention are absent entirely — their tape contents genuinely cannot be
 recovered without a catalog, which is by design (SPEC §4.2).
+
+### Live drive metrics (VictoriaMetrics)
+
+`GET /api/runs/{runID}/metrics/drives` and `GET
+/api/runs/{runID}/metrics/drives/{barcode}/history` (issue #275) are a thin, read-only
+proxy over VictoriaMetrics for the write-health gauges the data worker already exports
+(`workflows/backup/writehealth.go`'s `tape_archiver_write_throughput_mbps`/
+`repositions`/`tapealert_flags`/`below_floor`, all labeled `barcode`) — no new metric
+instrumentation is added anywhere. `cmd/web` never becomes an open PromQL proxy: every
+query is built server-side from a fixed metric-name allowlist and a barcode the
+requested run's own Temporal history actually loaded, and the sparkline range/step are
+fixed server-side constants — a client can never supply raw PromQL, an arbitrary
+metric, a foreign barcode, or an arbitrary time range. This intentionally covers only
+the current run's live drive view; a historical/long-range metrics explorer is out of
+scope (a Grafana-style tool is the right fit for that, not this API).
+
+VictoriaMetrics is optional observability. `VICTORIAMETRICS_URL` (e.g.
+`http://127.0.0.1:8428`) configures it; both endpoints return `503` with a stable
+`{"error": "..."}` body whenever it is unset, and the same `503` (never `500`) for any
+failure actually reaching or parsing a VictoriaMetrics response — a misbehaving or
+unreachable metrics backend never makes the rest of the run detail API look broken.
+The frontend polls these endpoints every 5 seconds (a plain interval, not
+Server-Sent Events — this data is optional best-effort observability that may be
+entirely unconfigured, unlike run status/phase) rather than opening a second stream —
+but only while the run is still in progress. Once a run reaches a terminal status, the
+UI stops querying VictoriaMetrics for it entirely and instead renders the final
+per-tape write-health from the run's own history (`GET /api/runs/{runID}/tapes`'s
+`writeHealth`, labeled as final measurements): a closed run must not poll forever, and
+VictoriaMetrics samples are only attributable to a run by which barcode is loaded
+*right now* — a barcode reused by a later run would otherwise have that later run's
+readings shown on an old run's page.
+
+`GET /api/runs/{runID}/metrics/drives` returns `{"runId": "...", "drives": [...]}` —
+one entry per tape barcode the run has loaded (same set `GET /api/runs/{runID}/tapes`
+derives), each `{"barcode", "tapeIndex", "copyIndex", "driveIndex", "result",
+"hasData", "throughputMBps", "repositions", "tapeAlertFlagCount", "belowFloor",
+"floorMBps", "floorKnown"}`. `hasData: false` means VictoriaMetrics has no sample for
+this barcode yet (not yet measured — still writing, or the run never reached
+`MeasureWriteHealth` for it), distinguishable from an actual zero/false reading.
+`floorMBps`/`floorKnown` are the tape's speed-matching floor from the run's own history
+(the floor is a static, generation-derived constant, not its own gauge). An empty
+`drives` list (`200`, not an error) means the run has not loaded any tape yet.
+
+`GET /api/runs/{runID}/metrics/drives/{barcode}/history` returns `{"runId": "...",
+"barcode": "...", "metric": "...", "points": [{"time", "value"}, ...]}` — a fixed
+8-point, 90-second-step VictoriaMetrics range query (the design's 8-bar write-rate
+sparkline) for one metric of one tape. `barcode` must be one this run actually loaded
+(`404` otherwise). The optional `metric` query parameter selects among `throughput`
+(the default), `repositions`, `tapealerts`, or `belowfloor` — any other value is `400`.
 
 ### Health endpoints
 

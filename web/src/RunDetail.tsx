@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { formatTimestamp } from './api'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
+import DriveMetricsPanel from './DriveMetricsPanel'
 
 // RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
 // both the "update" and "done" Server-Sent Events GET
@@ -152,6 +153,26 @@ function RunDetail({ runId }: RunDetailProps) {
         // view rather than just showing stale data, matching parseDetail's
         // own defensive stance above).
         <PauseActions runId={runId} pause={detail.currentPause ?? { kind: '' }} />
+      ) : null}
+
+      {detail ? (
+        // Drive write-health (issue #275): while the run is in progress this
+        // polls the live VictoriaMetrics-backed endpoints; once the run is
+        // terminal (the SSE stream's "done" event — exactly the same signal
+        // that renders "Run finished." below) it switches to the final
+        // per-tape measurements from the run's own history and never
+        // touches VictoriaMetrics again — a closed run must not poll
+        // forever, and a barcode reused by a later run must never have that
+        // later run's samples attributed to this page (see
+        // DriveMetricsPanelProps.terminal). Not gated to the Write phase —
+        // the panel renders a graceful "no measurement yet" placeholder
+        // outside it. This is a minimal drop-in; issue #277's redesigned
+        // run page re-homes it into the fuller Write-phase layout
+        // (DESIGN_ANALYSIS.md §3).
+        <div>
+          <h3 className="mb-1.5 text-sm font-medium text-text-dim">Drive write-health</h3>
+          <DriveMetricsPanel runId={runId} terminal={state === 'terminal'} />
+        </div>
       ) : null}
 
       {state === 'terminal' ? (
