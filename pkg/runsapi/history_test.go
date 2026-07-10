@@ -729,8 +729,55 @@ func TestDeriveTapeOutcomes(t *testing.T) {
 	writtenTape := byBarcode["GOODTAPE01"]
 	assert.Equal(t, tapeOutcomeWritten, writtenTape.Result)
 	require.NotNil(t, writtenTape.WriteHealth)
+	assert.True(t, writtenTape.WriteHealth.Measured, "the fixture's write-health was measured")
 	assert.InDelta(t, 140, writtenTape.WriteHealth.ThroughputMBps, 0.001)
 	assert.True(t, writtenTape.WriteHealth.FloorKnown)
+}
+
+// TestDeriveTapeOutcomesUnmeasuredWriteHealth proves a tape whose
+// MeasureWriteHealth activity could not take a measurement (writehealth.go's
+// Measured == false — the workflow records WriteHealth{} and the run still
+// succeeds) is reported with measured=false, distinguishable from a tape
+// measured and found unhealthy.
+func TestDeriveTapeOutcomesUnmeasuredWriteHealth(t *testing.T) {
+	b := newEventBuilder()
+	b.started(t, testConfig)
+
+	load := b.scheduled(t, "Load", nil)
+	b.completed(t, load, []backup.LoadedTape{
+		{Barcode: "UNMEASURED01", TapeIndex: 0, CopyIndex: 0, DriveIndex: 0, SourceSlot: 1},
+	})
+
+	format := b.scheduled(t, "FormatTape", struct{ Barcode string }{"UNMEASURED01"})
+	b.completed(t, format, nil)
+
+	write := b.scheduled(t, "WriteTree", struct{ Barcode string }{"UNMEASURED01"})
+	b.completed(t, write, nil)
+
+	finalize := b.scheduled(t, "FinalizeTape", struct{ Barcode string }{"UNMEASURED01"})
+	b.completed(t, finalize, "/staging/UNMEASURED01/index.xml")
+
+	// The measurement could not be taken: the activity completes with the
+	// zero WriteHealth (Measured false), exactly what measureWriteHealth
+	// (session.go) records when the activity fails or the scrape hangs.
+	health := b.scheduled(t, "MeasureWriteHealth", struct{ Barcode string }{"UNMEASURED01"})
+	b.completed(t, health, backup.WriteHealth{})
+
+	b.runCompleted()
+
+	history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+		return &fakeHistoryIterator{events: b.events}
+	}}, "run-unmeasured")
+	require.NoError(t, err)
+
+	outcomes := deriveTapeOutcomes(history.Activities)
+	require.Len(t, outcomes, 1)
+
+	outcome := outcomes[0]
+	assert.Equal(t, tapeOutcomeWritten, outcome.Result)
+	require.NotNil(t, outcome.WriteHealth)
+	assert.False(t, outcome.WriteHealth.Measured, "an untaken measurement must report measured=false")
+	assert.False(t, outcome.WriteHealth.Healthy, "an unmeasured tape is never certified healthy")
 }
 
 // --- HTTP handler tests ---
@@ -764,6 +811,8 @@ func TestGetRunConfigHandler(t *testing.T) {
 	assert.Equal(t, testConfig.Sources[0].ZFSPath.Name, body.Config.Sources[0].ZFSPath.Name)
 	assert.Equal(t, testConfig.Encryption.Recipients, body.Config.Encryption.Recipients)
 	assert.Equal(t, redactedSecret, body.Config.Encryption.Identity, "the age private identity must never leave the server")
+	assert.Equal(t, redactedSecret, body.Config.Delivery.WebhookURL,
+		"the Discord webhook URL embeds its auth token and must never leave the server")
 }
 
 func TestGetRunTapesHandler(t *testing.T) {
@@ -819,6 +868,53 @@ func TestListTapesHandler(t *testing.T) {
 
 		require.Len(t, body.RunErrors, 1, "the unreconstructable run must degrade, not fail the whole listing")
 		assert.Equal(t, "run-gone", body.RunErrors[0].RunID)
+	})
+
+	t.Run("limit bounds the reconstruction to the newest runs", func(t *testing.T) {
+		older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		newer := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+		var fetched []string
+
+		fake := &fakeTemporalClient{
+			listResponse: &workflowservice.ListWorkflowExecutionsResponse{
+				Executions: []*workflowpb.WorkflowExecutionInfo{
+					// Deliberately listed oldest-first: the limit must apply
+					// to the NEWEST runs, so the endpoint has to sort before
+					// truncating rather than taking the page's head.
+					executionInfo("run-older", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, older, &older),
+					executionInfo("run-newer", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, newer, &newer),
+				},
+			},
+			historyFunc: func(runID string) client.HistoryEventIterator {
+				fetched = append(fetched, runID)
+
+				return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
+			},
+		}
+
+		handler := newMux(newHandler(fake, emptyEnv))
+
+		recorder := doJSON(t, handler, http.MethodGet, "/api/tapes?limit=1", nil)
+		require.Equal(t, http.StatusOK, recorder.Code)
+
+		var body AggregateTapesResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+
+		assert.Equal(t, []string{"run-newer"}, fetched, "only the newest run's history may be fetched under limit=1")
+
+		for _, tapeOutcome := range body.Tapes {
+			assert.Equal(t, "run-newer", tapeOutcome.RunID)
+		}
+	})
+
+	t.Run("an invalid limit is a 400", func(t *testing.T) {
+		handler := newMux(newHandler(&fakeTemporalClient{}, emptyEnv))
+
+		for _, raw := range []string{"0", "-3", "abc"} {
+			recorder := doJSON(t, handler, http.MethodGet, "/api/tapes?limit="+raw, nil)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code, "limit=%s", raw)
+		}
 	})
 }
 

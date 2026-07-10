@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -43,6 +44,13 @@ const (
 // present only when a MeasureWriteHealth result was found for the tape's
 // barcode.
 type WriteHealthInfo struct {
+	// Measured mirrors backup.WriteHealth.Measured: false means the
+	// MeasureWriteHealth activity could not take a measurement at all
+	// (writehealth.go — the run still succeeds), so every other field here is
+	// a zero placeholder, not a measured value. Without this flag a
+	// never-measured tape would be indistinguishable from one measured
+	// unhealthy (Healthy == false either way).
+	Measured            bool     `json:"measured"`
 	ThroughputMBps      float64  `json:"throughputMBps"`
 	FloorMBps           float64  `json:"floorMBps,omitempty"`
 	FloorKnown          bool     `json:"floorKnown"`
@@ -51,15 +59,17 @@ type WriteHealthInfo struct {
 	RepositionsMeasured bool     `json:"repositionsMeasured"`
 	TapeAlertFlags      []string `json:"tapeAlertFlags,omitempty"`
 	// Healthy mirrors backup.WriteHealth.Healthy(): the tape streamed cleanly
-	// (at/above a known floor, zero measured repositions, no active TapeAlert
-	// flags). Carried pre-computed so clients need not reimplement the
-	// verdict.
+	// (measured, at/above a known floor, zero measured repositions, no active
+	// TapeAlert flags). Carried pre-computed so clients need not reimplement
+	// the verdict. Always false when Measured is false — check Measured to
+	// tell "unhealthy" apart from "unmeasured".
 	Healthy bool `json:"healthy"`
 }
 
 // toWriteHealthInfo maps a decoded backup.WriteHealth to its JSON projection.
 func toWriteHealthInfo(health backup.WriteHealth) *WriteHealthInfo {
 	return &WriteHealthInfo{
+		Measured:            health.Measured,
 		ThroughputMBps:      health.ThroughputMBps,
 		FloorMBps:           health.FloorMBps,
 		FloorKnown:          health.FloorKnown,
@@ -137,6 +147,14 @@ type AggregateTapesResponse struct {
 // GetWorkflowHistory RPCs to Temporal all at once.
 const listTapesConcurrency = 8
 
+// defaultListTapesRunLimit is how many of the most recent runs GET /api/tapes
+// reconstructs when the request does not say (the `limit` query parameter).
+// Each run costs a full history fetch + parse, so the endpoint's work is
+// O(runs × history size); bounding it to the newest runs by default keeps the
+// common tapes-page/dashboard request cheap while `?limit=` (capped at
+// listPageSize) lets a client deliberately reach further back.
+const defaultListTapesRunLimit = 50
+
 // getRunTapes implements GET /api/runs/{runID}/tapes.
 func (h *handler) getRunTapes(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
@@ -159,15 +177,26 @@ func (h *handler) getRunTapes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, RunTapesResponse{RunID: runID, Tapes: deriveTapeOutcomes(history.Activities)})
 }
 
-// listTapes implements GET /api/tapes: every tape outcome across every run
-// still in Temporal visibility (issue #273 AC6), driving the Tapes page and
-// the dashboard's library-history summary. Each run's history is fetched
-// independently and degrades on its own failure (RunError) rather than
-// failing the whole response — a listing must never 500 because one old or
-// foreign/stub run's history cannot be reconstructed.
+// listTapes implements GET /api/tapes: tape outcomes across the most recent
+// runs still in Temporal visibility (issue #273 AC6), driving the Tapes page
+// and the dashboard's library-history summary. The `limit` query parameter
+// bounds how many of the newest runs are reconstructed
+// (defaultListTapesRunLimit when absent, capped at listPageSize) since each
+// run costs a full history fetch. Each run's history is fetched independently
+// and degrades on its own failure (RunError, which applies within whatever
+// limit is in effect) rather than failing the whole response — a listing must
+// never 500 because one old or foreign/stub run's history cannot be
+// reconstructed.
 func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
+
+	limit, err := listTapesRunLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+
+		return
+	}
 
 	response, err := h.temporalClient.ListWorkflow(ctx, &workflowservicepb.ListWorkflowExecutionsRequest{
 		Query:    workflowIDQuery(),
@@ -180,6 +209,18 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	executions := response.GetExecutions()
+
+	// Newest runs first, then apply the run limit. Sorting happens here in Go
+	// for the same reason listRuns sorts client-side (runsapi.go): standard
+	// SQL-backed Temporal visibility rejects ORDER BY, so this is the only
+	// portable ordering.
+	sort.Slice(executions, func(i, j int) bool {
+		return executions[i].GetStartTime().AsTime().After(executions[j].GetStartTime().AsTime())
+	})
+
+	if len(executions) > limit {
+		executions = executions[:limit]
+	}
 
 	var (
 		mutex sync.Mutex
@@ -241,6 +282,27 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(errs, func(i, j int) bool { return errs[i].RunID < errs[j].RunID })
 
 	writeJSON(w, http.StatusOK, AggregateTapesResponse{Tapes: tapes, RunErrors: errs})
+}
+
+// listTapesRunLimit parses GET /api/tapes' `limit` query parameter: how many
+// of the most recent runs to reconstruct. Absent/empty means
+// defaultListTapesRunLimit; anything else must be a positive integer, capped
+// at listPageSize (the most runs one visibility page returns anyway).
+func listTapesRunLimit(raw string) (int, error) {
+	if raw == "" {
+		return defaultListTapesRunLimit, nil
+	}
+
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 {
+		return 0, fmt.Errorf("limit must be a positive integer, got %q", raw)
+	}
+
+	if limit > listPageSize {
+		return listPageSize, nil
+	}
+
+	return limit, nil
 }
 
 // deriveTapeOutcomes reconstructs every physical tape this run loaded and its

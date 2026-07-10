@@ -69,24 +69,35 @@ func (h *handler) getRunConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, RunConfigResponse{RunID: runID, Config: cfg})
 }
 
-// redactConfigSecrets strips the age private decryption identity before a
-// submitted config leaves the server. internal/config.Config's own doc
-// comment on Encryption.Identity is explicit about what it is: the private
-// key that decrypts every archive the run protects, escrowed into the report
-// and recovery ISO specifically so a human holding *those* physical/printed
-// artifacts can recover data — not something a browser session should be able
-// to read back over a GET. This endpoint exists to reproduce the config for
+// redactConfigSecrets strips credential-bearing fields before a submitted
+// config leaves the server. This endpoint exists to reproduce the config for
 // *display* (Sources list, tape-capacity/redundancy/delivery summaries,
-// DESIGN_ANALYSIS.md §5's Tapes-page CONTENTS column), none of which needs
-// the private key. Recipients (public keys) are left untouched — they carry
-// no such risk and are useful to display as-is.
+// DESIGN_ANALYSIS.md §5's Tapes-page CONTENTS column), none of which needs a
+// credential. Two fields qualify — the result of a deliberate sweep of every
+// field internal/config.Config carries (sources/labels/k8s refs, device
+// paths, slots, capacities, timeouts, percentages, and OpticalBurn's
+// drives/copies/flags are all non-secret operational values):
+//
+//   - Encryption.Identity: the age *private* key that decrypts every archive
+//     the run protects, escrowed into the report and recovery ISO
+//     specifically so a human holding *those* physical/printed artifacts can
+//     recover data (SPEC §7) — not something a browser session should read
+//     back over a GET. Encryption.Recipients (public keys) are left
+//     untouched: no such risk, and useful to display as-is.
+//   - Delivery.WebhookURL: a Discord webhook URL embeds its auth token in
+//     the path — the URL alone lets anyone post to the channel — so it is a
+//     credential, not an address.
 //
 // This is a deliberate scope narrowing of AC4 ("the exact run configuration
 // originally submitted... is returned"), documented as a decision on issue
 // #273 rather than silently applied: every field is returned unmodified
-// except this one secret.
+// except these two secrets.
 func redactConfigSecrets(cfg *config.Config) {
 	if cfg.Encryption.Identity != "" {
 		cfg.Encryption.Identity = redactedSecret
+	}
+
+	if cfg.Delivery.WebhookURL != "" {
+		cfg.Delivery.WebhookURL = redactedSecret
 	}
 }
