@@ -1,7 +1,7 @@
 import { useEffect, type ReactNode } from 'react'
 import SubmitRunForm from './SubmitRunForm'
 import RunDetail from './RunDetail'
-import RunHistory from './RunHistory'
+import Dashboard from './Dashboard'
 import TapesPage from './TapesPage'
 import NotFoundPage from './NotFoundPage'
 import LoginPage from './LoginPage'
@@ -47,6 +47,18 @@ function AuthGate() {
   const [preference, , setPreference] = useTheme()
 
   useEffect(() => {
+    if (route.name === 'history') {
+      // "/history" is folded into the dashboard (issue #276's acceptance
+      // criterion: navigating here must land the operator on "/", not just
+      // render the same content under a second URL) — redirect immediately,
+      // before even considering auth state, so an unauthenticated deep link
+      // to "/history" still ends up bounced to "/login?redirect=%2F" rather
+      // than a redirect that references a URL the app no longer serves.
+      navigate('/')
+
+      return
+    }
+
     if (route.name === 'login') {
       if (identityState.status === 'authenticated') {
         // Already signed in (e.g. a bookmarked /login, or landing back here
@@ -91,9 +103,13 @@ function AuthGate() {
 
 function pageTitle(route: Route): string {
   switch (route.name) {
+    case 'dashboard':
+      return 'Dashboard'
     case 'submit':
       return 'Start new run'
     case 'history':
+      // Transient: AuthGate's effect redirects this route to "dashboard"
+      // before the next render, so this title is never actually shown.
       return 'Dashboard'
     case 'run':
       return `Run ${route.runId}`
@@ -150,6 +166,8 @@ function CenteredView({ children }: { children: ReactNode }) {
 
 function renderRoute(route: Route, navigate: (path: string) => void) {
   switch (route.name) {
+    case 'dashboard':
+      return <Dashboard onStartRun={() => navigate('/submit')} />
     case 'submit':
       return (
         <CenteredView>
@@ -157,11 +175,9 @@ function renderRoute(route: Route, navigate: (path: string) => void) {
         </CenteredView>
       )
     case 'history':
-      return (
-        <CenteredView>
-          <RunHistory />
-        </CenteredView>
-      )
+      // Transient: AuthGate's effect redirects this route to "/" before the
+      // next render (see route.ts's doc comment on the "history" variant).
+      return null
     case 'run':
       // key={route.runId}: forces a fresh RunDetail mount (and thus a fresh
       // EventSource + reset display state) whenever the viewed run changes,

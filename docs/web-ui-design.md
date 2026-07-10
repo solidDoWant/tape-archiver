@@ -203,3 +203,41 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
 - 2026-07-10 (#278): shipped without new screenshots — no live `make web-dev`
   environment was exercised for this change; the epic's consolidated screenshot pass
   happens in issue #281 alongside the other new-page issues.
+- 2026-07-10 (#276): dashboard lands at `/` (`Dashboard.tsx`), replacing the interim
+  #272 nav mapping above — sidebar "Dashboard" now routes to `/`, "Start new run"
+  moved to `/submit` (freeing up `/`; the submit form itself is unchanged — a richer
+  dedicated flow is a separate, later issue). `/history` now redirects (client-side,
+  `AuthGate`'s existing route-change effect, `pushState`) to `/` rather than rendering
+  under two URLs — `RunHistory.tsx` is deleted, fully superseded by the dashboard's
+  embedded, paginated (8/page) `RunsTable.tsx`.
+- 2026-07-10 (#276): the current-run card's live status/phase/pause reuses the same
+  SSE subscription `RunDetail.tsx`'s run page already had, factored out to a shared
+  `useRunEvents` hook (`runEvents.ts`) rather than duplicated — both call sites need
+  identical semantics (connecting/live/terminal/error, "don't reset display state on
+  reconnect"). `RunSummary`/`statusBadgeClass` similarly moved from the now-deleted
+  `RunHistory.tsx` to the shared `api.ts`.
+- 2026-07-10 (#276): the current-run card's progress bar is derived from the position
+  of the live `lastCompletedPhase` in the known, fixed 11-phase pipeline order
+  (`workflows/backup`'s `Phase*` constants) — not a second per-tick fetch of the fuller
+  `GET /api/runs/{runID}/phases` timeline, and not a fabricated percentage. `GET
+  /api/runs` itself is fetched once per dashboard mount (same one-shot, not-live
+  pattern as the sidebar's `useActiveRun` — a run that starts while the dashboard is
+  already open is not picked up without a reload, an accepted minimal-scope gap
+  matching existing precedent); the currently active run's own status/phase/pause stay
+  live via the SSE subscription above once known at mount.
+- 2026-07-10 (#276): the library card never implies live drive/slot occupancy (no SCSI
+  element-status source exists — epic #271 non-goal) — it always shows an explicit
+  "not available" disclosure for that. Distinct from and in addition to that
+  disclosure, it also shows a small history-derived summary (tape outcome counts) from
+  `GET /api/tapes`, clearly labeled as derived from run history, never as live state.
+  This reconciles issue #276's AC7 ("show an unavailable state") with the task brief's
+  note describing a "derived/stale" summary card — the card does both: an
+  explicit unavailable state for the live-occupancy concept the design showed, plus an
+  honestly-labeled historical summary using data the backend already serves.
+- 2026-07-10 (#276): the hardware/environment card sources its device
+  paths/webhook/recipients from `GET /api/runs/{runID}/config` for the active run (or,
+  once idle, the most recently submitted one) — never hardcoded, per
+  `DESIGN_ANALYSIS.md` §4. A value unset in that config has no row at all (never a
+  blank or design-sample placeholder row); no run ever submitted (or a config fetch
+  failure, e.g. history aged out of retention) shows an explicit "not reported" state
+  instead of the card silently rendering empty.

@@ -32,6 +32,6 @@ describe('NotFoundPage', () => {
     )
 
     fireEvent.click(screen.getByRole('link', { name: /back to dashboard/i }))
-    expect(window.location.pathname).toBe('/history')
+    expect(window.location.pathname).toBe('/')
   })
 })

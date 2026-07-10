@@ -14,9 +14,14 @@ import { createContext, useContext } from 'react'
 // deep link, or a hard reload while unauthenticated, both now served the
 // SPA rather than an unstyled server redirect — see pkg/webauth's package
 // doc comment) and via AuthGate's own client-side redirect when an API call
-// reports no session.
+// reports no session. "history" is likewise never rendered directly (issue
+// #276): App.tsx redirects it to "dashboard" the moment it is seen, so a
+// bookmarked/linked "/history" URL still lands the operator on "/" per that
+// issue's acceptance criterion, rather than requiring every inbound link to
+// be updated at once.
 export type Route =
   | { name: 'login' }
+  | { name: 'dashboard' }
   | { name: 'submit' }
   | { name: 'history' }
   | { name: 'run'; runId: string }
@@ -33,6 +38,13 @@ export function parseRoute(rawPath: string): Route {
   const pathname = rawPath.split(/[?#]/)[0] || '/'
 
   if (pathname === '/') {
+    return { name: 'dashboard' }
+  }
+
+  // The submit form used to live at "/" (issue #272); it moved to "/submit"
+  // so "/" could become the dashboard (issue #276) without losing "Start new
+  // run" as a directly linkable/bookmarkable URL.
+  if (pathname === '/submit' || pathname === '/submit/') {
     return { name: 'submit' }
   }
 

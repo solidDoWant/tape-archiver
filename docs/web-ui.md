@@ -44,11 +44,11 @@ session timed out — both with a control to retry (or try a different account).
 The app shell — a persistent left sidebar with the `tape-archiver` brand,
 **Dashboard** / **Start new run** / **Tapes** navigation, a **Light/Dark/Auto** theme
 control, your signed-in name/email, and a build-version footer — is present on every
-page and reachable from anywhere in the UI. While a run is in progress, **Start new
-run** is disabled (with an explanation on hover) since backup runs are a singleton
-(SPEC §4.2) — finish or abort the current run first. **Tapes** is a placeholder page
-for now — its live library view lands later in the redesign (epic #271). The footer
-shows the deployed
+page and reachable from anywhere in the UI. **Dashboard** (`/`) is the UI's home page —
+see [Dashboard](#dashboard) below. While a run is in progress, **Start new run** is
+disabled (with an explanation on hover) since backup runs are a singleton (SPEC §4.2) —
+finish or abort the current run first. **Tapes** (`/tapes`) is the history-derived tape
+listing — see [Browsing tapes](#browsing-tapes) below. The footer shows the deployed
 build's version and, when the deployment sets `WEB_FOOTER_HOST`
 ([configuration.md](configuration.md#web-ui-environment-variables-cmdweb)), a
 deploy-specific label after it; with the variable unset the label is simply absent.
@@ -63,15 +63,65 @@ Navigating to a URL that doesn't exist (a mistyped path, a stale bookmark) shows
 
 The screenshots below predate the issue #272 shell redesign (they show the old
 header-based shell); they will be refreshed as the redesigned pages land
-(epic #271's documentation pass):
+(epic #271's documentation pass) — the [Dashboard](#dashboard) screenshots specifically
+are refreshed by issue #281, once every redesigned page has landed:
 
 | Light | Dark |
 | --- | --- |
 | ![Submit form, light mode](images/web-ui-submit-light.png) | ![Submit form, dark mode](images/web-ui-submit-dark.png) |
 
+## Dashboard
+
+The dashboard (`/` — the sidebar's **Dashboard** item, and the UI's home page) is the
+first thing you see after signing in: a **current run** card, the run history table,
+a **library** summary, and a **hardware & environment** card. `/history` — the old
+standalone history page — now redirects here; run history lives only as the table
+embedded in this page.
+
+The current-run card is one of three mutually exclusive states:
+
+- **Active** — a run is in progress: its status, last completed phase, and pipeline
+  progress, updating live (the same server-sent event stream [Monitoring a run
+  live](#monitoring-a-run-live) describes), with an **Open run →** link into its full
+  detail page.
+- **Paused** — the in-progress run is waiting on an operator action: the same narrative
+  and **Resume**/**Abort** controls described in [Acting on an operator-in-the-loop
+  pause](#acting-on-an-operator-in-the-loop-pause), surfaced right on the dashboard so
+  you don't have to open the run to see it needs you.
+- **Idle** — no run is currently active: a summary of the most recently completed run
+  (or, before any run has ever been submitted, a first-run empty state), with a
+  **Start a run →** link.
+
+Below it, the **runs** table lists every execution of the singleton backup workflow
+within Temporal's visibility retention window — the same executions `temporal workflow
+list` (or the Temporal Web UI) would show against workflow ID `backup`, and the same
+run/status/timing history `/history` used to show standalone — eight at a time, with
+**Prev**/**Next** pagination. `tapectl status` only reports the *current* run (SPEC
+§4.2's singleton model) and has no history equivalent — this table is the only place
+status/timing for *past* runs is surfaced without going to Temporal directly. Click a
+run's ID to open its [detail page](#monitoring-a-run-live). A closed run's "last
+completed phase" column reads "—": only a live workflow query can answer that, and a
+closed run has no worker left polling it — its final status and timing tell you how it
+ended; a run's PDF report (delivered to Discord on completion, see
+[`docs/report.md`](report.md)) has the full phase-by-phase detail if you need it.
+
+The **library** card is explicitly *not* a live view of the changer/drives — no live
+SCSI element-status source exists yet (epic #271 descopes it deliberately) — and says so.
+What it shows instead is a small summary (tapes written/failed/in-progress) derived from
+recent run history (the same `GET /api/tapes` endpoint behind the [Tapes
+page](#browsing-tapes)), clearly labeled as history-derived rather than the library's
+current physical state.
+
+The **hardware & environment** card shows the changer/drive/burner device paths, the
+delivery webhook (configured or not — the value itself is never shown, since a Discord
+webhook URL is a credential), and the encryption recipient(s), all read from the
+current (or, once idle, most recently submitted) run's own configuration — never
+hardcoded. A value that isn't set in that config simply has no row, rather than a blank
+or placeholder one.
+
 ## Submitting a run
 
-The submit page (the UI's home page, `/` — the sidebar's **Start new run** item) takes
+The submit page (`/submit` — the sidebar's **Start new run** item) takes
 a run-config JSON document — the
 same document `tapectl run --config <file>` takes (see
 [`docs/configuration.md`](configuration.md) for the full config reference). Either paste
@@ -111,7 +161,7 @@ terminated, or canceled) the page shows a "run finished" notice and stops pollin
 is nothing further to watch.
 
 Reach a run's detail page either via the **View run** link right after submitting, or by
-clicking through from the [history list](#browsing-run-history).
+clicking through from the [dashboard's runs table](#dashboard).
 
 ## Acting on an operator-in-the-loop pause
 
@@ -145,32 +195,6 @@ If the pause status itself can't be determined right now (e.g. no worker is curr
 polling the workflow), the page shows a clear "pause status unavailable" warning rather
 than silently looking like a healthy, unpaused run — check `tapectl status` or retry
 shortly in that case.
-
-## Browsing run history
-
-The run-history page (`/history` — the sidebar's **Dashboard** item, pending the full
-dashboard redesign landing) lists every execution of the singleton backup
-workflow within Temporal's visibility retention window — the same executions
-`temporal workflow list` (or the Temporal Web UI) would show against workflow ID
-`backup`, presented as a list with each run's status, start/close time, and (for the
-currently running entry, if any) its last completed phase. `tapectl status` only reports
-the *current* run (SPEC §4.2's singleton model) and has no history equivalent — this
-page is the only place status/timing for *past* runs is surfaced without going to
-Temporal directly:
-
-| Light | Dark |
-| --- | --- |
-| ![Run history list, light mode](images/web-ui-history-light.png) | ![Run history list, dark mode](images/web-ui-history-dark.png) |
-
-Click a run's ID to open its [detail page](#monitoring-a-run-live). A closed run's "last
-completed phase" is not shown here (only a live workflow query can answer that, and a
-closed run has no worker left polling it) — its final status and timing tell you how it
-ended; a run's PDF report (delivered to Discord on completion, see
-[`docs/report.md`](report.md)) has the full phase-by-phase detail if you need it.
-
-History has no pagination and no filtering — it lists everything Temporal's visibility
-still retains, newest first. Given backup runs are singleton and serial (SPEC §4.2),
-this stays well within a single page for any realistic retention window.
 
 ## Browsing tapes
 
@@ -212,8 +236,10 @@ a complete local stand-in with a couple of clicks: dev Temporal, `mhvtl`, and an
 ZFS test pool (reusing the existing `temporal-up`/`mhvtl-up`/`zpool-up` targets and
 scripts unchanged), a local VictoriaLogs + VictoriaMetrics stack fed by the dev workers'
 own logs/metrics, a local OIDC provider, real control and data workers, and `cmd/web`
-itself — with a few sample dry-run backups submitted automatically so History has
-something in it right away.
+itself — with a few sample dry-run backups submitted automatically so the
+[dashboard](#dashboard)'s runs table has something in it right away (the startup banner
+and `cmd/webdevseed`'s own comments still say "History" — its previous, now-folded-in
+name; not updated here, out of scope for this change).
 
 ```console
 $ make web-dev
@@ -254,8 +280,8 @@ $ make web-dev
 Open the printed URL. Since backup runs are a Temporal singleton (SPEC §4.2), the 2-3
 sample dry-runs seed sequentially in the background rather than blocking startup — each
 is a real run against `mhvtl` and the ZFS test pool (staging, tar, age encryption, PAR2,
-LTFS write, eject, report), so History fills in progressively over the next few minutes
-rather than all at once.
+LTFS write, eject, report), so the dashboard's runs table fills in progressively over
+the next few minutes rather than all at once.
 
 Interrupting `make web-dev` (Ctrl+C, which sends `SIGINT` to the whole foreground
 process group, or `SIGTERM` sent the same way — e.g. by a supervisor) tears the entire

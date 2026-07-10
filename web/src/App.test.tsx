@@ -42,6 +42,10 @@ function stubApi(overrides: Record<string, { status: number; body: unknown }> = 
     '/api/me': { status: 200, body: testIdentity },
     '/api/build-info': { status: 200, body: { version: 'v-test' } },
     '/api/runs': { status: 200, body: { runs: [] } },
+    // The dashboard (root path, issue #276) always fetches its library card
+    // from GET /api/tapes regardless of which test/route is under test;
+    // stubbed here so most tests don't need to care about it.
+    '/api/tapes': { status: 200, body: { tapes: [] } },
     ...overrides,
   }
 
@@ -124,7 +128,7 @@ async function renderAuthenticated(overrides: Record<string, { status: number; b
 }
 
 describe('App shell (authenticated)', () => {
-  it('renders the sidebar nav items, the operator identity, and the submit form at the root path', async () => {
+  it('renders the sidebar nav items, the operator identity, and the dashboard at the root path', async () => {
     await renderAuthenticated()
 
     expect(screen.getByRole('link', { name: /dashboard/i })).toBeInTheDocument()
@@ -135,7 +139,20 @@ describe('App shell (authenticated)', () => {
     expect(screen.getByText('Test Operator')).toBeInTheDocument()
     expect(screen.getByText('operator@example.com')).toBeInTheDocument()
 
-    // Root path renders the existing submit form inside the new shell.
+    // Root path renders the new dashboard (issue #276) inside the shell —
+    // Dashboard.test.tsx covers its states in detail; this just proves App
+    // wires the route to it.
+    await waitFor(() => {
+      expect(screen.getByText('No runs yet')).toBeInTheDocument()
+    })
+  })
+
+  it('renders the submit form at "/submit"', async () => {
+    await renderAuthenticated()
+
+    fireEvent.click(screen.getByRole('link', { name: /start new run/i }))
+
+    expect(window.location.pathname).toBe('/submit')
     expect(screen.getByRole('form', { name: /submit backup run/i })).toBeInTheDocument()
   })
 
@@ -196,7 +213,9 @@ describe('App shell (authenticated)', () => {
     expect(disabledItem).toHaveAttribute('aria-describedby', tooltip.id)
   })
 
-  it('navigates to the run history ("Dashboard") view via the sidebar', async () => {
+  it('navigates back to the dashboard (with the embedded runs table) via the sidebar', async () => {
+    window.history.pushState({}, '', '/submit')
+
     await renderAuthenticated({
       '/api/runs': {
         status: 200,
@@ -219,7 +238,7 @@ describe('App shell (authenticated)', () => {
     await waitFor(() => {
       expect(screen.getByRole('link', { name: 'run-1' })).toBeInTheDocument()
     })
-    expect(window.location.pathname).toBe('/history')
+    expect(window.location.pathname).toBe('/')
   })
 
   it('renders the run detail view directly when the URL already points at a run', async () => {
@@ -271,7 +290,9 @@ describe('App shell (authenticated)', () => {
     await waitFor(() => {
       expect(window.location.pathname).toBe('/')
     })
-    expect(screen.getByRole('form', { name: /submit backup run/i })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByText('No runs yet')).toBeInTheDocument()
+    })
   })
 
   it('shows the Tapes placeholder page via the sidebar', async () => {
@@ -295,7 +316,20 @@ describe('App shell (authenticated)', () => {
     expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('link', { name: /back to dashboard/i }))
-    expect(window.location.pathname).toBe('/history')
+    expect(window.location.pathname).toBe('/')
+  })
+
+  it('redirects "/history" to "/", the dashboard now embedding what used to be the standalone history page', async () => {
+    window.history.pushState({}, '', '/history')
+
+    await renderAuthenticated()
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/')
+    })
+    await waitFor(() => {
+      expect(screen.getByText('No runs yet')).toBeInTheDocument()
+    })
   })
 
   it('redirects a bookmarked /login back into the app when already signed in', async () => {

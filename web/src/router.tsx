@@ -9,18 +9,19 @@ import {
 import { RouterContext, parseRoute, useNavigate } from './route'
 
 // router.tsx is a small hand-rolled client-side router, not a dependency
-// like react-router-dom. The app only ever has three reachable views ("/",
-// "/runs/{runID}", "/history"), each with at most one path parameter — a
-// general-purpose router is more machinery than that surface needs, and
-// CLAUDE.md's Tech Stack guidance prefers minimal dependencies where
-// reasonable. Together with route.ts (the Route type, parseRoute/runPath,
-// and the useRoute/useNavigate hooks — split into its own file purely to
-// satisfy eslint's react-refresh/only-export-components rule, which wants a
-// component file to export components only) this is the whole router: a
-// context provider that tracks the current path and reacts to the
-// browser's back/forward buttons via the native "popstate" event, and a
-// <Link> that navigates via history.pushState instead of a full page load.
-// See App.tsx's doc comment for how routes map to views.
+// like react-router-dom. The app only ever has a handful of reachable views
+// ("/" the dashboard, "/submit", "/runs/{runID}", "/tapes", "/login"), each
+// with at most one path parameter, plus "/history" as a redirect-only alias
+// of "/" (issue #276) — a general-purpose router is more machinery than that
+// surface needs, and CLAUDE.md's Tech Stack guidance prefers minimal
+// dependencies where reasonable. Together with route.ts (the Route type,
+// parseRoute/runPath, and the useRoute/useNavigate hooks — split into its
+// own file purely to satisfy eslint's react-refresh/only-export-components
+// rule, which wants a component file to export components only) this is the
+// whole router: a context provider that tracks the current path and reacts
+// to the browser's back/forward buttons via the native "popstate" event,
+// and a <Link> that navigates via history.pushState instead of a full page
+// load. See App.tsx's doc comment for how routes map to views.
 
 // RouterProvider owns "which route is current" as state, seeded from
 // window.location on mount, and keeps it in sync in two ways: navigate()

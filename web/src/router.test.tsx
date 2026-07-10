@@ -12,8 +12,13 @@ afterEach(() => {
 })
 
 describe('parseRoute', () => {
-  it('maps "/" to the submit route', () => {
-    expect(parseRoute('/')).toEqual({ name: 'submit' })
+  it('maps "/" to the dashboard route', () => {
+    expect(parseRoute('/')).toEqual({ name: 'dashboard' })
+  })
+
+  it('maps "/submit" (with or without a trailing slash) to the submit route', () => {
+    expect(parseRoute('/submit')).toEqual({ name: 'submit' })
+    expect(parseRoute('/submit/')).toEqual({ name: 'submit' })
   })
 
   it('maps "/history" (with or without a trailing slash) to the history route', () => {
@@ -144,7 +149,7 @@ describe('RouterProvider', () => {
     // Navigation did not happen client-side; the browser's default action
     // (which jsdom does not actually follow) was left alone.
     expect(window.location.pathname).toBe('/')
-    expect(screen.getByTestId('route')).toHaveTextContent('submit')
+    expect(screen.getByTestId('route')).toHaveTextContent('dashboard')
   })
 
   it('useNavigate() pushes a new history entry and updates the route', () => {
@@ -173,7 +178,7 @@ describe('RouterProvider', () => {
     window.history.back()
 
     await waitFor(() => {
-      expect(screen.getByTestId('route')).toHaveTextContent('submit')
+      expect(screen.getByTestId('route')).toHaveTextContent('dashboard')
     })
 
     window.history.forward()

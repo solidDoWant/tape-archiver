@@ -1,29 +1,8 @@
-import { useEffect, useState } from 'react'
 import { formatTimestamp } from './api'
 import LogPanel from './LogPanel'
-import PauseActions, { type CurrentPauseInfo } from './PauseActions'
+import PauseActions from './PauseActions'
 import DriveMetricsPanel from './DriveMetricsPanel'
-
-// RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
-// both the "update" and "done" Server-Sent Events GET
-// /api/events/runs/{runID} emits (pkg/runsapi/events.go).
-export interface RunEventDetail {
-  workflowId: string
-  runId: string
-  status: string
-  startTime: string
-  closeTime?: string
-  lastCompletedPhase: string
-  // currentPause is which operator-in-the-loop pause (if any) is blocking
-  // this run right now (backup.CurrentPauseQuery via pkg/runsapi). The SSE
-  // poll loop behind this stream compares it on every tick alongside status/
-  // phase (pkg/runsapi/events.go), so a pause starting or clearing (e.g.
-  // after PauseActions below sends a resume/abort) shows up here live,
-  // without a manual refresh.
-  currentPause: CurrentPauseInfo
-}
-
-type ConnectionState = 'connecting' | 'live' | 'terminal' | 'error'
+import { useRunEvents } from './runEvents'
 
 export interface RunDetailProps {
   runId: string
@@ -58,58 +37,11 @@ export interface RunDetailProps {
 //
 // This component no longer renders its own "back" link (it used to, to
 // whatever view had navigated here) — App.tsx's persistent shell nav
-// (sub-issue 7) makes Submit and History reachable from every view,
-// including this one, so a special-cased in-page back link is redundant.
+// (sub-issue 7) makes Start new run and Dashboard reachable from every
+// view, including this one, so a special-cased in-page back link is
+// redundant.
 function RunDetail({ runId }: RunDetailProps) {
-  const [state, setState] = useState<ConnectionState>('connecting')
-  const [detail, setDetail] = useState<RunEventDetail | null>(null)
-
-  useEffect(() => {
-    const source = new EventSource(`/api/events/runs/${encodeURIComponent(runId)}`)
-
-    const parseDetail = (event: MessageEvent<string>): RunEventDetail | null => {
-      try {
-        return JSON.parse(event.data) as RunEventDetail
-      } catch {
-        // A malformed event body is not expected from pkg/runsapi's own
-        // encoder, but ignoring it (keeping whatever was last shown) is
-        // safer than crashing the whole view over one bad frame.
-        return null
-      }
-    }
-
-    const handleUpdate = (event: MessageEvent<string>) => {
-      const parsed = parseDetail(event)
-      if (parsed) {
-        setDetail(parsed)
-      }
-      setState('live')
-    }
-
-    const handleDone = (event: MessageEvent<string>) => {
-      const parsed = parseDetail(event)
-      if (parsed) {
-        setDetail(parsed)
-      }
-      setState('terminal')
-      source.close()
-    }
-
-    const handleError = () => {
-      // A dropped connection while already terminal is expected (the server
-      // closed it on purpose after "done") and must not overwrite the
-      // terminal state with an error.
-      setState((current) => (current === 'terminal' ? current : 'error'))
-    }
-
-    source.addEventListener('update', handleUpdate)
-    source.addEventListener('done', handleDone)
-    source.addEventListener('error', handleError)
-
-    return () => {
-      source.close()
-    }
-  }, [runId])
+  const { state, detail } = useRunEvents(runId)
 
   return (
     <div className="flex w-full max-w-2xl flex-col gap-4 text-left">

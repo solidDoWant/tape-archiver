@@ -60,3 +60,70 @@ export function describeNetworkError(error: unknown): string {
 export function formatTimestamp(value?: string): string {
   return value ? new Date(value).toLocaleString() : '—'
 }
+
+// formatDuration renders the elapsed time between two ISO timestamps as a
+// short human string ("2h 14m", "48s"), or an em dash when end is absent
+// (the run this pair describes has not closed yet — see RunsTable.tsx,
+// which shows "Running" instead of calling this for that case).
+export function formatDuration(start: string, end?: string): string {
+  if (!end) {
+    return '—'
+  }
+
+  const millis = new Date(end).getTime() - new Date(start).getTime()
+  if (!Number.isFinite(millis) || millis < 0) {
+    return '—'
+  }
+
+  const totalSeconds = Math.round(millis / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`
+  }
+
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`
+  }
+
+  return `${seconds}s`
+}
+
+// RunSummary mirrors pkg/runsapi.RunSummary's JSON shape, as returned in the
+// GET /api/runs list (pkg/runsapi.RunsResponse) — the shared shape behind
+// the sidebar's active-run check (activeRun.ts), the dashboard's current-run
+// card and runs table (Dashboard.tsx, RunsTable.tsx, CurrentRunCard.tsx).
+export interface RunSummary {
+  workflowId: string
+  runId: string
+  status: string
+  startTime: string
+  closeTime?: string
+}
+
+export interface RunsResponse {
+  runs: RunSummary[]
+}
+
+// statusBadgeClass renders one of Temporal's workflow execution statuses
+// (pkg/runsapi.RunSummary.Status, e.g. "Running"/"Completed"/"Failed") as a
+// themed badge class, shared by every view that shows a run's status
+// (RunsTable, CurrentRunCard).
+export function statusBadgeClass(status: string): string {
+  switch (status) {
+    case 'Running':
+      return 'bg-blue-100 text-blue-900 dark:bg-blue-950 dark:text-blue-100'
+    case 'Completed':
+      return 'bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-100'
+    case 'Failed':
+    case 'Terminated':
+    case 'TimedOut':
+      return 'bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-100'
+    case 'Canceled':
+      return 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-100'
+    default:
+      return 'bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-100'
+  }
+}

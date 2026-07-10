@@ -44,13 +44,13 @@ const themeOptions: { value: ThemePreference; label: string; Icon: typeof IconSu
 // run"/Tapes nav items, the Light/Dark/Auto theme control, the signed-in
 // operator's identity chip, and the build-version footer.
 //
-// Nav item routing note: the design's Dashboard and Tapes pages, and a
-// dedicated "run submission" flow distinct from today's JSON-only form, are
-// separate, later issues (DESIGN_ANALYSIS.md §7's implementation-shape
-// split; this issue's non-goals). Until they land: "Dashboard" routes to
-// the existing run-history page (today's closest functional equivalent —
-// a paginated run list), "Start new run" routes to the existing
-// SubmitRunForm at "/", and "Tapes" routes to a new minimal placeholder
+// Nav item routing note: "Dashboard" now routes to "/" (issue #276's new
+// dashboard page, which embeds the run history table the old "/history"
+// page used to own standalone — see route.ts's doc comment on the
+// "history" route). "Start new run" routes to the existing JSON-only
+// SubmitRunForm, moved from "/" to "/submit" to free up "/" for the
+// dashboard (a dedicated, richer run-submission flow is a separate, later
+// issue — DESIGN_ANALYSIS.md §7). "Tapes" routes to a minimal placeholder
 // (TapesPage.tsx) so the nav item has somewhere real to go.
 function Sidebar({ identity, preference, onPreferenceChange }: SidebarProps) {
   const route = useRoute()
@@ -73,7 +73,7 @@ function Sidebar({ identity, preference, onPreferenceChange }: SidebarProps) {
       </div>
 
       <nav aria-label="Main" className="flex flex-col gap-0.5 px-3 pt-1.5 pb-1">
-        <Link to="/history" className={navItemClasses(route.name === 'history')}>
+        <Link to="/" className={navItemClasses(route.name === 'dashboard')}>
           <IconDashboard className="h-4 w-4 text-text-dim" />
           Dashboard
         </Link>
@@ -96,7 +96,7 @@ function Sidebar({ identity, preference, onPreferenceChange }: SidebarProps) {
             </span>
           </span>
         ) : (
-          <Link to="/" className={navItemClasses(route.name === 'submit')}>
+          <Link to="/submit" className={navItemClasses(route.name === 'submit')}>
             <IconPlus className="h-4 w-4 text-text-dim" />
             Start new run
           </Link>
