@@ -123,9 +123,11 @@ type RunLogsResponse struct {
 //
 // phase, if given, must be one of the 11 pipeline phase names (phaseOrder);
 // omitted, the window is the whole run. since, if given, is an RFC3339
-// timestamp: only lines strictly after it are returned, letting a client
+// timestamp: only lines at or after it (inclusive — see buildLogsQLQuery's
+// doc comment for why not exclusive) are returned, letting a client
 // (LogPanel's poll loop) fetch just the new tail rather than the whole
-// window again.
+// window again; a polling caller must therefore deduplicate lines sharing
+// its since timestamp.
 func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 	// Checked first, before any Temporal RPC: the cheapest possible way to
 	// answer "is this even configured" (issue #274 AC1).
@@ -212,15 +214,65 @@ func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if window.spans != nil {
+		lines = filterLinesToSpans(lines, window.spans)
+	}
+
 	writeJSON(w, http.StatusOK, RunLogsResponse{RunID: runID, Phase: phase, Lines: lines, Live: window.live})
 }
 
-// logWindow is the [start, end) time range getRunLogs queries VictoriaLogs
-// over, and whether that range can still grow.
+// logWindow is the [start, end] time range getRunLogs queries VictoriaLogs
+// over, whether that range can still grow, and — for a phase-scoped
+// request — the disjoint sub-ranges within it that actually belong to the
+// phase.
 type logWindow struct {
 	start time.Time
 	end   *time.Time // nil means "still open" (the run/phase has not closed)
 	live  bool
+	// spans, when non-nil, are the phase's own disjoint per-activity time
+	// ranges within [start, end]. The tape path interleaves Load/Write/Eject
+	// per drive-set (SPEC §4.3 phases 6-8, and a Load/Write-failure pause
+	// retries onto fresh blanks), so one phase's activities are NOT
+	// contiguous: on a run whose first Write failed and was retried after a
+	// pause, "Load"'s single [earliest, latest] envelope would swallow the
+	// failed Write's and the pause's log lines, and vice versa. getRunLogs
+	// therefore issues ONE VictoriaLogs query over the whole envelope (a
+	// per-span query fan-out buys nothing) and post-filters the results to
+	// lines falling inside any of these spans (filterLinesToSpans). nil (the
+	// whole-run mode) means no filtering — every line in the window belongs.
+	spans []timeSpan
+}
+
+// timeSpan is one activity's [start, end] range. A zero end means the
+// activity has not reached a terminal state yet — the span is still open.
+type timeSpan struct {
+	start time.Time
+	end   time.Time
+}
+
+// filterLinesToSpans keeps only the lines whose timestamp falls inside at
+// least one span (inclusive on both ends — a line logged at the exact
+// scheduled/terminal instant belongs to the activity).
+func filterLinesToSpans(lines []LogLine, spans []timeSpan) []LogLine {
+	filtered := make([]LogLine, 0, len(lines))
+
+	for _, line := range lines {
+		for _, span := range spans {
+			if line.Time.Before(span.start) {
+				continue
+			}
+
+			if !span.end.IsZero() && line.Time.After(span.end) {
+				continue
+			}
+
+			filtered = append(filtered, line)
+
+			break
+		}
+	}
+
+	return filtered
 }
 
 // resolveLogWindow determines the time window to query for runID/phase,
@@ -264,13 +316,44 @@ func (h *handler) resolveLogWindow(ctx context.Context, runID, phase string) (lo
 			return logWindow{}, false, nil
 		}
 
-		return logWindow{start: *info.StartTime, end: info.EndTime, live: info.Status == PhaseActive}, true, nil
+		return logWindow{
+			start: *info.StartTime,
+			end:   info.EndTime,
+			live:  info.Status == PhaseActive,
+			spans: phaseActivitySpans(history, phase),
+		}, true, nil
 	}
 
 	// Unreachable: getRunLogs already rejected any phase not in phaseOrder
 	// (phaseIndex(phase) < 0) before calling this, and buildPhaseTimeline
 	// always emits exactly one PhaseInfo per phaseOrder entry.
 	return logWindow{}, false, nil
+}
+
+// phaseActivitySpans collects the disjoint per-activity time ranges of one
+// phase's own activities — the same attribution buildPhaseTimeline uses
+// (phaseForActivity, including the NotifyWritePathPause input-based
+// sub-phase routing) — so a phase-scoped log query never swallows the lines
+// another phase's activity emitted inside this phase's overall envelope
+// (see logWindow.spans' doc comment for the interleaved-tape-path case
+// that makes this necessary).
+func phaseActivitySpans(history runHistory, phase string) []timeSpan {
+	spans := make([]timeSpan, 0)
+
+	for _, record := range history.Activities {
+		recordPhase, ok := phaseForActivity(record.Name, record.Input)
+		if !ok || recordPhase != phase {
+			continue
+		}
+
+		if record.ScheduledTime.IsZero() {
+			continue
+		}
+
+		spans = append(spans, timeSpan{start: record.ScheduledTime, end: record.EndTime})
+	}
+
+	return spans
 }
 
 // queryVictoriaLogs issues one LogsQL query (buildLogsQLQuery) against
@@ -305,27 +388,27 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string,
 // streamFilter (operator config) ANDed with an exact match on RunID (never
 // client-supplied LogsQL — runID is validated as a UUID by the caller
 // before this is ever invoked) and a time-range clause, sorted oldest first
-// and capped at limit. since, when set, makes the lower bound exclusive
-// (">"/"(" — "give me only what's new") instead of inclusive (">="/"[").
+// and capped at limit. since, when set and later than start, replaces the
+// lower bound.
+//
+// The lower bound is always INCLUSIVE (">="/"["), even for since — a
+// deliberate choice, not an off-by-one: a caller polling with "since = the
+// last line's own timestamp" would, with an exclusive bound, permanently
+// lose any same-timestamp lines that had not been ingested yet when the
+// previous poll ran (log shipping is asynchronous and batched). Re-sending
+// the boundary lines instead and letting the client deduplicate (LogPanel
+// dedups by time+message identity) means a split same-timestamp batch is
+// eventually complete rather than silently truncated.
 func buildLogsQLQuery(streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, limit int) string {
 	lower := start
-	exclusive := false
-
 	if since != nil && since.After(start) {
 		lower = *since
-		exclusive = true
 	}
 
 	var timeFilter string
-
-	switch {
-	case end != nil && exclusive:
-		timeFilter = fmt.Sprintf("_time:(%s, %s]", formatVLTime(lower), formatVLTime(*end))
-	case end != nil:
+	if end != nil {
 		timeFilter = fmt.Sprintf("_time:[%s, %s]", formatVLTime(lower), formatVLTime(*end))
-	case exclusive:
-		timeFilter = fmt.Sprintf("_time:>%s", formatVLTime(lower))
-	default:
+	} else {
 		timeFilter = fmt.Sprintf("_time:>=%s", formatVLTime(lower))
 	}
 

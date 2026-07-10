@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
+
+	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
 // testRunID is a well-formed UUID (runIDPattern's only requirement) used by
@@ -187,7 +190,9 @@ func TestGetRunLogsSinceNarrowsTheQuery(t *testing.T) {
 	require.Len(t, fake.queries, 1)
 	query, err := url.QueryUnescape(fake.queries[0])
 	require.NoError(t, err)
-	assert.Contains(t, query, "_time:>", "an exclusive lower bound is used once ?since= is given")
+	assert.Contains(t, query, "_time:>="+since,
+		"the lower bound must be since, and INCLUSIVE — an exclusive bound would permanently lose "+
+			"same-timestamp lines split across a poll boundary by asynchronous log shipping")
 }
 
 func TestGetRunLogsPhaseHappyPath(t *testing.T) {
@@ -210,6 +215,95 @@ func TestGetRunLogsPhaseHappyPath(t *testing.T) {
 	assert.Equal(t, "Resolve", body.Phase)
 	assert.False(t, body.Live)
 	require.Len(t, fake.queries, 1)
+}
+
+// TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries covers the
+// interleaved-tape-path hazard logWindow.spans exists for: on a run whose
+// first Write failed and was retried after an operator pause
+// (Load1 → Write1 fails → pause → Load2 → Write2), each phase's activities
+// are NOT contiguous — "Load"'s single [earliest, latest] envelope contains
+// the failed Write's and the pause's log lines, and "Write"'s contains the
+// second Load's. A phase-scoped request must return only the lines that
+// fall inside that phase's own per-activity spans (issue #274 AC3: "the
+// matching log lines"), with lines in the gaps between spans excluded.
+func TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries(t *testing.T) {
+	// eventBuilder times are deterministic: base 2026-01-01T00:00:00Z, +1
+	// minute per event (history_test.go). The layout below yields:
+	//   Load spans:  [00:02, 00:03] (Load1), [00:08, 00:09] (Load2)
+	//   Write spans: [00:04, 00:05] (Write1 fails), [00:06, 00:07] (pause
+	//                alert, attributed to Write via its input), [00:10,
+	//                00:11] (Write2)
+	// so Load's envelope [00:02, 00:09] swallows both Write1 and the pause,
+	// and Write's [00:04, 00:11] swallows Load2 — exactly the over-inclusion
+	// this test must fail on.
+	builder := newEventBuilder()
+	builder.started(t, testConfig)
+
+	loadOne := builder.scheduled(t, "Load", nil)
+	builder.completed(t, loadOne, nil)
+
+	writeOne := builder.scheduled(t, "WriteTree", nil)
+	builder.failed(writeOne, "drive 0: write tree: medium error")
+
+	pause := builder.scheduled(t, "NotifyWritePathPause", backup.WritePathPauseInput{Phase: backup.PhaseWrite})
+	builder.completed(t, pause, nil)
+
+	loadTwo := builder.scheduled(t, "Load", nil)
+	builder.completed(t, loadTwo, nil)
+
+	writeTwo := builder.scheduled(t, "WriteTree", nil)
+	builder.completed(t, writeTwo, nil)
+
+	builder.runCompleted()
+
+	at := func(minute, second int) time.Time {
+		return time.Date(2026, 1, 1, 0, minute, second, 0, time.UTC)
+	}
+
+	// The fake returns every line for any query — the envelope query is one
+	// request either way, so span filtering can only happen server-side,
+	// after the response.
+	body := strings.Join([]string{
+		vlLine(at(2, 30), "INFO", "load one"),
+		vlLine(at(4, 30), "ERROR", "write one failing"),
+		vlLine(at(6, 30), "WARN", "pause alert"),
+		vlLine(at(7, 30), "INFO", "gap line"),
+		vlLine(at(8, 30), "INFO", "load two"),
+		vlLine(at(10, 30), "INFO", "write two"),
+	}, "\n")
+
+	fake := newFakeVictoriaLogs(t, http.StatusOK, body)
+	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})
+
+	temporalClient := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+		return &fakeHistoryIterator{events: builder.events}
+	}}
+	handler := newMux(newHandler(temporalClient, getenv))
+
+	tests := []struct {
+		phase        string
+		wantMessages []string
+	}{
+		{phase: "Load", wantMessages: []string{"load one", "load two"}},
+		{phase: "Write", wantMessages: []string{"write one failing", "pause alert", "write two"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.phase, func(t *testing.T) {
+			recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs?phase="+url.QueryEscape(test.phase), nil)
+			require.Equal(t, http.StatusOK, recorder.Code)
+
+			var response RunLogsResponse
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+
+			messages := make([]string, 0, len(response.Lines))
+			for _, logLine := range response.Lines {
+				messages = append(messages, logLine.Message)
+			}
+
+			assert.Equal(t, test.wantMessages, messages)
+		})
+	}
 }
 
 func TestGetRunLogsPhaseNotYetStartedIsEmptyNotUnavailable(t *testing.T) {
