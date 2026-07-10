@@ -151,7 +151,7 @@ func (h *handler) getRunTapes(w http.ResponseWriter, r *http.Request) {
 
 	history, err := fetchRunHistory(ctx, h.temporalClient, runID)
 	if err != nil {
-		writeHistoryError(w, r.Context(), h.temporalClient, runID, err)
+		writeHistoryError(ctx, w, h.temporalClient, runID, err)
 
 		return
 	}

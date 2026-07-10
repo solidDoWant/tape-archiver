@@ -106,7 +106,7 @@ func (h *handler) getRunPhases(w http.ResponseWriter, r *http.Request) {
 
 	history, err := fetchRunHistory(ctx, h.temporalClient, runID)
 	if err != nil {
-		writeHistoryError(w, r.Context(), h.temporalClient, runID, err)
+		writeHistoryError(ctx, w, h.temporalClient, runID, err)
 
 		return
 	}
@@ -156,6 +156,13 @@ func buildPhaseTimeline(history runHistory, outcomes []TapeOutcome) []PhaseInfo 
 		case len(records) == 0 && history.FailingPhase == name:
 			info.Status = PhaseFailed
 			info.Error = history.FailingSummary
+		case len(records) == 0 && (i < lastWithActivity || history.Succeeded):
+			// The run moved past this phase without it scheduling any
+			// activity of its own — it ran as a no-op (Burn with optical
+			// burning disabled, burnpath.go; or an empty tape plan's
+			// Load/Write/Eject). Completed, but with no time window to
+			// report.
+			info.Status = PhaseCompleted
 		case len(records) == 0:
 			info.Status = PhasePending
 		case i < lastWithActivity || history.Succeeded:
@@ -265,7 +272,7 @@ func phaseForActivity(name string, input *commonpb.Payloads) (string, bool) {
 //     Gone, distinguishable from the 404 above. This distinction is derived
 //     on demand from Temporal's own existing visibility index (the same one
 //     GET /api/runs already reads), never a new catalog (SPEC §4.2).
-func writeHistoryError(w http.ResponseWriter, ctx context.Context, temporalClient TemporalClient, runID string, err error) {
+func writeHistoryError(ctx context.Context, w http.ResponseWriter, temporalClient TemporalClient, runID string, err error) {
 	status := statusForTemporalError(err)
 	if status != http.StatusNotFound {
 		writeError(w, status, fmt.Errorf("fetch run %q history: %w", runID, err))

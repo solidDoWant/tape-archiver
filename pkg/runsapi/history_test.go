@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -22,6 +21,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -57,22 +57,16 @@ func (f *fakeHistoryIterator) Next() (*historypb.HistoryEvent, error) {
 }
 
 // GetWorkflowHistory implements the TemporalClient method history.go's
-// fetchRunHistory calls, routing through fakeTemporalClient.historyFunc.
-func (f *fakeTemporalClient) GetWorkflowHistory(context.Context, string, string, bool, enumspb.HistoryEventFilterType) client.HistoryEventIterator {
+// fetchRunHistory calls, routing through fakeTemporalClient.historyFunc with
+// the requested runID so a test can serve different histories per run (the
+// aggregate listTapes tests rely on this).
+func (f *fakeTemporalClient) GetWorkflowHistory(_ context.Context, _, runID string, _ bool, _ enumspb.HistoryEventFilterType) client.HistoryEventIterator {
 	if f.historyFunc != nil {
-		return f.historyFunc("")
+		return f.historyFunc(runID)
 	}
 
 	return &fakeHistoryIterator{}
 }
-
-// historyRunID routes fakeTemporalClient.historyFunc by runID, since the real
-// signature (matched above) does not thread it through to GetWorkflowHistory
-// callers in a way this fake can see per-call; tests that need per-run
-// behavior (the aggregate listTapes tests) instead build one
-// fakeTemporalClient whose historyFunc dispatches on a fixed table the test
-// already knows the runIDs for.
-func historyRunID(_ context.Context) string { return "" }
 
 // mustEncode encodes value into *commonpb.Payloads using Temporal's default
 // data converter — the exact converter decodePayloads (history.go) decodes
@@ -294,10 +288,7 @@ func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	})
 
 	eject := b.scheduled(t, "Eject", nil)
-	b.completed(t, eject, backup.EjectResult{InIOStation: []backup.LoadedTape{}[:0:0]})
-	// EjectResult.InIOStation is []tape.Barcode; encode directly below to
-	// avoid an import cycle concern (there is none, but keep the fixture
-	// simple and explicit about the type actually used).
+	b.completed(t, eject, backup.EjectResult{InIOStation: []tape.Barcode{"GOODTAPE01"}})
 
 	report := b.scheduled(t, "BuildReport", nil)
 	b.completed(t, report, backup.ReportOutput{ReportPath: "/staging/report.pdf"})
@@ -362,9 +353,21 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		for i, phase := range phases {
 			names[i] = phase.Name
 			assert.Equal(t, PhaseCompleted, phase.Status, "phase %s", phase.Name)
+
+			// Burn ran as a no-op in this fixture (optical burning disabled),
+			// so it completes with no time window; every other phase started
+			// and ended.
+			if phase.Name == backup.PhaseBurn {
+				assert.Nil(t, phase.StartTime, "no-op Burn has no start time")
+				assert.Nil(t, phase.EndTime, "no-op Burn has no end time")
+
+				continue
+			}
+
 			assert.NotNil(t, phase.StartTime, "phase %s start time", phase.Name)
 			assert.NotNil(t, phase.EndTime, "phase %s end time", phase.Name)
 		}
+
 		assert.Equal(t, []string{
 			backup.PhaseResolve, backup.PhasePrepare, backup.PhasePack, backup.PhaseGeneratePAR2,
 			backup.PhaseVerify, backup.PhaseLoad, backup.PhaseWrite, backup.PhaseEject,
@@ -411,6 +414,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		require.NoError(t, err)
 
 		phases := buildPhaseTimeline(history, nil)
+
 		byName := make(map[string]PhaseInfo, len(phases))
 		for _, phase := range phases {
 			byName[phase.Name] = phase
@@ -451,6 +455,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		require.NoError(t, err)
 
 		phases := buildPhaseTimeline(history, nil)
+
 		byName := make(map[string]PhaseInfo, len(phases))
 		for _, phase := range phases {
 			byName[phase.Name] = phase
@@ -488,6 +493,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		require.NoError(t, err)
 
 		phases := buildPhaseTimeline(history, nil)
+
 		byName := make(map[string]PhaseInfo, len(phases))
 		for _, phase := range phases {
 			byName[phase.Name] = phase
@@ -563,7 +569,7 @@ func TestGetRunPhasesHandler(t *testing.T) {
 	fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
 		return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
 	}}
-	handler := newMux(newHandler(fake, envLookup(nil)))
+	handler := newMux(newHandler(fake, emptyEnv))
 
 	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/phases", nil)
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -578,7 +584,7 @@ func TestGetRunConfigHandler(t *testing.T) {
 	fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
 		return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
 	}}
-	handler := newMux(newHandler(fake, envLookup(nil)))
+	handler := newMux(newHandler(fake, emptyEnv))
 
 	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/config", nil)
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -594,7 +600,7 @@ func TestGetRunTapesHandler(t *testing.T) {
 	fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
 		return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
 	}}
-	handler := newMux(newHandler(fake, envLookup(nil)))
+	handler := newMux(newHandler(fake, emptyEnv))
 
 	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/tapes", nil)
 	require.Equal(t, http.StatusOK, recorder.Code)
@@ -616,38 +622,18 @@ func TestListTapesHandler(t *testing.T) {
 					executionInfo("run-gone", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start2, &start2),
 				},
 			},
-			historyFunc: func(string) client.HistoryEventIterator {
-				// Every call gets the same iterator in this fake shape, so
-				// dispatch on call count instead: the first call answers
-				// run-good, the second run-gone. Order matches Executions
-				// above only if listTapes calls sequentially per execution
-				// with no reordering before dispatch, which the SetLimit(8)
-				// errgroup does not guarantee — so key on content instead.
-				return nil
+			// Route per runID: run-good gets the full fixture history,
+			// run-gone gets the NotFound a retention-expired history returns.
+			historyFunc: func(runID string) client.HistoryEventIterator {
+				if runID == "run-good" {
+					return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
+				}
+
+				return &fakeHistoryIterator{err: serviceerror.NewNotFound("workflow execution not found")}
 			},
 		}
 
-		// Route per runID explicitly: fakeTemporalClient.GetWorkflowHistory
-		// (history_test.go) ignores the runID argument by construction (see
-		// its doc comment), so give listTapes-specific behavior via a
-		// dedicated historyFunc keyed by a call counter guarded by identity
-		// instead of runID text, using a small closure over both fixtures.
-		calls := 0
-		fixtures := [][]*historypb.HistoryEvent{buildSuccessfulRunHistory(t), nil}
-		errs := []error{nil, serviceerror.NewNotFound("workflow execution not found")}
-
-		fake.historyFunc = func(string) client.HistoryEventIterator {
-			i := calls
-			calls++
-
-			if i >= len(fixtures) {
-				i = len(fixtures) - 1
-			}
-
-			return &fakeHistoryIterator{events: fixtures[i], err: errs[i]}
-		}
-
-		handler := newMux(newHandler(fake, envLookup(nil)))
+		handler := newMux(newHandler(fake, emptyEnv))
 
 		recorder := doJSON(t, handler, http.MethodGet, "/api/tapes", nil)
 		require.Equal(t, http.StatusOK, recorder.Code)
@@ -656,12 +642,136 @@ func TestListTapesHandler(t *testing.T) {
 		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 
 		assert.Len(t, body.Tapes, 2, "the reconstructable run's two tapes must still be listed")
-		assert.Len(t, body.RunErrors, 1, "the unreconstructable run must degrade, not fail the whole listing")
+
+		for _, tapeOutcome := range body.Tapes {
+			assert.Equal(t, "run-good", tapeOutcome.RunID, "every tape must be attributed back to its run")
+		}
+
+		require.Len(t, body.RunErrors, 1, "the unreconstructable run must degrade, not fail the whole listing")
+		assert.Equal(t, "run-gone", body.RunErrors[0].RunID)
 	})
 }
 
-// envLookup returns a getenv func backed by m, for tests that construct a
-// handler directly (mirroring runsapi_test.go's own pattern where present).
-func envLookup(m map[string]string) func(string) string {
-	return func(key string) string { return m[key] }
+// emptyEnv is a getenv func for tests whose handler never reads the
+// environment (the dry-run mhvtl gate is irrelevant to the GET endpoints
+// under test here).
+func emptyEnv(string) string { return "" }
+
+// TestHistoryEndpointErrorClassification proves the three-way distinction
+// issue #273 AC3/AC7 requires, across all three per-run history endpoints: a
+// run whose history has aged out of retention but which still appears in
+// Temporal visibility is 410 Gone; a run Temporal has no record of at all is
+// 404; a malformed run ID is 400 — each visibly distinct from the others.
+func TestHistoryEndpointErrorClassification(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	notFoundHistory := func(string) client.HistoryEventIterator {
+		return &fakeHistoryIterator{err: serviceerror.NewNotFound("workflow execution not found")}
+	}
+
+	tests := []struct {
+		name       string
+		client     *fakeTemporalClient
+		runID      string
+		wantStatus int
+	}{
+		{
+			name: "aged out of retention but still in visibility is 410",
+			client: &fakeTemporalClient{
+				historyFunc: notFoundHistory,
+				listResponse: &workflowservice.ListWorkflowExecutionsResponse{
+					Executions: []*workflowpb.WorkflowExecutionInfo{
+						executionInfo("aged-run", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &start),
+					},
+				},
+			},
+			runID:      "aged-run",
+			wantStatus: http.StatusGone,
+		},
+		{
+			name: "never a real execution is 404",
+			client: &fakeTemporalClient{
+				historyFunc:  notFoundHistory,
+				listResponse: &workflowservice.ListWorkflowExecutionsResponse{},
+			},
+			runID:      "never-existed",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name: "malformed run ID is 400",
+			client: &fakeTemporalClient{
+				historyFunc: func(string) client.HistoryEventIterator {
+					return &fakeHistoryIterator{err: serviceerror.NewInvalidArgument("Invalid RunId.")}
+				},
+			},
+			runID:      "not-a-uuid",
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	endpoints := []string{"phases", "config", "tapes"}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := newMux(newHandler(test.client, emptyEnv))
+
+			for _, endpoint := range endpoints {
+				recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+test.runID+"/"+endpoint, nil)
+				assert.Equal(t, test.wantStatus, recorder.Code, "endpoint %s", endpoint)
+			}
+		})
+	}
+}
+
+// TestGetRunConfigForeignWorkflow proves a history whose start input cannot
+// decode as a run config (a foreign/stub workflow sharing the fixed
+// WorkflowID — issue #273's warning) degrades to a per-run error status, not
+// a 500.
+func TestGetRunConfigForeignWorkflow(t *testing.T) {
+	b := newEventBuilder()
+	// A start input that is not a config.Config object at all.
+	b.started(t, []string{"not", "a", "config"})
+	b.runCompleted()
+
+	fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+		return &fakeHistoryIterator{events: b.events}
+	}}
+	handler := newMux(newHandler(fake, emptyEnv))
+
+	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/stub-run/config", nil)
+	assert.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
+}
+
+// TestGetRunPhasesForeignWorkflow proves a foreign/stub workflow's history —
+// no recognizable phase activities at all — yields a well-formed timeline
+// (all 11 phases, no invented progress) rather than an error, so the
+// aggregate views built on these endpoints can never be taken down by one
+// stub run (issue #273).
+func TestGetRunPhasesForeignWorkflow(t *testing.T) {
+	b := newEventBuilder()
+	b.started(t, "some foreign input")
+
+	unknown := b.scheduled(t, "SomeForeignActivity", nil)
+	b.completed(t, unknown, nil)
+	b.runCompleted()
+
+	fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+		return &fakeHistoryIterator{events: b.events}
+	}}
+	handler := newMux(newHandler(fake, emptyEnv))
+
+	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/stub-run/phases", nil)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var body RunPhasesResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+	require.Len(t, body.Phases, 11)
+
+	for _, phase := range body.Phases {
+		// The foreign activity maps to no phase, and the run "succeeded", so
+		// every phase reads completed-as-no-op — crucially with no fabricated
+		// times or facts, and no error.
+		assert.Equal(t, PhaseCompleted, phase.Status, "phase %s", phase.Name)
+		assert.Nil(t, phase.StartTime, "phase %s must not invent a start time", phase.Name)
+	}
 }
