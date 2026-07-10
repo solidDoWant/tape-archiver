@@ -172,6 +172,38 @@ History has no pagination and no filtering — it lists everything Temporal's vi
 still retains, newest first. Given backup runs are singleton and serial (SPEC §4.2),
 this stays well within a single page for any realistic retention window.
 
+## Browsing tapes
+
+The **Tapes** page (`/tapes`) lists every physical tape written by a run still inside
+Temporal's history window — barcode, a link to the run that wrote it, its logical-tape
+and copy index, its write outcome (loaded/written/failed, with a failed tape's reason
+shown under the badge), and a summary of its measured write health (throughput, whether
+it stayed above the speed-matching floor, the reposition count — or an explicit note
+when repositions could not be measured — and any TapeAlert flags — SPEC §14). Each of
+those warning signals gets its own badge, and any combination can appear together.
+Each row is reconstructed on the fly from that run's own
+Temporal execution history via `GET /api/tapes` (correlating the Load phase's per-tape
+barcodes with the Write phase's format/write/finalize/measure activities), the same way
+a single run's [`GET /api/runs/{runID}/tapes`](tapectl.md) backs the run detail page's
+drive write-health panel.
+
+The archiver keeps **no persistent tape catalog** (SPEC §4.2): this page does not read
+live status from the tape changer, and there is no permanent inventory anywhere in the
+system. A banner at the top of the page states this explicitly. Once a run ages out of
+Temporal's visibility retention window, the tapes it wrote drop off this list — its PDF
+report (delivered to Discord, see [`docs/report.md`](report.md)) remains the permanent
+record of what it wrote.
+
+By default the page reconstructs tapes from the 50 most recent runs (the API's own
+default) — there is no "show more"/limit control on the page itself, matching the design
+reference for this page. If a run's history cannot be reconstructed (for example, one
+whose Temporal history has partially aged out), that run is reported by name in a
+separate warning notice above the table rather than failing the whole page — every other
+run's tapes still list normally.
+
+If no run still within Temporal's retention has written a tape yet, the page shows an
+empty-state message instead of an empty table.
+
 ## Local development
 
 Everything above assumes a real deployment (a real Temporal cluster, a real identity

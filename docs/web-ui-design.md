@@ -171,3 +171,35 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
   placeholder page. The sidebar's active-run check ("Start new run" disabled while a
   run is in progress) is a one-shot `GET /api/runs` at shell mount, not a live
   subscription — accepted minimal-scope gap for the foundation issue.
+- 2026-07-10 (#278): the real Tapes page replaces #272's placeholder. It ships only
+  the design's second, history-resolved table (`DESIGN_ANALYSIS.md` §2 "C. Tapes");
+  the design's "IN THE LIBRARY NOW" live-changer-element table is dropped entirely
+  per the epic's explicit non-goal — it would need a live SCSI element-status
+  endpoint (`READ ELEMENT STATUS` via `SG_IO`, reachable only from the storage host,
+  not the control-plane web pod) that this epic never builds.
+- 2026-07-10 (#278): no limit/"show more" control on the page — it uses `GET
+  /api/tapes`'s own default (the 50 most recent runs, `tapes.go`'s
+  `defaultListTapesRunLimit`) as-is. The reference design has no such control on this
+  page either, so there is nothing to reproduce. The page copy discloses the cap
+  (banner and footer both say "50 most recent runs") so "derived from history" is
+  never read as "everything still within Temporal retention".
+- 2026-07-10 (#278, review): the write-health cell renders TapeAlert, below-floor,
+  and repositions as independent, simultaneous badges (matching the design's
+  "healthy / below floor / N repositions" badge set and `FinalTapeCard`'s
+  precedent) — the three are independent dimensions of
+  `backup.WriteHealth.Healthy()`, so one badge must never suppress another, and a
+  tape unhealthy solely from repositions must not look healthy. When repositions
+  could not be measured at all, the cell says "repositions not measured" explicitly
+  rather than implying zero. A failed tape's reason renders as visible text under
+  the outcome badge, not a hover-only title.
+- 2026-07-10 (#278): row order is exactly what `GET /api/tapes` already returns
+  (newest run first, then logical-tape index, then copy index) — no client-side
+  resort, keeping the page's grouping identical to the API contract.
+- 2026-07-10 (#278): a degraded run (one whose history could not be reconstructed,
+  `runErrors[]`) renders as a non-fatal warning notice listing the run ID and reason,
+  separate from and never hiding the tapes successfully derived from every other
+  run — matching the aggregate endpoint's explicit per-run degrade contract (issue
+  #273).
+- 2026-07-10 (#278): shipped without new screenshots — no live `make web-dev`
+  environment was exercised for this change; the epic's consolidated screenshot pass
+  happens in issue #281 alongside the other new-page issues.
