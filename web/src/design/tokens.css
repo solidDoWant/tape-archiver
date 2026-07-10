@@ -1,0 +1,126 @@
+/* Design tokens translated from the Claude Design canvas exports
+   (.claude/tasks/design-redesign/{Tape Archiver,Login}.dc.html — gitignored
+   design source, not part of this repo) into portable CSS custom
+   properties, then registered as Tailwind v4 theme values via `@theme` /
+   `@theme inline` so ordinary utility classes (bg-surface, text-text-dim,
+   border-border-strong, shadow-card, font-mono, ...) resolve to them. See
+   issue #272.
+
+   Login.dc.html and Tape Archiver.dc.html defined slightly different
+   --border/--border-strong values, and only Login defined --shadow-lg;
+   DESIGN_ANALYSIS.md §3/§6 (oversight 3) flagged the border mismatch as a
+   real inconsistency to reconcile before picking one canonical set. This
+   file uses Tape Archiver.dc.html's values as canonical (RESUME.md's
+   decision — "unified tokens using the app file's values where Login
+   drifts") and keeps Login's --shadow-lg as an additional token (an
+   elevated-card shadow the app shell itself never needed, not a
+   conflicting value) since the login card still uses it.
+
+   Dark-mode selector: `.dark` (not the design's `[data-theme="dark"]`
+   attribute) to match the app's existing class-based dark-mode toggle
+   (theme.ts, index.css's `@custom-variant dark`) rather than introducing a
+   second, parallel mechanism. */
+
+:root {
+  --bg: #efece6;
+  --surface: #fbfaf7;
+  --surface-2: #f3f0e9;
+  --inset: #eae6dd;
+  --border: #d6cfbf;
+  --border-strong: #c0b6a2;
+  --text: #211f1c;
+  --text-dim: #6f685c;
+  --text-faint: #a89e8c;
+  --green: #3f9d5f;
+  --green-bg: #e7f0e5;
+  --green-line: #c7e0c4;
+  --amber: #b9821b;
+  --amber-bg: #f6ecd4;
+  --amber-line: #e6d29a;
+  --red: #c0492f;
+  --red-bg: #f6e2dc;
+  --red-line: #e8bcae;
+  --blue: #2a6fdb;
+  --blue-bg: #e4ecf9;
+  --nav-active: #e9e4d8;
+  --nav-hover: #ddd6c6;
+  --console-bg: #1c1a17;
+  --console-panel: #232019;
+  --console-border: #33302a;
+  --console-text: #c3bbac;
+  --console-dim: #7d7566;
+  --shadow: 0 1px 2px rgba(40, 34, 24, 0.06), 0 4px 14px rgba(40, 34, 24, 0.05);
+  --shadow-lg: 0 1px 2px rgba(40, 34, 24, 0.05), 0 10px 34px rgba(40, 34, 24, 0.1),
+    0 30px 70px rgba(40, 34, 24, 0.06);
+}
+
+.dark {
+  --bg: #16140f;
+  --surface: #201d17;
+  --surface-2: #26221b;
+  --inset: #191712;
+  --border: #403a2e;
+  --border-strong: #544d3d;
+  --text: #ece7db;
+  --text-dim: #9c9284;
+  --text-faint: #6c6558;
+  --green: #6fbf87;
+  --green-bg: #1e2a1b;
+  --green-line: #33482f;
+  --amber: #e0b341;
+  --amber-bg: #312813;
+  --amber-line: #574818;
+  --red: #e58a6d;
+  --red-bg: #331f18;
+  --red-line: #5c3527;
+  --blue: #7aa5f2;
+  --blue-bg: #1b2436;
+  --nav-active: #2b271f;
+  --nav-hover: #38332a;
+  --console-bg: #121009;
+  --console-panel: #1a1811;
+  --console-border: #2c281f;
+  --console-text: #c3bbac;
+  --console-dim: #7d7566;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 18px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 40px rgba(0, 0, 0, 0.45), 0 30px 80px rgba(0, 0, 0, 0.35);
+}
+
+@theme {
+  /* Self-hosted (index.css imports @fontsource packages; no Google Fonts
+     <link>, unlike the design — DESIGN_ANALYSIS.md §3/§6 oversight 14). */
+  --font-sans: 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-inset: var(--inset);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-text-dim: var(--text-dim);
+  --color-text-faint: var(--text-faint);
+  --color-green: var(--green);
+  --color-green-bg: var(--green-bg);
+  --color-green-line: var(--green-line);
+  --color-amber: var(--amber);
+  --color-amber-bg: var(--amber-bg);
+  --color-amber-line: var(--amber-line);
+  --color-red: var(--red);
+  --color-red-bg: var(--red-bg);
+  --color-red-line: var(--red-line);
+  --color-blue: var(--blue);
+  --color-blue-bg: var(--blue-bg);
+  --color-nav-active: var(--nav-active);
+  --color-nav-hover: var(--nav-hover);
+  --color-console-bg: var(--console-bg);
+  --color-console-panel: var(--console-panel);
+  --color-console-border: var(--console-border);
+  --color-console-text: var(--console-text);
+  --color-console-dim: var(--console-dim);
+  --shadow-card: var(--shadow);
+  --shadow-elevated: var(--shadow-lg);
+}

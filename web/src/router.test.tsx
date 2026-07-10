@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Link, RouterProvider } from './router'
-import { parseRoute, runPath, useNavigate, useRoute } from './route'
+import { parseRoute, runPath, sanitizeRedirectPath, useNavigate, useRoute } from './route'
 
 beforeEach(() => {
   window.history.pushState({}, '', '/')
@@ -26,6 +26,21 @@ describe('parseRoute', () => {
     expect(parseRoute('/runs/run%20abc')).toEqual({ name: 'run', runId: 'run abc' })
   })
 
+  it('maps "/tapes" (with or without a trailing slash) to the tapes route', () => {
+    expect(parseRoute('/tapes')).toEqual({ name: 'tapes' })
+    expect(parseRoute('/tapes/')).toEqual({ name: 'tapes' })
+  })
+
+  it('maps "/login" to the login route, ignoring any query string', () => {
+    expect(parseRoute('/login')).toEqual({ name: 'login' })
+    expect(parseRoute('/login?error=denied&redirect=%2Fruns%2Fabc')).toEqual({ name: 'login' })
+  })
+
+  it('ignores a query string when matching any route', () => {
+    expect(parseRoute('/tapes?whatever=1')).toEqual({ name: 'tapes' })
+    expect(parseRoute('/runs/run-abc?x=1')).toEqual({ name: 'run', runId: 'run-abc' })
+  })
+
   it('maps anything else to not-found, carrying the original path', () => {
     expect(parseRoute('/nope')).toEqual({ name: 'not-found', path: '/nope' })
   })
@@ -41,6 +56,35 @@ describe('parseRoute', () => {
 describe('runPath', () => {
   it('builds and encodes a run detail URL', () => {
     expect(runPath('run abc')).toBe('/runs/run%20abc')
+  })
+})
+
+// The client-side mirror of pkg/webauth's identically-named server-side
+// defense — same cases as its Go test (webauth_test.go's
+// TestSanitizeRedirectPath), so the two implementations cannot silently
+// diverge on what they reject.
+describe('sanitizeRedirectPath', () => {
+  it('defaults empty/missing values to root', () => {
+    expect(sanitizeRedirectPath('')).toBe('/')
+    expect(sanitizeRedirectPath(null)).toBe('/')
+    expect(sanitizeRedirectPath(undefined)).toBe('/')
+  })
+
+  it('rejects a path without a leading slash', () => {
+    expect(sanitizeRedirectPath('runs/abc')).toBe('/')
+  })
+
+  it('preserves a normal same-origin path', () => {
+    expect(sanitizeRedirectPath('/runs/abc')).toBe('/runs/abc')
+  })
+
+  it('rejects a protocol-relative // URL', () => {
+    expect(sanitizeRedirectPath('//evil.example')).toBe('/')
+  })
+
+  it('rejects a backslash anywhere in the path', () => {
+    expect(sanitizeRedirectPath('/\\evil.example')).toBe('/')
+    expect(sanitizeRedirectPath('/runs/\\evil.example')).toBe('/')
   })
 })
 

@@ -1,46 +1,53 @@
 import { useCallback, useEffect, useState } from 'react'
 
-// theme.ts implements dark-mode detection/toggle for the app shell
-// (App.tsx's header). Tailwind v4 defaults dark: to a media-query-only
-// strategy (`prefers-color-scheme`), which already satisfied this issue's
-// required acceptance criterion (render in dark/light per the OS
-// preference) with zero code — but it cannot support a manual override, the
-// AC's documented nice-to-have. index.css switches the dark: variant to a
-// class-based selector (`@custom-variant dark (&:where(.dark, .dark *))`)
-// so this module can toggle it explicitly; this file is what keeps that
-// class in sync with the OS preference by default, and with an explicit
-// operator choice once one is made.
+// theme.ts implements the app's Light/Dark/Auto theme control (the design's
+// sidebar segmented control — issue #272). Tailwind v4 defaults dark: to a
+// media-query-only strategy (`prefers-color-scheme`), which alone would
+// satisfy "render in dark/light per the OS preference" with zero code — but
+// it cannot support a manual override, or a way to tell "explicitly light"
+// apart from "explicitly dark" apart from "following the OS". index.css
+// switches the dark: variant to a class-based selector
+// (`@custom-variant dark (&:where(.dark, .dark *))`) so this module can
+// toggle it explicitly; this file keeps that class in sync with either the
+// OS preference (while the operator has never chosen, or has chosen "Auto")
+// or an explicit Light/Dark choice.
 
+// ThemePreference is what the operator picked (or the default, "auto").
+export type ThemePreference = 'light' | 'dark' | 'auto'
+
+// Theme is the resolved value actually applied to the page — "auto" is
+// never a Theme, only a ThemePreference; resolveTheme turns one into the
+// other.
 export type Theme = 'light' | 'dark'
 
 const STORAGE_KEY = 'tape-archiver:theme'
 
-function isTheme(value: string | null): value is Theme {
-  return value === 'light' || value === 'dark'
+function isPreference(value: string | null): value is ThemePreference {
+  return value === 'light' || value === 'dark' || value === 'auto'
 }
 
-// getStoredTheme returns the operator's explicit override, if they have
-// ever used the toggle, or null if the theme has only ever tracked the OS
-// preference.
-export function getStoredTheme(): Theme | null {
+// getStoredPreference returns the operator's saved preference, or "auto"
+// when none has ever been saved (or storage is unavailable) — "auto" is
+// this module's default, not a sentinel meaning "unset".
+export function getStoredPreference(): ThemePreference {
   try {
     const value = window.localStorage.getItem(STORAGE_KEY)
 
-    return isTheme(value) ? value : null
+    return isPreference(value) ? value : 'auto'
   } catch {
     // Storage can throw in a locked-down/private-browsing context; treat
-    // that the same as "no override yet" rather than crashing the app over
-    // a purely cosmetic feature.
-    return null
+    // that the same as "auto" rather than crashing the app over a purely
+    // cosmetic feature.
+    return 'auto'
   }
 }
 
-function setStoredTheme(theme: Theme): void {
+function setStoredPreference(preference: ThemePreference): void {
   try {
-    window.localStorage.setItem(STORAGE_KEY, theme)
+    window.localStorage.setItem(STORAGE_KEY, preference)
   } catch {
-    // See getStoredTheme: losing persistence here just means the toggle
-    // resets on reload, not worth failing over.
+    // See getStoredPreference: losing persistence here just means the
+    // control resets to Auto on reload, not worth failing over.
   }
 }
 
@@ -48,49 +55,53 @@ function systemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches
 }
 
-// resolveInitialTheme is the OS-preference-driven acceptance criterion:
-// an explicit stored override wins if one exists, otherwise the OS
-// preference decides.
+// resolveTheme turns a preference into the Theme actually applied: "auto"
+// follows the live OS preference, "light"/"dark" are already resolved.
+export function resolveTheme(preference: ThemePreference): Theme {
+  return preference === 'auto' ? (systemPrefersDark() ? 'dark' : 'light') : preference
+}
+
+// resolveInitialTheme is called synchronously before the first render (see
+// main.tsx) so a dark-mode/Auto operator never sees a flash of the light
+// theme while React mounts.
 export function resolveInitialTheme(): Theme {
-  return getStoredTheme() ?? (systemPrefersDark() ? 'dark' : 'light')
+  return resolveTheme(getStoredPreference())
 }
 
 // applyTheme sets/clears the "dark" class index.css's custom dark: variant
-// selects on. Called synchronously in main.tsx before the first render (not
-// from inside a React effect) so a dark-mode operator never sees a flash of
-// the light theme while React mounts.
+// selects on, and that the design tokens' `.dark { ... }` block also keys
+// off (web/src/design/tokens.css).
 export function applyTheme(theme: Theme): void {
   document.documentElement.classList.toggle('dark', theme === 'dark')
 }
 
-// useTheme exposes the current theme and a setter that both applies it and
-// persists it as an explicit override. While no override has been saved
-// yet, it also tracks live OS preference changes, so an operator who never
-// touches the toggle keeps following their OS setting even if it changes
-// mid-session.
-export function useTheme(): [Theme, (theme: Theme) => void] {
-  const [theme, setThemeState] = useState<Theme>(() => resolveInitialTheme())
+// useTheme exposes the operator's preference, the resolved theme currently
+// applied, and a setter for the preference (used by the sidebar's
+// Light/Dark/Auto control). While the preference is "auto", it also tracks
+// live OS preference changes, so an operator who never touches the control
+// keeps following their OS setting even if it changes mid-session; picking
+// "Auto" explicitly (after having picked Light/Dark before) resumes that
+// tracking too.
+//
+// The resolved theme is derived during render rather than mirrored into its
+// own state from an effect: preference and the live OS preference are both
+// state, their combination is not. The OS-change listener always records OS
+// changes; the derivation simply ignores them unless the preference is
+// "auto".
+export function useTheme(): [ThemePreference, Theme, (preference: ThemePreference) => void] {
+  const [preference, setPreferenceState] = useState<ThemePreference>(() => getStoredPreference())
+  const [systemDark, setSystemDark] = useState<boolean>(() => systemPrefersDark())
+
+  const resolved: Theme = preference === 'auto' ? (systemDark ? 'dark' : 'light') : preference
 
   useEffect(() => {
-    applyTheme(theme)
-  }, [theme])
+    applyTheme(resolved)
+  }, [resolved])
 
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     const onChange = (event: MediaQueryListEvent) => {
-      // Re-checked on every OS change event, not just once when this effect
-      // first subscribed: this effect's deps are `[]`, so it subscribes
-      // exactly once for Shell's whole (never-unmounted) lifetime — if the
-      // "an override already exists" check only ran at subscribe time, an
-      // operator who sets an explicit override *after* mount (the toggle)
-      // would still have this same handler fire on the next OS preference
-      // change and silently revert their choice, contradicting the whole
-      // point of the override.
-      if (getStoredTheme() !== null) {
-        return
-      }
-
-      setThemeState(event.matches ? 'dark' : 'light')
+      setSystemDark(event.matches)
     }
 
     media.addEventListener('change', onChange)
@@ -98,10 +109,10 @@ export function useTheme(): [Theme, (theme: Theme) => void] {
     return () => media.removeEventListener('change', onChange)
   }, [])
 
-  const setTheme = useCallback((next: Theme) => {
-    setStoredTheme(next)
-    setThemeState(next)
+  const setPreference = useCallback((next: ThemePreference) => {
+    setStoredPreference(next)
+    setPreferenceState(next)
   }, [])
 
-  return [theme, setTheme]
+  return [preference, resolved, setPreference]
 }

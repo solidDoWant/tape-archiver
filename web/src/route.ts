@@ -9,21 +9,43 @@ import { createContext, useContext } from 'react'
 
 // Route is every reachable view. "not-found" covers any path that does not
 // match a known route (e.g. a stale bookmark), so the app always has
-// something reasonable to render rather than a blank page.
+// something reasonable to render rather than a blank page. "login" is the
+// styled pre-redirect login screen (issue #272) — reachable directly (a
+// deep link, or a hard reload while unauthenticated, both now served the
+// SPA rather than an unstyled server redirect — see pkg/webauth's package
+// doc comment) and via AuthGate's own client-side redirect when an API call
+// reports no session.
 export type Route =
+  | { name: 'login' }
   | { name: 'submit' }
   | { name: 'history' }
   | { name: 'run'; runId: string }
+  | { name: 'tapes' }
   | { name: 'not-found'; path: string }
 
-// parseRoute maps a URL pathname to a Route.
-export function parseRoute(pathname: string): Route {
+// parseRoute maps a URL path to a Route. The input may carry a query string
+// (e.g. "/login?error=denied&redirect=/runs/abc" — AuthGate/LoginPage build
+// these) or just a pathname (window.location.pathname); only the path
+// portion decides which Route this resolves to; a view that needs the query
+// string itself (LoginPage's error/redirect params) reads
+// window.location.search directly rather than the Route.
+export function parseRoute(rawPath: string): Route {
+  const pathname = rawPath.split(/[?#]/)[0] || '/'
+
   if (pathname === '/') {
     return { name: 'submit' }
   }
 
   if (pathname === '/history' || pathname === '/history/') {
     return { name: 'history' }
+  }
+
+  if (pathname === '/tapes' || pathname === '/tapes/') {
+    return { name: 'tapes' }
+  }
+
+  if (pathname === '/login' || pathname === '/login/') {
+    return { name: 'login' }
   }
 
   const runMatch = /^\/runs\/([^/]+)\/?$/.exec(pathname)
@@ -41,6 +63,22 @@ export function parseRoute(pathname: string): Route {
   }
 
   return { name: 'not-found', path: pathname }
+}
+
+// sanitizeRedirectPath restricts a caller-supplied post-login redirect to a
+// same-origin absolute path, defaulting to "/" for anything else — the
+// client-side mirror of pkg/webauth's identically-named server-side
+// function (which re-validates it again before ever using it to build an
+// IdP redirect; this copy exists so the SPA never even hands a malformed or
+// cross-origin value to history.pushState / window.location.assign in the
+// first place). See that function's doc comment for why "//" and "\" are
+// rejected specifically.
+export function sanitizeRedirectPath(path: string | null | undefined): string {
+  if (!path || !path.startsWith('/') || path.startsWith('//') || path.includes('\\')) {
+    return '/'
+  }
+
+  return path
 }
 
 // runPath builds the URL for a given run ID, the inverse of parseRoute's

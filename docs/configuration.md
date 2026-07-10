@@ -440,12 +440,14 @@ resume/abort actions, gated behind OIDC authentication (`pkg/webauth`) — see
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | yes | This app's confidential-client credentials at the provider above. |
 | `OIDC_REDIRECT_URL` | yes | This app's OIDC callback URL, exactly as registered with the provider (e.g. `https://tape-archiver.example.com/auth/callback`) — see [OIDC authentication](#oidc-authentication-cmdweb) below. |
 | `WEB_SESSION_KEY` | yes | A base64-encoded 32-byte AES-256 key (e.g. the output of `openssl rand -base64 32`) encrypting the session and login-state cookies. `cmd/web` holds no server-side session store (`docs/web-ui-design.md` §3), so losing or rotating this key just signs every operator out — nothing else depends on it. |
+| `WEB_FOOTER_HOST` | no | An optional deploy-time label (e.g. a host or deployment name, `homelab-01`) shown after the build version in the UI's footer line (`tape-archiver <version> · <label>`, on the login page and in the sidebar). When unset, the footer shows only the version — the label segment is omitted entirely, not left blank. The version segment itself always comes from the binary's own embedded VCS build info (`internal/buildinfo.ToolVersion`), not from any environment variable. Served (with the version) by the ungated `GET /api/build-info` route — do not put anything sensitive in it. |
 
 `cmd/web` fails to start if it cannot reach Temporal (same startup health check as
 `worker`/`tapectl` — `pkg/temporalclient.New` — since a run browser that cannot reach
 Temporal cannot do anything useful), or if the OIDC configuration above is incomplete or
 malformed (`pkg/webauth.New`, including OIDC discovery against `OIDC_ISSUER_URL`) — every
-route is gated behind a valid session, so a working OIDC setup is not optional.
+data-bearing `/api/*` route is gated behind a valid session, so a working OIDC setup is
+not optional.
 `/readyz` subsequently reflects Temporal connectivity going forward, e.g. if Temporal
 becomes unreachable after startup.
 
@@ -468,10 +470,13 @@ IDs are UUIDs) is `400`. Both, like every `/api/*` route, require an authenticat
 
 ### OIDC authentication (`cmd/web`)
 
-Every page route (the SPA at `/`) and every `/api/*` route is gated behind an OIDC
-authorization-code-flow session (`pkg/webauth`), authentication only — any authenticated
-user is authorized; there is no role/permission model. The provider is entirely
-configured via `OIDC_ISSUER_URL`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`/`OIDC_REDIRECT_URL`
+Every `/api/*` route (except the ungated `/api/build-info` below) is gated behind an
+OIDC authorization-code-flow session (`pkg/webauth`), authentication only — any
+authenticated user is authorized; there is no role/permission model. Page routes serve
+the SPA itself unconditionally (the bundle carries no data — everything sensitive is
+behind the gated API), and the SPA shows a styled login page until a session exists.
+The provider is entirely configured via
+`OIDC_ISSUER_URL`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`/`OIDC_REDIRECT_URL`
 above (OIDC discovery + a standard authorization-code exchange), so any compliant identity
 provider works without code changes.
 
@@ -479,16 +484,20 @@ Routes:
 
 | Route | Method | Gated? | Purpose |
 |-------|--------|--------|---------|
-| `/auth/login` | `GET` | no | Starts the flow: sets a short-lived (10 minute), encrypted login-state cookie (CSRF state, OIDC nonce, PKCE verifier, and the originally requested path) and redirects to the provider's authorization endpoint. An optional `?redirect=/some/path` query parameter controls where the browser lands after a successful login (must be a same-origin absolute path; anything else is ignored in favor of `/`). |
-| `/auth/callback` | `GET` | no | The provider's redirect target: validates the CSRF state, exchanges the authorization code (with the PKCE verifier from the state cookie), verifies the returned ID token's signature/issuer/audience/expiry/nonce, sets the session cookie, and redirects into the app. |
-| `/auth/logout` | `GET` | no | Clears the session cookie and redirects to `/` (which, now unauthenticated, immediately redirects to `/auth/login`). Logging out an already-logged-out session is a no-op, not an error. |
+| `/auth/login` | `GET` | no | Starts the flow: sets a short-lived (10 minute), encrypted login-state cookie (CSRF state, OIDC nonce, PKCE verifier, and the originally requested path) and redirects to the provider's authorization endpoint. An optional `?redirect=/some/path` query parameter controls where the browser lands after a successful login (must be a same-origin absolute path; anything else is ignored in favor of `/`). The UI's login page triggers this route when its sign-in control is activated. |
+| `/auth/callback` | `GET` | no | The provider's redirect target: validates the CSRF state, exchanges the authorization code (with the PKCE verifier from the state cookie), verifies the returned ID token's signature/issuer/audience/expiry/nonce, sets the session cookie, and redirects into the app. On any failure it redirects to the UI's login page with an error the page renders — `/login?error=denied` when the provider itself reported a denial (its `error` callback parameter, e.g. the account is not authorized), `/login?error=expired` for everything else (a missing/expired/tampered login-state cookie, CSRF state mismatch, a failed code exchange, an invalid/expired ID token, a nonce mismatch) — never a bare HTTP error page. The original destination is carried along as `redirect=` when known, so a successful retry still lands where the operator was headed. |
+| `/auth/logout` | `GET` | no | Clears the session cookie and redirects to `/` (which, now unauthenticated, renders the UI's login page). Logging out an already-logged-out session is a no-op, not an error. |
+| `/api/build-info` | `GET` | no | The build version and optional footer label: `{"version": "...", "footerHost": "..."}` (`footerHost` omitted when `WEB_FOOTER_HOST` is unset). Ungated deliberately — the login page's footer renders it before any session exists, and a build version/deploy label is not sensitive. |
 | `/api/me` | `GET` | yes | The authenticated identity: `{"subject": "...", "email": "...", "name": "..."}`, taken from the ID token's `sub`/`email`/`name` claims (`name` falls back to `preferred_username` when absent; `email`/`name` are omitted from the response when the provider does not supply them). |
 
 Gating split: an unauthenticated request under `/api/` gets `401` with a JSON
 `{"error": "..."}` body (a `fetch()`/XHR caller cannot usefully follow an HTML redirect);
 an unauthenticated request to any other route (the SPA at `/`, or any client-side route
-under it) gets a `302` redirect to `/auth/login?redirect={original path}`. A tampered or
-expired session cookie is rejected exactly like a missing one — never a `500`.
+under it) is served the SPA normally — the app itself detects the missing session (via
+`GET /api/me`) and shows its styled login page (route `/login`), whose sign-in control
+starts the flow via `/auth/login`. The SPA bundle carries no secrets; all data lives
+behind the `401`-gated `/api/*` routes. A tampered or expired session cookie is rejected
+exactly like a missing one — never a `500`.
 
 The session is a stateless, encrypted, tamper-evident cookie (AES-256-GCM, keyed by
 `WEB_SESSION_KEY`), not a server-side store, so `cmd/web` stays fully stateless and can

@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,10 +167,12 @@ func TestParseSessionKey(t *testing.T) {
 }
 
 // TestUnauthenticatedRequests_areRejected covers the split gating decision:
-// a protected API route 401s (JSON body) rather than redirecting, since a
-// fetch()/XHR caller cannot follow a redirect into an HTML login page
-// usefully; a protected page route redirects to /auth/login instead, since
-// that is what a browser navigation needs.
+// a protected API route 401s (JSON body) rather than serving anything,
+// since a fetch()/XHR caller has no use for an HTML page body; a page
+// route is served normally (the SPA, standing in as echoHandler here) even
+// without a session, since the SPA itself renders the styled login page
+// once it learns (via GET /api/me, still 401-gated) that it has no session
+// — see the package doc comment.
 func TestUnauthenticatedRequests_areRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -198,26 +201,90 @@ func TestUnauthenticatedRequests_areRejected(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	})
 
-	t.Run("page route without a session redirects to login", func(t *testing.T) {
+	t.Run("page route without a session is served, not redirected", func(t *testing.T) {
 		resp, err := client.Get(server.URL + "/runs/some-run-id")
 		require.NoError(t, err)
 
 		defer func() { _ = resp.Body.Close() }()
 
-		assert.Equal(t, http.StatusFound, resp.StatusCode)
-		location := resp.Header.Get("Location")
-		assert.Contains(t, location, "/auth/login")
-		assert.Contains(t, location, "redirect=%2Fruns%2Fsome-run-id")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var body struct {
+			Path     string
+			Identity Identity
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+		assert.Equal(t, "/runs/some-run-id", body.Path)
+		assert.Empty(t, body.Identity.Subject, "no identity should be attached for an unauthenticated request")
 	})
 
-	t.Run("root route without a session redirects to login", func(t *testing.T) {
+	t.Run("root route without a session is served, not redirected", func(t *testing.T) {
 		resp, err := client.Get(server.URL + "/")
 		require.NoError(t, err)
 
 		defer func() { _ = resp.Body.Close() }()
 
-		assert.Equal(t, http.StatusFound, resp.StatusCode)
-		assert.Contains(t, resp.Header.Get("Location"), "/auth/login")
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("login route without a session is served (never gated, even though it is under the general catch-all)", func(t *testing.T) {
+		resp, err := client.Get(server.URL + "/login")
+		require.NoError(t, err)
+
+		defer func() { _ = resp.Body.Close() }()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+}
+
+// TestBuildInfo covers GET /api/build-info: ungated (served without a
+// session), and reflecting the Authenticator's configured AppVersion/
+// FooterHost — including FooterHost being omitted from the JSON body
+// entirely when unset, not rendered as a blank string.
+func TestBuildInfo(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+
+	t.Run("with a footer host configured", func(t *testing.T) {
+		cfg := testConfig(t, idp)
+		cfg.AppVersion = "v1.2.3"
+		cfg.FooterHost = "homelab"
+
+		authenticator, err := New(t.Context(), cfg)
+		require.NoError(t, err)
+
+		server := newGatedServer(t, authenticator)
+
+		resp, err := http.Get(server.URL + "/api/build-info")
+		require.NoError(t, err)
+
+		defer func() { _ = resp.Body.Close() }()
+
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		assert.JSONEq(t, `{"version":"v1.2.3","footerHost":"homelab"}`, string(body))
+	})
+
+	t.Run("with no footer host configured, the field is omitted entirely", func(t *testing.T) {
+		cfg := testConfig(t, idp)
+		cfg.AppVersion = "v1.2.3"
+
+		authenticator, err := New(t.Context(), cfg)
+		require.NoError(t, err)
+
+		server := newGatedServer(t, authenticator)
+
+		resp, err := http.Get(server.URL + "/api/build-info")
+		require.NoError(t, err)
+
+		defer func() { _ = resp.Body.Close() }()
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		assert.JSONEq(t, `{"version":"v1.2.3"}`, string(body))
 	})
 }
 
@@ -429,7 +496,8 @@ func TestExpiredSessionCookie_isRejected(t *testing.T) {
 
 // TestCallback_stateMismatch_isRejected covers CSRF protection: a callback
 // whose "state" query parameter does not match the value recorded in the
-// state cookie must be rejected, not silently accepted.
+// state cookie must be rejected — redirected to the login page with an
+// "expired" error, not silently accepted.
 func TestCallback_stateMismatch_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -441,7 +509,7 @@ func TestCallback_stateMismatch_isRejected(t *testing.T) {
 		State:        "expected-state",
 		Nonce:        "some-nonce",
 		PKCEVerifier: "verifier",
-		RedirectPath: "/",
+		RedirectPath: "/runs/abc",
 		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
 	})
 	require.NoError(t, err)
@@ -450,18 +518,26 @@ func TestCallback_stateMismatch_isRejected(t *testing.T) {
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	location := resp.Header.Get("Location")
+	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
+	assert.Contains(t, location, "error=expired")
+	assert.Contains(t, location, "redirect=%2Fruns%2Fabc")
 }
 
 // TestCallback_noStateCookie_redirectsToLogin covers a callback hit cold
 // (no state cookie at all, e.g. a stale bookmark or a replayed URL after the
-// 10-minute state TTL) failing safely by sending the browser back to start
-// a fresh login, rather than erroring.
+// 10-minute state TTL) failing safely by sending the browser to the login
+// page with an "expired" error (no known redirect target, since the state
+// cookie carrying it is exactly what is missing), rather than erroring.
 func TestCallback_noStateCookie_redirectsToLogin(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -476,8 +552,12 @@ func TestCallback_noStateCookie_redirectsToLogin(t *testing.T) {
 
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusFound, resp.StatusCode)
-	assert.Contains(t, resp.Header.Get("Location"), "/auth/login")
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	location := resp.Header.Get("Location")
+	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
+	assert.Contains(t, location, "error=expired")
+	assert.NotContains(t, location, "redirect=")
 }
 
 // newCookieClient returns an http.Client with a cookie jar, so it behaves
@@ -494,8 +574,9 @@ func newCookieClient(t *testing.T) *http.Client {
 
 // TestCallback_idpError_isRejected covers the IdP declining the login
 // (e.g. the user cancels, or the provider rejects the request) reported back
-// as an "error" query parameter on the callback — this must fail the
-// request, not be ignored.
+// as an "error" query parameter on the callback — this must redirect to the
+// login page with the "denied" error (web/src/LoginPage.tsx's
+// error-denied state), not be ignored, and not any other error code.
 func TestCallback_idpError_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -507,7 +588,7 @@ func TestCallback_idpError_isRejected(t *testing.T) {
 		State:        "the-state",
 		Nonce:        "the-nonce",
 		PKCEVerifier: "verifier",
-		RedirectPath: "/",
+		RedirectPath: "/runs/abc",
 		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
 	})
 	require.NoError(t, err)
@@ -516,12 +597,19 @@ func TestCallback_idpError_isRejected(t *testing.T) {
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	location := resp.Header.Get("Location")
+	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
+	assert.Contains(t, location, "error=denied")
+	assert.Contains(t, location, "redirect=%2Fruns%2Fabc")
 }
 
 // TestCallback_pkceMismatch_isRejected covers the PKCE verifier in the state
@@ -552,12 +640,18 @@ func TestCallback_pkceMismatch_isRejected(t *testing.T) {
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusBadGateway, resp.StatusCode)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	location := resp.Header.Get("Location")
+	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
+	assert.Contains(t, location, "error=expired")
 }
 
 // TestCallback_nonceMismatch_isRejected covers the OIDC nonce recorded in
@@ -589,25 +683,48 @@ func TestCallback_nonceMismatch_isRejected(t *testing.T) {
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	location := resp.Header.Get("Location")
+	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
+	assert.Contains(t, location, "error=expired")
 }
 
 // TestCallback_expiredIDToken_isRejected covers a syntactically valid,
 // correctly-signed ID token that ID-token verification (coreos/go-oidc, not
 // anything hand-rolled in this package) rejects on its merits — expiry here,
 // standing in for the whole class of signature/issuer/audience/expiry
-// checks Verify performs.
+// checks Verify performs. Must redirect to the login page with the
+// "expired" error, not succeed and not fail the request outright.
 func TestCallback_expiredIDToken_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	idp.IDTokenLifetime = -time.Hour // already expired at issuance
 
 	server, _ := newGatedServerWithRealRedirect(t, idp)
-	client := newCookieClient(t)
+
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+
+	// Follows the redirect chain through the fake IdP (login -> authorize ->
+	// callback) like a real browser, but must NOT follow the final
+	// callback -> /login redirect this test is asserting on.
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) > 0 && strings.HasPrefix(via[len(via)-1].URL.Path, "/auth/callback") {
+				return http.ErrUseLastResponse
+			}
+
+			return nil
+		},
+	}
 
 	resp, err := client.Get(server.URL + "/auth/login")
 	require.NoError(t, err)
@@ -615,7 +732,11 @@ func TestCallback_expiredIDToken_isRejected(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	assert.Equal(t, http.StatusBadGateway, resp.StatusCode, "an expired ID token must be rejected by verification: %s", body)
+	require.Equal(t, http.StatusFound, resp.StatusCode, "an expired ID token must be rejected by verification: %s", body)
+
+	location := resp.Header.Get("Location")
+	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
+	assert.Contains(t, location, "error=expired")
 }
 
 // fakeAuthorize drives the fake IdP's authorization endpoint directly (not

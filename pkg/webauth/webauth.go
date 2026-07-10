@@ -19,6 +19,18 @@
 // server-side to stash it between the two requests. Both cookies are
 // encrypted with the same key but under different AAD "purposes", so one
 // can never be replayed as the other.
+//
+// Unauthenticated page requests (everything except "/api/*") are served the
+// SPA unconditionally rather than redirected — the SPA itself renders a
+// styled login page (web/src/LoginPage.tsx) and calls GET /auth/login when
+// the operator activates it, once it learns (from GET /api/me, still
+// 401-gated) that it has no session. A failed OIDC callback (IdP denial,
+// expired/invalid login state, a rejected ID token, ...) redirects back to
+// that same login page with an "error" query parameter (loginErrorRedirect)
+// the SPA renders as an error-denied/error-expired state, instead of the
+// callback failing with a raw HTTP error page. "/api/*" requests are
+// unaffected either way: a missing/invalid session there always gets a 401
+// JSON body, never a redirect.
 package webauth
 
 import (
@@ -100,6 +112,18 @@ type Config struct {
 	// attempt — acceptable, since the service is otherwise stateless and a
 	// dropped session just means logging in again.
 	SessionKey []byte
+	// AppVersion is the tape-archiver build version (cmd/web passes
+	// internal/buildinfo.ToolVersion()), served ungated at GET
+	// /api/build-info for the login page's and sidebar's footer
+	// (web/src/Footer.tsx). Never a hardcoded literal like the design's
+	// sample "v0.4.1" — see docs/configuration.md.
+	AppVersion string
+	// FooterHost is an optional deploy-time label (e.g. a host or
+	// deployment name — WEB_SESSION_KEY's sibling env var
+	// WEB_FOOTER_HOST) appended to the footer version line. Empty by
+	// default, in which case the footer omits that segment entirely rather
+	// than showing a blank placeholder — see docs/configuration.md.
+	FooterHost string
 }
 
 // Identity is the authenticated user, as returned by GET /api/me and
@@ -122,6 +146,8 @@ type Authenticator struct {
 	oauth2Config oauth2.Config
 	verifier     *oidc.IDTokenVerifier
 	gcm          cipher.AEAD
+	appVersion   string
+	footerHost   string
 }
 
 // ParseSessionKey decodes a base64-encoded 32-byte AES-256 key (e.g. the
@@ -176,8 +202,10 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 			Endpoint:     provider.Endpoint(),
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
 		},
-		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
-		gcm:      gcm,
+		verifier:   provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
+		gcm:        gcm,
+		appVersion: cfg.AppVersion,
+		footerHost: cfg.FooterHost,
 	}, nil
 }
 
@@ -210,33 +238,48 @@ func validateConfig(cfg Config) error {
 //   - GET /auth/login — starts the OIDC flow: redirects to the provider's
 //     authorization endpoint. Not gated (that would be circular).
 //   - GET /auth/callback — the provider's redirect target: exchanges the
-//     code, verifies the ID token, and sets the session cookie. Not gated,
-//     for the same reason.
+//     code, verifies the ID token, and sets the session cookie on success;
+//     on failure, redirects to the SPA's login route with an "error" query
+//     parameter (see loginErrorRedirect) instead of failing the request.
+//     Not gated, for the same reason as /auth/login.
 //   - GET /auth/logout — clears the session cookie and redirects to "/".
 //     Not gated: logging out an already-logged-out session is a no-op, not
 //     an error.
+//   - GET /api/build-info — the build version and (if configured) footer
+//     host label (buildInfoResponse, as JSON), for the login page's and
+//     sidebar's footer (web/src/Footer.tsx). Not gated: it renders on the
+//     unauthenticated login page, and a build version/deploy label is not
+//     sensitive.
 //   - GET /api/me — the authenticated identity (Identity, as JSON). Gated.
-//   - everything else (next) — gated. An unauthenticated request under
-//     "/api/" gets 401 with a JSON body; anything else is redirected to
-//     /auth/login (see requireSession) — a plain, unstyled redirect
-//     straight to the IdP is the "functional login trigger" this sub-issue
-//     ships; sub-issue 7 owns any in-app login page polish.
+//   - everything else (next) — /api/* is gated: an unauthenticated request
+//     there gets 401 with a JSON body. Every other path is served
+//     unconditionally, authenticated or not (see requireSession) — the SPA
+//     itself (web/src/App.tsx's AuthGate) decides whether to render the
+//     styled login page or the real app shell, based on whether GET
+//     /api/me reports a session.
 func (a *Authenticator) Wrap(next http.Handler) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /auth/login", a.handleLogin)
 	mux.HandleFunc("GET /auth/callback", a.handleCallback)
 	mux.HandleFunc("GET /auth/logout", a.handleLogout)
+	mux.HandleFunc("GET /api/build-info", a.handleBuildInfo)
 	mux.Handle("GET /api/me", a.requireSession(http.HandlerFunc(a.handleMe)))
 	mux.Handle("/", a.requireSession(next))
 
 	return mux
 }
 
-// requireSession gates next behind a valid session cookie: authenticated
-// requests are forwarded to next with the Identity attached to the request
-// context (see IdentityFromContext); unauthenticated ones are rejected —
-// 401 JSON under "/api/", a redirect to the login route otherwise.
+// requireSession attaches the authenticated Identity to the request context
+// (see IdentityFromContext) when a valid session cookie is present, then
+// always forwards to next — except an unauthenticated request under
+// "/api/", which gets a 401 JSON body instead: a fetch()/XHR caller cannot
+// usefully follow a redirect into an HTML page, and next (the SPA) has
+// nothing to serve an API caller anyway. Every other unauthenticated
+// request (a page, or one of the SPA's own static assets) is served next
+// exactly as an authenticated one would be — the SPA bundle itself carries
+// no secrets, and it is what renders the styled login page; see the package
+// doc comment.
 func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := a.identityFromSessionCookie(r)
@@ -247,7 +290,7 @@ func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 				return
 			}
 
-			redirectToLogin(w, r)
+			next.ServeHTTP(w, r)
 
 			return
 		}
@@ -299,11 +342,25 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 // verifier from the state cookie), verifies the returned ID token's
 // signature/issuer/audience/expiry (coreos/go-oidc) and nonce, and, on
 // success, sets the session cookie and redirects to wherever the login
-// attempt started from.
+// attempt started from. On any failure it redirects to the SPA's login page
+// with an "error" query parameter (loginErrorRedirect) instead of failing
+// the request outright, so the operator always lands back on a page that
+// explains what happened and offers to retry, never a bare HTTP error page
+// (see the package doc comment).
+//
+// Two error codes are distinguished, matching web/src/LoginPage.tsx's
+// error-denied/error-expired states: "denied" is only for an explicit
+// denial reported by the IdP itself (the "error" query parameter);
+// everything else this handler can reject — a missing/expired/tampered
+// state cookie, a CSRF state mismatch, a missing code, a failed code
+// exchange, a missing/invalid/expired ID token, a nonce mismatch — is
+// reported as "expired", since from the operator's perspective all of these
+// mean the same thing: the login attempt did not complete and they should
+// just try again.
 func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	state, ok := a.consumeStateCookie(w, r)
 	if !ok {
-		http.Redirect(w, r, "/auth/login", http.StatusFound)
+		loginErrorRedirect(w, r, loginErrorExpired, "")
 
 		return
 	}
@@ -311,48 +368,48 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	if errParam := query.Get("error"); errParam != "" {
-		http.Error(w, fmt.Sprintf("OIDC provider returned an error: %s", errParam), http.StatusBadGateway)
+		loginErrorRedirect(w, r, loginErrorDenied, state.RedirectPath)
 
 		return
 	}
 
 	returnedState := query.Get("state")
 	if returnedState == "" || subtle.ConstantTimeCompare([]byte(returnedState), []byte(state.State)) != 1 {
-		http.Error(w, "invalid or expired login attempt, please try again", http.StatusBadRequest)
+		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
 
 		return
 	}
 
 	code := query.Get("code")
 	if code == "" {
-		http.Error(w, "missing authorization code", http.StatusBadRequest)
+		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
 
 		return
 	}
 
 	token, err := a.oauth2Config.Exchange(r.Context(), code, oauth2.VerifierOption(state.PKCEVerifier))
 	if err != nil {
-		http.Error(w, "failed to exchange authorization code", http.StatusBadGateway)
+		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
 
 		return
 	}
 
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		http.Error(w, "OIDC provider did not return an ID token", http.StatusBadGateway)
+		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
 
 		return
 	}
 
 	idToken, err := a.verifier.Verify(r.Context(), rawIDToken)
 	if err != nil {
-		http.Error(w, "failed to verify ID token", http.StatusBadGateway)
+		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
 
 		return
 	}
 
 	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(state.Nonce)) != 1 {
-		http.Error(w, "ID token nonce mismatch", http.StatusBadRequest)
+		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
 
 		return
 	}
@@ -364,7 +421,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := idToken.Claims(&claims); err != nil {
-		http.Error(w, "failed to decode ID token claims", http.StatusBadGateway)
+		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
 
 		return
 	}
@@ -489,17 +546,55 @@ func (a *Authenticator) identityFromSessionCookie(r *http.Request) (Identity, bo
 	return Identity{Subject: claims.Subject, Email: claims.Email, Name: claims.Name}, true
 }
 
-// redirectToLogin sends an unauthenticated page request to /auth/login,
-// preserving the originally requested path (only) so the post-login
-// redirect (handleCallback) can send the browser back to it.
-func redirectToLogin(w http.ResponseWriter, r *http.Request) {
-	target := url.URL{Path: "/auth/login"}
+// loginPath is the SPA route the styled login page (web/src/LoginPage.tsx)
+// is served at.
+const loginPath = "/login"
+
+// Error codes handleCallback passes to loginErrorRedirect, matching
+// web/src/LoginPage.tsx's error-denied/error-expired states.
+const (
+	loginErrorDenied  = "denied"
+	loginErrorExpired = "expired"
+)
+
+// loginErrorRedirect sends the browser to the SPA's login page with an
+// "error" query parameter (loginErrorDenied/loginErrorExpired) the SPA
+// renders as an error state, and — when known — a "redirect" parameter
+// carrying the original login attempt's destination (already sanitized by
+// sanitizeRedirectPath when handleLogin first set it in the state cookie),
+// so a successful retry still lands wherever the operator originally meant
+// to go. Called only by handleCallback; see its doc comment for which
+// failures map to which code.
+func loginErrorRedirect(w http.ResponseWriter, r *http.Request, code string, redirectPath string) {
+	target := url.URL{Path: loginPath}
 
 	query := url.Values{}
-	query.Set("redirect", r.URL.Path)
+	query.Set("error", code)
+
+	if redirectPath != "" && redirectPath != "/" {
+		query.Set("redirect", redirectPath)
+	}
+
 	target.RawQuery = query.Encode()
 
 	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+// buildInfoResponse is GET /api/build-info's JSON body.
+type buildInfoResponse struct {
+	Version    string `json:"version"`
+	FooterHost string `json:"footerHost,omitempty"`
+}
+
+// handleBuildInfo implements the ungated GET /api/build-info — see Wrap's
+// doc comment.
+func (a *Authenticator) handleBuildInfo(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	if err := json.NewEncoder(w).Encode(buildInfoResponse{Version: a.appVersion, FooterHost: a.footerHost}); err != nil {
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
+	}
 }
 
 // sanitizeRedirectPath restricts a caller-supplied post-login redirect to a

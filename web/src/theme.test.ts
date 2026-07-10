@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { applyTheme, getStoredTheme, resolveInitialTheme, useTheme } from './theme'
+import { applyTheme, getStoredPreference, resolveInitialTheme, resolveTheme, useTheme } from './theme'
 
 // stubMatchMedia replaces window.matchMedia with one reporting matches for
 // good, standing in for a specific OS color-scheme preference.
@@ -71,24 +71,42 @@ describe('applyTheme', () => {
   })
 })
 
-describe('getStoredTheme', () => {
-  it('returns null when no override has ever been saved', () => {
-    expect(getStoredTheme()).toBeNull()
+describe('getStoredPreference', () => {
+  it('defaults to "auto" when no preference has ever been saved', () => {
+    expect(getStoredPreference()).toBe('auto')
   })
 
-  it('returns a previously saved override', () => {
+  it('returns a previously saved preference', () => {
     window.localStorage.setItem('tape-archiver:theme', 'dark')
-    expect(getStoredTheme()).toBe('dark')
+    expect(getStoredPreference()).toBe('dark')
   })
 
-  it('ignores a garbage stored value', () => {
+  it('falls back to "auto" for a garbage stored value', () => {
     window.localStorage.setItem('tape-archiver:theme', 'not-a-theme')
-    expect(getStoredTheme()).toBeNull()
+    expect(getStoredPreference()).toBe('auto')
+  })
+})
+
+describe('resolveTheme', () => {
+  it('follows the OS preference for "auto"', () => {
+    stubMatchMedia(true)
+    expect(resolveTheme('auto')).toBe('dark')
+
+    stubMatchMedia(false)
+    expect(resolveTheme('auto')).toBe('light')
+  })
+
+  it('passes an explicit light/dark preference through unchanged, ignoring the OS', () => {
+    stubMatchMedia(true)
+    expect(resolveTheme('light')).toBe('light')
+
+    stubMatchMedia(false)
+    expect(resolveTheme('dark')).toBe('dark')
   })
 })
 
 describe('resolveInitialTheme', () => {
-  it('follows the OS preference when no override is stored', () => {
+  it('follows the OS preference when the stored preference is "auto" (the default)', () => {
     stubMatchMedia(true)
     expect(resolveInitialTheme()).toBe('dark')
 
@@ -96,7 +114,7 @@ describe('resolveInitialTheme', () => {
     expect(resolveInitialTheme()).toBe('light')
   })
 
-  it('prefers a stored override over the OS preference', () => {
+  it('prefers a stored explicit preference over the OS preference', () => {
     stubMatchMedia(true)
     window.localStorage.setItem('tape-archiver:theme', 'light')
 
@@ -105,34 +123,51 @@ describe('resolveInitialTheme', () => {
 })
 
 describe('useTheme', () => {
-  it('keeps following the OS preference across a live change when no override is stored', () => {
+  it('defaults to "auto" and keeps following the OS preference across a live change', () => {
     const { fireChange } = stubControllableMatchMedia(false)
     const { result } = renderHook(() => useTheme())
 
-    expect(result.current[0]).toBe('light')
+    expect(result.current[0]).toBe('auto')
+    expect(result.current[1]).toBe('light')
 
     act(() => fireChange(true))
-    expect(result.current[0]).toBe('dark')
+    expect(result.current[1]).toBe('dark')
   })
 
   it('does not let a later OS preference change override an explicit operator choice', () => {
     const { fireChange } = stubControllableMatchMedia(false)
     const { result } = renderHook(() => useTheme())
 
-    expect(result.current[0]).toBe('light')
+    expect(result.current[1]).toBe('light')
 
-    // The operator explicitly picks dark via the toggle (setTheme), after
-    // the OS-change listener already subscribed at mount with no stored
-    // override — the exact ordering that regresses if the "an override
-    // exists" check is only made once at subscribe time instead of on
-    // every OS change event.
-    act(() => result.current[1]('dark'))
+    // The operator explicitly picks Dark via the control, after the
+    // OS-change listener already subscribed at mount with preference
+    // "auto" — the exact ordering that regresses if the "is the preference
+    // auto" check is only made once at subscribe time instead of on every
+    // OS change event.
+    act(() => result.current[2]('dark'))
     expect(result.current[0]).toBe('dark')
-    expect(getStoredTheme()).toBe('dark')
+    expect(result.current[1]).toBe('dark')
+    expect(getStoredPreference()).toBe('dark')
 
     // The OS preference now changes (e.g. a scheduled day/night switch).
     // The operator's explicit choice must survive it.
     act(() => fireChange(false))
-    expect(result.current[0]).toBe('dark')
+    expect(result.current[1]).toBe('dark')
+  })
+
+  it('resumes following the OS preference after switching back to "Auto"', () => {
+    const { fireChange } = stubControllableMatchMedia(false)
+    const { result } = renderHook(() => useTheme())
+
+    act(() => result.current[2]('dark'))
+    expect(result.current[1]).toBe('dark')
+
+    act(() => result.current[2]('auto'))
+    expect(result.current[0]).toBe('auto')
+    expect(result.current[1]).toBe('light')
+
+    act(() => fireChange(true))
+    expect(result.current[1]).toBe('dark')
   })
 })

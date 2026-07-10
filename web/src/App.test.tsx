@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
 
 // MinimalEventSource stands in for the browser's real EventSource (not
@@ -25,9 +25,74 @@ class MinimalEventSource {
 }
 
 // jsonResponse builds a minimal fetch Response stand-in, matching the shape
-// SubmitRunForm/api.ts/RunHistory all read (ok/status/json()).
+// api.ts reads (ok/status/json()).
 function jsonResponse(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body }
+}
+
+// The identity /api/me returns for authenticated tests.
+const testIdentity = { subject: 'user-1', email: 'operator@example.com', name: 'Test Operator' }
+
+// stubApi installs a fetch mock routing the endpoints the shell itself hits
+// on mount (AuthGate's /api/me, the Footer's /api/build-info, the Sidebar's
+// active-run check via /api/runs), with per-test overrides. Unlisted URLs
+// 404. Returns the mock for call assertions.
+function stubApi(overrides: Record<string, { status: number; body: unknown }> = {}) {
+  const routes: Record<string, { status: number; body: unknown }> = {
+    '/api/me': { status: 200, body: testIdentity },
+    '/api/build-info': { status: 200, body: { version: 'v-test' } },
+    '/api/runs': { status: 200, body: { runs: [] } },
+    ...overrides,
+  }
+
+  const fetchMock = vi.fn((input: string) => {
+    const url = typeof input === 'string' ? input : String(input)
+    const route = routes[url.split('?')[0]]
+
+    if (!route) {
+      return Promise.resolve(jsonResponse(404, { error: `no stub for ${url}` }))
+    }
+
+    return Promise.resolve(jsonResponse(route.status, route.body))
+  })
+
+  vi.stubGlobal('fetch', fetchMock)
+
+  return fetchMock
+}
+
+// stubControllableMatchMedia replaces window.matchMedia with one whose
+// reported OS color-scheme preference a test can flip mid-session via the
+// returned fireChange (matchMedia's real "change" event) — the same helper
+// theme.test.ts uses, duplicated here because it is test scaffolding, not
+// exportable product code.
+function stubControllableMatchMedia(initialMatches: boolean) {
+  let matches = initialMatches
+  let changeListener: ((event: MediaQueryListEvent) => void) | null = null
+
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() {
+      return matches
+    },
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) => {
+      changeListener = listener
+    },
+    removeEventListener: () => {
+      changeListener = null
+    },
+    dispatchEvent: () => false,
+  }))
+
+  return {
+    fireChange(nextMatches: boolean) {
+      matches = nextMatches
+      changeListener?.({ matches: nextMatches } as MediaQueryListEvent)
+    },
+  }
 }
 
 beforeEach(() => {
@@ -44,108 +109,146 @@ afterEach(() => {
   window.localStorage.clear()
 })
 
-describe('App', () => {
-  it('renders the shell heading, nav, and the submit-run form at the root path', () => {
-    render(<App />)
+// renderAuthenticated renders App with a session (stubbed /api/me) and
+// waits for AuthGate's loading state to resolve into the shell.
+async function renderAuthenticated(overrides: Record<string, { status: number; body: unknown }> = {}) {
+  const fetchMock = stubApi(overrides)
 
-    expect(screen.getByRole('link', { name: 'tape-archiver' })).toBeInTheDocument()
+  render(<App />)
+
+  await waitFor(() => {
     expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Submit' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'History' })).toBeInTheDocument()
+  })
+
+  return fetchMock
+}
+
+describe('App shell (authenticated)', () => {
+  it('renders the sidebar nav items, the operator identity, and the submit form at the root path', async () => {
+    await renderAuthenticated()
+
+    expect(screen.getByRole('link', { name: /dashboard/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /start new run/i })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /tapes/i })).toBeInTheDocument()
+
+    // Signed-in operator's name and email (from /api/me) in the sidebar.
+    expect(screen.getByText('Test Operator')).toBeInTheDocument()
+    expect(screen.getByText('operator@example.com')).toBeInTheDocument()
+
+    // Root path renders the existing submit form inside the new shell.
     expect(screen.getByRole('form', { name: /submit backup run/i })).toBeInTheDocument()
   })
 
-  it('navigates to the run detail view via the submit form\'s "View run" link', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(jsonResponse(201, { workflowId: 'backup', runId: 'run-abc-123' }))
-    vi.stubGlobal('fetch', fetchMock)
+  it('shows the Light/Dark/Auto theme control and applies an explicit Dark choice', async () => {
+    await renderAuthenticated()
 
-    render(<App />)
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
 
-    fireEvent.change(screen.getByLabelText('Run config (JSON)'), {
-      target: { value: '{"copies":1}' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /submit run/i }))
+    fireEvent.click(screen.getByRole('button', { name: /dark/i }))
 
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: /view run/i })).toBeInTheDocument()
-    })
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    expect(window.localStorage.getItem('tape-archiver:theme')).toBe('dark')
 
-    fireEvent.click(screen.getByRole('button', { name: /view run/i }))
+    fireEvent.click(screen.getByRole('button', { name: /light/i }))
 
-    expect(screen.getByRole('heading', { name: /run run-abc-123/i })).toBeInTheDocument()
-    expect(window.location.pathname).toBe('/runs/run-abc-123')
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+    expect(window.localStorage.getItem('tape-archiver:theme')).toBe('light')
+
+    fireEvent.click(screen.getByRole('button', { name: /auto/i }))
+
+    expect(window.localStorage.getItem('tape-archiver:theme')).toBe('auto')
+    // setupTests' matchMedia stub reports light, so Auto resolves to light.
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
   })
 
-  it('renders the run detail view directly when the URL already points at a run', () => {
+  it('disables "Start new run" with an explanation while a run is active', async () => {
+    await renderAuthenticated({
+      '/api/runs': {
+        status: 200,
+        body: {
+          runs: [
+            {
+              workflowId: 'backup',
+              runId: 'run-live',
+              status: 'Running',
+              startTime: '2026-07-01T00:00:00Z',
+            },
+          ],
+        },
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByRole('link', { name: /start new run/i })).not.toBeInTheDocument()
+    })
+
+    // Scoped to the nav: the "/" page header also reads "Start new run".
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    const disabledItem = within(nav).getByText('Start new run').closest('[aria-disabled="true"]')
+    expect(disabledItem).not.toBeNull()
+
+    // The explanation is announced to assistive tech, not just shown on
+    // hover: the focusable disabled item must reference the tooltip text
+    // via aria-describedby.
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip).toHaveTextContent(/already in progress/i)
+    expect(tooltip.id).not.toBe('')
+    expect(disabledItem).toHaveAttribute('aria-describedby', tooltip.id)
+  })
+
+  it('navigates to the run history ("Dashboard") view via the sidebar', async () => {
+    await renderAuthenticated({
+      '/api/runs': {
+        status: 200,
+        body: {
+          runs: [
+            {
+              workflowId: 'backup',
+              runId: 'run-1',
+              status: 'Completed',
+              startTime: '2026-07-01T00:00:00Z',
+              closeTime: '2026-07-01T02:00:00Z',
+            },
+          ],
+        },
+      },
+    })
+
+    fireEvent.click(screen.getByRole('link', { name: /dashboard/i }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'run-1' })).toBeInTheDocument()
+    })
+    expect(window.location.pathname).toBe('/history')
+  })
+
+  it('renders the run detail view directly when the URL already points at a run', async () => {
     window.history.pushState({}, '', '/runs/run-xyz')
 
-    render(<App />)
+    await renderAuthenticated()
 
     expect(screen.getByRole('heading', { name: /run run-xyz/i })).toBeInTheDocument()
     expect(screen.queryByRole('form', { name: /submit backup run/i })).not.toBeInTheDocument()
   })
 
-  it('returns to the previous view via the browser back button', async () => {
-    render(<App />)
+  it('navigates from a history row straight to that run detail view', async () => {
+    window.history.pushState({}, '', '/history')
 
-    fireEvent.click(screen.getByRole('link', { name: 'History' }))
-    expect(window.location.pathname).toBe('/history')
-
-    window.history.back()
-
-    await waitFor(() => {
-      expect(window.location.pathname).toBe('/')
+    await renderAuthenticated({
+      '/api/runs': {
+        status: 200,
+        body: {
+          runs: [
+            {
+              workflowId: 'backup',
+              runId: 'run-1',
+              status: 'Completed',
+              startTime: '2026-07-01T00:00:00Z',
+            },
+          ],
+        },
+      },
     })
-    expect(screen.getByRole('form', { name: /submit backup run/i })).toBeInTheDocument()
-  })
-
-  it('shows the run history view, fetched from GET /api/runs, via the nav link', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse(200, {
-        runs: [
-          {
-            workflowId: 'backup',
-            runId: 'run-1',
-            status: 'Completed',
-            startTime: '2026-07-01T00:00:00Z',
-            closeTime: '2026-07-01T02:00:00Z',
-          },
-        ],
-      }),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    render(<App />)
-
-    fireEvent.click(screen.getByRole('link', { name: 'History' }))
-
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'run-1' })).toBeInTheDocument()
-    })
-    expect(fetchMock).toHaveBeenCalledWith('/api/runs', undefined)
-    expect(window.location.pathname).toBe('/history')
-  })
-
-  it('navigates from a history row straight to that run\'s detail view', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse(200, {
-        runs: [
-          {
-            workflowId: 'backup',
-            runId: 'run-1',
-            status: 'Completed',
-            startTime: '2026-07-01T00:00:00Z',
-          },
-        ],
-      }),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    render(<App />)
-
-    fireEvent.click(screen.getByRole('link', { name: 'History' }))
 
     await waitFor(() => {
       expect(screen.getByRole('link', { name: 'run-1' })).toBeInTheDocument()
@@ -157,29 +260,100 @@ describe('App', () => {
     expect(window.location.pathname).toBe('/runs/run-1')
   })
 
-  it('shows a not-found view with a way back for an unknown path', () => {
-    window.history.pushState({}, '', '/no-such-page')
+  it('returns to the previous view via the browser back button', async () => {
+    await renderAuthenticated()
 
-    render(<App />)
+    fireEvent.click(screen.getByRole('link', { name: /tapes/i }))
+    expect(window.location.pathname).toBe('/tapes')
 
-    expect(screen.getByRole('heading', { name: /page not found/i })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('link', { name: /go to the submit form/i }))
+    window.history.back()
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/')
+    })
     expect(screen.getByRole('form', { name: /submit backup run/i })).toBeInTheDocument()
   })
 
-  it('toggles dark mode via the header control and persists the choice', () => {
+  it('shows the Tapes placeholder page via the sidebar', async () => {
+    await renderAuthenticated()
+
+    fireEvent.click(screen.getByRole('link', { name: /tapes/i }))
+
+    expect(screen.getByRole('heading', { name: /tapes/i })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/tapes')
+  })
+
+  it('shows the 404 page, with the sidebar still present, for an unknown path', async () => {
+    window.history.pushState({}, '', '/no-such-page')
+
+    await renderAuthenticated()
+
+    expect(screen.getByRole('heading', { name: /page not found/i })).toBeInTheDocument()
+    expect(screen.getByText('/no-such-page')).toBeInTheDocument()
+
+    // The shell (sidebar) is still there — the 404 view renders inside it.
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('link', { name: /back to dashboard/i }))
+    expect(window.location.pathname).toBe('/history')
+  })
+
+  it('redirects a bookmarked /login back into the app when already signed in', async () => {
+    window.history.pushState({}, '', '/login?redirect=%2Ftapes')
+
+    stubApi()
     render(<App />)
 
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/tapes')
+    })
+  })
+})
+
+describe('App auth gating (unauthenticated)', () => {
+  it('shows the styled login page instead of any app content when /api/me reports no session', async () => {
+    window.history.pushState({}, '', '/runs/run-abc')
+
+    stubApi({ '/api/me': { status: 401, body: { error: 'unauthorized' } } })
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /continue with sso/i })).toBeInTheDocument()
+    })
+
+    // Redirected to /login, preserving where the operator was headed.
+    expect(window.location.pathname).toBe('/login')
+    expect(window.location.search).toContain('redirect=%2Fruns%2Frun-abc')
+
+    // Nothing gated leaked out.
+    expect(screen.queryByRole('navigation', { name: 'Main' })).not.toBeInTheDocument()
+  })
+
+  it('keeps tracking live OS theme changes on the login page under Auto', async () => {
+    const { fireChange } = stubControllableMatchMedia(false)
+
+    stubApi({ '/api/me': { status: 401, body: { error: 'unauthorized' } } })
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /continue with sso/i })).toBeInTheDocument()
+    })
+
+    // No stored preference — Auto by default, currently light.
     expect(document.documentElement.classList.contains('dark')).toBe(false)
 
-    fireEvent.click(screen.getByRole('button', { name: /switch to dark mode/i }))
+    // The OS flips to dark mid-session; the login page (rendered WITHOUT
+    // the authenticated shell, whose sidebar used to be the only thing
+    // mounting the theme hook) must follow it live.
+    fireChange(true)
+    await waitFor(() => {
+      expect(document.documentElement.classList.contains('dark')).toBe(true)
+    })
 
-    expect(document.documentElement.classList.contains('dark')).toBe(true)
-    expect(window.localStorage.getItem('tape-archiver:theme')).toBe('dark')
-
-    fireEvent.click(screen.getByRole('button', { name: /switch to light mode/i }))
-
-    expect(document.documentElement.classList.contains('dark')).toBe(false)
-    expect(window.localStorage.getItem('tape-archiver:theme')).toBe('light')
+    // ... and back.
+    fireChange(false)
+    await waitFor(() => {
+      expect(document.documentElement.classList.contains('dark')).toBe(false)
+    })
   })
 })
