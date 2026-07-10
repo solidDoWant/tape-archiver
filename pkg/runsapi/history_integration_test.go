@@ -92,8 +92,26 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	require.True(t, slot.Full, "slot 3 must hold a tape")
 	require.NotEmpty(t, slot.Barcode, "slot 3 tape must have a barcode")
 
+	// Resolve drive 0's st/sg nodes by SCSI target, not the MHVTL_DRIVE*_DEV
+	// env defaults: the kernel assigns st/sg minors in probe order, which does
+	// not reliably match mhvtl's drive numbering (mhvtl DTE0 is SCSI target 1
+	// but its st node can come up as nst0 OR nst1 across module loads). The
+	// pre-blanking below drives the physical DTE0, so it must use the node
+	// that actually backs it — testutil resolves by target when the env var is
+	// unset. The MHVTL_DRIVE* vars are then re-pointed at the resolved nodes
+	// so the dry-run submission's config matches physical reality too (the
+	// workflow's Load pairs drives to changer elements by unit serial, issue
+	// #137, so it tolerates either order — the pre-blanking cannot).
+	t.Setenv(testutil.EnvDrive0Dev, "")
+	t.Setenv(testutil.EnvDrive1Dev, "")
+	t.Setenv(testutil.EnvDrive0SgDev, "")
+
 	stDevice := testutil.Drive0Dev(t)
 	sgDevice := testutil.Drive0SgDev(t)
+
+	t.Setenv(testutil.EnvDrive0Dev, stDevice)
+	t.Setenv(testutil.EnvDrive1Dev, testutil.Drive1Dev(t))
+
 	driveAddr := inventory.Drives[0].Address
 	slotAddr := slot.Address
 	barcode := slot.Barcode
