@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatTimestamp } from './api'
+import LogPanel from './LogPanel'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 import DriveMetricsPanel from './DriveMetricsPanel'
 
@@ -172,6 +173,17 @@ function RunDetail({ runId }: RunDetailProps) {
         <div>
           <h3 className="mb-1.5 text-sm font-medium text-text-dim">Drive write-health</h3>
           <DriveMetricsPanel runId={runId} terminal={state === 'terminal'} />
+        </div>
+      ) : null}
+
+      {detail ? (
+        // Whole-run mode (no phase prop): RunDetail has no per-phase rail
+        // yet (issue #277's redesign owns that), so this is the minimal
+        // wiring issue #274 asks for — enough to make LogPanel observable
+        // end-to-end. #277 is expected to re-home LogPanel per-phase.
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-medium">Logs</h3>
+          <LogPanel runId={runId} />
         </div>
       ) : null}
 

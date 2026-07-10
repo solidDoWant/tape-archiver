@@ -437,6 +437,8 @@ resume/abort actions, gated behind OIDC authentication (`pkg/webauth`) — see
 | `LOG_LEVEL` | no | Same semantics as the worker's `LOG_LEVEL` above: `debug`, `info`, `warn` (or `warning`), or `error`, case-insensitive, defaulting to `info`. |
 | `MHVTL_CHANGER_DEV` / `MHVTL_DRIVE0_DEV` / `MHVTL_DRIVE1_DEV` | only for dry-run submissions | Same mhvtl device nodes `tapectl run --dry-run` requires (see above). `POST /api/runs` with `"dryRun": true` fails closed with `400` unless all three are set on `cmd/web`'s own environment — a dry-run submitted through the browser never falls back to real hardware. |
 | `VICTORIAMETRICS_URL` | no | Base URL of a VictoriaMetrics instance scraping the workers' `METRICS_ADDR` endpoints (e.g. `http://127.0.0.1:8428`), backing the live drive metrics endpoints — see [Live drive metrics (VictoriaMetrics)](#live-drive-metrics-victoriametrics) above. Unset disables live drive metrics entirely: both endpoints return a stable `503` rather than falling back to any other data source. |
+| `VICTORIALOGS_URL` | no | Base URL of a VictoriaLogs instance (e.g. `http://victorialogs:9428`) that an external log collector (outside this repo's scope) ships worker `slog` JSON stdout into. Backs `GET /api/runs/{runID}/logs` (see below). Unset means logs are simply unavailable — `cmd/web` still starts and runs normally, the log panel just shows its explicit "unavailable" state. |
+| `VICTORIALOGS_STREAM_FILTER` | no | A LogsQL filter fragment ANDed onto every log query `GET /api/runs/{runID}/logs` issues (e.g. to scope queries to one tenant/stream in a shared VictoriaLogs deployment). Defaults to `*` (match everything) when unset — the right default for a VictoriaLogs instance dedicated to this deployment. |
 | `OIDC_ISSUER_URL` | yes | The OIDC identity provider's issuer URL, used for discovery (`GET {OIDC_ISSUER_URL}/.well-known/openid-configuration`). Any standards-compliant provider works (Keycloak, Authentik, Dex, ...) — `cmd/web` contains no IdP-specific code. |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | yes | This app's confidential-client credentials at the provider above. |
 | `OIDC_REDIRECT_URL` | yes | This app's OIDC callback URL, exactly as registered with the provider (e.g. `https://tape-archiver.example.com/auth/callback`) — see [OIDC authentication](#oidc-authentication-cmdweb) below. |
@@ -729,6 +731,52 @@ this barcode yet (not yet measured — still writing, or the run never reached
 sparkline) for one metric of one tape. `barcode` must be one this run actually loaded
 (`404` otherwise). The optional `metric` query parameter selects among `throughput`
 (the default), `repositions`, `tapealerts`, or `belowfloor` — any other value is `400`.
+
+#### `GET /api/runs/{runID}/logs` (log panel, issue #274)
+
+A read-only proxy over an external VictoriaLogs instance (`VICTORIALOGS_URL`,
+`VICTORIALOGS_STREAM_FILTER` — see the environment variable table above), never a raw
+LogsQL passthrough: `cmd/web` builds the query itself from validated parameters. Returns
+`{"runId", "phase", "lines": [{"time", "level", "message"}, ...], "live"}` — `lines` are
+the matched log lines, oldest first; `live` is `true` while more lines can still arrive
+for the requested window (the run, or the given phase, has not finished yet).
+
+Query parameters:
+
+- `phase` (optional) — one of the 11 pipeline phase names (`GET
+  /api/runs/{runID}/phases`' `name` values); an unknown value is `400`. Omitted, the
+  window is the whole run (its start to its close time, or now if still running).
+  Given, the window is that phase's own `[startTime, endTime)` (from the same
+  reconstruction `GET /api/runs/{runID}/phases` uses) — a phase that has not started
+  yet returns `{"lines": [], "live": false}`, a normal empty result, not the
+  "unavailable" state below.
+- `since` (optional) — an RFC3339 timestamp; only lines strictly after it are
+  returned. Intended for a client polling for new lines (e.g. `since=` the last
+  line's own `time`) without re-fetching the whole window every time — this is how
+  the web UI's log panel gets new lines to appear without a full page reload while
+  `live` is `true`, deliberately by polling rather than Server-Sent Events: unlike
+  `GET /api/events/runs/{runID}`, a browser `EventSource` has no way to expose a
+  failed connection's HTTP status to JS, which would make the "unavailable" state
+  below indistinguishable from an ordinary transient drop.
+- There is no client-facing result-count limit — the server always caps a single
+  response at a fixed number of lines (currently 5000) regardless of how many
+  actually matched, so an operator glancing at recent activity gets a bounded
+  response without needing to reason about paging.
+
+`runID` must be a well-formed UUID (Temporal run IDs always are) or the request is
+`400` before any Temporal or VictoriaLogs call is made — stricter than every other
+`/api/runs/{runID}/*` route, because unlike those this one interpolates `runID` into a
+query-language string rather than only ever passing it as an opaque RPC argument.
+Unknown/aged-out run IDs use the same `404`/`410` classification as the history-derived
+endpoints above.
+
+When `VICTORIALOGS_URL` is unset, or is set but VictoriaLogs cannot be reached or
+returns an error, the response is `503` with the same `{"error": "..."}` body shape
+every other endpoint uses — an explicit, distinguishable "logs unavailable" state,
+never a `500` and never a raw network error surfaced to the browser. The web UI's log
+panel (`web/src/LogPanel.tsx`, used by `RunDetail.tsx` and reusable per-run or
+per-phase) renders this as its own styled unavailable state, distinct from its loading
+and empty (no lines yet) states.
 
 ### Health endpoints
 

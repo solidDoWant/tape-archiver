@@ -79,9 +79,35 @@ const pausedDetail = {
   },
 }
 
+// emptyLogsResponse answers LogPanel's GET /api/runs/{runID}/logs (wired
+// into RunDetail once `detail` arrives — issue #274) with an empty,
+// non-live window, so tests that don't care about the log panel itself
+// aren't broken by an unmocked/mismatched fetch call. Tests that stub their
+// own fetch for a different purpose (e.g. the resume/abort action below)
+// reuse this via logsAwareFetchMock, so LogPanel's own request still gets a
+// sane answer instead of colliding with a mock meant for another endpoint.
+function emptyLogsResponse() {
+  return { ok: true, status: 200, json: async () => ({ runId: 'run-abc', lines: [], live: false }) }
+}
+
+// logsAwareFetchMock wraps handleOther (a mock for whatever endpoint a
+// specific test cares about) so any request to a /logs URL is answered by
+// emptyLogsResponse instead, regardless of call order relative to the
+// endpoint under test.
+function logsAwareFetchMock(handleOther: (input: RequestInfo | URL, init?: RequestInit) => unknown) {
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (typeof input === 'string' && input.includes('/logs')) {
+      return Promise.resolve(emptyLogsResponse())
+    }
+
+    return handleOther(input, init)
+  })
+}
+
 beforeEach(() => {
   FakeEventSource.instances = []
   vi.stubGlobal('EventSource', FakeEventSource)
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(emptyLogsResponse()))
 })
 
 afterEach(() => {
@@ -221,11 +247,13 @@ describe('RunDetail', () => {
   })
 
   it('shows the pause panel and lets an operator resume a paused run', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 202,
-      json: async () => ({ status: 'resume signal sent' }),
-    })
+    const fetchMock = logsAwareFetchMock(() =>
+      Promise.resolve({
+        ok: true,
+        status: 202,
+        json: async () => ({ status: 'resume signal sent' }),
+      }),
+    )
     vi.stubGlobal('fetch', fetchMock)
     vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
 
@@ -276,5 +304,23 @@ describe('RunDetail', () => {
 
     expect(screen.getByRole('button', { name: /^resume$/i })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^abort$/i })).not.toBeInTheDocument()
+  })
+
+  it('wires in a whole-run LogPanel once the first event arrives (issue #274)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(emptyLogsResponse())
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<RunDetail runId="run-abc" />)
+
+    // No phase rail exists yet on this page (issue #277 owns that), so the
+    // panel covers the whole run — no ?phase= query parameter.
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    FakeEventSource.instances[0].emit('update', runningDetail)
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-abc/logs', undefined)
+    })
+    expect(screen.getByRole('log')).toBeInTheDocument()
   })
 })
