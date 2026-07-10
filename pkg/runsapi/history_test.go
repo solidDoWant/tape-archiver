@@ -520,6 +520,176 @@ func TestBuildPhaseTimeline(t *testing.T) {
 
 		assert.Equal(t, backup.PhaseVerify, history.FailingPhase)
 	})
+
+	t.Run("a second drive-set's Write failure is failed even though set 1's Eject already ran", func(t *testing.T) {
+		// The interleaved tape path (SPEC §4.3 phases 6-8): drive-set 1
+		// completes Load → Write → Eject in full, then drive-set 2's WriteTree
+		// fails permanently and the run ends there. Eject holds real,
+		// completed activity from set 1, but the phase timeline must still
+		// report Write as the failed phase — later-phase activity from an
+		// earlier drive-set must never mask the failure — and Eject must not
+		// read active (nothing is running) or completed (the phase as a whole
+		// never finished).
+		b := newEventBuilder()
+		b.started(t, testConfig)
+
+		resolveK8s := b.scheduled(t, "ResolveK8sSources", testConfig)
+		b.completed(t, resolveK8s, []backup.ResolvedArchive{})
+		resolveCheck := b.scheduled(t, "ResolveAndCheck", nil)
+		b.completed(t, resolveCheck, []backup.ResolvedArchive{{SourceIndex: 0}})
+		hold := b.scheduled(t, "HoldSnapshots", nil)
+		b.completed(t, hold, nil)
+
+		prepare := b.scheduled(t, "PrepareArchives", nil)
+		b.completed(t, prepare, []backup.StagedArchive{{SourceIndex: 0, SizeBytes: 1024}})
+
+		pack := b.scheduled(t, "Pack", nil)
+		b.completed(t, pack, backup.TapePlan{Copies: 2, Tapes: []backup.PlannedTape{{}}})
+
+		par2 := b.scheduled(t, "GeneratePAR2", nil)
+		b.completed(t, par2, []backup.PAR2Set{{SourceIndex: 0}})
+
+		verify := b.scheduled(t, "Verify", backup.VerifyInput{})
+		b.completed(t, verify, backup.VerifiedPlan{})
+
+		// Drive-set 1 (one drive): Load, Write pipeline, and Eject all
+		// complete for copy 0.
+		load1 := b.scheduled(t, "Load", nil)
+		b.completed(t, load1, []backup.LoadedTape{
+			{Barcode: "SET1TAPE01", TapeIndex: 0, CopyIndex: 0, DriveIndex: 0, SourceSlot: 1},
+		})
+
+		format1 := b.scheduled(t, "FormatTape", struct{ Barcode string }{"SET1TAPE01"})
+		b.completed(t, format1, nil)
+
+		write1 := b.scheduled(t, "WriteTree", struct{ Barcode string }{"SET1TAPE01"})
+		b.completed(t, write1, nil)
+
+		finalize1 := b.scheduled(t, "FinalizeTape", struct{ Barcode string }{"SET1TAPE01"})
+		b.completed(t, finalize1, "/staging/SET1TAPE01/index.xml")
+
+		eject1 := b.scheduled(t, "Eject", nil)
+		b.completed(t, eject1, backup.EjectResult{InIOStation: []tape.Barcode{"SET1TAPE01"}})
+
+		// Drive-set 2: Load completes, WriteTree fails permanently, the
+		// operator aborts, the run fails in the Write phase.
+		load2 := b.scheduled(t, "Load", nil)
+		b.completed(t, load2, []backup.LoadedTape{
+			{Barcode: "SET2TAPE01", TapeIndex: 0, CopyIndex: 1, DriveIndex: 0, SourceSlot: 2},
+		})
+
+		format2 := b.scheduled(t, "FormatTape", struct{ Barcode string }{"SET2TAPE01"})
+		b.completed(t, format2, nil)
+
+		write2 := b.scheduled(t, "WriteTree", struct{ Barcode string }{"SET2TAPE01"})
+		b.failed(write2, "drive 0: write tree: medium error")
+
+		pause := b.scheduled(t, "NotifyWritePathPause", backup.WritePathPauseInput{Phase: backup.PhaseWrite})
+		b.completed(t, pause, nil)
+
+		notify := b.scheduled(t, "NotifyFailure", backup.FailureInput{
+			RunID: "run-6", Phase: backup.PhaseWrite, ErrorSummary: "phase Write: run aborted by operator",
+		})
+		b.completed(t, notify, nil)
+
+		b.runFailed("phase Write: run aborted by operator")
+
+		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: b.events}
+		}}, "run-6")
+		require.NoError(t, err)
+
+		outcomes := deriveTapeOutcomes(history.Activities)
+		phases := buildPhaseTimeline(history, outcomes)
+
+		byName := make(map[string]PhaseInfo, len(phases))
+		for _, phase := range phases {
+			byName[phase.Name] = phase
+		}
+
+		// Every phase before the tape path completed normally.
+		for _, name := range []string{
+			backup.PhaseResolve, backup.PhasePrepare, backup.PhasePack,
+			backup.PhaseGeneratePAR2, backup.PhaseVerify, backup.PhaseLoad,
+		} {
+			assert.Equal(t, PhaseCompleted, byName[name].Status, "phase %s", name)
+		}
+
+		// Write is the failed phase — set 1's completed Eject activity must
+		// not mask it.
+		assert.Equal(t, PhaseFailed, byName[backup.PhaseWrite].Status)
+		assert.Contains(t, byName[backup.PhaseWrite].Error, "aborted by operator")
+
+		// Eject holds only set 1's partial activity: the phase never
+		// completed and nothing is running — pending, not active, not
+		// completed.
+		assert.Equal(t, PhasePending, byName[backup.PhaseEject].Status)
+
+		// Nothing after the tape path ever ran.
+		for _, name := range []string{backup.PhaseReport, backup.PhaseBurn, backup.PhaseDeliver} {
+			assert.Equal(t, PhasePending, byName[name].Status, "phase %s", name)
+		}
+
+		// The per-tape reality stays visible through the tape outcomes: set
+		// 1's tape written, set 2's failed.
+		byBarcode := make(map[string]TapeOutcome, len(outcomes))
+		for _, outcome := range outcomes {
+			byBarcode[outcome.Barcode] = outcome
+		}
+
+		assert.Equal(t, tapeOutcomeWritten, byBarcode["SET1TAPE01"].Result)
+		assert.Equal(t, tapeOutcomeFailed, byBarcode["SET2TAPE01"].Result)
+	})
+
+	t.Run("an open run mid-tape-path keeps set 1's Eject active, never completed", func(t *testing.T) {
+		// Same interleave, still running: set 1 fully ejected, set 2's
+		// WriteTree in flight. The frontier is Write (the latest scheduled
+		// activity); Eject's earlier-set activity keeps it active — in
+		// progress as part of the still-running tape path — not completed.
+		b := newEventBuilder()
+		b.started(t, testConfig)
+
+		verify := b.scheduled(t, "Verify", backup.VerifyInput{})
+		b.completed(t, verify, backup.VerifiedPlan{})
+
+		load1 := b.scheduled(t, "Load", nil)
+		b.completed(t, load1, []backup.LoadedTape{
+			{Barcode: "SET1TAPE01", TapeIndex: 0, CopyIndex: 0, DriveIndex: 0, SourceSlot: 1},
+		})
+
+		write1 := b.scheduled(t, "WriteTree", struct{ Barcode string }{"SET1TAPE01"})
+		b.completed(t, write1, nil)
+
+		eject1 := b.scheduled(t, "Eject", nil)
+		b.completed(t, eject1, backup.EjectResult{InIOStation: []tape.Barcode{"SET1TAPE01"}})
+
+		load2 := b.scheduled(t, "Load", nil)
+		b.completed(t, load2, []backup.LoadedTape{
+			{Barcode: "SET2TAPE01", TapeIndex: 0, CopyIndex: 1, DriveIndex: 0, SourceSlot: 2},
+		})
+
+		// In flight: scheduled, no terminal event, run still open.
+		b.scheduled(t, "WriteTree", struct{ Barcode string }{"SET2TAPE01"})
+
+		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: b.events}
+		}}, "run-7")
+		require.NoError(t, err)
+
+		phases := buildPhaseTimeline(history, deriveTapeOutcomes(history.Activities))
+
+		byName := make(map[string]PhaseInfo, len(phases))
+		for _, phase := range phases {
+			byName[phase.Name] = phase
+		}
+
+		assert.Equal(t, PhaseCompleted, byName[backup.PhaseVerify].Status)
+		assert.Equal(t, PhaseCompleted, byName[backup.PhaseLoad].Status)
+		assert.Equal(t, PhaseActive, byName[backup.PhaseWrite].Status)
+		assert.Equal(t, PhaseActive, byName[backup.PhaseEject].Status,
+			"set 1's partial Eject activity keeps the phase active on an open run, never prematurely completed")
+		assert.Equal(t, PhasePending, byName[backup.PhaseReport].Status)
+	})
 }
 
 func assertFactValue(t *testing.T, facts []PhaseFact, key, want string) {
