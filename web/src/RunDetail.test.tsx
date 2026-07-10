@@ -1,23 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import RunDetail from './RunDetail'
+import { RouterProvider } from './router'
 
 // FakeEventSource stands in for the browser's real EventSource (not
-// implemented by jsdom) so RunDetail can be exercised without a real server:
-// it records every constructed instance (RunDetail creates one per mount) so
-// a test can reach in and drive its listeners directly, mirroring how a real
-// SSE connection would deliver "update"/"done"/"error" events.
+// implemented by jsdom): it records every constructed instance so a test can
+// reach in and drive its listeners directly, mirroring how a real SSE
+// connection would deliver "update"/"done"/"error" events.
 class FakeEventSource {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSED = 2
   static instances: FakeEventSource[] = []
 
-  readyState = FakeEventSource.CONNECTING
   closeCalls = 0
-
   private listeners: Record<string, ((event: MessageEvent<string>) => void)[]> = {}
-
   url: string
 
   constructor(url: string) {
@@ -29,19 +23,11 @@ class FakeEventSource {
     ;(this.listeners[type] ??= []).push(listener)
   }
 
-  removeEventListener() {
-    // Unused by RunDetail (it relies on the effect cleanup calling close()
-    // instead of removing individual listeners), but a real EventSource has
-    // this method, so the fake does too for shape-compatibility.
-  }
-
   close() {
     this.closeCalls += 1
-    this.readyState = FakeEventSource.CLOSED
   }
 
   emit(type: 'update' | 'done', body: unknown) {
-    this.readyState = FakeEventSource.OPEN
     const event = { data: JSON.stringify(body) } as MessageEvent<string>
     this.listeners[type]?.forEach((listener) => listener(event))
   }
@@ -51,276 +37,322 @@ class FakeEventSource {
   }
 }
 
+const phaseOrder = ['Resolve', 'Prepare', 'Pack', 'Generate PAR2', 'Verify', 'Load', 'Write', 'Eject', 'Report', 'Burn', 'Deliver']
+
+function pendingPhases() {
+  return phaseOrder.map((name) => ({ name, status: 'pending', facts: [] }))
+}
+
+function runningPhases() {
+  return phaseOrder.map((name, index) => {
+    if (index < 3) {
+      return { name, status: 'completed', startTime: '2026-07-09T12:00:00Z', endTime: '2026-07-09T12:05:00Z', facts: [] }
+    }
+
+    if (index === 3) {
+      return {
+        name,
+        status: 'active',
+        startTime: '2026-07-09T12:05:00Z',
+        facts: [{ key: 'recoverySets', label: 'Recovery sets', value: '71' }],
+      }
+    }
+
+    return { name, status: 'pending', facts: [] }
+  })
+}
+
+function writePhases(status: 'active' | 'completed' = 'active') {
+  return phaseOrder.map((name, index) => {
+    if (index < 6) {
+      return { name, status: 'completed', startTime: '2026-07-09T12:00:00Z', endTime: '2026-07-09T12:05:00Z', facts: [] }
+    }
+
+    if (index === 6) {
+      return { name, status, startTime: '2026-07-09T12:05:00Z', facts: [] }
+    }
+
+    return { name, status: 'pending', facts: [] }
+  })
+}
+
 const runningDetail = {
   workflowId: 'backup',
   runId: 'run-abc',
   status: 'Running',
   startTime: '2026-07-09T12:00:00Z',
-  lastCompletedPhase: 'Stage',
+  lastCompletedPhase: 'Verify',
   currentPause: { kind: '' },
 }
 
-const completedDetail = {
-  ...runningDetail,
-  status: 'Completed',
-  closeTime: '2026-07-09T13:00:00Z',
-  lastCompletedPhase: 'Verify',
+const minimalConfig = {
+  sources: [{ zfsPath: { name: 'bulk-pool-01/photos' }, compression: true }],
+  copies: 2,
+  redundancy: { targetPercentage: 10 },
 }
 
-const pausedDetail = {
-  ...runningDetail,
-  lastCompletedPhase: 'Load',
-  currentPause: {
-    kind: 'write-failure',
-    phase: 'Write',
-    affectedTapes: ['TA0001L6'],
-    reloadSlots: [101],
-    errorSummary: 'mkltfs: drive reported a hard write error',
-  },
+function jsonResponse(status: number, body: unknown) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body }
 }
 
-// emptyLogsResponse answers LogPanel's GET /api/runs/{runID}/logs (wired
-// into RunDetail once `detail` arrives — issue #274) with an empty,
-// non-live window, so tests that don't care about the log panel itself
-// aren't broken by an unmocked/mismatched fetch call. Tests that stub their
-// own fetch for a different purpose (e.g. the resume/abort action below)
-// reuse this via logsAwareFetchMock, so LogPanel's own request still gets a
-// sane answer instead of colliding with a mock meant for another endpoint.
-function emptyLogsResponse() {
-  return { ok: true, status: 200, json: async () => ({ runId: 'run-abc', lines: [], live: false }) }
-}
+// stub builds a fetch mock that answers every endpoint the redesigned run
+// detail page can call, with sane empty/pending defaults, and per-test
+// overrides keyed by the exact request path (query string stripped).
+function stub(overrides: Record<string, { status: number; body: unknown }> = {}) {
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : String(input)
+    const path = url.split('?')[0]
 
-// logsAwareFetchMock wraps handleOther (a mock for whatever endpoint a
-// specific test cares about) so any request to a /logs URL is answered by
-// emptyLogsResponse instead, regardless of call order relative to the
-// endpoint under test.
-function logsAwareFetchMock(handleOther: (input: RequestInfo | URL, init?: RequestInit) => unknown) {
-  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-    if (typeof input === 'string' && input.includes('/logs')) {
-      return Promise.resolve(emptyLogsResponse())
+    if (overrides[path]) {
+      return Promise.resolve(jsonResponse(overrides[path].status, overrides[path].body))
     }
 
-    return handleOther(input, init)
+    if (path.endsWith('/logs')) {
+      return Promise.resolve(jsonResponse(200, { runId: 'run-abc', lines: [], live: false }))
+    }
+    if (path.endsWith('/metrics/drives')) {
+      return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
+    }
+    if (/\/metrics\/drives\/[^/]+\/history$/.test(path)) {
+      return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
+    }
+    if (path.endsWith('/phases')) {
+      return Promise.resolve(jsonResponse(200, { runId: 'run-abc', phases: pendingPhases() }))
+    }
+    if (path.endsWith('/config')) {
+      return Promise.resolve(jsonResponse(200, { runId: 'run-abc', config: minimalConfig }))
+    }
+    if (path.endsWith('/tapes')) {
+      return Promise.resolve(jsonResponse(200, { runId: 'run-abc', tapes: [] }))
+    }
+    if (/^\/api\/runs\/[^/]+$/.test(path)) {
+      return Promise.resolve(jsonResponse(200, runningDetail))
+    }
+
+    return Promise.resolve(jsonResponse(404, { error: `no stub for ${url}` }))
   })
+
+  vi.stubGlobal('fetch', fetchMock)
+
+  return fetchMock
 }
 
 beforeEach(() => {
   FakeEventSource.instances = []
   vi.stubGlobal('EventSource', FakeEventSource)
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(emptyLogsResponse()))
 })
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+async function renderReady(overrides: Record<string, { status: number; body: unknown }> = {}) {
+  const fetchMock = stub(overrides)
+
+  render(<RunDetail runId="run-abc" />)
+
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /run overview/i })).toBeInTheDocument()
+  })
+
+  return fetchMock
+}
+
 describe('RunDetail', () => {
-  it('shows a connecting state before the first event arrives', () => {
+  it('always shows a heading naming the run being viewed', async () => {
     render(<RunDetail runId="run-abc" />)
 
-    expect(screen.getByRole('status')).toHaveTextContent(/connecting/i)
+    expect(screen.getByRole('heading', { name: /run run-abc/i })).toBeInTheDocument()
   })
 
-  it('connects to the SSE endpoint for the given run ID', () => {
-    render(<RunDetail runId="run-abc" />)
+  it('renders the phase rail with all 11 phases, in pipeline order, once loaded', async () => {
+    await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
 
-    expect(FakeEventSource.instances).toHaveLength(1)
-    expect(FakeEventSource.instances[0].url).toBe('/api/events/runs/run-abc')
+    const nav = screen.getByRole('navigation', { name: /run phases/i })
+    const buttons = within(nav).getAllByRole('button')
+    // "Run overview" + 11 phases.
+    expect(buttons).toHaveLength(12)
+    expect(buttons[1]).toHaveTextContent('Resolve')
+    expect(buttons[4]).toHaveTextContent('PAR2') // "Generate PAR2" displays as "PAR2".
+    expect(buttons[7]).toHaveTextContent('Write')
+    expect(buttons[12 - 1]).toHaveTextContent('Deliver')
   })
 
-  it('shows live status/phase on an update event', async () => {
-    render(<RunDetail runId="run-abc" />)
+  it('defaults to the run overview view', async () => {
+    await renderReady()
 
-    FakeEventSource.instances[0].emit('update', runningDetail)
+    expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument()
+  })
+
+  it('shows a non-active phase’s facts and logs when selected from the rail (AC2)', async () => {
+    await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
+
+    // Pack (index 2, completed) is not the active phase (PAR2, index 3).
+    screen.getByRole('button', { name: /^pack/i }).click()
 
     await waitFor(() => {
-      expect(screen.getByText('Running')).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Pack' })).toBeInTheDocument()
     })
-    expect(screen.getByText('Stage')).toBeInTheDocument()
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-  })
+    expect(screen.getByRole('log')).toBeInTheDocument()
 
-  it('updates in place as further update events arrive', async () => {
-    render(<RunDetail runId="run-abc" />)
-
-    const source = FakeEventSource.instances[0]
-
-    source.emit('update', runningDetail)
-    await waitFor(() => expect(screen.getByText('Stage')).toBeInTheDocument())
-
-    source.emit('update', { ...runningDetail, lastCompletedPhase: 'Verify' })
-    await waitFor(() => expect(screen.getByText('Verify')).toBeInTheDocument())
-    expect(screen.queryByText('Stage')).not.toBeInTheDocument()
-  })
-
-  it('shows a terminal state and closes the connection on a done event', async () => {
-    render(<RunDetail runId="run-abc" />)
-
-    const source = FakeEventSource.instances[0]
-
-    source.emit('update', runningDetail)
-    await waitFor(() => expect(screen.getByText('Running')).toBeInTheDocument())
-
-    source.emit('done', completedDetail)
+    screen.getByRole('button', { name: /^par2/i }).click()
 
     await waitFor(() => {
-      expect(screen.getByText(/run finished/i)).toBeInTheDocument()
-    })
-    expect(screen.getByText('Completed')).toBeInTheDocument()
-    expect(source.closeCalls).toBeGreaterThanOrEqual(1)
-  })
-
-  it('shows a connection-lost state on an error event', async () => {
-    render(<RunDetail runId="run-abc" />)
-
-    FakeEventSource.instances[0].emitError()
-
-    await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent(/connection lost/i)
+      expect(screen.getByText('Recovery sets')).toBeInTheDocument()
+      expect(screen.getByText('71')).toBeInTheDocument()
     })
   })
 
-  it('recovers from an error state once a later update event arrives', async () => {
-    render(<RunDetail runId="run-abc" />)
+  it('shows a pending placeholder for a phase that has not started', async () => {
+    await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
 
-    const source = FakeEventSource.instances[0]
-
-    source.emitError()
-    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
-
-    source.emit('update', runningDetail)
+    screen.getByRole('button', { name: /^deliver/i }).click()
 
     await waitFor(() => {
-      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(screen.getByText(/not started/i)).toBeInTheDocument()
     })
-    expect(screen.getByText('Running')).toBeInTheDocument()
   })
 
-  it('does not fall back into an error state after a done event closes the stream', async () => {
-    render(<RunDetail runId="run-abc" />)
+  it('embeds live drive metrics in the Write phase view (AC3)', async () => {
+    await renderReady({
+      '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: writePhases('active') } },
+      '/api/runs/run-abc/metrics/drives': {
+        status: 200,
+        body: { runId: 'run-abc', drives: [{ barcode: 'TA0001L6', driveIndex: 0, hasData: true, throughputMBps: 140, floorKnown: true, floorMBps: 50 }] },
+      },
+    })
 
-    const source = FakeEventSource.instances[0]
+    screen.getByRole('button', { name: /^write/i }).click()
 
-    source.emit('done', completedDetail)
-    await waitFor(() => expect(screen.getByText(/run finished/i)).toBeInTheDocument())
-
-    // The browser dispatching a trailing error once the connection actually
-    // closes (following our own close() call) must not overwrite the
-    // terminal state.
-    source.emitError()
-
-    expect(screen.getByText(/run finished/i)).toBeInTheDocument()
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByText(/140 MB\/s/)).toBeInTheDocument()
+    })
   })
 
-  it('closes the EventSource on unmount', () => {
-    const { unmount } = render(<RunDetail runId="run-abc" />)
+  it('shows a write-failure pause narrative with reload slots and rejects nothing (abort allowed)', async () => {
+    const fetchMock = await renderReady()
 
-    const source = FakeEventSource.instances[0]
-
-    unmount()
-
-    expect(source.closeCalls).toBeGreaterThanOrEqual(1)
-  })
-
-  it('reconnects to a new run ID when the prop changes', () => {
-    const { rerender } = render(<RunDetail runId="run-abc" />)
-
-    expect(FakeEventSource.instances).toHaveLength(1)
-    const first = FakeEventSource.instances[0]
-
-    rerender(<RunDetail runId="run-xyz" />)
-
-    expect(FakeEventSource.instances).toHaveLength(2)
-    expect(first.closeCalls).toBeGreaterThanOrEqual(1)
-    expect(FakeEventSource.instances[1].url).toBe('/api/events/runs/run-xyz')
-  })
-
-  it('shows no pause panel while the run is not paused', async () => {
-    render(<RunDetail runId="run-abc" />)
-
-    FakeEventSource.instances[0].emit('update', runningDetail)
-
-    await waitFor(() => expect(screen.getByText('Running')).toBeInTheDocument())
-
-    expect(screen.queryByText(/^paused:/i)).not.toBeInTheDocument()
-  })
-
-  it('shows the pause panel and lets an operator resume a paused run', async () => {
-    const fetchMock = logsAwareFetchMock(() =>
-      Promise.resolve({
-        ok: true,
-        status: 202,
-        json: async () => ({ status: 'resume signal sent' }),
-      }),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true))
-
-    render(<RunDetail runId="run-abc" />)
-
-    const source = FakeEventSource.instances[0]
-
-    source.emit('update', pausedDetail)
+    FakeEventSource.instances[0].emit('update', {
+      ...runningDetail,
+      currentPause: {
+        kind: 'write-failure',
+        phase: 'Write',
+        affectedTapes: ['TA0001L6'],
+        reloadSlots: [101],
+        errorSummary: 'mkltfs: drive reported a hard write error',
+        canAbort: true,
+      },
+    })
 
     await waitFor(() => {
       expect(screen.getByText(/Load\/Write failure/)).toBeInTheDocument()
     })
+    expect(screen.getByText(/101/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^abort$/i })).toBeInTheDocument()
 
-    expect(screen.getByText(/TA0001L6/)).toBeInTheDocument()
-
-    screen.getByRole('button', { name: /^resume$/i }).click()
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/runs/run-abc/resume',
-        expect.objectContaining({ method: 'POST' }),
-      )
-    })
-
-    // The pause panel itself does not clear on its own — that happens when
-    // the SSE stream's next poll observes CurrentPause changed and pushes a
-    // fresh update event (pkg/runsapi/events.go), which this test proves
-    // separately by driving that event directly:
-    source.emit('update', runningDetail)
-
-    await waitFor(() => {
-      expect(screen.queryByText(/^paused:/i)).not.toBeInTheDocument()
-    })
+    void fetchMock
   })
 
-  it('hides the Abort button for an eject pause', async () => {
-    render(<RunDetail runId="run-abc" />)
+  it('shows an eject pause narrative and rejects abort (button hidden)', async () => {
+    await renderReady()
 
     FakeEventSource.instances[0].emit('update', {
       ...runningDetail,
-      lastCompletedPhase: 'Eject',
-      currentPause: { kind: 'eject', affectedTapes: ['TA0001L6'], awaitingExport: 1 },
+      currentPause: { kind: 'eject', affectedTapes: ['TA0001L6'], awaitingExport: 1, canAbort: false },
     })
 
     await waitFor(() => {
       expect(screen.getByText(/Eject — import\/export station full/)).toBeInTheDocument()
     })
-
-    expect(screen.getByRole('button', { name: /^resume$/i })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^abort$/i })).not.toBeInTheDocument()
   })
 
-  it('wires in a whole-run LogPanel once the first event arrives (issue #274)', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(emptyLogsResponse())
-    vi.stubGlobal('fetch', fetchMock)
+  it('shows a burn pause narrative naming the affected devices', async () => {
+    await renderReady()
+
+    FakeEventSource.instances[0].emit('update', {
+      ...runningDetail,
+      currentPause: { kind: 'burn', devices: ['/dev/sr0'], canAbort: true },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/Burn phase/)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/\/dev\/sr0/)).toBeInTheDocument()
+  })
+
+  it('switches from live metrics to this run’s final recorded write-health once the run closes (terminal vs live)', async () => {
+    const fetchMock = await renderReady({
+      '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: writePhases('completed') } },
+    })
+
+    screen.getByRole('button', { name: /^write/i }).click()
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-abc/metrics/drives', undefined)
+    })
+
+    const metricsCallsBeforeTerminal = fetchMock.mock.calls.filter((call) => call[0] === '/api/runs/run-abc/metrics/drives').length
+    const tapesCallsBeforeTerminal = fetchMock.mock.calls.filter((call) => call[0] === '/api/runs/run-abc/tapes').length
+
+    FakeEventSource.instances[0].emit('done', { ...runningDetail, status: 'Completed', closeTime: '2026-07-09T13:00:00Z' })
+
+    await waitFor(() => {
+      expect(screen.getByText(/READ-ONLY/)).toBeInTheDocument()
+    })
+
+    // Once terminal: DriveMetricsPanel's terminal=true half (FinalDriveMetrics)
+    // fetches this run's own recorded /tapes outcomes instead of continuing
+    // to poll VictoriaMetrics — no further /metrics/drives calls, but at
+    // least one new /tapes call (both TapesSection's and DriveMetricsPanel's
+    // own terminal-triggered refetch land on the same endpoint).
+    await waitFor(() => {
+      const tapesCallsAfterTerminal = fetchMock.mock.calls.filter((call) => call[0] === '/api/runs/run-abc/tapes').length
+      expect(tapesCallsAfterTerminal).toBeGreaterThan(tapesCallsBeforeTerminal)
+    })
+    const metricsCallsAfterTerminal = fetchMock.mock.calls.filter((call) => call[0] === '/api/runs/run-abc/metrics/drives').length
+    expect(metricsCallsAfterTerminal).toBe(metricsCallsBeforeTerminal)
+  })
+
+  it('falls back to an aged-out state, distinct from not-found, when the phases endpoint reports 410', async () => {
+    stub({ '/api/runs/run-abc/phases': { status: 410, body: { error: 'gone' } } })
+
+    render(
+      <RouterProvider>
+        <RunDetail runId="run-abc" />
+      </RouterProvider>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText(/aged out of history/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/no run named/i)).not.toBeInTheDocument()
+  })
+
+  it('shows a distinct not-found state when the run itself does not exist', async () => {
+    stub({ '/api/runs/run-abc': { status: 404, body: { error: 'not found' } } })
+
+    render(
+      <RouterProvider>
+        <RunDetail runId="run-abc" />
+      </RouterProvider>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText(/no run named run-abc/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/aged out of history/i)).not.toBeInTheDocument()
+  })
+
+  it('degrades honestly to the basic status view when the phases endpoint 404s despite the run existing', async () => {
+    stub({ '/api/runs/run-abc/phases': { status: 404, body: { error: 'not found' } } })
 
     render(<RunDetail runId="run-abc" />)
 
-    // No phase rail exists yet on this page (issue #277 owns that), so the
-    // panel covers the whole run — no ?phase= query parameter.
-    expect(fetchMock).not.toHaveBeenCalled()
-
-    FakeEventSource.instances[0].emit('update', runningDetail)
-
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-abc/logs', undefined)
+      expect(screen.getByRole('alert')).toHaveTextContent(/unavailable/i)
     })
-    expect(screen.getByRole('log')).toBeInTheDocument()
+    expect(screen.getByText('Running')).toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: /run phases/i })).not.toBeInTheDocument()
   })
 })

@@ -1,133 +1,368 @@
-import { formatTimestamp } from './api'
-import LogPanel from './LogPanel'
-import PauseActions from './PauseActions'
-import DriveMetricsPanel from './DriveMetricsPanel'
-import { useRunEvents } from './runEvents'
+import { useEffect, useState } from 'react'
+import { apiFetch, ApiError, describeNetworkError, formatTimestamp } from './api'
+import { Link } from './router'
+import PhaseRail from './PhaseRail'
+import PhaseDetail from './PhaseDetail'
+import RunOverview from './RunOverview'
+import PauseActions, { type CurrentPauseInfo } from './PauseActions'
+import { useRunEvents, type RunEventDetail } from './runEvents'
+
+// RunEventDetail's definition lives in runEvents.ts alongside the shared
+// useRunEvents hook (issue #276's dashboard factored the SSE subscription
+// out of this file); re-exported here so this page's own satellite modules
+// (RunOverview.tsx) and tests keep one import site for the page's types.
+export type { RunEventDetail } from './runEvents'
+
+// PhaseStatus mirrors pkg/runsapi.PhaseStatus (phases.go).
+export type PhaseStatus = 'pending' | 'active' | 'completed' | 'failed'
+
+// PhaseFact mirrors pkg/runsapi.PhaseFact.
+export interface PhaseFact {
+  key: string
+  label: string
+  value: string
+}
+
+// PhaseInfo mirrors pkg/runsapi.PhaseInfo, one entry of GET
+// /api/runs/{runID}/phases' 11-phase timeline, in the exact pipeline order
+// workflows/backup's backupPhases() runs them (Resolve, Prepare, Pack,
+// "Generate PAR2", Verify, Load, Write, Eject, Report, Burn, Deliver —
+// issue #277's technical context: this code order, not the design mock's,
+// is authoritative).
+export interface PhaseInfo {
+  name: string
+  status: PhaseStatus
+  startTime?: string
+  endTime?: string
+  facts: PhaseFact[]
+  error?: string
+}
+
+interface RunPhasesResponse {
+  runId: string
+  phases: PhaseInfo[]
+}
 
 export interface RunDetailProps {
   runId: string
 }
 
-// RunDetail shows a single run's live status/phase, fed by GET
-// /api/events/runs/{runID} (pkg/runsapi) via EventSource — cookies are sent
-// automatically by EventSource for a same-origin request, so this works
-// transparently behind pkg/webauth's session gate the same way any other
-// fetch on this page does; no separate auth handling is needed here.
+// normalizePauseInfo fills in a safe "not paused" default when a response
+// omits currentPause — defensive against a malformed/unexpected frame (real
+// pkg/runsapi responses always include it), matching this file's previous
+// stance of never letting one bad frame crash the page.
+function normalizePauseInfo(pause: CurrentPauseInfo | undefined): CurrentPauseInfo {
+  return pause ?? { kind: '' }
+}
+
+type InitialState =
+  | { status: 'loading' }
+  | { status: 'not-found' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; detail: RunEventDetail }
+
+// RunDetail is the redesigned `/runs/{id}` page (issue #277): a phase rail
+// (PhaseRail) plus a detail pane that shows either the run overview
+// (RunOverview) or one selected phase's facts/logs (PhaseDetail), fed by a
+// mix of a one-shot existence check, a live SSE stream for status/phase/
+// pause, and the history-derived GET /api/runs/{runID}/phases timeline.
 //
-// States shown: "connecting" until the first event arrives, "live" showing
-// the current status/phase and updating in place as further "update" events
-// arrive, "terminal" once the server sends its final "done" event (the run
-// reached a status other than RUNNING), and "error" if the underlying
-// connection drops before that — EventSource retries automatically on its
-// own, so an "error" state can recover back to "live" if the retry
-// succeeds; it does not recover once "terminal" has been reached, since the
-// stream is explicitly closed at that point and not reopened.
-// RunDetail keys its state to the connection it currently holds open: if a
-// caller ever renders it with a new runId without remounting it (App.tsx
-// avoids this by keying <RunDetail> on the run ID, so a navigation to a
-// different run always starts from a fresh mount), the effect below still
-// tears down the old EventSource and opens a new one, but the previously
-// displayed status/phase intentionally stays on screen until the new
-// connection's first event replaces it, rather than being reset to
-// "connecting" from inside the effect — an effect synchronously calling
-// setState at its own start (rather than from within a subscription
-// callback reacting to an external event) is the exact anti-pattern
-// react-hooks/set-state-in-effect flags, and the "remount to reset" pattern
-// it points at is what App.tsx's key does instead.
+// The existence check (a plain GET /api/runs/{runID} before anything else)
+// exists because the live stream below cannot: a browser EventSource gives
+// calling JS no access to a failed connection's HTTP status code (the same
+// reason LogPanel.tsx polls instead of using SSE for its own unavailable
+// detection), so distinguishing "this run does not exist" (404, issue #277
+// AC7's "not-found" state) from "the connection dropped" would be
+// impossible from the stream alone. Only once existence is confirmed does
+// this component open the live stream and fetch the phase timeline.
 //
-// This component no longer renders its own "back" link (it used to, to
-// whatever view had navigated here) — App.tsx's persistent shell nav
-// (sub-issue 7) makes Start new run and Dashboard reachable from every
-// view, including this one, so a special-cased in-page back link is
-// redundant.
+// This component relies on being remounted for a new runId (App.tsx keys
+// <RunDetail> on the route's run ID, same rationale as the pre-redesign
+// version) rather than resetting `initial` back to "loading" itself from
+// inside the effect on every runId change — an effect synchronously calling
+// setState at its own start is the exact anti-pattern
+// react-hooks/set-state-in-effect flags, and "remount to reset" is what
+// App.tsx's key does instead.
 function RunDetail({ runId }: RunDetailProps) {
-  const { state, detail } = useRunEvents(runId)
+  const [initial, setInitial] = useState<InitialState>({ status: 'loading' })
+
+  useEffect(() => {
+    let cancelled = false
+
+    apiFetch<RunEventDetail>(`/api/runs/${encodeURIComponent(runId)}`)
+      .then((detail) => {
+        if (!cancelled) {
+          setInitial({ status: 'ready', detail: { ...detail, currentPause: normalizePauseInfo(detail.currentPause) } })
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return
+        }
+
+        if (error instanceof ApiError && error.status === 404) {
+          setInitial({ status: 'not-found' })
+
+          return
+        }
+
+        const message = error instanceof ApiError ? error.message : describeNetworkError(error)
+        setInitial({ status: 'error', message })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [runId])
 
   return (
-    <div className="flex w-full max-w-2xl flex-col gap-4 text-left">
-      <h2 className="text-xl font-semibold">Run {runId}</h2>
+    <div className="flex min-w-0 flex-1 flex-col">
+      <div className="border-b border-border px-5 py-4 sm:px-7">
+        <h1 className="text-lg font-semibold tracking-tight">Run {runId}</h1>
+      </div>
 
-      {state === 'connecting' ? (
-        <p role="status" className="text-slate-600 dark:text-slate-400">
-          Connecting…
+      {initial.status === 'loading' ? (
+        <p role="status" className="p-5 text-[12px] text-text-faint sm:p-7">
+          Loading run…
         </p>
       ) : null}
 
-      {state === 'error' ? (
-        <p
-          role="alert"
-          className="rounded border border-amber-600 bg-amber-50 p-3 text-amber-900 dark:border-amber-500 dark:bg-amber-950 dark:text-amber-100"
-        >
-          Connection lost; the page will keep retrying automatically.
-        </p>
-      ) : null}
+      {initial.status === 'not-found' ? <NotFoundNotice runId={runId} /> : null}
 
-      {detail ? (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
-          <dt className="font-medium">Status</dt>
-          <dd>{detail.status}</dd>
-          <dt className="font-medium">Last completed phase</dt>
-          <dd>{detail.lastCompletedPhase || '—'}</dd>
-          <dt className="font-medium">Started</dt>
-          <dd>{formatTimestamp(detail.startTime)}</dd>
-          {detail.closeTime ? (
-            <>
-              <dt className="font-medium">Closed</dt>
-              <dd>{formatTimestamp(detail.closeTime)}</dd>
-            </>
-          ) : null}
-        </dl>
-      ) : null}
+      {initial.status === 'error' ? <ErrorNotice message={initial.message} /> : null}
 
-      {detail ? (
-        // Fallback to "not paused" if an older/unexpected event body ever
-        // omits currentPause (pkg/runsapi always includes it as of this
-        // sub-issue, but this keeps a malformed frame from crashing the
-        // view rather than just showing stale data, matching parseDetail's
-        // own defensive stance above).
-        <PauseActions runId={runId} pause={detail.currentPause ?? { kind: '' }} />
-      ) : null}
+      {initial.status === 'ready' ? <RunDetailLive runId={runId} initialDetail={initial.detail} /> : null}
+    </div>
+  )
+}
 
-      {detail ? (
-        // Drive write-health (issue #275): while the run is in progress this
-        // polls the live VictoriaMetrics-backed endpoints; once the run is
-        // terminal (the SSE stream's "done" event — exactly the same signal
-        // that renders "Run finished." below) it switches to the final
-        // per-tape measurements from the run's own history and never
-        // touches VictoriaMetrics again — a closed run must not poll
-        // forever, and a barcode reused by a later run must never have that
-        // later run's samples attributed to this page (see
-        // DriveMetricsPanelProps.terminal). Not gated to the Write phase —
-        // the panel renders a graceful "no measurement yet" placeholder
-        // outside it. This is a minimal drop-in; issue #277's redesigned
-        // run page re-homes it into the fuller Write-phase layout
-        // (DESIGN_ANALYSIS.md §3).
-        <div>
-          <h3 className="mb-1.5 text-sm font-medium text-text-dim">Drive write-health</h3>
-          <DriveMetricsPanel runId={runId} terminal={state === 'terminal'} />
+type PhasesState =
+  | { status: 'loading' }
+  | { status: 'aged-out' }
+  | { status: 'degraded'; message?: string }
+  | { status: 'ready'; phases: PhaseInfo[] }
+
+// RunDetailLive owns the live half of the page: the shared useRunEvents SSE
+// subscription (runEvents.ts — issue #276 factored it out of this file, and
+// the dashboard's current-run card shares it) for status/phase/pause, the
+// phase-rail selection state, and the GET /api/runs/{runID}/phases
+// timeline — refetched whenever a fresh SSE frame arrives (the effect below
+// keys on the frame's object identity: useRunEvents stores a new detail
+// object per update/done event) so the rail's per-phase statuses stay
+// current (issue #277's "refresh on SSE updates"), without resetting to a
+// loading flicker on every tick (only the very first fetch shows "loading";
+// a background refetch silently replaces the phases once it resolves).
+function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail: RunEventDetail }) {
+  const { state: connection, detail: liveDetail } = useRunEvents(runId)
+  const [selected, setSelected] = useState<string>('overview')
+  const [phases, setPhases] = useState<PhasesState>({ status: 'loading' })
+
+  // The latest SSE frame once one has arrived, else the parent's existence-
+  // check snapshot; currentPause normalized defensively either way (the
+  // parent already normalized initialDetail's).
+  const detail: RunEventDetail = liveDetail
+    ? { ...liveDetail, currentPause: normalizePauseInfo(liveDetail.currentPause) }
+    : initialDetail
+
+  useEffect(() => {
+    let cancelled = false
+
+    apiFetch<RunPhasesResponse>(`/api/runs/${encodeURIComponent(runId)}/phases`)
+      .then((response) => {
+        if (cancelled) {
+          return
+        }
+
+        setPhases({
+          status: 'ready',
+          phases: response.phases.map((phase) => ({ ...phase, facts: phase.facts ?? [] })),
+        })
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return
+        }
+
+        if (error instanceof ApiError && error.status === 410) {
+          setPhases({ status: 'aged-out' })
+
+          return
+        }
+
+        if (error instanceof ApiError && error.status === 404) {
+          // This run's own existence was already confirmed by RunDetail's
+          // initial fetch, so a 404 here specifically is an unexpected
+          // inconsistency rather than a genuinely missing run — degrade
+          // honestly to the basic status view instead of a misleading
+          // "not found" (issue #277's phases-endpoint fallback).
+          setPhases({ status: 'degraded' })
+
+          return
+        }
+
+        const message = error instanceof ApiError ? error.message : describeNetworkError(error)
+        setPhases({ status: 'degraded', message })
+      })
+
+    return () => {
+      cancelled = true
+    }
+    // liveDetail deliberately included: useRunEvents stores a brand-new
+    // detail object per SSE update/done event, so its identity changing is
+    // exactly "a fresh frame arrived" — the phase timeline is re-derived
+    // from the latest workflow history as the run progresses, not just once
+    // at mount.
+  }, [runId, liveDetail])
+
+  // terminal: closeTime is authoritative (present the moment the initial
+  // fetch or any SSE frame reports the run closed) and does not require
+  // waiting for this connection's own "done" event, which matters for a run
+  // that was ALREADY closed when this page was first opened (a historical
+  // run) — connection stays 'connecting'/'live' briefly in that case, but
+  // detail.closeTime is already set from the initial fetch.
+  const terminal = Boolean(detail.closeTime) || connection === 'terminal'
+
+  const selectedPhaseIndex = phases.status === 'ready' ? phases.phases.findIndex((phase) => phase.name === selected) : -1
+  const selectedPhase = selectedPhaseIndex >= 0 && phases.status === 'ready' ? phases.phases[selectedPhaseIndex] : undefined
+
+  return (
+    <div className="flex min-w-0 flex-1 flex-col">
+      {connection === 'error' ? (
+        <div role="alert" className="mx-4 mt-3 rounded-lg border border-amber-line bg-amber-bg px-3.5 py-2 text-[12px] text-amber sm:mx-6">
+          Live updates disconnected — this page will keep retrying automatically.
         </div>
       ) : null}
 
-      {detail ? (
-        // Whole-run mode (no phase prop): RunDetail has no per-phase rail
-        // yet (issue #277's redesign owns that), so this is the minimal
-        // wiring issue #274 asks for — enough to make LogPanel observable
-        // end-to-end. #277 is expected to re-home LogPanel per-phase.
-        <div className="flex flex-col gap-1">
-          <h3 className="text-sm font-medium">Logs</h3>
-          <LogPanel runId={runId} />
+      {terminal ? (
+        <div className="mx-4 mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-surface-2 px-3.5 py-2 sm:mx-6">
+          <span className="rounded-full border border-border bg-inset px-2 py-0.5 font-mono text-[11px] font-semibold text-text-dim">
+            READ-ONLY
+          </span>
+          <span className="font-mono text-[11px] text-text-dim">
+            Viewing a closed run, reconstructed from Temporal history — no live hardware access is performed.
+          </span>
         </div>
       ) : null}
 
-      {state === 'terminal' ? (
-        <p
-          role="status"
-          className="rounded border border-green-600 bg-green-50 p-3 text-green-900 dark:border-green-500 dark:bg-green-950 dark:text-green-100"
-        >
-          Run finished.
+      {phases.status === 'loading' ? (
+        <p role="status" className="p-5 text-[12px] text-text-faint sm:p-7">
+          Loading phases…
         </p>
+      ) : phases.status === 'aged-out' ? (
+        <AgedOutNotice runId={runId} />
+      ) : phases.status === 'ready' ? (
+        <div className="flex min-w-0 flex-1 flex-col md:flex-row">
+          <PhaseRail phases={phases.phases} selected={selected} onSelect={setSelected} />
+
+          <div className="min-w-0 flex-1 p-5 sm:p-7">
+            {selected === 'overview' || !selectedPhase ? (
+              <RunOverview runId={runId} detail={detail} phases={phases.phases} terminal={terminal} />
+            ) : (
+              <PhaseDetail runId={runId} index={selectedPhaseIndex + 1} phase={selectedPhase} terminal={terminal} />
+            )}
+          </div>
+        </div>
+      ) : (
+        <DegradedNotice runId={runId} detail={detail} message={phases.status === 'degraded' ? phases.message : undefined} />
+      )}
+    </div>
+  )
+}
+
+// NotFoundNotice is issue #277 AC7's not-found state: a run ID Temporal has
+// no record of at all, distinct from AgedOutNotice below (a run that DID
+// exist but whose history has since aged out).
+function NotFoundNotice({ runId }: { runId: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-surface-2 text-2xl text-text-faint">
+        ≣
+      </div>
+      <h2 className="text-lg font-semibold">No run named {runId}</h2>
+      <p className="max-w-[420px] text-[13px] text-text-dim">
+        Temporal has no record of this run — check the run ID, or it may never have been submitted.
+      </p>
+      <Link
+        to="/"
+        className="mt-1 rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium transition-colors hover:bg-surface-2"
+      >
+        Back to runs
+      </Link>
+    </div>
+  )
+}
+
+// AgedOutNotice is issue #277 AC7's aged-out state: this run ID exists (it
+// is still in Temporal's visibility index — RunDetail's own initial fetch
+// above proved that), but its event history has fallen out of Temporal's
+// retention window, so GET /api/runs/{runID}/phases (and /config, /tapes)
+// report 410 Gone — phases/contents can no longer be reconstructed at all,
+// distinct from NotFoundNotice's "never existed" case.
+function AgedOutNotice({ runId }: { runId: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-border bg-surface-2 text-2xl text-text-faint">
+        ▤
+      </div>
+      <h2 className="text-lg font-semibold">{runId} has aged out of history</h2>
+      <p className="max-w-[440px] text-[13px] text-text-dim">
+        This run is older than Temporal's retention window, so its phases and contents can no longer be
+        reconstructed.
+      </p>
+      <Link
+        to="/"
+        className="mt-1 rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium transition-colors hover:bg-surface-2"
+      >
+        Back to runs
+      </Link>
+    </div>
+  )
+}
+
+// DegradedNotice is the honest fallback for GET /api/runs/{runID}/phases
+// failing in a way that is neither aged-out nor not-found (issue #277's
+// "phases endpoint 410/404 → honest fallback to the basic status view"): the
+// page still shows whatever it already has — status, timing, and pause
+// controls (all sourced independently of the phases endpoint) — with a
+// visible note that phase-by-phase detail could not be loaded, rather than
+// a blank or broken page.
+function DegradedNotice({ runId, detail, message }: { runId: string; detail: RunEventDetail; message?: string }) {
+  return (
+    <div className="flex max-w-xl flex-col gap-4 p-5 sm:p-7">
+      <p role="alert" className="rounded-lg border border-dashed border-border-strong bg-surface-2 p-3 text-[12px] text-text-dim">
+        {message ?? 'Phase-by-phase detail is unavailable for this run right now.'}
+      </p>
+
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
+        <dt className="text-text-dim">Status</dt>
+        <dd>{detail.status}</dd>
+        <dt className="text-text-dim">Last completed phase</dt>
+        <dd>{detail.lastCompletedPhase || '—'}</dd>
+        <dt className="text-text-dim">Started</dt>
+        <dd>{formatTimestamp(detail.startTime)}</dd>
+        {detail.closeTime ? (
+          <>
+            <dt className="text-text-dim">Closed</dt>
+            <dd>{formatTimestamp(detail.closeTime)}</dd>
+          </>
+        ) : null}
+      </dl>
+
+      {detail.currentPause.kind !== '' || detail.currentPause.unknown ? (
+        <PauseActions runId={runId} pause={detail.currentPause} />
       ) : null}
     </div>
+  )
+}
+
+// ErrorNotice is a generic fetch failure on RunDetail's own initial
+// existence check (network failure, an upstream 5xx, etc.) — distinct from
+// "not found" (a clean 404).
+function ErrorNotice({ message }: { message: string }) {
+  return (
+    <p role="alert" className="m-5 rounded-lg border border-red-line bg-red-bg p-3 text-[12px] text-red sm:m-7">
+      {message}
+    </p>
   )
 }
 
