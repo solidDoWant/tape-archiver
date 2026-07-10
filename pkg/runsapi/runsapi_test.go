@@ -80,6 +80,12 @@ type fakeTemporalClient struct {
 	signalWorkflowID string
 	signalRunID      string
 	signalName       string
+
+	// historyFunc answers GetWorkflowHistory, keyed by the requested runID —
+	// see history_test.go's fakeHistoryIterator and newHistoryEvent helpers
+	// (used by phases/config/tapes-endpoint tests). nil yields an iterator
+	// with no events and no error (an empty, successfully-fetched history).
+	historyFunc func(runID string) client.HistoryEventIterator
 }
 
 func (f *fakeTemporalClient) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {

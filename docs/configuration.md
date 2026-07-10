@@ -570,6 +570,107 @@ left behind either way.
 The web UI's run-detail view (`RunDetail.tsx`) is the primary consumer, reachable from
 the submit form's success state.
 
+#### History-derived run endpoints
+
+`GET /api/runs/{runID}/phases`, `GET /api/runs/{runID}/config`,
+`GET /api/runs/{runID}/tapes`, and `GET /api/tapes` reconstruct richer per-run data —
+a full phase timeline, the originally submitted run config, and per-run/aggregate
+tape outcomes — entirely on demand from the run's raw Temporal workflow event history
+(`GetWorkflowHistory`). There is no persistent catalog and no cross-run state (SPEC
+§4.2): everything below is derived from Temporal's own records at request time, and a
+run whose history has aged out of Temporal's retention window is therefore genuinely
+no longer reconstructable (reported explicitly, see the error mapping below). The
+history is parsed as raw events, never replayed against workflow code, so runs
+recorded by older deployed versions of the workflow — or non-backup stub workflows
+sharing the `backup` workflow ID (e.g. from tests) — degrade to partial data rather
+than erroring.
+
+All three per-run endpoints share one error mapping, extending `GET
+/api/runs/{runID}`'s: a malformed run ID (Temporal run IDs are UUIDs) is `400`; a run
+ID Temporal has no record of at all is `404`; and — distinct from both — a run that
+verifiably existed (it still appears in Temporal visibility, the same index `GET
+/api/runs` lists) but whose event history has aged out of the retention window is
+`410 Gone`, with a message saying the history can no longer be reconstructed. Like
+every `/api/*` route, an unauthenticated request is `401`.
+
+`GET /api/runs/{runID}/phases` returns `{"runId": "...", "phases": [...]}` with all 11
+pipeline phases (SPEC §4.3) in pipeline order — `Resolve`, `Prepare`, `Pack`,
+`Generate PAR2`, `Verify`, `Load`, `Write`, `Eject`, `Report`, `Burn`, `Deliver` —
+each `{"name", "status", "startTime", "endTime", "facts", "error"}`. `status` is one
+of `pending`, `active` (in progress — including while paused for an operator;
+`currentPause` on `GET /api/runs/{runID}` reports the pause itself), `completed`, or
+`failed`. `startTime`/`endTime` bracket the phase's activity window and are omitted
+where unknown (a pending phase, or a phase that completed as a no-op — e.g. `Burn` on
+a run without `delivery.opticalBurn`).
+
+Because the Load/Write/Eject tape path interleaves per drive-set (SPEC §4.3 phases
+6–8), a later phase can hold real activity from an earlier drive-set while an earlier
+phase is still running — or has failed — for a later set. Statuses therefore follow
+the run's *pipeline frontier*, not raw "does a later phase have activity": `failed`
+marks exactly the phase the run's own failure record names, regardless of any
+later-phase activity earlier drive-sets left behind; phases before it are
+`completed`; phases after it are `pending` even when they hold an earlier set's
+partial activity (on a run failed at a later set's Write, set 1's already-ejected
+tapes do not make `Eject` "completed" — the per-set reality stays visible through the
+tape-outcome endpoints below). On a still-running run, a later phase holding an
+earlier drive-set's activity reads `active` (the interleaved tape path is in progress
+as a unit), never prematurely `completed`. A phase containing individually
+failed-and-retried work the run moved past (a Load/Write-failure pause resumed onto
+fresh blanks) is `completed`, not `failed`, with `error` carrying the failure text
+only on the `failed` phase. `facts` is a list of `{"key", "label", "value"}` observable facts
+recovered from the phase's own activity payloads where available — e.g. Resolve's
+`archives`, Prepare's `archivesStaged`/`stagedBytes`, Pack's `logicalTapes`/`copies`,
+Generate PAR2's `recoverySets`, Verify's `filesVerified` (`"N/N"`), Load's
+`tapesLoaded`, Write's `tapesWritten` (and `tapesFailed` when any tape failed),
+Eject's `tapesExported`, Report's `reportBuilt`/`isoBuilt`, Burn's `discsBurned` (or
+`opticalBurn: disabled`), Deliver's `delivered`. Facts are best-effort: a phase still
+running, or recorded by an older workflow version whose payload shapes differ, simply
+reports fewer facts.
+
+`GET /api/runs/{runID}/config` returns `{"runId": "...", "config": {...}}` — the run
+configuration recovered from the workflow's own start input, i.e. exactly what was
+submitted to Temporal for that run (for a dry-run, that is the post-override config
+the run actually executed with: mhvtl device nodes, optical burning removed). Two
+deliberate exceptions — the two credential-bearing fields in the whole config, per a
+field-by-field sweep — are replaced with `"***redacted***"` and never leave the
+server: `encryption.identity` (the age *private* decryption key, escrowed only into
+the printed report and recovery ISO — see [Encryption](#encryption)) and
+`delivery.webhookUrl` (a Discord webhook URL embeds its auth token in the path, so
+the URL alone lets anyone post to the channel). `encryption.recipients` (public keys)
+and every other field are returned as-is. A history whose start input cannot be
+decoded as a run config (a foreign/stub workflow under the `backup` workflow ID) is
+`422`, not a `500`.
+
+`GET /api/runs/{runID}/tapes` returns `{"runId": "...", "tapes": [...]}` — every
+physical tape the run loaded, each
+`{"barcode", "tapeIndex", "copyIndex", "driveIndex", "slot", "result", "error",
+"overwroteNonBlank", "writeHealth"}`. `result` is `written` (formatted, written, and
+finalized successfully), `failed` (the format/write/finalize pipeline failed — `error`
+carries the failure text), or `loaded` (loaded but the run has not finished it yet —
+still in progress, or it ended first). A Load/Write-failure retry loads a fresh blank
+(a different physical tape), so the failed tape and its replacement each appear as
+their own entry (SPEC §4.3's bounded blast radius, visible per tape). `writeHealth`,
+when present, is the tape's observational write-health verdict (SPEC §14):
+`{"measured", "throughputMBps", "floorMBps", "floorKnown", "belowFloor",
+"repositions", "repositionsMeasured", "tapeAlertFlags", "healthy"}` — `measured:
+false` means the measurement could not be taken at all (the run still succeeds; every
+other field is then a zero placeholder), so an unmeasured tape is distinguishable
+from one measured and found unhealthy (`healthy` is `false` in both cases).
+
+`GET /api/tapes` returns `{"tapes": [...], "runErrors": [...]}` — the tape outcomes
+above aggregated across the most recent runs still in Temporal visibility, newest run
+first, each entry additionally carrying `{"runId", "runStartTime", "runStatus"}` so
+every tape is attributable back to its run (this drives the tapes page and the
+dashboard's library card). Reconstructing each run costs a full history fetch, so an
+optional `limit` query parameter bounds how many of the newest runs are
+reconstructed: default `50`, capped at `1000` (the visibility page size); a
+non-positive or non-numeric value is `400`. The listing degrades per run within that
+limit and never fails as a whole because one run is unreconstructable: a run whose
+history is gone (aged out) or unreadable contributes a `{"runId", "error"}` entry to
+`runErrors` instead, while every other run's tapes are still listed. Runs older than
+Temporal's retention are absent entirely — their tape contents genuinely cannot be
+recovered without a catalog, which is by design (SPEC §4.2).
+
 ### Health endpoints
 
 The worker (and, since sub-issue 2 of the web UI epic, `cmd/web` — see above) serves two
