@@ -82,11 +82,13 @@ function Sidebar({ identity, preference, onPreferenceChange }: SidebarProps) {
           <span
             tabIndex={0}
             aria-disabled="true"
+            aria-describedby="start-new-run-disabled-reason"
             className="group relative flex cursor-not-allowed items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] text-text-faint opacity-70 outline-none"
           >
             <IconLock className="h-4 w-4" />
             Start new run
             <span
+              id="start-new-run-disabled-reason"
               role="tooltip"
               className="pointer-events-none absolute top-full left-0 z-10 mt-1 w-56 rounded-md border border-border bg-surface p-2 text-[11px] text-text-dim opacity-0 shadow-card transition-opacity group-hover:opacity-100 group-focus:opacity-100"
             >

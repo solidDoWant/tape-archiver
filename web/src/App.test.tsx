@@ -61,6 +61,40 @@ function stubApi(overrides: Record<string, { status: number; body: unknown }> = 
   return fetchMock
 }
 
+// stubControllableMatchMedia replaces window.matchMedia with one whose
+// reported OS color-scheme preference a test can flip mid-session via the
+// returned fireChange (matchMedia's real "change" event) — the same helper
+// theme.test.ts uses, duplicated here because it is test scaffolding, not
+// exportable product code.
+function stubControllableMatchMedia(initialMatches: boolean) {
+  let matches = initialMatches
+  let changeListener: ((event: MediaQueryListEvent) => void) | null = null
+
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    get matches() {
+      return matches
+    },
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: (_event: string, listener: (event: MediaQueryListEvent) => void) => {
+      changeListener = listener
+    },
+    removeEventListener: () => {
+      changeListener = null
+    },
+    dispatchEvent: () => false,
+  }))
+
+  return {
+    fireChange(nextMatches: boolean) {
+      matches = nextMatches
+      changeListener?.({ matches: nextMatches } as MediaQueryListEvent)
+    },
+  }
+}
+
 beforeEach(() => {
   vi.stubGlobal('EventSource', MinimalEventSource)
   window.history.pushState({}, '', '/')
@@ -152,7 +186,14 @@ describe('App shell (authenticated)', () => {
     const nav = screen.getByRole('navigation', { name: 'Main' })
     const disabledItem = within(nav).getByText('Start new run').closest('[aria-disabled="true"]')
     expect(disabledItem).not.toBeNull()
-    expect(screen.getByRole('tooltip')).toHaveTextContent(/already in progress/i)
+
+    // The explanation is announced to assistive tech, not just shown on
+    // hover: the focusable disabled item must reference the tooltip text
+    // via aria-describedby.
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip).toHaveTextContent(/already in progress/i)
+    expect(tooltip.id).not.toBe('')
+    expect(disabledItem).toHaveAttribute('aria-describedby', tooltip.id)
   })
 
   it('navigates to the run history ("Dashboard") view via the sidebar', async () => {
@@ -286,5 +327,33 @@ describe('App auth gating (unauthenticated)', () => {
 
     // Nothing gated leaked out.
     expect(screen.queryByRole('navigation', { name: 'Main' })).not.toBeInTheDocument()
+  })
+
+  it('keeps tracking live OS theme changes on the login page under Auto', async () => {
+    const { fireChange } = stubControllableMatchMedia(false)
+
+    stubApi({ '/api/me': { status: 401, body: { error: 'unauthorized' } } })
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /continue with sso/i })).toBeInTheDocument()
+    })
+
+    // No stored preference — Auto by default, currently light.
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+
+    // The OS flips to dark mid-session; the login page (rendered WITHOUT
+    // the authenticated shell, whose sidebar used to be the only thing
+    // mounting the theme hook) must follow it live.
+    fireChange(true)
+    await waitFor(() => {
+      expect(document.documentElement.classList.contains('dark')).toBe(true)
+    })
+
+    // ... and back.
+    fireChange(false)
+    await waitFor(() => {
+      expect(document.documentElement.classList.contains('dark')).toBe(false)
+    })
   })
 })
