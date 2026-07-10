@@ -446,16 +446,18 @@ WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
 # Deliberately NOT a zpool-up prerequisite here, unlike temporal-up/mhvtl-up:
 # zpool-up.sh destroys and recreates the pool on every invocation (the right
 # behavior for test-integration/test-e2e, which each want a guaranteed-clean
-# pool) — for web-dev, which is meant to be re-run repeatedly across a dev
-# session, that would silently blow away the ZFS snapshot backing whatever
-# sample runs are still in flight (webdevseed's background seeding pass, or
-# any run submitted through the UI mid-session) every time. web-dev-up.sh
-# instead only calls zpool-up when the pool isn't already present.
-web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground (Ctrl+C stops only the web server — see docs/web-ui.md's "Local development").
+# pool) — for web-dev, that would silently blow away the ZFS snapshot backing
+# whatever sample runs are still in flight (webdevseed's background seeding
+# pass, or any run submitted through the UI mid-session) if it ran again
+# while a previous invocation's state was still around (e.g. after a
+# crash/SIGKILL, which cannot be trapped — see web-dev-up.sh's "Interrupt
+# handling" comment and web-dev-down below). web-dev-up.sh instead only calls
+# zpool-up when the pool isn't already present.
+web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
 	@BIN_DIR=$(BIN_DIR) WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-up.sh
 
 .PHONY: web-dev-down
-web-dev-down: ## Tear down everything `make web-dev` brought up: the OIDC provider and control/data workers, then Temporal/mhvtl/zpool (via their own *-down targets).
+web-dev-down: ## Tear down everything `make web-dev` brought up: the OIDC provider and control/data workers, then Temporal/mhvtl/zpool (via their own *-down targets). Also what `make web-dev` itself runs on interrupt; use this directly only after a crash/SIGKILL.
 	@WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-down.sh
 	@$(MAKE) zpool-down
 	@$(MAKE) mhvtl-down
