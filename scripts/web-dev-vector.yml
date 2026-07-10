@@ -1,0 +1,65 @@
+# web-dev-vector.yml — Vector pipeline that ships the dev workers' stdout
+# (structured `slog` JSON, per pkg/logging.go's slog.NewJSONHandler; captured
+# into $WEB_DEV_STATE_DIR/logs/*.log by scripts/web-dev-up.sh's `setsid ... >
+# logfile 2>&1`) into VictoriaLogs, for issue #280.
+#
+# worker_logs tails every *.log file under /var/log/tape-archiver (the fixed
+# in-container mount point docker-compose.web-dev.yml binds
+# $WEB_DEV_STATE_DIR/logs to) as raw text — Vector 0.44's file source has no
+# built-in `decoding.codec: json` option (confirmed: it rejects that key at
+# config-load time), so JSON parsing happens in the `parsed` transform below
+# instead.
+#
+# The `parsed` transform runs each line's raw text through parse_json and, on
+# success, merges the parsed object over the event so every field the worker
+# logged (level, msg, time, and Temporal SDK-injected tags like WorkflowID/
+# RunID/WorkflowType — see go.temporal.io/sdk/internal/internal_logging_tags.go,
+# wired in by workflow.GetLogger/activity.GetLogger) survives into
+# VictoriaLogs unflattened and matchable by LogsQL. A line that isn't valid
+# JSON (a stray Temporal SDK banner, a panic, etc.) is deliberately NOT
+# dropped — it still ships with Vector's own `message`/`host`/`timestamp`
+# fields intact, so nothing worth debugging silently vanishes; it just won't
+# have parsed fields to filter on.
+#
+# The `victorialogs` sink POSTs newline-delimited JSON to VictoriaLogs'
+# `/insert/jsonline` endpoint (see
+# https://docs.victoriametrics.com/victorialogs/data-ingestion/#json-stream-api).
+# _time_field=time and _msg_field=msg match slog's default JSON handler key
+# names (see pkg/logging/logging_test.go's own assertions against
+# slog.TimeKey/slog.MessageKey). _stream_fields groups log lines into
+# VictoriaLogs streams by the same run/workflow identity issue #274's LogsQL
+# queries filter on.
+sources:
+  worker_logs:
+    type: file
+    include:
+      - /var/log/tape-archiver/*.log
+    read_from: beginning
+
+transforms:
+  parsed:
+    type: remap
+    inputs: ["worker_logs"]
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null {
+        . = merge!(., parsed)
+        del(.message)
+      }
+      del(.file)
+      del(.host)
+      del(.source_type)
+
+sinks:
+  victorialogs:
+    type: http
+    inputs: ["parsed"]
+    uri: "http://127.0.0.1:9428/insert/jsonline?_time_field=time&_msg_field=msg&_stream_fields=WorkflowID,RunID"
+    method: post
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    request:
+      headers:
+        Content-Type: "application/stream+json"

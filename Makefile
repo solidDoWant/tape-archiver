@@ -435,6 +435,23 @@ zpool-down: ## Destroy the ephemeral ZFS test pool.
 # mhvtl-up.sh's /opt/mhvtl media directory.
 WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
 
+.PHONY: web-dev-observability-up
+# WEB_DEV_LOG_DIR must already exist (and be writable by the invoking user,
+# not just root) before this runs — the vector service bind-mounts it — so
+# this is deliberately NOT a `web-dev` Makefile prerequisite the way
+# temporal-up/mhvtl-up are (which have no such ordering constraint):
+# web-dev-up.sh calls this compose stack directly, after its own `mkdir -p
+# "$LOG_DIR"`, the same reason zpool-up.sh is invoked directly rather than
+# via a `zpool-up` prerequisite. Still exposed as its own target for manual
+# use/discoverability and as the counterpart web-dev-down invokes below.
+web-dev-observability-up: ## Start the web-dev-only VictoriaLogs + VictoriaMetrics + log-shipper stack (issue #280; never a dependency of test-integration/test-e2e — see docker-compose.web-dev.yml).
+	WEB_DEV_LOG_DIR=$(WEB_DEV_STATE_DIR)/logs docker compose -f $(PROJECT_DIR)/docker-compose.web-dev.yml up -d --wait
+	@echo "VictoriaLogs is ready: http://localhost:9428  VictoriaMetrics: http://localhost:8428"
+
+.PHONY: web-dev-observability-down
+web-dev-observability-down: ## Stop the web-dev-only VictoriaLogs/VictoriaMetrics/log-shipper stack and remove its volumes/networks.
+	WEB_DEV_LOG_DIR=$(WEB_DEV_STATE_DIR)/logs docker compose -f $(PROJECT_DIR)/docker-compose.web-dev.yml down -v --remove-orphans
+
 .PHONY: web-dev
 # Depends on temporal-up/mhvtl-up directly (not web-dev-up.sh calling `make`
 # itself), the same pattern test-integration/test-e2e already use, so Make's
@@ -443,22 +460,26 @@ WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
 # worker's Report phase requires (nix build .#recoveryBinaries, cached after
 # the first run).
 #
-# Deliberately NOT a zpool-up prerequisite here, unlike temporal-up/mhvtl-up:
-# zpool-up.sh destroys and recreates the pool on every invocation (the right
-# behavior for test-integration/test-e2e, which each want a guaranteed-clean
-# pool) — for web-dev, that would silently blow away the ZFS snapshot backing
-# whatever sample runs are still in flight (webdevseed's background seeding
-# pass, or any run submitted through the UI mid-session) if it ran again
-# while a previous invocation's state was still around (e.g. after a
-# crash/SIGKILL, which cannot be trapped — see web-dev-up.sh's "Interrupt
-# handling" comment and web-dev-down below). web-dev-up.sh instead only calls
-# zpool-up when the pool isn't already present.
-web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
+# Deliberately NOT a zpool-up (or web-dev-observability-up) prerequisite
+# here, unlike temporal-up/mhvtl-up: zpool-up.sh destroys and recreates the
+# pool on every invocation (the right behavior for test-integration/test-e2e,
+# which each want a guaranteed-clean pool) — for web-dev, that would silently
+# blow away the ZFS snapshot backing whatever sample runs are still in
+# flight (webdevseed's background seeding pass, or any run submitted through
+# the UI mid-session) if it ran again while a previous invocation's state
+# was still around (e.g. after a crash/SIGKILL, which cannot be trapped —
+# see web-dev-up.sh's "Interrupt handling" comment and web-dev-down below).
+# web-dev-observability-up has a different ordering constraint (see its own
+# comment above) but the same conclusion: web-dev-up.sh instead calls
+# zpool-up.sh and the observability compose stack directly, each only when
+# needed/in the right order.
+web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
 	@BIN_DIR=$(BIN_DIR) WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-up.sh
 
 .PHONY: web-dev-down
-web-dev-down: ## Tear down everything `make web-dev` brought up: the OIDC provider and control/data workers, then Temporal/mhvtl/zpool (via their own *-down targets). Also what `make web-dev` itself runs on interrupt; use this directly only after a crash/SIGKILL.
+web-dev-down: ## Tear down everything `make web-dev` brought up: the OIDC provider and control/data workers, then VictoriaLogs/VictoriaMetrics, Temporal/mhvtl/zpool (via their own *-down targets). Also what `make web-dev` itself runs on interrupt; use this directly only after a crash/SIGKILL.
 	@WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-down.sh
+	@$(MAKE) web-dev-observability-down
 	@$(MAKE) zpool-down
 	@$(MAKE) mhvtl-down
 	@$(MAKE) temporal-down
