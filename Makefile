@@ -435,6 +435,19 @@ zpool-down: ## Destroy the ephemeral ZFS test pool.
 # mhvtl-up.sh's /opt/mhvtl media directory.
 WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
 
+# WEB_DEV_OBS_COMPOSE invokes docker-compose.web-dev.yml under its own
+# explicit compose project name: the directory basename (the same
+# per-directory default docker compose would derive itself, preserving
+# per-worktree isolation) plus an "-obs" suffix so it never shares a project
+# with the root docker-compose.yml (dev Temporal) — sharing one would make
+# each side's `down --remove-orphans` delete the other side's containers as
+# "orphans"; see docker-compose.web-dev.yml's header comment.
+# scripts/web-dev-up.sh constructs the identical invocation itself (see its
+# observability-stack comment for why it can't go through this Makefile).
+WEB_DEV_OBS_COMPOSE = WEB_DEV_LOG_DIR=$(WEB_DEV_STATE_DIR)/logs docker compose \
+	-p "$$(basename $(PROJECT_DIR) | tr '[:upper:]' '[:lower:]')-obs" \
+	-f $(PROJECT_DIR)/docker-compose.web-dev.yml
+
 .PHONY: web-dev-observability-up
 # WEB_DEV_LOG_DIR must already exist (and be writable by the invoking user,
 # not just root) before this runs — the vector service bind-mounts it — so
@@ -445,12 +458,12 @@ WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
 # via a `zpool-up` prerequisite. Still exposed as its own target for manual
 # use/discoverability and as the counterpart web-dev-down invokes below.
 web-dev-observability-up: ## Start the web-dev-only VictoriaLogs + VictoriaMetrics + log-shipper stack (issue #280; never a dependency of test-integration/test-e2e — see docker-compose.web-dev.yml).
-	WEB_DEV_LOG_DIR=$(WEB_DEV_STATE_DIR)/logs docker compose -f $(PROJECT_DIR)/docker-compose.web-dev.yml up -d --wait
+	$(WEB_DEV_OBS_COMPOSE) up -d --wait
 	@echo "VictoriaLogs is ready: http://localhost:9428  VictoriaMetrics: http://localhost:8428"
 
 .PHONY: web-dev-observability-down
 web-dev-observability-down: ## Stop the web-dev-only VictoriaLogs/VictoriaMetrics/log-shipper stack and remove its volumes/networks.
-	WEB_DEV_LOG_DIR=$(WEB_DEV_STATE_DIR)/logs docker compose -f $(PROJECT_DIR)/docker-compose.web-dev.yml down -v --remove-orphans
+	$(WEB_DEV_OBS_COMPOSE) down -v --remove-orphans
 
 .PHONY: web-dev
 # Depends on temporal-up/mhvtl-up directly (not web-dev-up.sh calling `make`

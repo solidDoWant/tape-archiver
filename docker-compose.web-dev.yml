@@ -6,13 +6,17 @@
 # three containers only ever run for `make web-dev` — never for the test
 # suites (this is dev-only tooling; see this file's non-goals in issue #280).
 #
-# No explicit `-p`/COMPOSE_PROJECT_NAME here, matching how temporal-up/down
-# already invoke the root docker-compose.yml: docker compose's default
-# project name is derived from the project directory's basename, which is
-# this repo/worktree's own directory — giving free per-worktree isolation
-# (concurrent `make web-dev` runs from two different worktree checkouts on
-# the same Docker host get distinct default project names) without any extra
-# wiring.
+# Every invocation of this file passes an explicit project name (see the
+# Makefile's WEB_DEV_OBS_COMPOSE and scripts/web-dev-up.sh): the directory
+# basename — the same per-directory value docker compose would derive by
+# default, keeping per-worktree isolation — plus an "-obs" suffix. The suffix
+# matters: without it this file and the root docker-compose.yml (dev
+# Temporal, run from the same directory) share one compose project, so each
+# side's `down --remove-orphans` (temporal-down, web-dev-observability-down)
+# would delete the OTHER side's containers as "orphans" — e.g. a standalone
+# `make web-dev-observability-down` would kill the dev Temporal container out
+# from under a running `make web-dev` session (observed live before the
+# suffix existed, as mutual "Found orphan containers" warnings).
 #
 # network_mode: host on all three services: victoriametrics must scrape the
 # dev control/data workers' METRICS_ADDR endpoints, which listen on the
@@ -65,7 +69,11 @@ services:
   # victorialogs — see scripts/web-dev-vector.yml for the pipeline itself.
   # Depends on victorialogs being healthy first so it isn't posting into a
   # not-yet-serving endpoint at startup (it would just retry, but there is no
-  # reason to make it).
+  # reason to make it). The healthcheck hits vector's own API (enabled in
+  # web-dev-vector.yml, loopback-only) so `up --wait` fails fast and visibly
+  # if the config doesn't load rather than reporting a crash-looping shipper
+  # as up: vector exits on a config error, and without a healthcheck compose
+  # counts a just-started (about-to-crash) container as ready.
   vector:
     image: timberio/vector:0.44.0-alpine
     restart: on-failure
@@ -76,6 +84,12 @@ services:
     volumes:
       - ./scripts/web-dev-vector.yml:/etc/vector/vector.yaml:ro
       - ${WEB_DEV_LOG_DIR:?WEB_DEV_LOG_DIR must be set — see scripts/web-dev-up.sh}:/var/log/tape-archiver:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8686/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
 
 volumes:
   victorialogs_data:

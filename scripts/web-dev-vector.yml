@@ -1,12 +1,21 @@
 # web-dev-vector.yml — Vector pipeline that ships the dev workers' stdout
 # (structured `slog` JSON, per pkg/logging.go's slog.NewJSONHandler; captured
-# into $WEB_DEV_STATE_DIR/logs/*.log by scripts/web-dev-up.sh's `setsid ... >
-# logfile 2>&1`) into VictoriaLogs, for issue #280.
+# into the WEB_DEV_STATE_DIR logs/ directory's *.log files by
+# scripts/web-dev-up.sh's `setsid ... > logfile 2>&1`) into VictoriaLogs, for
+# issue #280.
+#
+# NOTE: Vector interpolates dollar-sign environment-variable references over
+# the RAW config text before parsing it — comments included — and fails the
+# whole config load on any that are unset ("Missing environment variable in
+# config"), sending the container into a crash loop. Learned the hard way: an
+# earlier revision of this very comment block spelled a variable name with
+# its dollar sign. Never write a dollar-prefixed name anywhere in this file,
+# even in prose; escape as double-dollar if one is ever genuinely needed.
 #
 # worker_logs tails every *.log file under /var/log/tape-archiver (the fixed
-# in-container mount point docker-compose.web-dev.yml binds
-# $WEB_DEV_STATE_DIR/logs to) as raw text — Vector 0.44's file source has no
-# built-in `decoding.codec: json` option (confirmed: it rejects that key at
+# in-container mount point docker-compose.web-dev.yml binds the host's
+# WEB_DEV_LOG_DIR to) as raw text — Vector 0.44's file source has no built-in
+# `decoding.codec: json` option (confirmed: it rejects that key at
 # config-load time), so JSON parsing happens in the `parsed` transform below
 # instead.
 #
@@ -29,6 +38,15 @@
 # slog.TimeKey/slog.MessageKey). _stream_fields groups log lines into
 # VictoriaLogs streams by the same run/workflow identity issue #274's LogsQL
 # queries filter on.
+#
+# The api block backs the container healthcheck (GET /health on 8686, bound
+# to loopback only — the service runs with network_mode: host) so `docker
+# compose up --wait` fails fast and visibly on a bad config instead of
+# reporting a crash-looping shipper as up.
+api:
+  enabled: true
+  address: "127.0.0.1:8686"
+
 sources:
   worker_logs:
     type: file

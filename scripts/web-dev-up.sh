@@ -230,10 +230,19 @@ fi
 # worker-control/worker-data — does NOT run under sudo) fail to create their
 # own log files in it. $LOG_DIR was already created above (this script's
 # very first mkdir -p), so that ordering is satisfied here.
+#
+# The explicit -p project name (directory basename + "-obs") must stay
+# identical to the Makefile's WEB_DEV_OBS_COMPOSE — that's what
+# web-dev-observability-down tears down — and distinct from the root
+# docker-compose.yml's default project, so neither side's
+# `down --remove-orphans` removes the other's containers; see
+# docker-compose.web-dev.yml's header comment.
 # ---------------------------------------------------------------------------
 
 echo "==> starting VictoriaLogs/VictoriaMetrics dev-observability stack..."
-WEB_DEV_LOG_DIR="$LOG_DIR" docker compose -f "$PROJECT_DIR/docker-compose.web-dev.yml" up -d --wait
+WEB_DEV_LOG_DIR="$LOG_DIR" docker compose \
+  -p "$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')-obs" \
+  -f "$PROJECT_DIR/docker-compose.web-dev.yml" up -d --wait
 
 # ---------------------------------------------------------------------------
 # Recovery binaries (real static age/par2/zstd/tar — the data worker's Report
