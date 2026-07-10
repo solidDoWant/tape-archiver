@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # web-dev-up.sh — bring up the local `cmd/web` dev stack (issue #265): a local
 # OIDC provider, real control + data workers, a background sample-run
-# seeding pass, then `cmd/web` itself in the foreground.
+# seeding pass, VictoriaLogs/VictoriaMetrics/a log shipper (issue #280), then
+# `cmd/web` itself in the foreground.
 #
 # Temporal/mhvtl are NOT brought up here — the `web-dev` Makefile target
 # depends on the existing, genuinely idempotent `temporal-up`/`mhvtl-up`
@@ -13,7 +14,10 @@
 # the check below. That check also covers this script's own crash/SIGKILL
 # recovery path (a non-goal to change — see issue #268): those cannot be
 # trapped, so `web-dev-down` remains the documented remedy, and a subsequent
-# `make web-dev` must tolerate whatever they left behind.
+# `make web-dev` must tolerate whatever they left behind. VictoriaLogs/
+# VictoriaMetrics are a third case — genuinely idempotent like temporal/mhvtl,
+# but with their own ordering requirement that rules out being a plain
+# Makefile prerequisite too; see the dedicated comment further down.
 #
 # Everything this script itself starts (the OIDC provider, both worker roles,
 # and the seeding pass) is detached into its own session via `setsid`, so a
@@ -35,7 +39,8 @@
 # Requires (all provided by `nix develop`): age-keygen (webdevseed's sample
 # keypair), mkltfs/ltfs/par2/zstd/tar/mt-st/sg3-utils (the data worker's real
 # activities), setsid (util-linux), curl, make (to hand off to
-# `web-dev-down` on interrupt).
+# `web-dev-down` on interrupt), docker with the compose plugin (VictoriaLogs/
+# VictoriaMetrics/vector, docker-compose.web-dev.yml).
 
 set -euo pipefail
 
@@ -69,11 +74,25 @@ CONTROL_METRICS_ADDR=":19090"
 DATA_HEALTH_ADDR=":18081"
 DATA_METRICS_ADDR=":19091"
 
+# VictoriaLogs/VictoriaMetrics (issue #280, docker-compose.web-dev.yml — both
+# run with network_mode: host, so they listen directly on these loopback
+# ports). cmd/web does not read these yet (issues #274/#275 add that); they
+# are exported to it below anyway so the dev stack is already wired for
+# whichever of those two lands first, without another web-dev-up.sh change.
+# VICTORIALOGS_STREAM_FILTER's exact semantics are #274's to define; "*" (a
+# LogsQL query matching every log line) is the correct default for THIS
+# stack specifically because it is single-tenant — this VictoriaLogs
+# instance only ever ingests tape-archiver dev-worker logs (see
+# scripts/web-dev-vector.yml), so there is nothing else to filter out.
+VICTORIALOGS_URL="${VICTORIALOGS_URL:-http://127.0.0.1:9428}"
+VICTORIALOGS_STREAM_FILTER="${VICTORIALOGS_STREAM_FILTER:-*}"
+VICTORIAMETRICS_URL="${VICTORIAMETRICS_URL:-http://127.0.0.1:8428}"
+
 # ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
 
-for cmd in age-keygen mkltfs setsid curl; do
+for cmd in age-keygen mkltfs setsid curl docker; do
   command -v "$cmd" > /dev/null 2>&1 || {
     echo "error: '$cmd' not found in PATH — run 'make web-dev' from within 'nix develop'" >&2
     exit 1
@@ -194,6 +213,40 @@ if ! sudo zpool list -H -o name "${TAPE_POOL_DATASET%%/*}" > /dev/null 2>&1; the
 else
   echo "==> ZFS test pool '${TAPE_POOL_DATASET%%/*}' already present; reusing it."
 fi
+
+# ---------------------------------------------------------------------------
+# VictoriaLogs + VictoriaMetrics + the vector log shipper (issue #280):
+# `docker compose ... up -d --wait` is genuinely idempotent (like
+# temporal-up/mhvtl-up), but this is called directly here — the same
+# `docker compose` invocation the `web-dev-observability-up` Makefile target
+# wraps, not `make web-dev-observability-up` itself, to avoid a nested `make`
+# negotiating a jobserver token with the outer `make web-dev` invocation that
+# is running this script (see run_teardown's own comment on the same
+# concern) — rather than made a `web-dev` Makefile prerequisite, because it
+# has an ordering requirement those don't: vector bind-mounts $LOG_DIR
+# (WEB_DEV_LOG_DIR below), which must already exist, owned by the invoking
+# user, before the container starts, or Docker auto-creates it as root:root
+# and the daemons started below (webdevoidc in particular, which — unlike
+# worker-control/worker-data — does NOT run under sudo) fail to create their
+# own log files in it. $LOG_DIR was already created above (this script's
+# very first mkdir -p), so that ordering is satisfied here.
+#
+# The explicit -p project name (directory basename + "-obs") must stay
+# identical to the Makefile's WEB_DEV_OBS_COMPOSE — that's what
+# web-dev-observability-down tears down — and distinct from the root
+# docker-compose.yml's default project, so neither side's
+# `down --remove-orphans` removes the other's containers; see
+# docker-compose.web-dev.yml's header comment.
+#
+# --wait-timeout: with restart: on-failure + healthchecks, a container that
+# can never become healthy (e.g. a bad shipper config) would otherwise hang
+# this --wait indefinitely; bounding it turns that into a visible failure.
+# ---------------------------------------------------------------------------
+
+echo "==> starting VictoriaLogs/VictoriaMetrics dev-observability stack..."
+WEB_DEV_LOG_DIR="$LOG_DIR" docker compose \
+  -p "$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')-obs" \
+  -f "$PROJECT_DIR/docker-compose.web-dev.yml" up -d --wait --wait-timeout 120
 
 # ---------------------------------------------------------------------------
 # Recovery binaries (real static age/par2/zstd/tar — the data worker's Report
@@ -419,12 +472,18 @@ cat << EOF
    Sample dry-run backups are being submitted in the background and will
    appear in History over the next few minutes (tail $SEED_LOG to watch).
 
+   VictoriaLogs:    $VICTORIALOGS_URL
+   VictoriaMetrics: $VICTORIAMETRICS_URL
+   (cmd/web doesn't render log/metric panels from these yet — issues #274/#275 —
+   but both are already ingesting/scraping the dev workers; query them directly
+   at the URLs above in the meantime.)
+
    Ctrl+C (or SIGTERM) stops the whole dev stack: cmd/web shuts down first,
    then the full 'make web-dev-down' teardown runs automatically —
-   Temporal/mhvtl/zpool, the OIDC provider, and the workers all come down, so
-   the next 'make web-dev' always starts from a clean slate. Run
-   'make web-dev-down' yourself only after a crash/SIGKILL, which cannot be
-   trapped.
+   Temporal/mhvtl/zpool, VictoriaLogs/VictoriaMetrics, the OIDC provider, and
+   the workers all come down, so the next 'make web-dev' always starts from a
+   clean slate. Run 'make web-dev-down' yourself only after a crash/SIGKILL,
+   which cannot be trapped.
 ==============================================================================
 
 EOF
@@ -440,6 +499,9 @@ env \
   MHVTL_CHANGER_DEV="$MHVTL_CHANGER_DEV" \
   MHVTL_DRIVE0_DEV="$MHVTL_DRIVE0_DEV" \
   MHVTL_DRIVE1_DEV="$MHVTL_DRIVE1_DEV" \
+  VICTORIALOGS_URL="$VICTORIALOGS_URL" \
+  VICTORIALOGS_STREAM_FILTER="$VICTORIALOGS_STREAM_FILTER" \
+  VICTORIAMETRICS_URL="$VICTORIAMETRICS_URL" \
   "$BIN_DIR/web" &
 WEB_PID=$!
 

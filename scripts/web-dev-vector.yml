@@ -1,0 +1,85 @@
+# web-dev-vector.yml — Vector pipeline that ships the dev workers' stdout
+# (structured `slog` JSON, per pkg/logging.go's slog.NewJSONHandler; captured
+# into the WEB_DEV_STATE_DIR logs/ directory's *.log files by
+# scripts/web-dev-up.sh's `setsid ... > logfile 2>&1`) into VictoriaLogs, for
+# issue #280.
+#
+# NOTE: Vector interpolates dollar-sign environment-variable references over
+# the RAW config text before parsing it — comments included — and fails the
+# whole config load on any that are unset ("Missing environment variable in
+# config"), sending the container into a crash loop. Learned the hard way: an
+# earlier revision of this very comment block spelled a variable name with
+# its dollar sign. Never write a dollar-prefixed name anywhere in this file,
+# even in prose; escape as double-dollar if one is ever genuinely needed.
+#
+# worker_logs tails every *.log file under /var/log/tape-archiver (the fixed
+# in-container mount point docker-compose.web-dev.yml binds the host's
+# WEB_DEV_LOG_DIR to) as raw text — Vector 0.44's file source has no built-in
+# `decoding.codec: json` option (confirmed: it rejects that key at
+# config-load time), so JSON parsing happens in the `parsed` transform below
+# instead.
+#
+# The `parsed` transform runs each line's raw text through parse_json and, on
+# success, merges the parsed object over the event so every field the worker
+# logged (level, msg, time, and Temporal SDK-injected tags like WorkflowID/
+# RunID/WorkflowType — see go.temporal.io/sdk/internal/internal_logging_tags.go,
+# wired in by workflow.GetLogger/activity.GetLogger) survives into
+# VictoriaLogs unflattened and matchable by LogsQL. A line that isn't valid
+# JSON (a stray Temporal SDK banner, a panic, etc.) is deliberately NOT
+# dropped — it still ships with Vector's own `message` and `timestamp`
+# fields intact (`host`/`file`/`source_type` are stripped unconditionally,
+# JSON or not — constant noise in a single-host dev stack), so nothing worth
+# debugging silently vanishes; it just won't have parsed fields to filter
+# on.
+#
+# The `victorialogs` sink POSTs newline-delimited JSON to VictoriaLogs'
+# `/insert/jsonline` endpoint (see
+# https://docs.victoriametrics.com/victorialogs/data-ingestion/#json-stream-api).
+# _time_field=time and _msg_field=msg match slog's default JSON handler key
+# names (see pkg/logging/logging_test.go's own assertions against
+# slog.TimeKey/slog.MessageKey). _stream_fields groups log lines into
+# VictoriaLogs streams by the same run/workflow identity issue #274's LogsQL
+# queries filter on.
+#
+# The api block backs the container healthcheck (GET /health on 8686, bound
+# to loopback only — the service runs with network_mode: host) so `docker
+# compose up --wait` fails fast and visibly on a bad config instead of
+# reporting a crash-looping shipper as up.
+api:
+  enabled: true
+  address: "127.0.0.1:8686"
+
+sources:
+  worker_logs:
+    type: file
+    include:
+      - /var/log/tape-archiver/*.log
+    read_from: beginning
+
+transforms:
+  parsed:
+    type: remap
+    inputs: ["worker_logs"]
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null {
+        . = merge!(., parsed)
+        del(.message)
+      }
+      del(.file)
+      del(.host)
+      del(.source_type)
+
+sinks:
+  victorialogs:
+    type: http
+    inputs: ["parsed"]
+    uri: "http://127.0.0.1:9428/insert/jsonline?_time_field=time&_msg_field=msg&_stream_fields=WorkflowID,RunID"
+    method: post
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    request:
+      headers:
+        Content-Type: "application/stream+json"

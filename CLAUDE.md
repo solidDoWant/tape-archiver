@@ -95,14 +95,16 @@ as the project is implemented; keep this list current):
   (`$ZFS_MODULES`); `zpool-up` loads it at runtime (needs `sudo`), falling back to
   the host's own module when the flake build does not match the running kernel.
 - `make web-dev` / `make web-dev-down` — one-command local web UI: dev Temporal +
-  mhvtl + ZFS pool + a local-only fake OIDC provider (`cmd/webdevoidc`) + real
-  control/data workers, seeded with a few sample dry-run backups
-  (`cmd/webdevseed`), `cmd/web` running in the foreground. Interrupting it
-  (Ctrl+C/SIGINT or SIGTERM) waits for `cmd/web` to shut down gracefully, then
-  runs the full `web-dev-down` teardown automatically, so every `make web-dev`
-  starts from a clean slate; `make web-dev-down` itself remains the remedy
-  after a crash/SIGKILL, which cannot be trapped. See `docs/web-ui.md`'s
-  "Local development" section.
+  mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics (`docker-compose.web-dev.yml`,
+  fed by a `vector` shipper tailing the dev workers' structured log files) +
+  a local-only fake OIDC provider (`cmd/webdevoidc`) + real control/data
+  workers, seeded with a few sample dry-run backups (`cmd/webdevseed`),
+  `cmd/web` running in the foreground. Interrupting it (Ctrl+C/SIGINT or
+  SIGTERM) waits for `cmd/web` to shut down gracefully, then runs the full
+  `web-dev-down` teardown automatically, so every `make web-dev` starts from
+  a clean slate; `make web-dev-down` itself remains the remedy after a
+  crash/SIGKILL, which cannot be trapped. See `docs/web-ui.md`'s "Local
+  development" section.
 
 ## Dev Tools
 

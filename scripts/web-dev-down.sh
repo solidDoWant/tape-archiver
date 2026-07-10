@@ -4,10 +4,16 @@
 # sample-run seeding pass, and — after a crash/SIGKILL of web-dev-up.sh
 # itself — an orphaned cmd/web) and remove its state directory.
 #
-# Temporal/mhvtl/zpool are torn down separately by the `web-dev-down` Makefile
-# target via the existing `temporal-down`/`mhvtl-down`/`zpool-down` targets,
-# not by this script — mirroring how `web-dev-up.sh` leaves bringing those up
-# to `web-dev`'s Make prerequisites.
+# Temporal/mhvtl/zpool/the VictoriaLogs+VictoriaMetrics dev-observability
+# stack (issue #280) are torn down separately by the `web-dev-down` Makefile
+# target via the existing `temporal-down`/`mhvtl-down`/`zpool-down`/
+# `web-dev-observability-down` targets, not by this script — for
+# Temporal/mhvtl this mirrors how `web-dev-up.sh` leaves bringing those up to
+# `web-dev`'s Make prerequisites; zpool and the observability stack are each
+# brought up by `web-dev-up.sh` directly instead (their own ordering
+# constraints — see web-dev-up.sh's comments), but their teardown still lives
+# here at the Makefile level for the same reason zpool's always has: nothing
+# about tearing them down is order-sensitive the way bringing them up is.
 #
 # Idempotent: safe to run when nothing (or only some daemons) are up.
 

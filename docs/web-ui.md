@@ -153,7 +153,8 @@ Everything above assumes a real deployment (a real Temporal cluster, a real iden
 provider, a real tape library). For iterating on the UI itself, `make web-dev` brings up
 a complete local stand-in with a couple of clicks: dev Temporal, `mhvtl`, and an ephemeral
 ZFS test pool (reusing the existing `temporal-up`/`mhvtl-up`/`zpool-up` targets and
-scripts unchanged), a local OIDC provider, real control and data workers, and `cmd/web`
+scripts unchanged), a local VictoriaLogs + VictoriaMetrics stack fed by the dev workers'
+own logs/metrics, a local OIDC provider, real control and data workers, and `cmd/web`
 itself — with a few sample dry-run backups submitted automatically so History has
 something in it right away.
 
@@ -178,12 +179,18 @@ $ make web-dev
    appear in History over the next few minutes (tail the printed log path
    to watch progress).
 
+   VictoriaLogs:    http://127.0.0.1:9428
+   VictoriaMetrics: http://127.0.0.1:8428
+   (cmd/web doesn't render log/metric panels from these yet — issues #274/#275 —
+   but both are already ingesting/scraping the dev workers; query them directly
+   at the URLs above in the meantime.)
+
    Ctrl+C (or SIGTERM) stops the whole dev stack: cmd/web shuts down first,
    then the full 'make web-dev-down' teardown runs automatically —
-   Temporal/mhvtl/zpool, the OIDC provider, and the workers all come down, so
-   the next 'make web-dev' always starts from a clean slate. Run
-   'make web-dev-down' yourself only after a crash/SIGKILL, which cannot be
-   trapped.
+   Temporal/mhvtl/zpool, VictoriaLogs/VictoriaMetrics, the OIDC provider, and
+   the workers all come down, so the next 'make web-dev' always starts from a
+   clean slate. Run 'make web-dev-down' yourself only after a crash/SIGKILL,
+   which cannot be trapped.
 ==============================================================================
 ```
 
@@ -198,17 +205,48 @@ process group, or `SIGTERM` sent the same way — e.g. by a supervisor) tears th
 stack back down: `cmd/web` shuts down gracefully first, and once it has actually
 exited, the full `web-dev-down` teardown runs — the OIDC provider, both workers, and
 any in-flight seeder are stopped, the state dir is removed, and Temporal/`mhvtl`/the
-ZFS pool come down via their own `*-down` targets. This is a deliberate change from the
-original fast-restart design (issue #265): Temporal and `mhvtl` state have to move in
-lockstep (stale `mhvtl` slot state from an interrupted seeding pass, for example, breaks
-the next run's `Load` step), and nothing enforces that if only part of the stack comes
-down. So every `make web-dev` now starts from a clean slate — dev Temporal, blank
-virtual tapes, and a freshly recreated pool — at the cost of a slower restart than the
+ZFS pool/VictoriaLogs/VictoriaMetrics come down via their own `*-down` targets. This is a
+deliberate change from the original fast-restart design (issue #265): Temporal and
+`mhvtl` state have to move in lockstep (stale `mhvtl` slot state from an interrupted
+seeding pass, for example, breaks the next run's `Load` step), and nothing enforces that
+if only part of the stack comes down. So every `make web-dev` now starts from a clean
+slate — dev Temporal, blank virtual tapes, a freshly recreated pool, and empty
+VictoriaLogs/VictoriaMetrics volumes — at the cost of a slower restart than the
 few-seconds turnaround the original design aimed for.
 
 `make web-dev-down` remains available (and idempotent) as its own target — it's what
 `make web-dev` itself runs on interrupt, and it's also the remedy after a crash or
 `SIGKILL`, neither of which can be trapped and cleaned up automatically.
+
+**VictoriaLogs + VictoriaMetrics (issue #280).** `docker-compose.web-dev.yml` — a
+separate compose file from the root `docker-compose.yml` that `temporal-up`/
+`temporal-down` back, so these containers only ever run for `make web-dev`, never for
+`test-integration`/`test-e2e` — brings up three containers, all on `network_mode: host`
+so they can reach the dev workers' loopback-bound ports directly:
+
+- **`victorialogs`** (VictoriaLogs) ingests the dev workers' structured `slog` JSON
+  stdout. `scripts/web-dev-up.sh` redirects each worker's combined stdout/stderr into
+  `$WEB_DEV_STATE_DIR/logs/<name>.log`; a **`vector`** container tails those files,
+  parses each line as JSON, and ships it into VictoriaLogs' JSON stream API
+  (`/insert/jsonline`), preserving every field the worker logged — including the
+  Temporal SDK's own `WorkflowID`/`RunID`/`WorkflowType` tags (added automatically by
+  `workflow.GetLogger`/`activity.GetLogger`), which is what makes a run's logs
+  matchable by LogsQL.
+- **`victoriametrics`** (VictoriaMetrics) scrapes both dev workers' Prometheus
+  `/metrics` endpoints directly (`scripts/web-dev-vm-scrape.yml`: static targets at the
+  control/data workers' fixed dev-stack `METRICS_ADDR` ports, 19090/19091), including
+  the write-health gauges `workflows/backup/writehealth.go` registers.
+- `cmd/web` is started with `VICTORIALOGS_URL`, `VICTORIALOGS_STREAM_FILTER`, and
+  `VICTORIAMETRICS_URL` already pointed at these containers (`http://127.0.0.1:9428`,
+  `*`, and `http://127.0.0.1:8428` respectively) — it does not read them yet (that's
+  issues #274 and #275), but the dev stack is already wired for whichever lands first.
+  In the meantime, query either service directly (`curl` against the URLs the startup
+  banner prints, e.g. `.../select/logsql/query` or `.../api/v1/query`) to see real
+  dev-worker data.
+
+Both containers, the log shipper, and their volumes come down as part of the same
+`web-dev-down` teardown described above (`make web-dev-observability-up`/
+`web-dev-observability-down` are also available standalone for manual poking).
 
 **Local OIDC provider — how it works and its one real tradeoff.** `cmd/web` refuses to
 start without a real, reachable OIDC provider (see
