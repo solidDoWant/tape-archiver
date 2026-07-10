@@ -176,9 +176,12 @@ this stays well within a single page for any realistic retention window.
 
 The **Tapes** page (`/tapes`) lists every physical tape written by a run still inside
 Temporal's history window — barcode, a link to the run that wrote it, its logical-tape
-and copy index, its write outcome (loaded/written/failed), and a summary of its measured
-write health (throughput, whether it stayed above the speed-matching floor, and any
-TapeAlert flags — SPEC §14). Each row is reconstructed on the fly from that run's own
+and copy index, its write outcome (loaded/written/failed, with a failed tape's reason
+shown under the badge), and a summary of its measured write health (throughput, whether
+it stayed above the speed-matching floor, the reposition count — or an explicit note
+when repositions could not be measured — and any TapeAlert flags — SPEC §14). Each of
+those warning signals gets its own badge, and any combination can appear together.
+Each row is reconstructed on the fly from that run's own
 Temporal execution history via `GET /api/tapes` (correlating the Load phase's per-tape
 barcodes with the Write phase's format/write/finalize/measure activities), the same way
 a single run's [`GET /api/runs/{runID}/tapes`](tapectl.md) backs the run detail page's

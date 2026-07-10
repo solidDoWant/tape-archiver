@@ -180,7 +180,18 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
 - 2026-07-10 (#278): no limit/"show more" control on the page — it uses `GET
   /api/tapes`'s own default (the 50 most recent runs, `tapes.go`'s
   `defaultListTapesRunLimit`) as-is. The reference design has no such control on this
-  page either, so there is nothing to reproduce.
+  page either, so there is nothing to reproduce. The page copy discloses the cap
+  (banner and footer both say "50 most recent runs") so "derived from history" is
+  never read as "everything still within Temporal retention".
+- 2026-07-10 (#278, review): the write-health cell renders TapeAlert, below-floor,
+  and repositions as independent, simultaneous badges (matching the design's
+  "healthy / below floor / N repositions" badge set and `FinalTapeCard`'s
+  precedent) — the three are independent dimensions of
+  `backup.WriteHealth.Healthy()`, so one badge must never suppress another, and a
+  tape unhealthy solely from repositions must not look healthy. When repositions
+  could not be measured at all, the cell says "repositions not measured" explicitly
+  rather than implying zero. A failed tape's reason renders as visible text under
+  the outcome badge, not a hover-only title.
 - 2026-07-10 (#278): row order is exactly what `GET /api/tapes` already returns
   (newest run first, then logical-tape index, then copy index) — no client-side
   resort, keeping the page's grouping identical to the API contract.

@@ -27,6 +27,10 @@ describe('TapesPage', () => {
 
     expect(screen.getByText(/no persistent tape catalog/i)).toBeInTheDocument()
     expect(screen.getByText(/does not read live status from the tape changer/i)).toBeInTheDocument()
+    // The listing's reach (the API's newest-runs default) must be disclosed
+    // too — "derived from history" alone would wrongly imply everything
+    // still within Temporal retention is covered.
+    expect(screen.getByText(/50 most recent runs/i)).toBeInTheDocument()
   })
 
   it('shows a loading state before the response arrives', () => {
@@ -169,6 +173,93 @@ describe('TapesPage', () => {
 
     expect(screen.getByText(/below floor/i)).toBeInTheDocument()
     expect(screen.getByText(/tapealert/i)).toBeInTheDocument()
+    // The failed tape's reason is visible text, not just a hover title a
+    // touch device or screen reader would never surface.
+    expect(screen.getByText('drive reported a hard write error')).toBeInTheDocument()
+  })
+
+  it('shows a repositions warning when a tape recorded repositions, alongside any other warning', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            {
+              barcode: 'TA0006L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              runId: 'run-5',
+              runStartTime: '2026-07-05T00:00:00Z',
+              runStatus: 'Completed',
+              writeHealth: {
+                measured: true,
+                throughputMBps: 41,
+                floorMBps: 50,
+                floorKnown: true,
+                belowFloor: true,
+                repositions: 3,
+                repositionsMeasured: true,
+                healthy: false,
+              },
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/3 repositions/i)).toBeInTheDocument()
+    })
+
+    // Repositions and below-floor are independent problems — one badge must
+    // never suppress the other, and neither may masquerade as healthy.
+    expect(screen.getByText(/below floor/i)).toBeInTheDocument()
+    expect(screen.queryByText('healthy')).not.toBeInTheDocument()
+  })
+
+  it('says so explicitly when repositions could not be measured, instead of implying zero', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            {
+              barcode: 'TA0007L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              runId: 'run-6',
+              runStartTime: '2026-07-06T00:00:00Z',
+              runStatus: 'Completed',
+              writeHealth: {
+                measured: true,
+                throughputMBps: 140,
+                floorMBps: 50,
+                floorKnown: true,
+                belowFloor: false,
+                repositionsMeasured: false,
+                healthy: false,
+              },
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/repositions not measured/i)).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('healthy')).not.toBeInTheDocument()
   })
 
   it('shows an unmeasured note when a tape has no write-health measurement', async () => {

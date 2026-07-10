@@ -61,6 +61,13 @@ type LoadState =
   | { status: 'error'; error: string }
   | { status: 'loaded'; tapes: AggregateTapeOutcome[]; runErrors: RunError[] }
 
+// apiDefaultRunLimit mirrors pkg/runsapi's defaultListTapesRunLimit
+// (tapes.go): how many of the newest runs GET /api/tapes reconstructs when
+// the request doesn't say. Surfaced in the page copy so an operator knows
+// the listing's actual reach — "derived from history" alone would wrongly
+// imply everything still in Temporal retention is covered.
+const apiDefaultRunLimit = 50
+
 // outcomeBadgeClass colors a tape's write outcome (pkg/runsapi's
 // tapeOutcomeLoaded/tapeOutcomeWritten/tapeOutcomeFailed): written is the
 // only unambiguously good state (green); failed is unambiguously bad (red);
@@ -83,16 +90,25 @@ function outcomeBadgeClass(result: string): string {
 
 // WriteHealthCell renders a compact one-line summary of a tape's measured
 // write health (SPEC §14): unmeasured tapes (still in progress, or a run
-// that ended before MeasureWriteHealth ran for this barcode) show a plain
-// dash rather than an empty cell that could be mistaken for "healthy". A
-// TapeAlert flag takes priority over "below floor" as the more serious
-// signal when a tape has both.
+// that ended before MeasureWriteHealth ran for this barcode) show an
+// explicit "not measured" note rather than an empty cell that could be
+// mistaken for "healthy". The three warning signals — TapeAlert flags,
+// below-floor throughput, and measured repositions — are independent
+// dimensions of the verdict (backup.WriteHealth.Healthy() requires ALL of
+// them clean), so each renders as its own badge and any combination can
+// appear together; suppressing one behind another would hide a real
+// problem (a tape unhealthy solely from repositions must not look
+// healthy). This mirrors FinalTapeCard (DriveMetricsPanel.tsx) and the
+// design's "healthy / below floor / N repositions" badge set — the two
+// views phrase and lay the data out differently (card vs. table cell), so
+// the markup is deliberately not extracted into a shared component.
 function WriteHealthCell({ health }: { health?: WriteHealthInfo }) {
   if (!health || !health.measured) {
     return <span className="text-text-faint">not measured</span>
   }
 
   const hasTapeAlert = (health.tapeAlertFlags?.length ?? 0) > 0
+  const repositions = health.repositions ?? 0
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -105,12 +121,27 @@ function WriteHealthCell({ health }: { health?: WriteHealthInfo }) {
           <IconWarning className="h-3 w-3" />
           TapeAlert
         </span>
-      ) : health.belowFloor ? (
+      ) : null}
+      {health.belowFloor ? (
         <span className="inline-flex items-center gap-1 rounded-full border border-amber-line bg-amber-bg px-2 py-0.5 text-[11px] font-medium text-amber">
           <IconWarning className="h-3 w-3" />
           below floor
         </span>
-      ) : health.healthy ? (
+      ) : null}
+      {health.repositionsMeasured ? (
+        repositions > 0 ? (
+          <span className="inline-flex items-center gap-1 rounded-full border border-amber-line bg-amber-bg px-2 py-0.5 text-[11px] font-medium text-amber">
+            <IconWarning className="h-3 w-3" />
+            {repositions} reposition{repositions === 1 ? '' : 's'}
+          </span>
+        ) : null
+      ) : (
+        // Repositions couldn't be measured at all (writehealth.go — e.g. the
+        // drive doesn't expose the counter): say so, since a missing
+        // repositions badge must not read as "zero repositions".
+        <span className="font-mono text-[11px] text-text-faint">repositions not measured</span>
+      )}
+      {health.healthy ? (
         <span className="rounded-full border border-green-line bg-green-bg px-2 py-0.5 text-[11px] font-medium text-green">
           healthy
         </span>
@@ -139,7 +170,8 @@ function TapesPage() {
 
       try {
         // No `?limit=` override: the API's own default
-        // (defaultListTapesRunLimit, 50 of the newest runs — tapes.go)
+        // (defaultListTapesRunLimit — tapes.go; mirrored as
+        // apiDefaultRunLimit above for the page copy)
         // already bounds this to a page-worthy amount of history, and the
         // reference design has no "show more"/limit control on this page
         // (dc.html's Tapes section) — see docs/web-ui-design.md's decisions
@@ -185,9 +217,10 @@ function TapesPage() {
           The archiver keeps no persistent tape catalog (SPEC §4.2) — there is no
           permanent inventory to show, and this page does not read live status from the
           tape changer. Every row below is reconstructed on the fly from a completed or
-          in-progress run's own Temporal execution history. Once a run ages out of
-          Temporal's visibility retention, the tapes it wrote drop off this list — its
-          PDF report is the permanent record of what it wrote.
+          in-progress run's own Temporal execution history, covering the{' '}
+          {apiDefaultRunLimit} most recent runs. Once a run ages out of Temporal's
+          visibility retention, the tapes it wrote drop off this list — its PDF report
+          is the permanent record of what it wrote.
         </p>
       </div>
 
@@ -280,10 +313,19 @@ function TapesPage() {
                       <td className="px-4 py-3">
                         <span
                           className={`inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${outcomeBadgeClass(tape.result)}`}
-                          title={tape.result === 'failed' ? tape.error : undefined}
                         >
                           {tape.result}
                         </span>
+                        {tape.result === 'failed' && tape.error ? (
+                          // The failure reason is real information an
+                          // operator acts on (which tape to pull, what went
+                          // wrong) — render it visibly, not just as a hover
+                          // title a touch device or screen reader would
+                          // never surface.
+                          <div className="mt-1 max-w-[280px] font-mono text-[11px] break-words text-red">
+                            {tape.error}
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-4 py-3">
                         <WriteHealthCell health={tape.writeHealth} />
@@ -296,8 +338,9 @@ function TapesPage() {
           )}
 
           <p className="max-w-3xl text-[11px] text-text-faint">
-            Tapes from runs that have aged out of Temporal's history are not listed —
-            their contents can no longer be reconstructed here.
+            Only the {apiDefaultRunLimit} most recent runs are inspected. Tapes from
+            older runs, or from runs that have aged out of Temporal's history, are not
+            listed — their contents can no longer be reconstructed here.
           </p>
         </>
       ) : null}
