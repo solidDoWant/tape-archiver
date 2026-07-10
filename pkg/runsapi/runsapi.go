@@ -264,6 +264,10 @@ func newMux(h *handler) http.Handler {
 	mux.HandleFunc("GET /api/runs/{runID}/config", h.getRunConfig)
 	mux.HandleFunc("GET /api/runs/{runID}/tapes", h.getRunTapes)
 	mux.HandleFunc("GET /api/tapes", h.listTapes)
+	// VictoriaLogs-backed log panel (issue #274): a plain JSON proxy, not a
+	// persisted catalog (SPEC §4.2) and not this package's usual SSE
+	// pattern — see logs.go's doc comment for why.
+	mux.HandleFunc("GET /api/runs/{runID}/logs", h.getRunLogs)
 
 	return mux
 }

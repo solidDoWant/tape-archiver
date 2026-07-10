@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { formatTimestamp } from './api'
+import LogPanel from './LogPanel'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 
 // RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
@@ -152,6 +153,17 @@ function RunDetail({ runId }: RunDetailProps) {
         // view rather than just showing stale data, matching parseDetail's
         // own defensive stance above).
         <PauseActions runId={runId} pause={detail.currentPause ?? { kind: '' }} />
+      ) : null}
+
+      {detail ? (
+        // Whole-run mode (no phase prop): RunDetail has no per-phase rail
+        // yet (issue #277's redesign owns that), so this is the minimal
+        // wiring issue #274 asks for — enough to make LogPanel observable
+        // end-to-end. #277 is expected to re-home LogPanel per-phase.
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-medium">Logs</h3>
+          <LogPanel runId={runId} />
+        </div>
       ) : null}
 
       {state === 'terminal' ? (
