@@ -22,6 +22,7 @@ import (
 	"sort"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -68,6 +69,15 @@ type TemporalClient interface {
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 	QueryWorkflow(ctx context.Context, workflowID string, runID string, queryType string, args ...interface{}) (converter.EncodedValue, error)
 	SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error
+	// GetWorkflowHistory returns an iterator over a run's raw event history.
+	// history.go's fetchRunHistory walks it to reconstruct the phase
+	// timeline, the originally submitted run config, and tape/copy outcomes
+	// entirely on demand (SPEC §4.2 — no persistent state or catalog):
+	// issue #273's endpoints derive everything from these events rather than
+	// from a replay-based query, which would panic on a closed run whose
+	// history predates the currently-deployed workflow code (nondeterminism
+	// — see history.go's doc comment).
+	GetWorkflowHistory(ctx context.Context, workflowID string, runID string, isLongPoll bool, filterType enumspb.HistoryEventFilterType) client.HistoryEventIterator
 	runsubmit.TemporalClient
 }
 
@@ -246,6 +256,14 @@ func newMux(h *handler) http.Handler {
 	mux.HandleFunc("POST /api/runs/{runID}/resume", h.resumeRun)
 	mux.HandleFunc("POST /api/runs/{runID}/abort", h.abortRun)
 	mux.HandleFunc("GET /api/events/runs/{runID}", h.streamRunEvents)
+	// History-derived endpoints (issue #273): reconstructed on demand from
+	// Temporal workflow history, never from a persisted catalog (SPEC §4.2).
+	// See history.go's doc comment for why these read raw history events
+	// rather than replay-based queries.
+	mux.HandleFunc("GET /api/runs/{runID}/phases", h.getRunPhases)
+	mux.HandleFunc("GET /api/runs/{runID}/config", h.getRunConfig)
+	mux.HandleFunc("GET /api/runs/{runID}/tapes", h.getRunTapes)
+	mux.HandleFunc("GET /api/tapes", h.listTapes)
 
 	return mux
 }
@@ -269,7 +287,7 @@ func (h *handler) listRuns(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	response, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Query:    fmt.Sprintf("WorkflowId = %q", backup.WorkflowID),
+		Query:    workflowIDQuery(),
 		PageSize: listPageSize,
 	})
 	if err != nil {
