@@ -269,6 +269,10 @@ func newMux(h *handler) http.Handler {
 	// metrics.go's doc comment.
 	mux.HandleFunc("GET /api/runs/{runID}/metrics/drives", h.getRunDriveMetrics)
 	mux.HandleFunc("GET /api/runs/{runID}/metrics/drives/{barcode}/history", h.getRunDriveMetricsHistory)
+	// VictoriaLogs-backed log panel (issue #274): a plain JSON proxy, not a
+	// persisted catalog (SPEC §4.2) and not this package's usual SSE
+	// pattern — see logs.go's doc comment for why.
+	mux.HandleFunc("GET /api/runs/{runID}/logs", h.getRunLogs)
 
 	return mux
 }
