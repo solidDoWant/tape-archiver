@@ -41,6 +41,14 @@
 //     login-state cookies. The service holds no server-side session store
 //     (docs/web-ui-design.md §3), so losing/rotating this key just signs
 //     everyone out; nothing else depends on it.
+//
+// An unauthenticated browser requesting any page (not "/api/*") is served
+// the SPA, which renders its own styled login page and starts the OIDC flow
+// when the operator activates it — see pkg/webauth's package doc comment.
+// WEB_FOOTER_HOST optionally labels the login page's/sidebar's footer line
+// with a deploy-specific host/deployment name (docs/configuration.md); the
+// footer's build-version segment always comes from the binary's own
+// embedded VCS info (internal/buildinfo.ToolVersion), never an env var.
 package main
 
 import (
@@ -57,6 +65,7 @@ import (
 
 	"go.temporal.io/sdk/client"
 
+	"github.com/solidDoWant/tape-archiver/internal/buildinfo"
 	"github.com/solidDoWant/tape-archiver/pkg/health"
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
 	"github.com/solidDoWant/tape-archiver/pkg/metrics"
@@ -296,5 +305,13 @@ func oidcConfigFromEnv(getenv func(string) string) (webauth.Config, error) {
 		ClientSecret: getenv("OIDC_CLIENT_SECRET"),
 		RedirectURL:  getenv("OIDC_REDIRECT_URL"),
 		SessionKey:   sessionKey,
+		// AppVersion comes from the Go build's own embedded VCS info
+		// (internal/buildinfo.ToolVersion — the same mechanism the run
+		// report already uses), not an env var: there is nothing to
+		// configure, it is simply what was built. FooterHost is the one
+		// genuinely deploy-time knob — see docs/configuration.md's
+		// WEB_FOOTER_HOST.
+		AppVersion: buildinfo.ToolVersion(),
+		FooterHost: getenv("WEB_FOOTER_HOST"),
 	}, nil
 }

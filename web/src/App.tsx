@@ -1,75 +1,116 @@
+import { useEffect } from 'react'
 import SubmitRunForm from './SubmitRunForm'
 import RunDetail from './RunDetail'
 import RunHistory from './RunHistory'
-import { Link, RouterProvider } from './router'
-import { runPath, useNavigate, useRoute, type Route } from './route'
+import TapesPage from './TapesPage'
+import NotFoundPage from './NotFoundPage'
+import LoginPage from './LoginPage'
+import Sidebar from './Sidebar'
+import { RouterProvider } from './router'
+import { runPath, sanitizeRedirectPath, useNavigate, useRoute, type Route } from './route'
 import { useTheme } from './theme'
+import { useIdentity, type Identity } from './identity'
 
-// App is the persistent shell for the tape-archiver web UI: a header with
-// app-wide navigation (reachable from every view, satisfying this issue's
-// "app shell" acceptance criterion) wrapping a router-driven content area.
-//
-// Earlier sub-issues (4, 5) built RunDetail/PauseActions against an ad hoc
-// navigation mechanism this file previously documented in detail: a single
-// lifted `runID` bit of state and direct `history.pushState` calls, with no
-// `popstate` handling and no history-list view — explicitly deferring "real
-// client-side routing" and "run history" to this sub-issue. This is that
-// replacement; see router.tsx for the routing approach (a small hand-rolled
-// router rather than a dependency) and its rationale.
+// App is the persistent shell for the tape-archiver web UI (issue #272's
+// design-tokens/shell/login/404 foundation): a themed sidebar (Sidebar.tsx)
+// with app-wide navigation wrapping a router-driven content area, an
+// AuthGate deciding between the styled login page and that shell, and a
+// hand-rolled router (router.tsx/route.ts — unchanged rationale, see those
+// files' doc comments).
 function App() {
   return (
     <RouterProvider>
-      <Shell />
+      <AuthGate />
     </RouterProvider>
   )
 }
 
-// navLinkClass highlights whichever nav link matches the current route, so
-// the shell doubles as a lightweight "you are here" indicator.
-function navLinkClass(active: boolean): string {
-  const base = 'rounded px-3 py-1.5 text-sm font-medium'
-
-  return active
-    ? `${base} bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900`
-    : `${base} text-slate-700 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800`
-}
-
-// Shell renders the header/nav and the current route's view. The header is
-// flex-wrap so it stays usable at mobile widths without ever needing
-// horizontal scroll — a narrow viewport wraps the nav links onto their own
-// line below the title rather than clipping or overflowing.
-function Shell() {
+// AuthGate is the top of the authenticated app: on every route change it
+// decides whether to show the styled login page, a brief loading state, or
+// the real app shell. This replaces pkg/webauth's previous behavior of
+// 302-ing every unauthenticated page request straight to the IdP before the
+// SPA ever loaded — every page request (not just "/") is now served the SPA
+// unconditionally, and this is the client-side logic that reacts to GET
+// /api/me reporting no session (see pkg/webauth's package doc comment and
+// identity.ts's useIdentity).
+function AuthGate() {
   const route = useRoute()
   const navigate = useNavigate()
-  const [theme, setTheme] = useTheme()
+  const identityState = useIdentity()
+
+  useEffect(() => {
+    if (route.name === 'login') {
+      if (identityState.status === 'authenticated') {
+        // Already signed in (e.g. a bookmarked /login, or landing back here
+        // after a successful callback that AuthGate itself triggered) —
+        // move on to wherever the login attempt was headed.
+        const redirect = sanitizeRedirectPath(new URLSearchParams(window.location.search).get('redirect'))
+        navigate(redirect)
+      }
+
+      return
+    }
+
+    if (identityState.status === 'unauthenticated') {
+      const redirect = window.location.pathname + window.location.search
+      navigate(`/login?redirect=${encodeURIComponent(redirect)}`)
+    }
+  }, [route.name, identityState.status, navigate])
+
+  if (route.name === 'login') {
+    return <LoginPage />
+  }
+
+  if (identityState.status !== 'authenticated') {
+    // "loading", or "unauthenticated" for the one render before the effect
+    // above's navigate() to /login commits — either way, nothing gated
+    // should render yet.
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg text-[12.5px] text-text-dim">
+        Loading…
+      </div>
+    )
+  }
+
+  return <Shell identity={identityState.identity} />
+}
+
+function pageTitle(route: Route): string {
+  switch (route.name) {
+    case 'submit':
+      return 'Start new run'
+    case 'history':
+      return 'Dashboard'
+    case 'run':
+      return `Run ${route.runId}`
+    case 'tapes':
+      return 'Tapes'
+    case 'not-found':
+      return 'Not found'
+    case 'login':
+      // Unreachable: AuthGate renders LoginPage directly for this route
+      // without ever mounting Shell.
+      return ''
+  }
+}
+
+// Shell renders the sidebar and the current route's view, once AuthGate has
+// confirmed a session exists.
+function Shell({ identity }: { identity: Identity }) {
+  const route = useRoute()
+  const navigate = useNavigate()
+  const [preference, , setPreference] = useTheme()
 
   return (
-    <div className="flex min-h-screen flex-col bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 sm:px-6 dark:border-slate-800">
-        <Link to="/" className="text-xl font-semibold tracking-tight">
-          tape-archiver
-        </Link>
+    <div className="flex min-h-screen bg-bg text-text">
+      <Sidebar identity={identity} preference={preference} onPreferenceChange={setPreference} />
 
-        <nav aria-label="Main" className="flex flex-wrap items-center gap-2">
-          <Link to="/" className={navLinkClass(route.name === 'submit')}>
-            Submit
-          </Link>
-          <Link to="/history" className={navLinkClass(route.name === 'history')}>
-            History
-          </Link>
-          <button
-            type="button"
-            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-            className="rounded border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-          >
-            {theme === 'dark' ? '☀️ Light' : '🌙 Dark'}
-          </button>
-        </nav>
-      </header>
+      <main className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-5 border-b border-border bg-bg/80 px-5 py-4 backdrop-blur-sm sm:px-7">
+          <div className="text-base font-semibold tracking-tight">{pageTitle(route)}</div>
+        </header>
 
-      <main className="flex flex-1 flex-col items-center gap-6 px-4 py-8 sm:px-6">
-        {renderRoute(route, navigate)}
+        <div className="flex flex-1 flex-col overflow-auto">{renderRoute(route, navigate)}</div>
       </main>
     </div>
   )
@@ -78,27 +119,34 @@ function Shell() {
 function renderRoute(route: Route, navigate: (path: string) => void) {
   switch (route.name) {
     case 'submit':
-      return <SubmitRunForm onViewRun={(runId) => navigate(runPath(runId))} />
+      return (
+        <div className="flex flex-col items-center gap-6 p-6 sm:p-7">
+          <SubmitRunForm onViewRun={(runId) => navigate(runPath(runId))} />
+        </div>
+      )
     case 'history':
-      return <RunHistory />
+      return (
+        <div className="flex flex-col items-center gap-6 p-6 sm:p-7">
+          <RunHistory />
+        </div>
+      )
     case 'run':
       // key={route.runId}: forces a fresh RunDetail mount (and thus a fresh
       // EventSource + reset display state) whenever the viewed run changes,
       // rather than RunDetail resetting its own state from inside an effect
       // on a prop change — see RunDetail's doc comment.
-      return <RunDetail key={route.runId} runId={route.runId} />
-    case 'not-found':
       return (
-        <div className="flex w-full max-w-2xl flex-col gap-3 text-left">
-          <h2 className="text-xl font-semibold">Page not found</h2>
-          <p className="text-slate-600 dark:text-slate-400">
-            There is nothing at <code>{route.path}</code>.
-          </p>
-          <Link to="/" className="self-start font-medium underline">
-            Go to the submit form
-          </Link>
+        <div className="flex flex-col items-center gap-6 p-6 sm:p-7">
+          <RunDetail key={route.runId} runId={route.runId} />
         </div>
       )
+    case 'tapes':
+      return <TapesPage />
+    case 'not-found':
+      return <NotFoundPage path={route.path} />
+    case 'login':
+      // Unreachable — see pageTitle's comment.
+      return null
   }
 }
 

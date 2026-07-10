@@ -1,7 +1,34 @@
 @import 'tailwindcss';
 
+/* Self-hosted fonts (Space Grotesk, JetBrains Mono — the design's family
+   choices, see .claude/tasks/design-redesign/DESIGN_ANALYSIS.md §3)
+   bundled by Vite from npm (@fontsource/*, see package.json) rather than
+   fetched from Google Fonts' CDN like the design's own <link>s: a homelab
+   admin console should never fail to render its own type because outbound
+   internet is down or blocked. Only the weights the design actually uses
+   (400/500/600/700) are imported. Issue #272. */
+@import '@fontsource/space-grotesk/400.css';
+@import '@fontsource/space-grotesk/500.css';
+@import '@fontsource/space-grotesk/600.css';
+@import '@fontsource/space-grotesk/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+@import '@fontsource/jetbrains-mono/700.css';
+
+/* Design tokens (colors, shadows, font tokens) — see that file's own doc
+   comment. */
+@import './design/tokens.css';
+
 /* Dark mode is class-based ("dark" on <html>) rather than Tailwind v4's
    default prefers-color-scheme-only strategy, so theme.ts can offer a
    manual override toggle on top of OS-preference detection (still the
    default — see theme.ts's resolveInitialTheme/useTheme). */
 @custom-variant dark (&:where(.dark, .dark *));
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}

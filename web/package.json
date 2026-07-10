@@ -13,6 +13,8 @@
     "typecheck": "tsc -b"
   },
   "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/space-grotesk": "^5.2.8",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
