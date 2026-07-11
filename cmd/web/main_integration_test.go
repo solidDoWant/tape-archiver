@@ -191,9 +191,10 @@ func newAuthenticatedClient(t *testing.T, addr string) *http.Client {
 // TestRunServesAndShutsDownGracefully drives the full run() entrypoint
 // (Temporal client, health, metrics, OIDC, listen, serve,
 // ctx-cancel-triggered shutdown) end to end against a real dev Temporal and
-// a fake OIDC provider: an unauthenticated request to "/" is redirected to
-// login (pkg/webauth gates it), a request authenticated via a real
-// login -> callback round trip against the fake provider succeeds, the
+// a fake OIDC provider: an unauthenticated request to "/" is served the SPA
+// shell (200, which renders its own login) while the real gate at /api/*
+// answers 401, a request authenticated via a real login -> callback round
+// trip against the fake provider is then honored by /api/me, the
 // health server answers /healthz and /readyz and /metrics stays reachable
 // unauthenticated (all three are separate, always-on ports pkg/webauth's
 // Wrap never touches — Kubernetes probes and Prometheus scrapes cannot
@@ -221,23 +222,27 @@ func TestRunServesAndShutsDownGracefully(t *testing.T) {
 		t.Fatal("server never became ready")
 	}
 
-	// A plain http.Get would transparently follow the whole redirect chain
-	// (our own /auth/login -> the fake IdP auto-approving -> our
-	// /auth/callback) and land back on "/" with 200, silently defeating this
-	// check — the fake provider has no interactive login prompt to stop at,
-	// unlike a real one. Disabling redirects isolates just the first hop.
-	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-
-	unauthResp, err := noRedirect.Get("http://" + addr + "/")
+	// Post-#284 the server never bounces an unauthenticated browser with a
+	// bare redirect: GET "/" serves the SPA shell (200) exactly as it would for
+	// a logged-in user — the bundle carries no secrets and renders its own
+	// styled login page once GET /api/me reports no session. The real gate is
+	// /api/*, which answers 401 (a fetch/XHR caller cannot follow a redirect
+	// into HTML). See pkg/webauth's package doc comment.
+	unauthPage, err := http.Get("http://" + addr + "/")
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusFound, unauthResp.StatusCode, "an unauthenticated page request must be gated, not served directly")
-	require.NoError(t, unauthResp.Body.Close())
+	assert.Equal(t, http.StatusOK, unauthPage.StatusCode, "an unauthenticated page request must be served the SPA, which renders its own login")
+	require.NoError(t, unauthPage.Body.Close())
+
+	unauthMe, err := http.Get("http://" + addr + "/api/me")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, unauthMe.StatusCode, "the real gate is /api/*: an unauthenticated /api/me must be rejected")
+	require.NoError(t, unauthMe.Body.Close())
 
 	authenticatedClient := newAuthenticatedClient(t, addr)
 
-	resp, err := authenticatedClient.Get("http://" + addr + "/")
+	resp, err := authenticatedClient.Get("http://" + addr + "/api/me")
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode, "an authenticated request must be served once a session is established")
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "once a session is established /api/me must report it, not 401")
 	require.NoError(t, resp.Body.Close())
 
 	healthzResp, err := http.Get("http://" + healthAddr + "/healthz")
@@ -506,6 +511,18 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 
 	_ = unauthResp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, unauthResp.StatusCode, "an unauthenticated POST /api/runs must be rejected, not accepted")
+
+	// Finish the submitted run and wait for it to actually complete while the
+	// stub worker is still polling. This test is the last stub-driving test in
+	// cmd/web, so a leaked run here is never drained by a later cmd/web worker
+	// and survives all the way to pkg/runsapi's TestHistoryEndpointsAgainstRealDryRun,
+	// which then cannot submit against the still-occupied singleton workflow ID.
+	// The t.Cleanup above is not enough on its own: cleanups run after the
+	// deferred backupWorker.Stop, too late for the signal to be processed — the
+	// same leak fixed in TestShutdownWithOpenSSEConnectionIsBounded (PR #300).
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+	require.NoError(t, temporalClient.GetWorkflow(ctx, backup.WorkflowID, submitted.RunID).Get(ctx, nil),
+		"stub workflow must complete so the singleton workflow ID is free for later tests")
 
 	cancelWeb()
 
