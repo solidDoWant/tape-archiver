@@ -33,6 +33,10 @@ buildGoModule {
       (lib.fileset.difference ../cmd ../cmd/web/dist)
       ../internal
       ../pkg
+      # The schemas Go package (issue #279) embeds the committed run-config
+      # JSON schema for GET /api/config/schema — both the .go file and the
+      # .json it go:embeds must be in the store copy.
+      ../schemas
       ../workflows
     ];
   };
