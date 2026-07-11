@@ -6,12 +6,13 @@
 // provider, and there is no such provider available for a one-command local
 // run.
 //
-// It wraps internal/testutil.NewStandaloneFakeOIDCProvider — the same
+// It wraps internal/devoidc.NewStandaloneFakeOIDCProvider — the same
 // real discovery/JWKS/authorize/token implementation
 // pkg/webauth's and cmd/web's own tests already exercise via
-// NewFakeOIDCProvider/NewFakeOIDCProviderOn, extracted (issue #265's option
-// (b)) into a form that does not need a testing.TB, which only a Go test
-// binary can supply. A standards-compliant fake was chosen over running a
+// testutil's NewFakeOIDCProvider/NewFakeOIDCProviderOn, extracted
+// (issue #265's option (b), package boundary sharpened by issue #267) into
+// a form that does not need a testing.TB, which only a Go test binary can
+// supply. A standards-compliant fake was chosen over running a
 // real IdP (e.g. Dex) in Docker: no new external dependency or image pull,
 // and `make web-dev` stays pure Go tooling like mhvtl-up.sh/zpool-up.sh.
 // The one real tradeoff: unlike a real IdP's login page, this provider's
@@ -45,7 +46,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/internal/devoidc"
 )
 
 const (
@@ -70,7 +71,7 @@ func run() error {
 	addr := envOr("WEBDEVOIDC_LISTEN_ADDR", defaultListenAddr)
 	issuerURL := "http://" + addr
 
-	idp, server, err := testutil.NewStandaloneFakeOIDCProvider(
+	idp, server, err := devoidc.NewStandaloneFakeOIDCProvider(
 		envOr("WEBDEVOIDC_CLIENT_ID", defaultClientID),
 		envOr("WEBDEVOIDC_CLIENT_SECRET", defaultClientSecret),
 		issuerURL,
