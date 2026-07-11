@@ -119,31 +119,97 @@ current (or, once idle, most recently submitted) run's own configuration — nev
 hardcoded. A value that isn't set in that config simply has no row, rather than a blank
 or placeholder one.
 
-## Submitting a run
+## Starting a new run (the config page)
 
-The submit page (`/submit` — the sidebar's **Start new run** item) takes
-a run-config JSON document — the
-same document `tapectl run --config <file>` takes (see
-[`docs/configuration.md`](configuration.md) for the full config reference). Either paste
-it directly into the text area, or use the file picker to load it from disk (the picker
-reads the file client-side and fills the text area with its contents — nothing is
-uploaded until you actually submit).
+The config page (`/submit` — the sidebar's **Start new run** item) builds and submits
+a run config in either of two modes, switched by the **Form / Paste-upload** toggle at
+the top. Both modes end in the same submission the CLI makes (`POST /api/runs`, the
+exact path `tapectl run [--dry-run]` uses), and both validate against the committed
+run-config JSON Schema ([`schemas/run-config.schema.json`](configuration.md), served
+by `GET /api/config/schema`) client-side before anything reaches the server.
 
-Check **Dry-run** to redirect the submission to the `mhvtl` virtual library and disable
-optical burning, exactly like `tapectl run --dry-run` — see
-[`--dry-run`](tapectl.md#tapectl-run) for exactly what that overrides and why (in short:
-it swaps the config's changer/drive device paths for the `mhvtl` equivalents and strips
-the optical-burn section, so a dry-run never touches real tape hardware or a real
-burner). A dry-run submitted through the browser fails closed with a clear error if the
-server itself isn't configured with `mhvtl` device paths — it never silently falls back
-to real hardware.
+If a run is already in progress when the page opens, it shows a blocked state — "A run
+is already in progress", with an **Open current run** link — instead of the editor:
+backup runs are a singleton (SPEC §4.2), so a submission could only fail anyway. (The
+server still independently rejects a conflicting submission with a conflict error, so
+nothing depends on the page-level check.)
 
-Click **Submit run**. A malformed or invalid config is rejected immediately with the
-validation error, and nothing is submitted. A valid submission starts the backup
-workflow and shows its run ID and workflow ID, with a **View run** link straight into
-that run's live detail page. Since backup runs are a singleton (SPEC §4.2 — only one can
-be active at a time), submitting while a run is already in progress is rejected with a
-conflict error rather than queuing or replacing it.
+### Form mode
+
+A guided, sectioned builder covering the whole config surface an operator normally
+needs (see [`docs/configuration.md`](configuration.md) for what every field means):
+
+- **Sources** — repeatable cards, each either a raw **ZFS** dataset/snapshot name or a
+  **k8s** snapshot resource (`VolumeSnapshot` / `VolumeGroupSnapshot`, selected by
+  namespace+name or by label selector — the matching `apiVersion` is filled in for
+  you), with a per-source zstd compression toggle and an optional label.
+- **Copies & redundancy** — tape copy count, slice size, and the PAR2 policy (fixed
+  target percentage, or fill-to-capacity with a floor).
+- **Library** — changer device, drive device list, the tape generation (the
+  capacity `select` lists LTO-6 2.5 TB through LTO-9 18 TB native capacities), a
+  free-form list of blank storage slot numbers (any library size — not tied to one
+  fixed slot layout), and the deliberately scary "allow non-blank tapes" opt-out.
+- **Encryption** — the age recipient list and escrowed identity, plus a
+  **Generate new age keypair** button: it calls the server's
+  [`POST /api/age/keygen`](configuration.md#post-apiagekeygen-age-keypair-generation-issue-279)
+  endpoint, inserts the new public recipient into the config, fills the identity
+  field, and shows the private identity **exactly once** with a copy control and a
+  store-this-now warning. There is no way to retrieve it again from the app afterward
+  — not after a reload, not after generating another pair; the server never persists
+  or logs it.
+- **Delivery** — the Discord webhook URL and the optional optical recovery-disc
+  burning section (burner devices, copies per run, rewritable-disc reclaim opt-out).
+
+A few advanced tuning fields (`feasibilityOverhead` and the operator-wait timeout
+overrides) have no form controls; use JSON mode for those — the run gets their
+documented defaults otherwise.
+
+Pressing **Review →** validates the assembled config against the schema. Any problem
+blocks the transition and is listed by field path (e.g.
+`encryption.identity: is required`); a valid config advances to the **Review** step,
+which shows a summary (mode, sources, copies, redundancy, encryption, recovery discs),
+a note that blank-tape checking happens at write time, and the final run-config JSON
+exactly as it will be submitted. Submit from there, or go **← Back to edit**.
+
+### JSON mode (paste / upload)
+
+The original flow, unchanged in behavior: paste a run-config JSON document into the
+text area or load one from disk with the file picker (read client-side — nothing is
+uploaded until you submit), and submit directly. A live indicator below the textarea
+shows whether the current text parses and validates against the schema (with the
+first failing field path), but an invalid document is only ever *blocked* at
+submit time by the same server-side validation as always — the indicator is
+advisory.
+
+### Switching modes
+
+Switching **Form → JSON** serializes the form's current state into the JSON textarea,
+so the JSON always reflects your latest edits. Switching **JSON → Form** parses the
+current JSON text and populates the form from it; if the text isn't valid JSON, the
+form simply keeps its previous state (and says so) rather than guessing. Nothing is
+discarded on the switch itself in either direction — with one loudly-flagged caveat:
+if the JSON carries any of the advanced fields the form has no controls for
+(`feasibilityOverhead`, `library.ioWaitTimeoutSeconds`,
+`library.writeFailureWaitTimeoutSeconds`,
+`delivery.opticalBurn.burnWaitTimeoutSeconds`), the page shows a notice naming
+exactly those fields: they survive only in the JSON text, so continuing to edit in
+Form mode (whose state is what any later serialization or Review uses) drops them.
+Switch back to JSON mode to keep them.
+
+### Dry-run and submission
+
+The **Dry-run** toggle in the action bar applies to both modes: it redirects the
+submission to the `mhvtl` virtual library and disables optical burning, exactly like
+`tapectl run --dry-run` — see [`--dry-run`](tapectl.md#tapectl-run) for exactly what
+that overrides and why. A dry-run submitted through the browser fails closed with a
+clear error if the server itself isn't configured with `mhvtl` device paths — it never
+silently falls back to real hardware.
+
+A valid submission starts the backup workflow and shows its run ID and workflow ID,
+with a **View run** link straight into that run's live detail page. A malformed or
+invalid config is rejected with the validation error and nothing is submitted;
+submitting while a run is already in progress is rejected with a conflict error rather
+than queuing or replacing it.
 
 ## Monitoring a run live
 

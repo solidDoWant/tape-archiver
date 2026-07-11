@@ -18,11 +18,11 @@ if (!configPath) {
 }
 
 // lastCompletedPhaseCell locates the "Last completed phase" value cell within
-// scope (either the whole page's RunDetail <dl>, or one RunHistory row's own
-// <dl>) — both render the same "<dt>Last completed phase</dt><dd>...</dd>"
-// shape (RunDetail.tsx, RunHistory.tsx). XPath's following-sibling axis is
-// used rather than a CSS adjacent-sibling selector so this reads unambiguously
-// regardless of exactly which Playwright CSS extensions are in play.
+// scope (the run-detail page's <dl> — RunDetail.tsx renders
+// "<dt>Last completed phase</dt><dd>...</dd>"). XPath's following-sibling
+// axis is used rather than a CSS adjacent-sibling selector so this reads
+// unambiguously regardless of exactly which Playwright CSS extensions are in
+// play.
 function lastCompletedPhaseCell(scope: Page | Locator): Locator {
   return scope.locator('xpath=//dt[contains(., "Last completed phase")]/following-sibling::dd[1]')
 }
@@ -34,12 +34,17 @@ test('submit a dry-run, watch it progress live, then see it in history', async (
   // the full OIDC authorization-code flow — pkg/webauth's /auth/login
   // redirects to the fake IdP's /authorize, which immediately redirects
   // back to /auth/callback with a code, which is exchanged and lands back
-  // on "/" — before the submit form ever renders. Completing that
-  // round-trip into the form is this test's proof that the login leg of
-  // AC1 actually works, not a separate assertion.
+  // on "/" — the dashboard, since issue #276. Completing that round-trip,
+  // then reaching the config page (issue #279 — "Start new run", /submit)
+  // and its JSON mode ("Paste / upload" — the page opens in Form mode), is
+  // this test's proof that the login leg of AC1 actually works, not a
+  // separate assertion.
   await page.goto('/')
 
   await page.getByRole('button', { name: /continue with sso/i }).click()
+
+  await page.getByRole('link', { name: 'Start new run' }).click({ timeout: 30_000 })
+  await page.getByRole('button', { name: 'Paste / upload' }).click()
 
   const configTextarea = page.getByLabel('Run config (JSON)')
   await expect(configTextarea).toBeVisible({ timeout: 30_000 })
@@ -72,21 +77,22 @@ test('submit a dry-run, watch it progress live, then see it in history', async (
     .poll(async () => phaseCell.innerText(), { timeout: 4 * 60_000, intervals: [1000] })
     .not.toBe(firstPhase)
 
-  // AC2 (mid-run half): the run-history view also surfaces phase-reached
-  // information for the still-Running row — RunHistory.tsx enriches exactly
-  // one row (the singleton Running run, SPEC §4.2) with a live per-row fetch
-  // of the same last-completed-phase data the SSE stream above carries.
-  // Opened as a second page in the same (already-authenticated) browser
-  // context so the live monitoring page above keeps running unaffected.
+  // AC2 (mid-run half): the run-history table (embedded in the dashboard
+  // since issue #276 — /history redirects there) also surfaces phase-reached
+  // information for the still-Running row, fed by the dashboard's own live
+  // SSE subscription to the singleton Running run (SPEC §4.2). Opened as a
+  // second page in the same (already-authenticated) browser context so the
+  // live monitoring page above keeps running unaffected.
   const historyPage = await context.newPage()
 
   try {
-    await historyPage.goto('/history')
+    await historyPage.goto('/')
 
-    const runningRow = historyPage.locator('li').filter({ hasText: runId }).first()
+    const runningRow = historyPage.getByRole('link', { name: runId })
     await expect(runningRow).toBeVisible({ timeout: 30_000 })
-    await expect(runningRow.getByText('Running', { exact: true })).toBeVisible()
-    await expect(lastCompletedPhaseCell(runningRow)).not.toHaveText('—', { timeout: 60_000 })
+    await expect(runningRow.getByText('Running', { exact: true }).first()).toBeVisible()
+    // The row's LAST PHASE cell (grid column 5) must show a real phase.
+    await expect(runningRow.locator(':scope > span').nth(4)).not.toHaveText('—', { timeout: 60_000 })
   } finally {
     await historyPage.close()
   }
@@ -97,24 +103,23 @@ test('submit a dry-run, watch it progress live, then see it in history', async (
   const statusCell = page.locator('xpath=//dt[contains(., "Status")]/following-sibling::dd[1]').first()
   await expect(statusCell).toHaveText('Completed', { timeout: 30_000 })
 
-  // AC2 (post-completion half): status + timing are listed in the history
-  // view once the run has closed. RunHistory.tsx only re-enriches Running
-  // rows with a live phase fetch — a deliberate, already-reviewed
-  // (sub-issue 7) scope decision, not a bug — so a closed row's own
-  // "Last completed phase" cell shows "—" rather than being re-queried; the
+  // AC2 (post-completion half): status + timing are listed in run history
+  // once the run has closed. Run history lives in the dashboard's embedded
+  // runs table since issue #276 (RunsTable.tsx — each row is one link whose
+  // accessible name is the run ID); a closed row's "last phase" cell shows
+  // "—" by design (only a live workflow query can answer it), and the
   // mid-run assertion above already proved that data is real and genuinely
-  // surfaced through this same view while the row was still Running.
-  // "Dashboard" is the sidebar's name for the run-history view since the
-  // issue #272 shell redesign (the /history route is unchanged).
+  // surfaced while the run was still Running.
   await page.getByRole('link', { name: 'Dashboard' }).click()
-  await expect(page).toHaveURL(/\/history\/?$/)
+  await expect(page).toHaveURL(/\/$/)
 
-  const finishedRow = page.locator('li').filter({ hasText: runId }).first()
+  const finishedRow = page.getByRole('link', { name: runId })
   await expect(finishedRow).toBeVisible({ timeout: 30_000 })
   await expect(finishedRow.getByText('Completed', { exact: true })).toBeVisible()
 
-  const startedCell = finishedRow.locator('xpath=.//dt[contains(., "Started")]/following-sibling::dd[1]')
-  const closedCell = finishedRow.locator('xpath=.//dt[contains(., "Closed")]/following-sibling::dd[1]')
-  await expect(startedCell).not.toHaveText('—')
-  await expect(closedCell).not.toHaveText('—')
+  // The STARTED and DURATION cells (grid columns 2 and 3) must both be
+  // real values, not the em-dash placeholder.
+  const cells = finishedRow.locator(':scope > span')
+  await expect(cells.nth(1)).not.toHaveText('—')
+  await expect(cells.nth(2)).not.toHaveText('—')
 })

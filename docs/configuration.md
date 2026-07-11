@@ -785,6 +785,46 @@ panel (`web/src/LogPanel.tsx`, used by `RunDetail.tsx` and reusable per-run or
 per-phase) renders this as its own styled unavailable state, distinct from its loading
 and empty (no lines yet) states.
 
+#### `POST /api/age/keygen` (age keypair generation, issue #279)
+
+Generates a fresh age **native post-quantum** keypair (hybrid ML-KEM-768 + X25519,
+`age-keygen -pq` — the only recipient form the encryption pipeline accepts, see
+[Encryption](#encryption)) by invoking the same bundled `age-keygen` binary that ships
+on the recovery disc, so a generated identity is produced by the exact implementation a
+future recoverer decrypts with. The request takes no body. On success the response is
+`200` with:
+
+```json
+{ "recipient": "age1pq1…", "identity": "AGE-SECRET-KEY-PQ-1…" }
+```
+
+The returned `recipient` is re-derived from the generated identity via `age-keygen -y`
+(the same derivation the Report phase uses to verify an escrowed identity), never
+parsed from `age-keygen`'s own comment output, so the pair can never drift apart.
+
+**The private `identity` exists only in this one response.** It is never logged, never
+written to disk, and never persisted server-side in any form — `cmd/web` has no store
+for it to land in, deliberately (SPEC §4.2) — and no endpoint can return it again. The
+web UI's config page (its consumer) shows it exactly once with a copy control and a
+"store this now" warning; once that response is gone (page reload, navigation, a second
+generation), the identity is unrecoverable through the app. The response carries
+`Cache-Control: no-store` (and `Pragma: no-cache`) so no browser or intermediary cache
+ever retains a copy. A keypair-generation
+failure (e.g. the `age-keygen` binary missing from the image) is `500` with the usual
+`{"error": "..."}` body — the error text never contains key material. Like every
+`/api/*` route, an unauthenticated request is `401`.
+
+#### `GET /api/config/schema` (run-config JSON Schema, issue #279)
+
+Returns the committed run-config JSON Schema (`schemas/run-config.schema.json`,
+embedded into the binary at build time) verbatim, as `application/json`. The web UI's
+config page fetches it to validate Form-mode-built and JSON-mode-pasted configs
+client-side against the exact same schema `make generate-schema` produces from
+`internal/config`'s types — never a hand-duplicated copy that could drift. It carries
+no run or deployment state and takes no parameters. Client-side validation against
+this schema is a usability layer only; `POST /api/runs` always re-validates every
+submission with `internal/config.Parse` regardless.
+
 ### Health endpoints
 
 The worker (and, since sub-issue 2 of the web UI epic, `cmd/web` — see above) serves two

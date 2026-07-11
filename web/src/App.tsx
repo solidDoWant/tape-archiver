@@ -1,5 +1,5 @@
-import { useEffect, type ReactNode } from 'react'
-import SubmitRunForm from './SubmitRunForm'
+import { useEffect } from 'react'
+import ConfigPage from './ConfigPage'
 import RunDetail from './RunDetail'
 import Dashboard from './Dashboard'
 import TapesPage from './TapesPage'
@@ -155,25 +155,16 @@ function Shell({ identity, preference, onPreferenceChange }: ShellProps) {
   )
 }
 
-// CenteredView is the shared content wrapper for the pre-redesign pages
-// (submit form, run history, run detail), which lay themselves out as
-// centered max-width columns — the padding/centering they used to get from
-// the old shell's `main`. The redesigned pages (Tapes, 404) own their whole
-// content area instead.
-function CenteredView({ children }: { children: ReactNode }) {
-  return <div className="flex flex-col items-center gap-6 p-6 sm:p-7">{children}</div>
-}
-
 function renderRoute(route: Route, navigate: (path: string) => void) {
   switch (route.name) {
     case 'dashboard':
       return <Dashboard onStartRun={() => navigate('/submit')} />
     case 'submit':
-      return (
-        <CenteredView>
-          <SubmitRunForm onViewRun={(runId) => navigate(runPath(runId))} />
-        </CenteredView>
-      )
+      // ConfigPage lays out its own full-width max-w-3xl content area
+      // (issue #279 — richer than the other pre-redesign pages' centered
+      // narrow column), so it is not wrapped in CenteredView, matching
+      // TapesPage/NotFoundPage's already-redesigned pattern below.
+      return <ConfigPage onViewRun={(runId) => navigate(runPath(runId))} />
     case 'history':
       // Transient: AuthGate's effect redirects this route to "/" before the
       // next render (see route.ts's doc comment on the "history" variant).

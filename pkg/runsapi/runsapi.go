@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/agewrap"
 	"github.com/solidDoWant/tape-archiver/pkg/runsubmit"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
@@ -242,9 +243,17 @@ func New(temporalClient TemporalClient) http.Handler {
 
 // newHandler builds a handler with an injectable getenv, so tests can drive
 // the dry-run mhvtl-env-var gate (runsubmit.ApplyDryRun) without mutating
-// the process environment. New wires this to os.Getenv for production.
+// the process environment. New wires this to os.Getenv for production. The
+// age-keygen dependency (generateAgeIdentity) is likewise injectable, for the
+// same reason: agekeygen_test.go drives generateAgeKeypair's error path
+// without depending on how the real age-keygen binary happens to fail. New
+// wires it to agewrap.GenerateIdentity for production.
 func newHandler(temporalClient TemporalClient, getenv func(string) string) *handler {
-	return &handler{temporalClient: temporalClient, getenv: getenv}
+	return &handler{
+		temporalClient:      temporalClient,
+		getenv:              getenv,
+		generateAgeIdentity: agewrap.GenerateIdentity,
+	}
 }
 
 // newMux mounts h's handlers behind their routes.
@@ -273,13 +282,19 @@ func newMux(h *handler) http.Handler {
 	// persisted catalog (SPEC §4.2) and not this package's usual SSE
 	// pattern — see logs.go's doc comment for why.
 	mux.HandleFunc("GET /api/runs/{runID}/logs", h.getRunLogs)
+	// Config-page support (issue #279): the committed run-config JSON Schema
+	// (for client-side validation) and age post-quantum keypair generation —
+	// see configschema.go's and agekeygen.go's doc comments.
+	mux.HandleFunc("GET /api/config/schema", h.getConfigSchema)
+	mux.HandleFunc("POST /api/age/keygen", h.generateAgeKeypair)
 
 	return mux
 }
 
 type handler struct {
-	temporalClient TemporalClient
-	getenv         func(string) string
+	temporalClient      TemporalClient
+	getenv              func(string) string
+	generateAgeIdentity func(context.Context) (identity, recipient string, err error)
 }
 
 // listRuns implements GET /api/runs: every execution of the singleton backup
