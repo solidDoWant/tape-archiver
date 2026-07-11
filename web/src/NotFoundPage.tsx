@@ -14,7 +14,7 @@ function NotFoundPage({ path }: { path: string }) {
         There is nothing at <code className="font-mono text-text">{path}</code>.
       </p>
       <Link
-        to="/history"
+        to="/"
         className="mt-2 rounded-[9px] bg-text px-4 py-2 text-[12.5px] font-semibold text-bg shadow-card transition-opacity hover:opacity-90"
       >
         Back to dashboard

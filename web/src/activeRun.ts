@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
-import { apiFetch } from './api'
-import type { RunSummary } from './RunHistory'
+import { apiFetch, type RunSummary, type RunsResponse } from './api'
 
 // ActiveRunState is whether the singleton backup workflow (SPEC §4.2 — at
 // most one run at a time) currently has an execution in Temporal's
@@ -15,7 +14,7 @@ export type ActiveRunState =
 // navigating between views), whether a run is currently active, so the
 // sidebar can visibly disable "Start new run" with an explanation while one
 // is in progress (issue #272's acceptance criterion). It reuses GET
-// /api/runs rather than adding a new endpoint — the same data RunHistory.tsx
+// /api/runs rather than adding a new endpoint — the same data Dashboard.tsx
 // already renders — and does not poll live; a run that starts or finishes
 // while the operator is elsewhere in the app is picked up next time the
 // sidebar (re)mounts, which is an accepted, minimal-scope gap for this
@@ -29,7 +28,7 @@ export function useActiveRun(): ActiveRunState {
 
     async function load() {
       try {
-        const response = await apiFetch<{ runs: RunSummary[] }>('/api/runs')
+        const response = await apiFetch<RunsResponse>('/api/runs')
         if (cancelled) {
           return
         }
