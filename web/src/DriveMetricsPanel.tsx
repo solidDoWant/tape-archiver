@@ -107,12 +107,19 @@ const defaultPollIntervalMs = 5000
 // empty/"no-data" outside the Write phase), and issue #277's redesigned run
 // page re-homes it into the fuller Write-phase layout described in
 // DESIGN_ANALYSIS.md §3.
+//
+// The labeled <section> wrapper exists so the panel is addressable as one
+// landmark regardless of which of its states is rendering (live gauges, the
+// terminal write-health summary, "unavailable", "no data") — its inner
+// states share no other stable root element. Screen-reader users get a
+// named region for the same reason tests get a stable locator (issue #281's
+// e2e pass asserts this panel on the Write phase by this accessible name).
 function DriveMetricsPanel({ runId, terminal = false, pollIntervalMs = defaultPollIntervalMs }: DriveMetricsPanelProps) {
-  if (terminal) {
-    return <FinalDriveMetrics runId={runId} />
-  }
-
-  return <LiveDriveMetrics runId={runId} pollIntervalMs={pollIntervalMs} />
+  return (
+    <section aria-label="Drive write health">
+      {terminal ? <FinalDriveMetrics runId={runId} /> : <LiveDriveMetrics runId={runId} pollIntervalMs={pollIntervalMs} />}
+    </section>
+  )
 }
 
 // LiveDriveMetrics is the non-terminal (VictoriaMetrics-polling) half of

@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,14 @@ const (
 	// package use — see tape_test.go's prepareBlankTapeAt callers (2, 3, 4,
 	// 5, 6, 8, 9, 12+, 20+, 24, 26) — comfortably clear of all of them.
 	webBlankSlot = 30
+
+	// webFormBlankSlot is a second, separate blank slot for
+	// config-form-and-tapes.spec.ts's own dry-run submission (issue #281) —
+	// distinct from webBlankSlot above, which submit-monitor-history.spec.ts
+	// already writes to; the two specs run sequentially against the same
+	// singleton `backup` workflow (SPEC §4.2, playwright.config.ts's
+	// workers: 1), so their tapes must not collide.
+	webFormBlankSlot = 31
 )
 
 // webE2EPrereqReason returns a skip reason when a prerequisite specific to
@@ -116,6 +125,14 @@ func TestWebUIEndToEnd(t *testing.T) {
 
 	source := testutil.PoolDataset(t) + "@" + testutil.TestSnapshot(t)
 	fixture := prepareBlankTapeAt(t, webBlankSlot)
+	// config-form-and-tapes.spec.ts's Form-mode submission needs its own
+	// separate blank slot (typed directly into the page, not read from a
+	// config file) — prepareBlankTapeAt's own assertions (drive empty, slot
+	// holds a tape) are exactly the precondition check that submission
+	// needs too; only the slot number itself (not the rest of the fixture)
+	// is passed through, since the dry-run toggle overwrites
+	// Library.Changer/Drives server-side regardless of what the form typed.
+	prepareBlankTapeAt(t, webFormBlankSlot)
 	identity, recipient := generateTestKeypair(t)
 
 	deliveryToken := fmt.Sprintf("web-e2e-%d", time.Now().UnixNano())
@@ -259,6 +276,8 @@ func TestWebUIEndToEnd(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"WEB_UI_BASE_URL="+baseURL,
 		"RUN_CONFIG_PATH="+configPath,
+		"FORM_ZFS_SOURCE="+source,
+		"FORM_BLANK_SLOT="+strconv.Itoa(webFormBlankSlot),
 	)
 
 	out, err := cmd.CombinedOutput()
