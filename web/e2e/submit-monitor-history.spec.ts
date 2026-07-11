@@ -141,6 +141,24 @@ test('submit a dry-run (JSON mode), watch it progress live with the phase rail, 
   // spinner.
   await expect(page.getByRole('log')).toBeVisible({ timeout: 3 * 60_000 })
 
+  // The drive-metrics panel (DriveMetricsPanel — the Write phase's other
+  // AC4 panel) must be present as its own labeled region alongside the log
+  // panel, and must settle into one of its meaningful states rather than a
+  // stuck loading spinner: a real MB/s reading (live from VictoriaMetrics,
+  // or a terminal run's final recorded write health), an honest "no
+  // measurement" note (write health is measured only after a tape's write
+  // window closes — DriveGauge.tsx), an empty "no tapes" note, or the
+  // panel's styled unavailable state. Which one depends on where the run
+  // has progressed by the time this executes — all are correct; a
+  // perpetual "Loading" is the only wrong answer.
+  const metricsPanel = page.getByRole('region', { name: 'Drive write health' })
+  await expect(metricsPanel).toBeVisible()
+  await expect(
+    metricsPanel.getByText(
+      /MB\/s|No measurement yet|No measurement was taken|No tapes were written|Metrics unavailable|Write-health unavailable/,
+    ),
+  ).toBeVisible({ timeout: 60_000 })
+
   // Back to the overview for the remaining assertions.
   await rail.getByRole('button', { name: 'Run overview' }).click()
   await expect(statusHeading(page)).toBeVisible()
@@ -158,16 +176,33 @@ test('submit a dry-run (JSON mode), watch it progress live with the phase rail, 
   try {
     await historyPage.goto('/')
 
-    // Current-run card: active state has an "Open run ->" link into this
-    // same run (CurrentRunCard.tsx) — distinct from the idle state's "Start
-    // a run ->" link this same card showed before this run existed.
-    await expect(historyPage.getByRole('link', { name: 'Open run →' })).toBeVisible({ timeout: 30_000 })
+    // The dashboard must reflect this run. Which state it reflects is a
+    // race this test cannot control: a dry-run against mhvtl can finish in
+    // well under a minute, so by the time this second page loads, the run
+    // is either still Running (current-run card shows its active state with
+    // an "Open run ->" link — distinct from the idle state's "Start a
+    // run ->") or already Completed (the card is back to idle and the run
+    // sits in the embedded history table). Both are correct dashboard
+    // behavior for AC2/AC4; assert the run's row either way, and only
+    // assert the active-state card when the run is genuinely still open.
+    const runRow = historyPage.getByRole('link', { name: runId, exact: true })
+    await expect(runRow).toBeVisible({ timeout: 30_000 })
 
-    const runningRow = historyPage.getByRole('link', { name: runId, exact: true })
-    await expect(runningRow).toBeVisible({ timeout: 30_000 })
-    await expect(runningRow.getByText('Running', { exact: true }).first()).toBeVisible()
-    // The row's LAST PHASE cell (grid column 5) must show a real phase.
-    await expect(runningRow.locator(':scope > span').nth(4)).not.toHaveText('—', { timeout: 60_000 })
+    const stillRunning = await runRow
+      .getByText('Running', { exact: true })
+      .first()
+      .isVisible()
+      .catch(() => false)
+    if (stillRunning) {
+      await expect(historyPage.getByRole('link', { name: 'Open run →' })).toBeVisible({ timeout: 30_000 })
+      // The row's LAST PHASE cell (grid column 5) must show a real phase.
+      await expect(runRow.locator(':scope > span').nth(4)).not.toHaveText('—', { timeout: 60_000 })
+    } else {
+      // Already terminal: the row must carry a terminal status badge and a
+      // real final phase, proving the dashboard tracked it to completion.
+      await expect(runRow.getByText(/Completed|Failed/).first()).toBeVisible()
+      await expect(runRow.locator(':scope > span').nth(4)).not.toHaveText('—')
+    }
   } finally {
     await historyPage.close()
   }

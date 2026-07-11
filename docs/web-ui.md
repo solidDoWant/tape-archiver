@@ -242,8 +242,7 @@ and keeps retrying automatically.
 | --- | --- |
 | ![A run's live detail view, light mode](images/web-ui-run-detail-light.png) | ![A run's live detail view, dark mode](images/web-ui-run-detail-dark.png) |
 | ![A completed run's read-only detail view, light mode](images/web-ui-run-detail-completed-light.png) | ![A completed run's read-only detail view, dark mode](images/web-ui-run-detail-completed-dark.png) |
-
-![The Write phase's own view, with live per-drive metrics and its log panel](images/web-ui-run-detail-write-light.png)
+| ![The Write phase's own view, with its log panel and per-drive write health, light mode](images/web-ui-run-detail-write-light.png) | ![The Write phase's own view, with its log panel and per-drive write health, dark mode](images/web-ui-run-detail-write-dark.png) |
 
 Reach a run's detail page either via the **View run** link right after submitting, or by
 clicking through from the [dashboard's runs table](#dashboard).
