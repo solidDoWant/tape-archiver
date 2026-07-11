@@ -25,12 +25,24 @@ buildGoModule {
   # postPatch below replaces it wholesale with webFrontend's output, so whatever
   # (if anything) happens to be checked out locally in that gitignored directory
   # never leaks into the Nix build.
+  #
+  # Deliberately `../cmd/web` (minus dist), not the whole `../cmd` tree (issue
+  # #259): this is a single Go module, so `buildGoModule`'s vendorHash is a
+  # fixed-output hash of `go mod vendor`'s result, which is computed from every
+  # package `go list ./...` finds under the copied src — i.e. every package
+  # actually present in the store copy, not just the one subPackages builds.
+  # Including cmd/worker and cmd/tapectl here would make this vendorHash a
+  # function of their imports too, so a worker- or tapectl-only dependency
+  # change would break `nix build .#web` with a fixed-output-hash mismatch
+  # despite cmd/web's own dependency tree being untouched. internal/pkg/
+  # workflows/schemas are genuinely shared with cmd/web, so they stay included —
+  # a dependency change there is a real coupling, not an unrelated one.
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
       ../go.mod
       ../go.sum
-      (lib.fileset.difference ../cmd ../cmd/web/dist)
+      (lib.fileset.difference ../cmd/web ../cmd/web/dist)
       ../internal
       ../pkg
       # The schemas Go package (issue #279) embeds the committed run-config
@@ -43,9 +55,14 @@ buildGoModule {
 
   # Pinned vendor hash: refresh with `make update-dependencies` (or by setting
   # this to lib.fakeHash and reading the value nix reports on the failed build)
-  # whenever go.mod/go.sum change. Shared Go module graph with nix/worker.nix,
-  # so this is expected to track that derivation's vendorHash in lockstep.
-  vendorHash = "sha256-0M0WKVBYzY2W1lnWG6w0AWNi8bZKlRwyoxpKxv1gxjA=";
+  # whenever go.mod/go.sum, cmd/web's own imports, or internal/pkg/workflows/
+  # schemas' imports change. No longer shared with nix/worker.nix's vendorHash
+  # (#259): each binary's src fileset is now scoped to its own subPackage, so
+  # the two hashes are independent, refreshed separately, and need not match
+  # (this one differs from worker's because dropping cmd/worker and cmd/tapectl
+  # from the store copy shrinks the vendored set to what cmd/web + the shared
+  # packages actually import).
+  vendorHash = "sha256-xfVKDOxyvjRIZg1BocW+cKjhgxlDB9u9lH7Rg7fJAtg=";
 
   # Replace the gitignored (or, in a from-scratch checkout, placeholder-only)
   # cmd/web/dist with the hermetically-built frontend before compiling, so
