@@ -130,7 +130,10 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 
 	defer func() {
 		if !shutdownStart.IsZero() {
-			slog.Info("web: shutdown complete", "total", time.Since(shutdownStart).Round(time.Millisecond))
+			// .String() so the JSON logs carry "1.2s", not a raw
+			// nanosecond integer — these lines exist to be read by a
+			// human attributing a slow exit.
+			slog.Info("web: shutdown complete", "total", time.Since(shutdownStart).Round(time.Millisecond).String())
 		}
 	}()
 
@@ -289,7 +292,7 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	drainStart := time.Now()
 	shutdownErr := srv.Shutdown(shutdownCtx)
 
-	slog.Info("web: shutdown stage complete", "stage", "main server drain", "duration", time.Since(drainStart).Round(time.Millisecond))
+	slog.Info("web: shutdown stage complete", "stage", "main server drain", "duration", time.Since(drainStart).Round(time.Millisecond).String())
 
 	if shutdownErr != nil {
 		return fmt.Errorf("shutdown: %w", shutdownErr)
@@ -330,7 +333,8 @@ func logShutdownStage(name string, stage func()) {
 
 	stage()
 
-	slog.Info("web: shutdown stage complete", "stage", name, "duration", time.Since(start).Round(time.Millisecond))
+	// .String() for the same human-readability reason as the total in run().
+	slog.Info("web: shutdown stage complete", "stage", name, "duration", time.Since(start).Round(time.Millisecond).String())
 }
 
 // listenAddr resolves the TCP address to listen on: WEB_LISTEN_ADDRESS when

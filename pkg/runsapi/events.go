@@ -85,11 +85,7 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	firstCtx, firstCancel := context.WithTimeout(r.Context(), requestTimeout)
-	detail, err := fetchRunDetail(firstCtx, h.temporalClient, runID)
-
-	firstCancel()
-
+	detail, err := h.fetchRunDetailUntilDrain(r.Context(), runID)
 	if err != nil {
 		writeRunDetailError(w, runID, err)
 
@@ -149,11 +145,7 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 			// in a rolling deploy.
 			return
 		case <-ticker.C:
-			pollCtx, cancel := context.WithTimeout(r.Context(), requestTimeout)
-			next, err := fetchRunDetail(pollCtx, h.temporalClient, runID)
-
-			cancel()
-
+			next, err := h.fetchRunDetailUntilDrain(r.Context(), runID)
 			if err != nil {
 				// A mid-stream poll failure (e.g. a transient Temporal blip)
 				// is logged and retried on the next tick rather than tearing
@@ -199,6 +191,24 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// fetchRunDetailUntilDrain is streamRunEvents' fetchRunDetail wrapper: the
+// usual requestTimeout bound, plus cancellation the moment the drain context
+// (WithDrainContext) ends. Without the latter, a Temporal RPC in flight when
+// graceful shutdown begins would hold the stream — and with it
+// http.Server.Shutdown — for up to the full requestTimeout (issue #270; a
+// slow or unresponsive Temporal makes this real, not theoretical). A
+// drain-aborted fetch surfaces as an error to the poll loop, whose next
+// select iteration hits the drain case and ends the stream.
+func (h *handler) fetchRunDetailUntilDrain(ctx context.Context, runID string) (RunDetail, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+
+	stop := context.AfterFunc(h.drain, cancel)
+	defer stop()
+
+	return fetchRunDetail(fetchCtx, h.temporalClient, runID)
 }
 
 // writeSSEEvent writes one Server-Sent Event named event with body
