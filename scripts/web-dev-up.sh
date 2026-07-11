@@ -528,16 +528,18 @@ done
 
 # Only once actually interrupted does a bounded grace period apply, counted
 # from the moment the signal arrived (not from when cmd/web started).
-# cmd/web's total process lifetime after a shutdown signal has been
-# observed at 25-70s (longer with a browser SSE connection open) — note
-# that is NOT fully attributed: cmd/web's srv.Shutdown is hard-capped at
-# shutdownTimeout=10s (cmd/web/main.go), so the remainder is going to the
-# post-Shutdown health/metrics/Temporal-client cleanup; tracked separately,
-# not investigated in this script. 90s is the generous bound over that
-# observed range, after which SIGKILL guarantees an interrupt can never
-# hang forever even if cmd/web wedges mid-drain.
+# cmd/web's post-signal lifetime is bounded by design (issue #270): open SSE
+# streams are ended via a drain context the moment shutdown begins, the
+# HTTP drain itself is capped at shutdownTimeout=10s (cmd/web/main.go), and
+# cmd/web skips the final-Prometheus-scrape wait by default (its
+# METRICS_SCRAPE_WAIT_TIMEOUT default is 0s — docs/configuration.md), so a
+# normal exit lands in ~1-2s, worst case around 10s plus client teardown;
+# cmd/web logs a per-stage breakdown ("web: shutdown stage complete") if it
+# ever doesn't. 30s is a generous bound over that, after which SIGKILL
+# guarantees an interrupt can never hang forever even if cmd/web wedges
+# mid-drain.
 if [ "$INTERRUPTED" -eq 1 ]; then
-  WEB_GRACE_PERIOD_S=90
+  WEB_GRACE_PERIOD_S=30
   WEB_GRACE_DEADLINE=$((SECONDS + WEB_GRACE_PERIOD_S))
   while kill -0 "$WEB_PID" 2> /dev/null; do
     if [ "$SECONDS" -ge "$WEB_GRACE_DEADLINE" ]; then

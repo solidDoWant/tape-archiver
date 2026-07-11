@@ -68,7 +68,11 @@ config:
     logLevel: info
     # metricsScrapeWaitTimeout overrides METRICS_SCRAPE_WAIT_TIMEOUT (a Go duration
     # string, e.g. "60s") — how long shutdown waits for a final Prometheus scrape.
-    # Leave empty to use cmd/web's own default (60s).
+    # Leave empty to use cmd/web's own default (0s — no wait; the pod drains within
+    # roughly cmd/web's 10s HTTP shutdown deadline of SIGTERM). A positive value
+    # delays every pod's SIGTERM exit by up to that long — keep it well under the
+    # pod's terminationGracePeriodSeconds (this chart sets 30) or the kubelet will
+    # SIGKILL the pod mid-wait.
     metricsScrapeWaitTimeout: ""
     # The web UI always exposes /metrics on port 9090 regardless of this value. The
     # toggle controls whether a PodMonitor is created for cluster-side scraping.
@@ -138,7 +142,11 @@ config:
 #     the SPA + JSON API, WEB_LISTEN_ADDRESS), "health" (8081, HEALTH_ADDR), and
 #     "metrics" (9090, METRICS_ADDR); hardened securityContext; httpGet liveness
 #     (/healthz) and readiness (/readyz) probes on the health port; a
-#     terminationGracePeriodSeconds covering cmd/web's SIGTERM drain).
+#     terminationGracePeriodSeconds of 30 covering cmd/web's SIGTERM drain —
+#     bounded at roughly its 10s HTTP shutdown deadline plus a couple of seconds
+#     of client teardown, and normally far quicker, so 30 leaves ample headroom
+#     unless config.web.metricsScrapeWaitTimeout re-enables the final-scrape
+#     wait, in which case raise this to keep it comfortably above that value).
 #   - a ClusterIP Service ("main") exposing the "http" port, for an Ingress (below)
 #     or any other in-cluster caller to target.
 #

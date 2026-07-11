@@ -544,3 +544,48 @@ func TestStreamRunEventsSurvivesServerWriteTimeout(t *testing.T) {
 	fourth := waitForFrame(t, frames, time.Second)
 	assertFrame(t, fourth, sseEventDone, enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, "Verify")
 }
+
+// TestStreamRunEventsClosesOnDrain proves an open, healthy SSE stream over a
+// still-RUNNING run ends promptly once the WithDrainContext context is
+// cancelled — the mechanism cmd/web uses so a graceful SIGTERM drain
+// (http.Server.Shutdown) is not held at its full deadline by open browser
+// tabs (issue #270). Without the drain case in streamRunEvents' select, this
+// test would hang at the final read until its timeout: nothing else ends a
+// healthy stream over a running run.
+func TestStreamRunEventsClosesOnDrain(t *testing.T) {
+	setEventPollInterval(t, 15*time.Millisecond)
+
+	client := &dynamicTemporalClient{}
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "")
+
+	drainCtx, startDrain := context.WithCancel(t.Context())
+
+	server := httptest.NewServer(New(client, WithDrainContext(drainCtx)))
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
+
+	frames := readSSEFrames(resp.Body)
+
+	// The stream is established and healthy: the initial snapshot arrives.
+	first := waitForFrame(t, frames, 2*time.Second)
+	assertFrame(t, first, sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "")
+
+	// Begin the graceful drain, exactly as cmd/web does right before
+	// srv.Shutdown.
+	startDrain()
+
+	// The server must close the still-RUNNING stream on its own, promptly,
+	// without any further frames.
+	select {
+	case frame, ok := <-frames:
+		assert.False(t, ok, "expected the stream to close without further frames on drain, got %+v", frame)
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not close after the drain context was cancelled")
+	}
+}

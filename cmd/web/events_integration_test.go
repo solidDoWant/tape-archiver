@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -212,5 +213,115 @@ func TestSSERunEventsAgainstRealTemporal(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(15 * time.Second):
 		t.Fatal("run did not return after ctx cancellation")
+	}
+}
+
+// TestShutdownWithOpenSSEConnectionIsBounded is issue #270's acceptance
+// criterion, verbatim: Given cmd/web is running and serving at least one
+// open SSE connection, When it receives SIGTERM (its NotifyContext being
+// cancelled — the identical code path), Then it exits within a small bound,
+// cleanly. Before the fix this took the full 10s shutdownTimeout AND
+// returned a "shutdown: context deadline exceeded" error (an open SSE
+// response never goes idle, so srv.Shutdown could only ever give up), and
+// with METRICS_SCRAPE_WAIT_TIMEOUT unset the no-SSE path additionally hung
+// on a 60s final-scrape wait no scraper was going to satisfy. After the fix
+// the drain context ends the stream immediately and cmd/web's scrape-wait
+// default is 0, so both failure modes are covered by the single bound
+// asserted here.
+func TestShutdownWithOpenSSEConnectionIsBounded(t *testing.T) {
+	requireBuiltFrontend(t)
+
+	webListenAddr := freeAddr(t)
+	setupEnv(t, webListenAddr)
+
+	// setupEnv pins METRICS_SCRAPE_WAIT_TIMEOUT=0s so other tests never sit
+	// through run()'s scrape wait; this test is specifically about cmd/web's
+	// own built-in shutdown bound, so exercise the real production default
+	// (env unset — cmd/web must skip the wait on its own). setupEnv's
+	// t.Setenv cleanup restores the variable when this test ends.
+	require.NoError(t, os.Unsetenv("METRICS_SCRAPE_WAIT_TIMEOUT"))
+
+	ctx := t.Context()
+
+	temporalClient, shutdown, err := temporalclient.New(ctx, nil)
+	require.NoError(t, err)
+
+	defer shutdown()
+
+	backupWorker := worker.New(temporalClient, backup.TaskQueue, worker.Options{})
+	backupWorker.RegisterWorkflowWithOptions(stubBackupWorkflow, workflow.RegisterOptions{Name: backup.WorkflowType})
+	require.NoError(t, backupWorker.Start())
+
+	defer backupWorker.Stop()
+
+	workflowRun, err := temporalClient.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       backup.WorkflowID,
+		TaskQueue:                backup.TaskQueue,
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_TERMINATE_EXISTING,
+	}, backup.WorkflowType, nil)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil)
+	})
+
+	webCtx, cancelWeb := context.WithCancel(ctx)
+	defer cancelWeb()
+
+	readyCh := make(chan string, 1)
+	runErrCh := make(chan error, 1)
+
+	go func() {
+		runErrCh <- run(webCtx, envGetenv(webListenAddr), func(addr string) { readyCh <- addr })
+	}()
+
+	var addr string
+
+	select {
+	case addr = <-readyCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("web server never became ready")
+	}
+
+	authenticatedClient := newAuthenticatedClient(t, addr)
+
+	resp, err := authenticatedClient.Get("http://" + addr + "/api/events/runs/" + workflowRun.GetRunID())
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
+
+	frames := readSSEFrames(resp.Body)
+
+	// The stream is live (initial snapshot delivered) and the run is still
+	// RUNNING, so nothing but shutdown will end it server-side.
+	first := waitForFrame(t, frames, 15*time.Second)
+	require.Equal(t, "update", first.event)
+
+	// Deliver the shutdown signal and time run()'s exit.
+	shutdownStart := time.Now()
+
+	cancelWeb()
+
+	select {
+	case err := <-runErrCh:
+		elapsed := time.Since(shutdownStart)
+
+		require.NoError(t, err, "shutdown with an open SSE stream must complete cleanly, not by exhausting the drain deadline")
+		assert.Less(t, elapsed, 5*time.Second, "shutdown must be bounded well under shutdownTimeout, took %s", elapsed)
+	case <-time.After(9 * time.Second):
+		// Just under shutdownTimeout: reaching the 10s drain deadline at all
+		// is the failure this test exists to catch.
+		t.Fatal("run did not return within the bounded shutdown window after ctx cancellation")
+	}
+
+	// The server must have ended the SSE stream itself as part of draining.
+	select {
+	case _, ok := <-frames:
+		assert.False(t, ok, "expected the SSE stream to be closed by the draining server without further frames")
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE stream was not closed by the draining server")
 	}
 }

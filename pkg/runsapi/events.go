@@ -139,6 +139,15 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-h.drain.Done():
+			// The hosting server has begun graceful shutdown
+			// (WithDrainContext). Close the stream now so
+			// http.Server.Shutdown can reach connection quiescence instead
+			// of stalling on this open response until its deadline (issue
+			// #270). The browser's EventSource treats the closed connection
+			// like any other drop and reconnects — to this pod's successor,
+			// in a rolling deploy.
+			return
 		case <-ticker.C:
 			pollCtx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 			next, err := fetchRunDetail(pollCtx, h.temporalClient, runID)

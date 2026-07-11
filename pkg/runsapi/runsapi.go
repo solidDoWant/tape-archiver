@@ -236,9 +236,24 @@ type SubmitRunResponse struct {
 	RunID      string `json:"runId"`
 }
 
+// Option configures New's handler beyond its required Temporal client.
+type Option func(*handler)
+
+// WithDrainContext supplies a context that is cancelled when the hosting
+// server begins graceful shutdown. Long-lived streaming handlers (the SSE
+// run-event stream) return promptly once it is done, so http.Server.Shutdown
+// can reach connection quiescence instead of stalling on them until its
+// deadline (issue #270). Ordinary request/response handlers ignore it: they
+// are bounded by requestTimeout already and should be allowed to finish
+// their in-flight work during a graceful drain. When not supplied, streams
+// only end on client disconnect or run completion, as before.
+func WithDrainContext(ctx context.Context) Option {
+	return func(h *handler) { h.drain = ctx }
+}
+
 // New builds the /api/runs HTTP handler. temporalClient must be non-nil.
-func New(temporalClient TemporalClient) http.Handler {
-	return newMux(newHandler(temporalClient, os.Getenv))
+func New(temporalClient TemporalClient, opts ...Option) http.Handler {
+	return newMux(newHandler(temporalClient, os.Getenv, opts...))
 }
 
 // newHandler builds a handler with an injectable getenv, so tests can drive
@@ -248,12 +263,22 @@ func New(temporalClient TemporalClient) http.Handler {
 // same reason: agekeygen_test.go drives generateAgeKeypair's error path
 // without depending on how the real age-keygen binary happens to fail. New
 // wires it to agewrap.GenerateIdentity for production.
-func newHandler(temporalClient TemporalClient, getenv func(string) string) *handler {
-	return &handler{
+func newHandler(temporalClient TemporalClient, getenv func(string) string, opts ...Option) *handler {
+	h := &handler{
 		temporalClient:      temporalClient,
 		getenv:              getenv,
 		generateAgeIdentity: agewrap.GenerateIdentity,
+		// A background default means "never drained": the drain case in
+		// streaming handlers' selects simply never fires unless the host
+		// opted in via WithDrainContext.
+		drain: context.Background(),
 	}
+
+	for _, opt := range opts {
+		opt(h)
+	}
+
+	return h
 }
 
 // newMux mounts h's handlers behind their routes.
@@ -295,6 +320,9 @@ type handler struct {
 	temporalClient      TemporalClient
 	getenv              func(string) string
 	generateAgeIdentity func(context.Context) (identity, recipient string, err error)
+	// drain is done when the hosting server has begun graceful shutdown —
+	// see WithDrainContext. Defaults to context.Background() (never done).
+	drain context.Context
 }
 
 // listRuns implements GET /api/runs: every execution of the singleton backup

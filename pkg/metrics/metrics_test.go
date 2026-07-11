@@ -297,3 +297,46 @@ func TestNewFromEnv_ScrapeWaitTimeout_DisabledViaZeroEnvVar(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, elapsed, 500*time.Millisecond, "explicit 0s env value should disable the scrape-wait gate")
 }
+
+func TestNewFromEnv_DefaultOptions_DisableScrapeWait(t *testing.T) {
+	addr := freeAddr(t)
+	t.Setenv("METRICS_ADDR", addr)
+	unsetEnv(t, "METRICS_SCRAPE_WAIT_TIMEOUT")
+
+	// Caller-supplied defaults apply when the corresponding env var is unset:
+	// cmd/web passes WithScrapeWaitTimeout(0) this way so its SIGTERM drain
+	// never waits for a final scrape by default (issue #270).
+	provider, shutdown, err := metrics.NewFromEnv("", metrics.WithScrapeWaitTimeout(0))
+	require.NoError(t, err)
+	t.Cleanup(shutdown)
+
+	start := time.Now()
+	err = provider.WaitForScrape(t.Context())
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Less(t, elapsed, 500*time.Millisecond, "a caller default of 0 should disable the scrape-wait gate")
+}
+
+func TestNewFromEnv_EnvOverridesDefaultOptions(t *testing.T) {
+	addr := freeAddr(t)
+	t.Setenv("METRICS_ADDR", addr)
+	t.Setenv("METRICS_SCRAPE_WAIT_TIMEOUT", "100ms")
+
+	// METRICS_SCRAPE_WAIT_TIMEOUT must win over a caller-supplied default of
+	// "disabled": with the gate re-enabled at 100ms and no scrape arriving,
+	// WaitForScrape must block until that timeout rather than return
+	// immediately.
+	provider, shutdown, err := metrics.NewFromEnv("", metrics.WithScrapeWaitTimeout(0))
+	require.NoError(t, err)
+	t.Cleanup(shutdown)
+
+	start := time.Now()
+	err = provider.WaitForScrape(t.Context())
+	elapsed := time.Since(start)
+
+	require.Error(t, err, "the env-configured 100ms gate should be in effect, not the caller's disabled default")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
+	assert.Less(t, elapsed, 2*time.Second, "WaitForScrape should return shortly after the env-configured timeout")
+}
