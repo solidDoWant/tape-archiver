@@ -73,6 +73,26 @@ describe('RunOverview', () => {
     expect(screen.queryByText(/no operator action needed/i)).not.toBeInTheDocument()
   })
 
+  it('shows an uncertainty hero — not PAUSED — when the pause status is unknown', () => {
+    stubPanels()
+
+    render(
+      <RunOverview
+        runId="run-1"
+        detail={{ ...runningDetail, currentPause: { kind: '', unknown: true } }}
+        phases={phases}
+        terminal={false}
+      />,
+    )
+
+    // The hero must not assert "Backup paused" (the pause query failed —
+    // the run may or may not be paused); PauseActions' own warning carries
+    // the detail.
+    expect(screen.getByText('PAUSE STATUS UNKNOWN')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /backup paused/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(/pause status unavailable/i)
+  })
+
   it('shows a failed-run error console for the failing phase', () => {
     stubPanels()
 

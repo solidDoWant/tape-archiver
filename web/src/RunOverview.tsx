@@ -4,9 +4,19 @@ import PauseActions from './PauseActions'
 import ConfigSummary from './ConfigSummary'
 import TapesSection from './TapesSection'
 
-function heroCopy(status: string, paused: boolean): { label: string; title: string; badgeClass: string } {
+function heroCopy(status: string, paused: boolean, pauseUnknown: boolean): { label: string; title: string; badgeClass: string } {
+  // Order matters: a confirmed pause (kind !== '') wins, but a failed pause
+  // query (unknown) must NOT assert "Backup paused" — the run may or may
+  // not be waiting on an operator, and the hero saying PAUSED while
+  // PauseActions right below says "pause status unavailable" would
+  // contradict itself. The hero states the uncertainty instead;
+  // PauseActions renders the full warning for the same state.
   if (paused) {
     return { label: 'PAUSED', title: 'Backup paused', badgeClass: 'text-amber' }
+  }
+
+  if (pauseUnknown) {
+    return { label: 'PAUSE STATUS UNKNOWN', title: 'Backup in progress', badgeClass: 'text-amber' }
   }
 
   switch (status) {
@@ -59,8 +69,9 @@ export interface RunOverviewProps {
 // rest of this view (issue #277 AC4).
 function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
   const pause = detail.currentPause
-  const isPaused = pause.kind !== '' || Boolean(pause.unknown)
-  const hero = heroCopy(detail.status, isPaused)
+  const isPaused = pause.kind !== ''
+  const pauseUnknown = Boolean(pause.unknown)
+  const hero = heroCopy(detail.status, isPaused, pauseUnknown)
 
   const completedCount = phases.filter((phase) => phase.status === 'completed').length
   const failedPhase = phases.find((phase) => phase.status === 'failed')
@@ -82,7 +93,7 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
         </p>
       </div>
 
-      {isPaused ? (
+      {isPaused || pauseUnknown ? (
         <PauseActions runId={runId} pause={pause} />
       ) : detail.status === 'Running' ? (
         <div className="flex items-center gap-2.5 rounded-lg border border-dashed border-border-strong px-4 py-3 text-[12px] text-text-dim">

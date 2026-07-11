@@ -82,6 +82,10 @@ function TapesSection({ runId, terminal }: TapesSectionProps) {
           return
         }
 
+        // 410 and 404 deliberately share the "no longer available" copy
+        // here — see ConfigSummary.tsx's identical catch for why the
+        // page-level not-found/aged-out taxonomy does not apply inside
+        // these panels.
         if (error instanceof ApiError && (error.status === 410 || error.status === 404)) {
           setState({ status: 'unavailable' })
 

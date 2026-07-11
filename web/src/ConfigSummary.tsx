@@ -102,6 +102,13 @@ function ConfigSummary({ runId, logicalTapes, copies }: ConfigSummaryProps) {
           return
         }
 
+        // 410 and 404 deliberately share the "no longer available" copy
+        // here, unlike RunDetail.tsx's page-level not-found/aged-out
+        // taxonomy: by the time this panel renders, the page has already
+        // confirmed the run exists, so either status can only mean the
+        // history became unreconstructable mid-view (aged out, or fell out
+        // of visibility entirely) — the distinction was already drawn where
+        // it matters, and neither is operator-actionable from this panel.
         if (error instanceof ApiError && (error.status === 410 || error.status === 404)) {
           setState({ status: 'unavailable' })
 

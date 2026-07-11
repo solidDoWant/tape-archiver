@@ -203,6 +203,70 @@ describe('RunDetail', () => {
     })
   })
 
+  it('fetches the PAR2 phase’s logs by its stable name "Generate PAR2", not its "PAR2" display label', async () => {
+    const fetchMock = await renderReady({
+      '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } },
+    })
+
+    screen.getByRole('button', { name: /^par2/i }).click()
+
+    // The rail's button says "PAR2" (display label), but the log window must
+    // be scoped by the phase's stable workflow name — VictoriaLogs records
+    // carry "Generate PAR2" (the Go constant's value), never the label.
+    // URLSearchParams encodes the space as "+".
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-abc/logs?phase=Generate+PAR2', undefined)
+    })
+  })
+
+  it('refreshes the phase rail’s statuses when an SSE update event arrives', async () => {
+    await renderReady() // default stub: all 11 phases pending.
+
+    expect(screen.getByRole('button', { name: /^resolve/i })).toHaveAttribute('data-status', 'pending')
+
+    // The workflow has progressed: the next /phases fetch reports it. Swap
+    // the stub before driving the SSE event that triggers the refetch.
+    stub({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
+
+    FakeEventSource.instances[0].emit('update', { ...runningDetail, lastCompletedPhase: 'Pack' })
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^resolve/i })).toHaveAttribute('data-status', 'completed')
+    })
+    expect(screen.getByRole('button', { name: /^par2/i })).toHaveAttribute('data-status', 'active')
+  })
+
+  it('keeps the already-loaded phase rail when an SSE-triggered refetch fails', async () => {
+    await renderReady({
+      '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } },
+    })
+
+    // The refetch the next SSE event triggers fails outright (e.g. a
+    // transient 500 or cmd/web blip)...
+    const failingFetch = vi.fn((input: RequestInfo | URL) => {
+      const path = (typeof input === 'string' ? input : String(input)).split('?')[0]
+
+      if (path.endsWith('/phases')) {
+        return Promise.resolve(jsonResponse(500, { error: 'boom' }))
+      }
+
+      return Promise.resolve(jsonResponse(200, { runId: 'run-abc', lines: [], live: false }))
+    })
+    vi.stubGlobal('fetch', failingFetch)
+
+    FakeEventSource.instances[0].emit('update', runningDetail)
+
+    await waitFor(() => {
+      expect(failingFetch).toHaveBeenCalledWith('/api/runs/run-abc/phases', undefined)
+    })
+
+    // ...but the rail the page already showed is kept, not clobbered into
+    // the degraded fallback over one bad refetch.
+    expect(screen.getByRole('navigation', { name: /run phases/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^resolve/i })).toHaveAttribute('data-status', 'completed')
+    expect(screen.queryByText(/unavailable/i)).not.toBeInTheDocument()
+  })
+
   it('shows a pending placeholder for a phase that has not started', async () => {
     await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
 

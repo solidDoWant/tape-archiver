@@ -183,25 +183,38 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
           return
         }
 
-        if (error instanceof ApiError && error.status === 410) {
-          setPhases({ status: 'aged-out' })
+        setPhases((previous) => {
+          // A failed refetch after the rail has already loaded keeps the
+          // current (slightly stale) timeline rather than clobbering a
+          // healthy rail into a degraded state — the same keep-and-retry
+          // stance LogPanel.tsx takes for a mid-stream poll blip. This
+          // matters most for the refetch the terminal "done" event
+          // triggers: the SSE stream is closed at that point, so a
+          // degraded state reached there would be permanent, over data
+          // the page had already successfully shown. The next SSE event
+          // (if any) bumps refreshKey and retries naturally. Only the
+          // very first load's failure decides aged-out/degraded below.
+          if (previous.status === 'ready') {
+            return previous
+          }
 
-          return
-        }
+          if (error instanceof ApiError && error.status === 410) {
+            return { status: 'aged-out' }
+          }
 
-        if (error instanceof ApiError && error.status === 404) {
-          // This run's own existence was already confirmed by RunDetail's
-          // initial fetch, so a 404 here specifically is an unexpected
-          // inconsistency rather than a genuinely missing run — degrade
-          // honestly to the basic status view instead of a misleading
-          // "not found" (issue #277's phases-endpoint fallback).
-          setPhases({ status: 'degraded' })
+          if (error instanceof ApiError && error.status === 404) {
+            // This run's own existence was already confirmed by RunDetail's
+            // initial fetch, so a 404 here specifically is an unexpected
+            // inconsistency rather than a genuinely missing run — degrade
+            // honestly to the basic status view instead of a misleading
+            // "not found" (issue #277's phases-endpoint fallback).
+            return { status: 'degraded' }
+          }
 
-          return
-        }
+          const message = error instanceof ApiError ? error.message : describeNetworkError(error)
 
-        const message = error instanceof ApiError ? error.message : describeNetworkError(error)
-        setPhases({ status: 'degraded', message })
+          return { status: 'degraded', message }
+        })
       })
 
     return () => {
