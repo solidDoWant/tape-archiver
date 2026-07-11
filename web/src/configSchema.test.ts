@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { onSessionExpired } from './api'
 import { fetchConfigSchema, resetConfigSchemaCache, validateAgainstSchema } from './configSchema'
 import { testRunConfigSchema } from './testSchemaFixture'
 
@@ -110,7 +111,7 @@ describe('fetchConfigSchema', () => {
     expect(first).toEqual(testRunConfigSchema)
     expect(second).toBe(first)
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock).toHaveBeenCalledWith('/api/config/schema')
+    expect(fetchMock).toHaveBeenCalledWith('/api/config/schema', undefined)
   })
 
   it('does not poison the cache on a failed fetch', async () => {
@@ -125,5 +126,26 @@ describe('fetchConfigSchema', () => {
     const second = await fetchConfigSchema()
     expect(second).toEqual(testRunConfigSchema)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  // issue #285 (PR #297 review): /api/config/schema is session-gated like
+  // every other /api/* route, and this was the one call site not going
+  // through apiFetch — a schema fetch after mid-session expiry must trigger
+  // the same session-loss notification as any other data fetch, not
+  // dead-end in a component-level validation error or a silently-stuck
+  // JSON-mode validity indicator.
+  it('notifies onSessionExpired subscribers when the schema fetch 401s', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) }),
+    )
+
+    const listener = vi.fn()
+    const unsubscribe = onSessionExpired(listener)
+
+    await expect(fetchConfigSchema()).rejects.toMatchObject({ status: 401 })
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    unsubscribe()
   })
 })

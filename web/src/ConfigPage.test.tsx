@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ConfigPage from './ConfigPage'
 import { RouterProvider } from './router'
+import { onSessionExpired } from './api'
 import { resetConfigSchemaCache } from './configSchema'
 import { testRunConfigSchema } from './testSchemaFixture'
 
@@ -272,6 +273,31 @@ describe('ConfigPage', () => {
     // Never advanced to Review.
     expect(screen.getByText('STEP 1 · BUILD')).toBeInTheDocument()
     expect(screen.queryByText('Review before submitting')).not.toBeInTheDocument()
+  })
+
+  // issue #285 (PR #297 review): the Review step's schema fetch is
+  // session-gated like every other /api/* call, so an operator who sat on
+  // this page past session expiry and then clicked Review must get the same
+  // session-loss notification (and thus the AuthGate redirect to the login
+  // page — App.test.tsx covers that leg) as any other data fetch, instead
+  // of a dead in-place validation error.
+  it('notifies session expiry when the Review step schema fetch 401s', async () => {
+    renderPage({
+      '/api/config/schema': { status: 401, body: { error: 'unauthorized' } },
+    })
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    const listener = vi.fn()
+    const unsubscribe = onSessionExpired(listener)
+
+    await fillMinimalValidForm()
+    fireEvent.click(screen.getByRole('button', { name: /review →/i }))
+
+    await waitFor(() => {
+      expect(listener).toHaveBeenCalledTimes(1)
+    })
+
+    unsubscribe()
   })
 
   it('submits JSON mode directly (no Review step) and shows success', async () => {

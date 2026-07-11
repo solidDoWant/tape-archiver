@@ -31,6 +31,8 @@
 // that does is still caught, exactly as before this issue, by the same
 // POST /api/runs 400 response ConfigJsonMode.tsx already surfaces.
 
+import { apiFetch } from './api'
+
 export interface JSONSchema {
   $ref?: string
   $defs?: Record<string, JSONSchema>
@@ -228,17 +230,16 @@ let cachedSchema: Promise<JSONSchema> | null = null
 // Review-step validation, JSON mode's live valid/invalid indicator) shares
 // one network request rather than each re-fetching the same static
 // document.
+//
+// It goes through apiFetch (not raw fetch) deliberately: the endpoint is
+// session-gated like every other /api/* route, so a 401 here — an operator
+// who sat on the config page past session expiry and then clicked Review,
+// or whose JSON mode mounted after expiry — must trigger apiFetch's
+// onSessionExpired routing back to the login page (issue #285) the same as
+// any other data fetch, not dead-end in a component-level error.
 export function fetchConfigSchema(): Promise<JSONSchema> {
   if (!cachedSchema) {
-    cachedSchema = fetch('/api/config/schema').then((response) => {
-      if (!response.ok) {
-        cachedSchema = null
-
-        throw new Error(`fetching the run-config schema failed with status ${response.status}`)
-      }
-
-      return response.json() as Promise<JSONSchema>
-    })
+    cachedSchema = apiFetch<JSONSchema>('/api/config/schema')
 
     cachedSchema.catch(() => {
       // A failed fetch must not permanently poison the cache — the next
