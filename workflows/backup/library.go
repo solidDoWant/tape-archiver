@@ -731,10 +731,13 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState, writte
 
 		// The I/O station is full with tapes still to export. Alert the operator
 		// which tapes to remove, then pause until the station is cleared. Drain any
-		// stale resume before the alert is dispatched so only genuinely-stale
-		// (pre-alert) resumes are discarded while a resume prompted by this alert
-		// survives (issue #216).
-		drainStaleResumeSignals(ctx)
+		// stale resume or abort before the alert is dispatched so only genuinely-
+		// stale (pre-alert) signals are discarded while one prompted by this alert
+		// survives (issues #216, #254). waitForIOCleared below never listens on the
+		// abort channel itself (an Eject pause rejects abort), so this drain's only
+		// effect on abort is to stop a stale one from leaking forward onto a later,
+		// unrelated pause.
+		drainStalePauseSignals(ctx)
 
 		notifyOperatorPause(ctx, result.InIOStation, len(remaining))
 
@@ -796,9 +799,10 @@ func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (Eje
 // reports it can auto-resume (IOStatus.CanAutoResume) or false when the wait
 // deadline elapses.
 //
-// Stale buffered resumes are drained by the caller before the pause alert is
-// dispatched (issue #216), not here at wait entry, so a resume the operator sends
-// in response to the alert is never discarded.
+// Stale buffered resumes (and, since issue #254, aborts) are drained by the caller
+// before the pause alert is dispatched (issue #216), not here at wait entry, so a
+// resume the operator sends in response to the alert is never discarded. This wait
+// itself still never listens on the abort channel — an Eject pause rejects abort.
 func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
 	signalCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 

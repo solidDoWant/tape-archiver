@@ -695,6 +695,86 @@ func TestBurnStaleResumeSignalDoesNotSatisfyLaterPause(t *testing.T) {
 	assert.Equal(t, 1, burnsByDev["/dev/sr0"], "set 1 never burns; no disc-set-2 copy")
 }
 
+// TestBurnStaleAbortSignalDoesNotAbortLaterPause covers issue #254 AC1 for the
+// Burn phase: an abort buffered during one pause but not consumed before that pause
+// resolves by other means must not abort a later, unrelated pause. The same
+// 3-copy/2-drive shape as TestBurnStaleResumeSignalDoesNotSatisfyLaterPause fails
+// one disc in set 0; during that pause the operator resumes while a racing (stale)
+// abort — e.g. a delayed web-API request — is delivered right after it. The resume
+// clears the failure pause and set 0 completes; the buffered abort must be drained
+// at the between-set swap pause's entry, so that pause waits for a fresh action
+// and — none arriving — times out. Without the drain the stale abort would silently
+// abort the run at the swap pause.
+func TestBurnStaleAbortSignalDoesNotAbortLaterPause(t *testing.T) {
+	cfg := burnConfig(3, []string{"/dev/sr0", "/dev/sr1"}, false, 300)
+	env := newBurnPauseEnv(t)
+
+	var (
+		mu         sync.Mutex
+		burnsByDev = map[string]int{}
+		swapAlerts int
+		failAlerts int
+	)
+
+	// /dev/sr1 fails its first burn (within-set failure pause), then succeeds on the
+	// resume retry; /dev/sr0 always succeeds.
+	env.OnActivity((&BurnActivities{}).BurnDisc, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnDiscInput) (BurnResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			burnsByDev[input.Device]++
+
+			if input.Device == "/dev/sr1" && burnsByDev[input.Device] == 1 {
+				return BurnResult{}, errors.New("optical burn failed: drive reported a write error")
+			}
+
+			return BurnResult{Device: input.Device}, nil
+		})
+	env.OnActivity((&BurnActivities{}).VerifyDisc, mock.Anything, mock.Anything).Return(nil)
+
+	env.OnActivity((&FailureActivities{}).NotifyBurnPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input BurnPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			if isBurnFailurePause(input) {
+				failAlerts++
+			} else {
+				swapAlerts++
+			}
+
+			return nil
+		})
+
+	// During the set-0 failure pause the operator resumes and a stale abort races in
+	// behind it. The resume clears that pause; the buffered abort must not leak
+	// forward to the between-set swap pause.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+		env.SignalWorkflow(OperatorAbortSignal, nil)
+	}, 30*time.Second)
+
+	env.ExecuteWorkflow(burnPauseTestWorkflow, cfg)
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err, "the stale abort must not satisfy the swap pause; it times out")
+	assert.Contains(t, err.Error(), "did not resume or abort")
+	assert.Contains(t, err.Error(), "disc-set 2", "the run stalls at the between-set swap pause")
+	assert.NotContains(t, err.Error(), "aborted", "the stale abort must not end the run at the swap pause")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, failAlerts, "set 0's within-set failure pauses once")
+	assert.Equal(t, 1, swapAlerts, "the between-set swap pause is reached and alerts once")
+	// Set 1 (disc-set 2) never burns: the leaked abort neither ended the run early
+	// nor let the swap pause resolve, so /dev/sr0 burns only its set-0 copy.
+	assert.Equal(t, 1, burnsByDev["/dev/sr0"], "set 1 never burns; no disc-set-2 copy")
+}
+
 // TestBurnForgotSwapDoesNotOverwriteVerifiedCopy covers issue #154 AC2: with
 // allowNonBlankDiscs enabled on rewritable media, a reused drive whose just-verified
 // copy is still loaded (the operator resumed the between-set swap without swapping

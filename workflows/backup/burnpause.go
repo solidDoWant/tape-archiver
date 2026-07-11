@@ -30,8 +30,9 @@ import (
 // signal handling.
 func waitForBurnOperator(ctx workflow.Context, cfg config.Config, state *runState, devices []string, cause error) pauseOutcome {
 	// Drain before the alert is dispatched so only genuinely-stale (pre-alert)
-	// resumes are discarded and a resume prompted by this alert survives (issue #216).
-	drainStaleResumeSignals(ctx)
+	// resumes/aborts are discarded and a resume or abort prompted by this alert
+	// survives (issues #216, #254).
+	drainStalePauseSignals(ctx)
 
 	notifyBurnPause(ctx, devices, cause)
 

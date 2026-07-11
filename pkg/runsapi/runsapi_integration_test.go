@@ -224,7 +224,7 @@ const lastSignalQuery = "lastSignal"
 // /api/runs/{runID}/resume and /abort against a real Temporal server and
 // observe the real signal being delivered and acted on — behavior no fake
 // client can prove. It is a test-only stand-in, not the real workflow: the
-// pre-existing resume/abort signal-handling behavior (drainStaleResumeSignals
+// pre-existing resume/abort signal-handling behavior (drainStalePauseSignals
 // etc.) is covered by workflows/backup's own tests, and the real workflow's
 // three pause sites setting/clearing CurrentPause around their existing wait
 // calls are covered by workflows/backup's own unit tests plus, for the Eject
