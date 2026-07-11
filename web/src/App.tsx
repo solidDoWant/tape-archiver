@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect } from 'react'
 import ConfigPage from './ConfigPage'
 import RunDetail from './RunDetail'
 import Dashboard from './Dashboard'
@@ -153,15 +153,6 @@ function Shell({ identity, preference, onPreferenceChange }: ShellProps) {
       </main>
     </div>
   )
-}
-
-// CenteredView is the shared content wrapper for the pre-redesign pages
-// (submit form, run history, run detail), which lay themselves out as
-// centered max-width columns — the padding/centering they used to get from
-// the old shell's `main`. The redesigned pages (Tapes, 404) own their whole
-// content area instead.
-function CenteredView({ children }: { children: ReactNode }) {
-  return <div className="flex flex-col items-center gap-6 p-6 sm:p-7">{children}</div>
 }
 
 function renderRoute(route: Route, navigate: (path: string) => void) {
