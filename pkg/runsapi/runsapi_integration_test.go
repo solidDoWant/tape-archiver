@@ -582,12 +582,24 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 
 	// Once the first run has closed, a fresh submission succeeds again.
+	var thirdRunID string
+
 	require.Eventually(t, func() bool {
 		status, body := postRun(t, server.URL, submitBody)
+		thirdRunID = body.RunID
 
 		return status == http.StatusCreated && body.RunID != "" && body.RunID != firstRunID
 	}, 30*time.Second, 250*time.Millisecond, "a new submission did not succeed after the first run closed")
 
-	// Unblock the run started by the post-close check so it does not linger.
+	// Unblock the run started by the post-close check and wait for it to
+	// actually complete while the stub worker is still polling. This is the
+	// last test in this file, so a leaked run here is never drained by a later
+	// test in this package and would survive into the next package's binary.
+	// The t.Cleanup/defer backupWorker.Stop safety nets above are not enough on
+	// their own: cleanups run after the deferred Stop, so a signal sent there
+	// would sit unprocessed and this test would leave the singleton "backup"
+	// workflow Running for a later package's test to trip over.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+	require.NoError(t, temporalClient.GetWorkflow(ctx, backup.WorkflowID, thirdRunID).Get(ctx, nil),
+		"stub workflow must complete so the singleton workflow ID is free for later tests")
 }
