@@ -324,4 +324,15 @@ func TestShutdownWithOpenSSEConnectionIsBounded(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("SSE stream was not closed by the draining server")
 	}
+
+	// Finish the stub workflow while its worker is still running (the
+	// deferred backupWorker.Stop has not run yet) and wait for it to actually
+	// complete. The finish-signal t.Cleanup above is not enough on its own:
+	// cleanups run after the deferred worker Stop, so the signal would sit
+	// unprocessed forever and this test would leave the singleton "backup"
+	// workflow Running — which blocks any later test that submits a run
+	// against the same dev Temporal (pkg/runsapi's dry-run submission
+	// integration tests fail with "dry-run submission never started").
+	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+	require.NoError(t, workflowRun.Get(ctx, nil), "stub workflow must complete so the singleton workflow ID is free for later tests")
 }
