@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { apiFetch } from './api'
 import type { CurrentPauseInfo } from './PauseActions'
 
 // RunEventDetail mirrors pkg/runsapi.RunDetail's JSON shape, as carried by
@@ -65,6 +66,7 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
       return
     }
 
+    let cancelled = false
     const source = new EventSource(`/api/events/runs/${encodeURIComponent(runId)}`)
 
     const parseDetail = (event: MessageEvent<string>): RunEventDetail | null => {
@@ -95,11 +97,45 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
       source.close()
     }
 
+    // sessionProbeInFlight guards handleError's follow-up /api/me probe
+    // below against firing a second overlapping probe for every retry
+    // EventSource attempts on its own (it retries automatically; a real
+    // outage can mean several "error" events in a row before this effect's
+    // cleanup ever runs).
+    let sessionProbeInFlight = false
+
     const handleError = () => {
       // A dropped connection while already terminal is expected (the server
       // closed it on purpose after "done") and must not overwrite the
       // terminal state with an error.
       setState((current) => (current === 'terminal' ? current : 'error'))
+
+      // EventSource cannot see the HTTP status of a failed connection (its
+      // 'error' event carries no status code), so a dropped session and a
+      // transient network blip look identical here. Disambiguate with a
+      // follow-up authenticated fetch (issue #285): apiFetch itself already
+      // treats a 401 as authoritative session loss and notifies
+      // identity.ts's subscription (api.ts's onSessionExpired), which
+      // routes the app back to the login page — this probe only needs to
+      // fire that path, not act on its own result. Any other outcome
+      // (success, or a non-401 failure such as the server being briefly
+      // unreachable) is left alone: EventSource's own automatic
+      // reconnection handles recovering from those without this hook doing
+      // anything further.
+      if (cancelled || sessionProbeInFlight) {
+        return
+      }
+
+      sessionProbeInFlight = true
+      void apiFetch('/api/me')
+        .catch(() => {
+          // Intentionally ignored: a 401 already triggered the session-loss
+          // path as a side effect inside apiFetch, and any other failure
+          // (network-level) is not session loss — see comment above.
+        })
+        .finally(() => {
+          sessionProbeInFlight = false
+        })
     }
 
     source.addEventListener('update', handleUpdate)
@@ -107,6 +143,7 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
     source.addEventListener('error', handleError)
 
     return () => {
+      cancelled = true
       source.close()
     }
   }, [runId])

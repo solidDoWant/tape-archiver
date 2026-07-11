@@ -21,6 +21,36 @@ export class ApiError extends Error {
   }
 }
 
+// sessionExpiredListeners backs onSessionExpired/notifySessionExpired below
+// (issue #285): a tiny module-level pub-sub so apiFetch — the one place that
+// sees every /api/* response — can tell the rest of the app "the session is
+// gone" without importing React or any component. identity.ts's
+// useIdentity is the sole subscriber today (it turns a notification into
+// IdentityState going to "unauthenticated", which App.tsx's AuthGate effect
+// already redirects to /login?redirect=(current path) for); the pub-sub
+// shape (rather than a direct identity.ts import here) keeps api.ts
+// free of any dependency on identity.ts/React.
+const sessionExpiredListeners = new Set<() => void>()
+
+// onSessionExpired registers listener to be called every time apiFetch
+// observes a 401 response, and returns an unsubscribe function. Intended for
+// a component that lives for the app's lifetime (identity.ts's useIdentity,
+// mounted by App.tsx's AuthGate) to subscribe once and react to session loss
+// discovered by any fetch anywhere in the app, not just its own.
+export function onSessionExpired(listener: () => void): () => void {
+  sessionExpiredListeners.add(listener)
+
+  return () => {
+    sessionExpiredListeners.delete(listener)
+  }
+}
+
+function notifySessionExpired(): void {
+  for (const listener of sessionExpiredListeners) {
+    listener()
+  }
+}
+
 // apiFetch issues a fetch to the JSON API and decodes the response body as
 // T, throwing ApiError for a non-2xx response (using the response's
 // {"error": "..."} body when present) and letting a network-level failure
@@ -28,6 +58,16 @@ export class ApiError extends Error {
 // response with no body (e.g. a 202 Accepted with only a status field, or
 // truly empty) decodes as {} cast to T — callers that need specific fields
 // should treat them as optional.
+//
+// A 401 status specifically also fires the onSessionExpired pub-sub above
+// (issue #285's mid-session-expiry fix), on the principle that the backend's
+// 401 is authoritative: pkg/webauth issues 401 only for a genuinely missing
+// or invalid session (webauth.go), never for e.g. a proxy hiccup or a
+// network blip — those surface as fetch() itself rejecting (a non-ApiError,
+// handled distinctly by every existing caller already) or as a different
+// status code, neither of which reaches this branch. So there is no
+// debounce/retry/confirmation step here: a single 401 is treated as session
+// loss immediately, on this response alone.
 export async function apiFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init)
   const body = await response.json().catch(() => null)
@@ -37,6 +77,10 @@ export async function apiFetch<T>(input: string, init?: RequestInit): Promise<T>
       body && typeof body.error === 'string'
         ? body.error
         : `Request failed with status ${response.status}.`
+
+    if (response.status === 401) {
+      notifySessionExpired()
+    }
 
     throw new ApiError(response.status, message)
   }

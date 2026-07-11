@@ -41,6 +41,15 @@ page: **Access denied** when your account authenticated but is not authorized fo
 archive, and **Session expired** when a login attempt went stale or your previous
 session timed out — both with a control to retry (or try a different account).
 
+Session expiry mid-use is handled the same way: if your session ends while a tab is
+open (for example past the server's `maxSessionDuration`), the next thing the app
+fetches — a page's data load, an action like resume/abort, or the live run event
+stream reconnecting — detects it and returns you to the login page, remembering the
+page you were on; signing back in lands you there again. Only a genuine
+session-is-gone response from the server triggers this — a transient network problem
+(server briefly unreachable, a dropped connection) instead shows in place as each
+page's own error or connection state, without ending your session.
+
 The app shell — a persistent left sidebar with the `tape-archiver` brand,
 **Dashboard** / **Start new run** / **Tapes** navigation, a **Light/Dark/Auto** theme
 control, your signed-in name/email, and a build-version footer — is present on every
