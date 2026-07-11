@@ -533,18 +533,25 @@ affected tapes for fresh blanks and resumes, or aborts; if neither happens withi
 `library.writeFailureWaitTimeoutSeconds` (default 12 h) the run fails in that defined
 paused state and is reported.
 
-**Resume signals are matched to the pause that is waiting.** Every operator pause — the
-Eject I/O-station pause, the write-path pause, and the optical-burn pause — drains any
-resume signal already buffered *before it dispatches that pause's alert*, then waits. A
-resume buffered before the alert is stale — a double `tapectl resume`, or one that raced
-an auto-resume (the Eject poll can resume on the access bit while a signal is still in
-flight) — and is discarded, so it can never instantly satisfy a later pause. Without this,
-a surplus resume could skip a between-burn-set disc-swap pause and blank a just-verified
-recovery disc. The drain runs before the alert, never at wait entry: a resume the operator
-sends *in response to* this pause's alert is appended after the alert and always survives —
-even if it lands while the control worker is restarting, deploying, or backlogged and so is
-buffered ahead of the workflow task that begins the wait. A buffered *abort* is never
-discarded: aborting is always a safe, reported, no-further-data outcome.
+**Resume and abort signals are matched to the pause that is waiting.** Every operator
+pause — the Eject I/O-station pause, the write-path pause, and the optical-burn pause —
+drains any resume *and abort* signal already buffered *before it dispatches that pause's
+alert*, then waits. A signal buffered before the alert is stale — a double `tapectl
+resume`/`abort`, one that raced an auto-resume (the Eject poll can resume on the access
+bit while a signal is still in flight), or a web-API resume/abort request
+(`POST /api/runs/{runID}/resume`/`abort`) whose non-atomic pause-state check and signal
+send straddled the pause resolving by other means — and is discarded, so it can never
+instantly satisfy a later, unrelated pause. Without this, a surplus resume could skip a
+between-burn-set disc-swap pause and blank a just-verified recovery disc, and a surplus
+abort could silently end a run at a pause the operator never intended to abort. The drain
+runs before the alert, never at wait entry: a resume or abort the operator sends *in
+response to* this pause's alert is appended after the alert and always survives — even if
+it lands while the control worker is restarting, deploying, or backlogged and so is
+buffered ahead of the workflow task that begins the wait. Draining the abort channel does
+not change which pauses *accept* abort: the Eject I/O-station pause's own wait still never
+listens for it (every tape is already safely written by then, so there is nothing left for
+an abort to protect against) — the drain only stops a stale abort from surviving past that
+pause onto a later one.
 
 ## 12. Dry-run and the virtual library
 

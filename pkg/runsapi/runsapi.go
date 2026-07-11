@@ -563,24 +563,18 @@ func (h *handler) abortRun(w http.ResponseWriter, r *http.Request) {
 //
 // This check is NOT atomic with the signal send that follows it — they are
 // two independent Temporal RPCs, so it narrows but does not close the
-// stale-signal hazard workflows/backup's drainStaleResumeSignals doc
+// stale-signal hazard workflows/backup's drainStalePauseSignals doc
 // describes (issues #154/#216): if the pause resolves by other means (a
 // concurrent `tapectl`/browser action, or — for an Eject pause specifically —
 // its own auto-resume, entirely independent of any signal, see
 // waitForIOCleared) in the gap between this check and SignalWorkflow
 // returning, the signal this handler sends can still be delivered late and
-// buffered. For OperatorResumeSignal that is harmless: every pause site
-// drains stale resume signals before its next alert. For
-// OperatorAbortSignal there is currently no equivalent drain — a buffered
-// abort is, by workflows/backup's existing design, left to be consumed by
-// whatever pause next calls a wait-for-operator function, which for this
-// handler's stale-signal case means a LATER, UNRELATED pause on the same
-// run could be silently aborted. This is a known, pre-existing gap in the
-// signal-draining design (unrelated to this handler, and not something a
-// web-API-side check alone can close) — tracked as
-// https://github.com/solidDoWant/tape-archiver/issues/254, which should be
-// resolved by extending drainStaleResumeSignals to also drain abort, not by
-// adding more checks here.
+// buffered. Every pause site drains both stale resume and stale abort
+// signals before its next alert (issue #254), so a signal buffered by this
+// race can resume or abort at most the pause it raced, never leak forward
+// onto a LATER, UNRELATED pause on the same run. Fixing that leak is out of
+// scope for a web-API-side check alone — it belongs in, and is handled by,
+// workflows/backup's drain.
 func (h *handler) signalPausedRun(w http.ResponseWriter, r *http.Request, signalName, verb string, allow func(backup.CurrentPause) error) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
