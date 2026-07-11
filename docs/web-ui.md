@@ -452,7 +452,7 @@ Both containers, the log shipper, and their volumes come down as part of the sam
 start without a real, reachable OIDC provider (see
 [OIDC authentication](configuration.md#oidc-authentication-cmdweb)), so `make web-dev`
 starts one: a small dev-only binary (`cmd/webdevoidc`) wrapping the same real, in-process,
-standards-compliant OpenID Connect implementation (`internal/testutil`) already exercised
+standards-compliant OpenID Connect implementation (`internal/devoidc`) already exercised
 end to end by `pkg/webauth`'s own tests — real discovery, JWKS, and a real
 authorize/token exchange with PKCE, not a mock. This was chosen over running a real
 identity provider (e.g. [Dex](https://dexidp.io/)) in Docker specifically to avoid a new

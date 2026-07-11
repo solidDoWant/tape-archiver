@@ -1,4 +1,4 @@
-package testutil_test
+package devoidc_test
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/internal/devoidc"
 )
 
 // TestNewStandaloneFakeOIDCProvider_realAuthCodeFlow exercises
@@ -24,18 +24,19 @@ import (
 // uses for `make web-dev` — end to end against a real listener: discovery,
 // JWKS, a real PKCE authorize/token round trip, and ID token signature/claim
 // verification. This is the same real-provider behavior
-// NewFakeOIDCProvider/NewFakeOIDCProviderOn already get exercised through by
-// pkg/webauth's tests; this test instead drives the standalone constructor
-// directly (no testing.TB involved in the provider under test) so a future
-// change to the shared buildFakeOIDCProvider construction path cannot silently
-// break the standalone path while the two testing.TB-based ones stay green.
+// internal/testutil's NewFakeOIDCProvider/NewFakeOIDCProviderOn already get
+// exercised through by pkg/webauth's tests; this test instead drives the
+// standalone constructor directly (no testing.TB involved in the provider
+// under test) so a future change to the shared NewUnstarted construction path
+// cannot silently break the standalone path while the two testing.TB-based
+// ones stay green.
 func TestNewStandaloneFakeOIDCProvider_realAuthCodeFlow(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err, "listen")
 
 	issuerURL := "http://" + listener.Addr().String()
 
-	idp, server, err := testutil.NewStandaloneFakeOIDCProvider("dev-client", "dev-secret", issuerURL)
+	idp, server, err := devoidc.NewStandaloneFakeOIDCProvider("dev-client", "dev-secret", issuerURL)
 	require.NoError(t, err, "NewStandaloneFakeOIDCProvider")
 
 	idp.Subject = "dev-operator"
