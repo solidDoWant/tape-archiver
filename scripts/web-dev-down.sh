@@ -114,10 +114,11 @@ stop_web() {
   echo "==> stopping web (pid $pid)..."
   kill -TERM "$pid" 2> /dev/null || true
 
-  # cmd/web's post-signal lifetime has been observed at 25-70s (see
-  # web-dev-up.sh's grace-period comment), so this waits longer than
-  # stop_daemon's 10s before escalating.
-  for _ in $(seq 1 160); do
+  # cmd/web's post-signal lifetime is bounded at roughly its 10s HTTP drain
+  # deadline, normally ~1-2s (issue #270 — see web-dev-up.sh's grace-period
+  # comment), so 30s here is already generous headroom over stop_daemon's
+  # 10s before escalating.
+  for _ in $(seq 1 60); do
     kill -0 "$pid" 2> /dev/null || break
     sleep 0.5
   done

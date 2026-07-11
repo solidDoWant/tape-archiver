@@ -204,10 +204,20 @@ func (p *Provider) WaitForScrape(ctx context.Context) error {
 // METRICS_SCRAPE_WAIT_TIMEOUT (a Go duration string) bounds
 // Provider.WaitForScrape.
 //
+// defaults are caller-supplied Options applied before the env-derived ones,
+// so the environment always wins over them. They exist because the right
+// built-in scrape-wait default differs per binary: a batch worker's
+// end-of-run metrics only exist at exit, so waiting up to
+// DefaultScrapeWaitTimeout for a final scrape is worth it, while a
+// long-running web server loses at most one scrape interval's worth of
+// counter increments and must not hold its SIGTERM drain open for a scrape
+// that may never come (issue #270) — cmd/web passes WithScrapeWaitTimeout(0)
+// here, and METRICS_SCRAPE_WAIT_TIMEOUT still overrides it.
+//
 // The returned shutdown func must be deferred by the caller. It stops the
 // metrics HTTP server with a 10-second deadline and writes any error to
 // stderr.
-func NewFromEnv(defaultAddr string) (*Provider, func(), error) {
+func NewFromEnv(defaultAddr string, defaults ...Option) (*Provider, func(), error) {
 	// LookupEnv distinguishes unset (fall back to defaultAddr) from an explicit
 	// empty value (disable the endpoint), mirroring health.NewFromEnv.
 	addr, set := os.LookupEnv("METRICS_ADDR")
@@ -215,7 +225,9 @@ func NewFromEnv(defaultAddr string) (*Provider, func(), error) {
 		addr = defaultAddr
 	}
 
-	var opts []Option
+	// Caller defaults first; env-derived options are appended after them so
+	// the environment takes precedence (Options apply in order).
+	opts := append([]Option{}, defaults...)
 	if addr != "" {
 		opts = append(opts, WithMetricsAddr(addr))
 	}

@@ -121,16 +121,39 @@ func main() {
 func run(ctx context.Context, getenv func(string) string, ready func(addr string)) error {
 	logging.Setup(getenv("LOG_LEVEL"))
 
+	// Registered before any of the shutdown-stage defers below so it runs
+	// after all of them (defers are LIFO): the very last log line before the
+	// process exits reports the total time spent shutting down. shutdownStart
+	// is only set once an orderly shutdown actually begins, so startup
+	// failures do not log a bogus total.
+	var shutdownStart time.Time
+
+	defer func() {
+		if !shutdownStart.IsZero() {
+			// .String() so the JSON logs carry "1.2s", not a raw
+			// nanosecond integer — these lines exist to be read by a
+			// human attributing a slow exit.
+			slog.Info("web: shutdown complete", "total", time.Since(shutdownStart).Round(time.Millisecond).String())
+		}
+	}()
+
 	assets, err := distFS()
 	if err != nil {
 		return fmt.Errorf("load embedded SPA assets: %w", err)
 	}
 
-	metricsProvider, metricsShutdown, err := metrics.NewFromEnv(defaultMetricsAddr)
+	// Unlike cmd/worker — whose end-of-run metrics only exist at exit, making
+	// a final Prometheus scrape worth waiting up to 60s for — cmd/web is a
+	// long-running server whose counters lose at most one scrape interval of
+	// increments at shutdown. Its scrape-wait default is therefore 0 (skip),
+	// so a SIGTERM drain is not held open waiting for a scrape that may never
+	// come (issue #270). METRICS_SCRAPE_WAIT_TIMEOUT still overrides this for
+	// operators who want the wait back.
+	metricsProvider, metricsShutdown, err := metrics.NewFromEnv(defaultMetricsAddr, metrics.WithScrapeWaitTimeout(0))
 	if err != nil {
 		return fmt.Errorf("set up metrics: %w", err)
 	}
-	defer metricsShutdown()
+	defer logShutdownStage("metrics server shutdown", metricsShutdown)
 
 	// SDK metrics register against the same Prometheus registry as
 	// application metrics so they share one /metrics endpoint. The registerer
@@ -147,7 +170,7 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 
 		return fmt.Errorf("connect to Temporal: %w", err)
 	}
-	defer temporalShutdown()
+	defer logShutdownStage("temporal client shutdown", temporalShutdown)
 
 	// The health server exposes liveness (/healthz, always OK once serving)
 	// and readiness (/readyz, gated on live Temporal connectivity). Readiness
@@ -177,7 +200,7 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 
 	defer func() {
 		if healthShutdownPending {
-			healthShutdown()
+			logShutdownStage("health server shutdown", healthShutdown)
 		}
 	}()
 
@@ -197,7 +220,16 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		return fmt.Errorf("set up OIDC authenticator: %w", err)
 	}
 
-	handler, err := webserver.NewHandler(assets, runsapi.New(temporalClient))
+	// drainCtx is cancelled the moment graceful shutdown begins (see
+	// startDrain() below). runsapi's long-lived SSE streams end promptly when
+	// it is done; without this, a single open browser tab would hold
+	// srv.Shutdown at its full shutdownTimeout deadline and make it return an
+	// error, because Shutdown only waits for connections to go idle and an
+	// active SSE response never does (issue #270).
+	drainCtx, startDrain := context.WithCancel(context.Background())
+	defer startDrain()
+
+	handler, err := webserver.NewHandler(assets, runsapi.New(temporalClient, runsapi.WithDrainContext(drainCtx)))
 	if err != nil {
 		return fmt.Errorf("build web server handler: %w", err)
 	}
@@ -247,33 +279,62 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 
 	slog.Info("web: shutting down")
 
+	shutdownStart = time.Now()
+
+	// End the long-lived SSE streams before draining: srv.Shutdown below only
+	// returns early once every connection is idle, and an open SSE response
+	// never goes idle on its own — see drainCtx's comment above.
+	startDrain()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+	drainStart := time.Now()
+	shutdownErr := srv.Shutdown(shutdownCtx)
+
+	slog.Info("web: shutdown stage complete", "stage", "main server drain", "duration", time.Since(drainStart).Round(time.Millisecond).String())
+
+	if shutdownErr != nil {
+		return fmt.Errorf("shutdown: %w", shutdownErr)
 	}
 
 	// The main listener no longer accepts connections as of the line above;
 	// stop reporting ready now rather than waiting for the deferred shutdown
 	// at the end of run() — see the comment where healthShutdown is set up.
-	healthShutdown()
+	logShutdownStage("health server shutdown", healthShutdown)
 
 	healthShutdownPending = false
 
 	// Give Prometheus a bounded window to collect a final scrape of
 	// end-of-lifecycle metrics before the deferred metricsShutdown() closes
-	// the /metrics server, mirroring cmd/worker/main.go. A non-cancelled
-	// context is used deliberately: the SIGTERM-driven shutdown that got us
-	// here also cancelled ctx, and passing that cancelled context would
-	// defeat the wait. A timeout here is expected and benign, so it is logged
-	// at debug rather than failing. WaitForScrape is a no-op when metrics are
-	// disabled or the configured timeout is non-positive.
-	if err := metricsProvider.WaitForScrape(context.Background()); err != nil {
-		slog.Debug("final metrics scrape wait ended without a scrape", "error", err)
-	}
+	// the /metrics server. Unlike cmd/worker, cmd/web's default for this
+	// window is 0 — skip — so this is a no-op unless the operator set
+	// METRICS_SCRAPE_WAIT_TIMEOUT (see the metrics.NewFromEnv call above). A
+	// non-cancelled context is used deliberately: the SIGTERM-driven shutdown
+	// that got us here also cancelled ctx, and passing that cancelled context
+	// would defeat the wait. A timeout here is expected and benign, so it is
+	// logged at debug rather than failing.
+	logShutdownStage("final metrics scrape wait", func() {
+		if err := metricsProvider.WaitForScrape(context.Background()); err != nil {
+			slog.Debug("final metrics scrape wait ended without a scrape", "error", err)
+		}
+	})
 
 	return nil
+}
+
+// logShutdownStage runs stage and logs its wall-clock duration, so a slow
+// exit after SIGINT/SIGTERM can be attributed to a specific shutdown stage
+// from the process's own logs (issue #270). Used both inline and with defer:
+// `defer logShutdownStage(name, fn)` evaluates only the arguments up front
+// and runs fn when the surrounding function returns.
+func logShutdownStage(name string, stage func()) {
+	start := time.Now()
+
+	stage()
+
+	// .String() for the same human-readability reason as the total in run().
+	slog.Info("web: shutdown stage complete", "stage", name, "duration", time.Since(start).Round(time.Millisecond).String())
 }
 
 // listenAddr resolves the TCP address to listen on: WEB_LISTEN_ADDRESS when

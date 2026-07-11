@@ -138,7 +138,7 @@ chart — it has no `ScaledJob` path.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `logLevel` | `info` | `LOG_LEVEL` for the web server. |
-| `metricsScrapeWaitTimeout` | `""` | `METRICS_SCRAPE_WAIT_TIMEOUT` override (Go duration, e.g. `60s`). Leave empty for `cmd/web`'s own default. |
+| `metricsScrapeWaitTimeout` | `""` | `METRICS_SCRAPE_WAIT_TIMEOUT` override (Go duration, e.g. `60s`). Leave empty for `cmd/web`'s own default of `0s` — no shutdown-time wait for a final scrape, so pods drain within roughly `cmd/web`'s 10-second HTTP shutdown deadline (see `docs/configuration.md`). Setting a positive value delays every pod's SIGTERM exit by up to that long; keep it well under the pod's `terminationGracePeriodSeconds` (chart default 30) or the kubelet will SIGKILL the pod mid-wait. |
 | `metrics.enabled` | `false` | Emit a `PodMonitor` for the always-on `/metrics` endpoint (port 9090). Requires prometheus-operator CRDs. |
 | `oidc.issuerUrl` | `""` (**required**) | OIDC identity provider issuer URL (used for discovery). |
 | `oidc.clientId` | `""` (**required**) | This app's OIDC client ID. |
