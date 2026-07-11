@@ -50,5 +50,14 @@ func (h *handler) generateAgeKeypair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The response body carries a one-time private key: forbid any cache
+	// (browser, proxy, or otherwise) from retaining a copy. POST responses
+	// are not normally cached anyway, but this body uniquely deserves the
+	// explicit directive — a cached copy would silently break the
+	// "displayed once, never retrievable again" contract. Pragma covers
+	// legacy HTTP/1.0 intermediaries.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
 	writeJSON(w, http.StatusOK, AgeKeygenResponse{Recipient: recipient, Identity: identity})
 }

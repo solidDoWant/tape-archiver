@@ -16,7 +16,8 @@ import (
 
 // TestGenerateAgeKeypairShape checks the real endpoint (real age-keygen
 // binary, via the same DI newHandler wires production to) returns a
-// well-formed post-quantum recipient/identity pair.
+// well-formed post-quantum recipient/identity pair, with cache-forbidding
+// headers on the response carrying the one-time private key.
 func TestGenerateAgeKeypairShape(t *testing.T) {
 	t.Parallel()
 
@@ -24,6 +25,11 @@ func TestGenerateAgeKeypairShape(t *testing.T) {
 
 	recorder := postJSON(t, mux, "/api/age/keygen", nil, nil)
 	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	// The one-time private identity must never be retained by any cache —
+	// a cached copy would break "displayed once, never retrievable again".
+	assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-cache", recorder.Header().Get("Pragma"))
 
 	var response AgeKeygenResponse
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))

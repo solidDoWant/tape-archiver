@@ -187,7 +187,14 @@ Switching **Form → JSON** serializes the form's current state into the JSON te
 so the JSON always reflects your latest edits. Switching **JSON → Form** parses the
 current JSON text and populates the form from it; if the text isn't valid JSON, the
 form simply keeps its previous state (and says so) rather than guessing. Nothing is
-discarded on a switch in either direction.
+discarded on the switch itself in either direction — with one loudly-flagged caveat:
+if the JSON carries any of the advanced fields the form has no controls for
+(`feasibilityOverhead`, `library.ioWaitTimeoutSeconds`,
+`library.writeFailureWaitTimeoutSeconds`,
+`delivery.opticalBurn.burnWaitTimeoutSeconds`), the page shows a notice naming
+exactly those fields: they survive only in the JSON text, so continuing to edit in
+Form mode (whose state is what any later serialization or Review uses) drops them.
+Switch back to JSON mode to keep them.
 
 ### Dry-run and submission
 

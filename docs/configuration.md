@@ -807,7 +807,9 @@ written to disk, and never persisted server-side in any form — `cmd/web` has n
 for it to land in, deliberately (SPEC §4.2) — and no endpoint can return it again. The
 web UI's config page (its consumer) shows it exactly once with a copy control and a
 "store this now" warning; once that response is gone (page reload, navigation, a second
-generation), the identity is unrecoverable through the app. A keypair-generation
+generation), the identity is unrecoverable through the app. The response carries
+`Cache-Control: no-store` (and `Pragma: no-cache`) so no browser or intermediary cache
+ever retains a copy. A keypair-generation
 failure (e.g. the `age-keygen` binary missing from the image) is `500` with the usual
 `{"error": "..."}` body — the error text never contains key material. Like every
 `/api/*` route, an unauthenticated request is `401`.

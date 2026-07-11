@@ -1,7 +1,14 @@
 import { useState } from 'react'
 import { apiFetch, ApiError, describeNetworkError } from './api'
 import { useActiveRun } from './activeRun'
-import { buildConfig, configToFormState, defaultFormState, type FormState, type RunConfig } from './configModel'
+import {
+  buildConfig,
+  configToFormState,
+  defaultFormState,
+  unmodeledFields,
+  type FormState,
+  type RunConfig,
+} from './configModel'
 import { fetchConfigSchema, validateAgainstSchema, type ValidationIssue } from './configSchema'
 import ConfigForm from './ConfigForm'
 import ConfigReview from './ConfigReview'
@@ -58,6 +65,11 @@ function segmentButtonClass(active: boolean): string {
 // fields) — either way nothing is silently discarded: the operator can
 // always switch back to see what they last had in the other mode's own
 // state, since neither mode's state is cleared by switching away from it.
+// The one asymmetry is called out loudly rather than papered over: the form
+// has no controls for a few advanced fields (configModel.ts's
+// unmodeledFields — feasibilityOverhead and the operator-wait timeout
+// overrides), so a JSON → Form switch of a config carrying one shows a
+// notice naming exactly which fields a continued Form-mode edit would drop.
 //
 // AC5 (a run already in progress blocks the whole page, not just submit) is
 // answered here by the same useActiveRun one-shot check the sidebar already
@@ -90,8 +102,22 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
         throw new Error('not a config object')
       }
 
-      setForm(configToFormState(parsed as RunConfig))
-      setModeSwitchNotice('')
+      const config = parsed as RunConfig
+
+      setForm(configToFormState(config))
+
+      // The form has no controls for a few advanced fields, so a config
+      // carrying them survives only as long as the JSON text itself:
+      // continuing in Form mode (whose next Form → JSON switch or Review
+      // re-serializes from form state) drops them. Say so by name up
+      // front rather than losing them silently.
+      const dropped = unmodeledFields(config)
+
+      setModeSwitchNotice(
+        dropped.length > 0
+          ? `The form has no controls for ${dropped.join(', ')} — continuing in Form mode drops ${dropped.length === 1 ? 'this field' : 'these fields'} (switch back to JSON mode to keep ${dropped.length === 1 ? 'it' : 'them'}).`
+          : '',
+      )
     } catch {
       setModeSwitchNotice(
         'The current JSON could not be loaded into the form (it is not valid JSON), so the form keeps its last state.',

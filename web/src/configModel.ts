@@ -303,11 +303,43 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
   return base
 }
 
+// unmodeledFields lists (as dotted paths) the fields present in config that
+// Form mode has no controls for and configToFormState therefore drops —
+// the advanced tuning knobs this file's doc comment names. ConfigPage's
+// JSON → Form switch calls this to warn the operator exactly what a
+// continued Form-mode edit would silently lose (the values survive only for
+// as long as the JSON text itself is untouched); kept adjacent to
+// configToFormState so a future Form-mode control for one of these fields
+// is naturally removed from both places together.
+export function unmodeledFields(config: RunConfig): string[] {
+  const dropped: string[] = []
+
+  if (config.feasibilityOverhead !== undefined) {
+    dropped.push('feasibilityOverhead')
+  }
+
+  if (config.library?.ioWaitTimeoutSeconds !== undefined) {
+    dropped.push('library.ioWaitTimeoutSeconds')
+  }
+
+  if (config.library?.writeFailureWaitTimeoutSeconds !== undefined) {
+    dropped.push('library.writeFailureWaitTimeoutSeconds')
+  }
+
+  if (config.delivery?.opticalBurn?.burnWaitTimeoutSeconds !== undefined) {
+    dropped.push('delivery.opticalBurn.burnWaitTimeoutSeconds')
+  }
+
+  return dropped
+}
+
 // configToFormState is buildConfig's inverse: a best-effort reconstruction
 // of Form-mode state from an arbitrary schema-shaped config (e.g. one
 // parsed from JSON-mode text), used when the operator switches from JSON
 // mode into Form mode (ConfigPage.tsx's mode toggle — see its doc comment
-// for the switch's documented semantics). Every field has a safe fallback,
+// for the switch's documented semantics). Fields Form mode has no controls
+// for are dropped (unmodeledFields above enumerates them; ConfigPage warns
+// the operator at switch time). Every field has a safe fallback,
 // so this never throws: a tapeCapacityBytes with no exact match in
 // ltoGenerations falls back to defaultLtoGeneration (Form mode's <select>
 // can only ever choose one of that fixed table's values — an operator

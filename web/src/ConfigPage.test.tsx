@@ -136,6 +136,61 @@ describe('ConfigPage', () => {
     expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('bulk-pool-01/from-json')
   })
 
+  it('names the fields Form mode would drop when switching JSON with advanced-only fields to Form mode', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
+
+    const config = {
+      sources: [{ zfsPath: { name: 'bulk-pool-01/advanced' } }],
+      copies: 2,
+      feasibilityOverhead: 1.1,
+      library: {
+        changer: '/dev/sch0',
+        drives: ['/dev/nst0'],
+        blankSlots: [],
+        tapeCapacityBytes: 2500000000000,
+        ioWaitTimeoutSeconds: 3600,
+      },
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
+      delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
+    }
+
+    fireEvent.change(screen.getByLabelText('Run config (JSON)'), { target: { value: JSON.stringify(config) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Form' }))
+
+    // The form still loads (the modeled fields all populate)…
+    expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('bulk-pool-01/advanced')
+
+    // …but the notice names exactly what a continued Form-mode edit drops.
+    const notice = screen.getByText(/the form has no controls for/i)
+    expect(notice).toHaveTextContent('feasibilityOverhead')
+    expect(notice).toHaveTextContent('library.ioWaitTimeoutSeconds')
+  })
+
+  it('shows no dropped-field notice when the JSON carries only form-modeled fields', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
+
+    const config = {
+      sources: [{ zfsPath: { name: 'bulk-pool-01/plain' } }],
+      copies: 2,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
+      delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
+    }
+
+    fireEvent.change(screen.getByLabelText('Run config (JSON)'), { target: { value: JSON.stringify(config) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Form' }))
+
+    expect(screen.queryByText(/the form has no controls for/i)).not.toBeInTheDocument()
+  })
+
   it('keeps the form unchanged and shows a notice when switching from malformed JSON to Form mode', async () => {
     renderPage()
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))

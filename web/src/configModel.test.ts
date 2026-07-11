@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { buildConfig, configToFormState, defaultFormState, newSourceFormState, type RunConfig } from './configModel'
+import {
+  buildConfig,
+  configToFormState,
+  defaultFormState,
+  newSourceFormState,
+  unmodeledFields,
+  type RunConfig,
+} from './configModel'
 
 describe('buildConfig', () => {
   it('builds a schema-shaped config from the default form state', () => {
@@ -164,5 +171,53 @@ describe('configToFormState', () => {
 
     expect(() => configToFormState(config)).not.toThrow()
     expect(configToFormState(config).opticalBurnEnabled).toBe(false)
+  })
+})
+
+describe('unmodeledFields', () => {
+  const baseConfig: RunConfig = {
+    sources: [{ zfsPath: { name: 'pool/data' } }],
+    copies: 2,
+    library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
+    redundancy: { targetPercentage: 10, sliceSizeBytes: 1024 },
+    encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
+    delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
+  }
+
+  it('returns nothing for a config with only form-modeled fields', () => {
+    expect(unmodeledFields(baseConfig)).toEqual([])
+  })
+
+  it('names every advanced-only field present, as a dotted path', () => {
+    const config: RunConfig = {
+      ...baseConfig,
+      feasibilityOverhead: 1.1,
+      library: { ...baseConfig.library, ioWaitTimeoutSeconds: 3600, writeFailureWaitTimeoutSeconds: 7200 },
+      delivery: {
+        ...baseConfig.delivery,
+        opticalBurn: { drives: ['/dev/sr0'], copies: 2, burnWaitTimeoutSeconds: 1800 },
+      },
+    }
+
+    expect(unmodeledFields(config)).toEqual([
+      'feasibilityOverhead',
+      'library.ioWaitTimeoutSeconds',
+      'library.writeFailureWaitTimeoutSeconds',
+      'delivery.opticalBurn.burnWaitTimeoutSeconds',
+    ])
+  })
+
+  it('exactly covers what configToFormState drops: re-building from the mapped form restores every other field', () => {
+    // The invariant the ConfigPage notice relies on: for a config with none
+    // of the unmodeled fields, JSON -> Form -> JSON round-trips losslessly
+    // (modulo defaulted booleans buildConfig always emits explicitly).
+    const roundTripped = buildConfig(configToFormState(baseConfig))
+
+    expect(roundTripped.feasibilityOverhead).toBeUndefined()
+    expect(roundTripped.sources[0].zfsPath).toEqual({ name: 'pool/data' })
+    expect(roundTripped.copies).toBe(2)
+    expect(roundTripped.library.tapeCapacityBytes).toBe(2_500_000_000_000)
+    expect(roundTripped.encryption).toEqual(baseConfig.encryption)
+    expect(roundTripped.delivery.webhookUrl).toBe(baseConfig.delivery.webhookUrl)
   })
 })
