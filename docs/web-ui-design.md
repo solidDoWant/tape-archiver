@@ -327,3 +327,50 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
 - 2026-07-11 (#279): the config page's blocked state (run already active) reuses
   `useActiveRun`'s one-shot `GET /api/runs` check (issue #272's sidebar mechanism) —
   still not a live subscription; the server-side 409 remains the authoritative guard.
+- 2026-07-11 (#281): the epic's consolidated, batched live-verification pass — the
+  first time every redesigned page (#272, #276–#279) ran together against a real
+  `make web-dev` stack — happened here, since it depends on all of them existing
+  together (this issue's own technical context). Drove the real UI end to end
+  (login, dashboard, Tapes, the config page's Form and Review steps including a real
+  `POST /api/age/keygen` round trip, and a run detail page's phase rail/log
+  panel/drive-metrics view, in both themes and at a 375px viewport) with headless
+  Chromium (`playwright-core`, not `@playwright/test` — a driving script, not the
+  committed e2e suite, since the goal was broad manual coverage rather than a fixed
+  set of assertions) and captured every screenshot below from that real run, never a
+  mockup. Two real defects surfaced and were fixed as part of this pass (see below);
+  no other behavioral defects were found in the redesigned pages themselves — every
+  card/panel/badge rendered exactly as its own issue's design log describes.
+- 2026-07-11 (#281): `web/e2e/submit-monitor-history.spec.ts` (updated for the
+  redesigned UI by #279, per that issue's technical context) had never actually been
+  run end to end before this issue. Running it for the first time surfaced that it
+  was stale relative to #277's phase-rail redesign: it looked for a
+  `<dt>Status</dt>`/`<dt>Last completed phase</dt>` `<dl>` pair and a literal "Run
+  finished." string, none of which exist in the redesigned `RunOverview.tsx` (which
+  renders a status hero `<h2>` like "Backup completed" and a plain "Last completed
+  phase: X" paragraph instead — CLAUDE.md's rule is fix the code the test is
+  wrong about, not the other way around here, since the *app* markup is what #277
+  intentionally shipped; the *test* was simply never updated to match it). Fixed in
+  place, plus added phase-rail navigation and log-panel coverage the file didn't
+  previously exercise. A second spec,
+  `web/e2e/config-form-and-tapes.spec.ts`, was added for the two AC4 surfaces the
+  first file doesn't cover: submitting via the Form-mode config builder (including
+  the real age-keygen round trip) and the Tapes page.
+- 2026-07-11 (#281): the operator-in-the-loop pause screenshot is real, not staged —
+  the live-verification pass's several sequential dry-runs against one long-lived
+  `make web-dev` session organically filled the dev mhvtl stack's 3-slot I/O
+  export station (each dry-run loads a tape and never has anything actually empty
+  it, since nothing in dev tooling simulates an operator physically removing
+  tapes), so a later run's Eject phase genuinely paused. Used that rather than
+  staging a synthetic failure: confirmed `PauseActions.tsx` (unmodified since
+  earlier issues) still renders correctly in the redesigned **Run overview** view,
+  and that clicking **Resume** round-trips a real `OperatorResumeSignal` through
+  the server and back — it correctly re-paused with the same reason afterward,
+  since the underlying I/O station genuinely was not cleared, exactly the
+  behavior `docs/web-ui.md` documents ("sending it before that just re-hits the
+  same failure"), not a defect. **Abort** is confirmed absent for this pause kind,
+  also per spec. The three pre-redesign screenshots this issue's predecessor
+  issues left in place as placeholders (`web-ui-submit-*.png`,
+  `web-ui-history-*.png`, `web-ui-run-detail-live.png`,
+  `web-ui-run-detail-paused-*.png`) are deleted (the paused ones' filenames are
+  reused for the new real screenshots); every page `docs/web-ui.md` embeds a
+  screenshot for now has one captured from the redesigned UI.

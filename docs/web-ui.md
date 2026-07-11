@@ -59,16 +59,12 @@ default) follows your OS/browser's light/dark preference, including live changes
 mid-session.
 
 Navigating to a URL that doesn't exist (a mistyped path, a stale bookmark) shows a
-404 page inside the same shell, with a way back to the dashboard — never a blank page.
-
-The screenshots below predate the issue #272 shell redesign (they show the old
-header-based shell); they will be refreshed as the redesigned pages land
-(epic #271's documentation pass) — the [Dashboard](#dashboard) screenshots specifically
-are refreshed by issue #281, once every redesigned page has landed:
+404 page inside the same shell, with a way back to the dashboard — never a blank page:
 
 | Light | Dark |
 | --- | --- |
-| ![Submit form, light mode](images/web-ui-submit-light.png) | ![Submit form, dark mode](images/web-ui-submit-dark.png) |
+| ![Login page, light mode](images/web-ui-login-light.png) | ![Login page, dark mode](images/web-ui-login-dark.png) |
+| ![404 page, light mode](images/web-ui-404-light.png) | ![404 page, dark mode](images/web-ui-404-dark.png) |
 
 ## Dashboard
 
@@ -118,6 +114,10 @@ webhook URL is a credential), and the encryption recipient(s), all read from the
 current (or, once idle, most recently submitted) run's own configuration — never
 hardcoded. A value that isn't set in that config simply has no row, rather than a blank
 or placeholder one.
+
+| Light | Dark |
+| --- | --- |
+| ![Dashboard, light mode](images/web-ui-dashboard-light.png) | ![Dashboard, dark mode](images/web-ui-dashboard-dark.png) |
 
 ## Starting a new run (the config page)
 
@@ -170,6 +170,11 @@ blocks the transition and is listed by field path (e.g.
 which shows a summary (mode, sources, copies, redundancy, encryption, recovery discs),
 a note that blank-tape checking happens at write time, and the final run-config JSON
 exactly as it will be submitted. Submit from there, or go **← Back to edit**.
+
+| Light | Dark |
+| --- | --- |
+| ![Config page, Form mode, light mode](images/web-ui-config-form-light.png) | ![Config page, Form mode, dark mode](images/web-ui-config-form-dark.png) |
+| ![Config page, Review step, light mode](images/web-ui-config-review-light.png) | ![Config page, Review step, dark mode](images/web-ui-config-review-dark.png) |
 
 ### JSON mode (paste / upload)
 
@@ -233,11 +238,12 @@ from it too), so the moment something changes the page reflects it within a coup
 seconds. If the underlying connection drops, the page shows a "connection lost" notice
 and keeps retrying automatically.
 
-The screenshots below predate the issue #277 phase-rail redesign (they show the old
-single-pane status view); they will be refreshed once the redesigned pages' screenshot
-pass lands (issue #281):
+| Light | Dark |
+| --- | --- |
+| ![A run's live detail view, light mode](images/web-ui-run-detail-light.png) | ![A run's live detail view, dark mode](images/web-ui-run-detail-dark.png) |
+| ![A completed run's read-only detail view, light mode](images/web-ui-run-detail-completed-light.png) | ![A completed run's read-only detail view, dark mode](images/web-ui-run-detail-completed-dark.png) |
 
-![A run's live detail view](images/web-ui-run-detail-live.png)
+![The Write phase's own view, with live per-drive metrics and its log panel](images/web-ui-run-detail-write-light.png)
 
 Reach a run's detail page either via the **View run** link right after submitting, or by
 clicking through from the [dashboard's runs table](#dashboard).
@@ -269,11 +275,16 @@ failure, and the Burn phase on a burn/verify failure or a between-set disc swap.
 detail page surfaces an active pause the moment it starts (via the same live stream
 described above), on the **Run overview** view, with enough context to act on it — the
 failing phase, affected tape barcodes, which storage slots to reload with fresh blanks,
-or which burner devices need a fresh disc, depending on the pause kind:
+or which burner devices need a fresh disc, depending on the pause kind (`PauseActions.tsx`
+— unchanged by the run-detail redesign, just re-homed into the new **Run overview** view).
+The screenshots below are from a real Eject pause (a `make web-dev` dev stack's mhvtl
+import/export station genuinely filling up across several dry-runs sharing one session
+— issue #281's live-verification pass hit this organically, and used it rather than
+staging one artificially):
 
 | Light | Dark |
 | --- | --- |
-| ![A paused run showing Resume and Abort, light mode](images/web-ui-run-detail-paused-light.png) | ![A paused run showing Resume and Abort, dark mode](images/web-ui-run-detail-paused-dark.png) |
+| ![A paused run showing Resume, light mode](images/web-ui-run-detail-paused-light.png) | ![A paused run showing Resume, dark mode](images/web-ui-run-detail-paused-dark.png) |
 
 **Resume** and **Abort** send the same `OperatorResumeSignal` / `OperatorAbortSignal`
 that [`tapectl resume`](tapectl.md#tapectl-resume) and
@@ -327,6 +338,10 @@ run's tapes still list normally.
 If no run still within Temporal's retention has written a tape yet, the page shows an
 empty-state message instead of an empty table.
 
+| Light | Dark |
+| --- | --- |
+| ![Tapes page, light mode](images/web-ui-tapes-light.png) | ![Tapes page, dark mode](images/web-ui-tapes-dark.png) |
+
 ## Local development
 
 Everything above assumes a real deployment (a real Temporal cluster, a real identity
@@ -363,9 +378,8 @@ $ make web-dev
 
    VictoriaLogs:    http://127.0.0.1:9428
    VictoriaMetrics: http://127.0.0.1:8428
-   (cmd/web doesn't render log/metric panels from these yet — issues #274/#275 —
-   but both are already ingesting/scraping the dev workers; query them directly
-   at the URLs above in the meantime.)
+   (query these directly, e.g. for LogsQL/PromQL exploration beyond what the
+   run detail page's log and drive-metrics panels already show.)
 
    Ctrl+C (or SIGTERM) stops the whole dev stack: cmd/web shuts down first,
    then the full 'make web-dev-down' teardown runs automatically —
@@ -423,10 +437,13 @@ so they can reach the dev workers' loopback-bound ports directly:
   `*`, and `http://127.0.0.1:8428` respectively). `VICTORIAMETRICS_URL` backs the live
   drive metrics endpoints (issue #275 — see
   [Live drive metrics (VictoriaMetrics)](configuration.md#live-drive-metrics-victoriametrics)),
-  wired into a run's Write phase view. `VICTORIALOGS_URL`/`VICTORIALOGS_STREAM_FILTER`
-  are not read yet (issue #274); in the meantime, query VictoriaLogs directly (`curl`
-  against the URL the startup banner prints, e.g. `.../select/logsql/query`) to see
-  real dev-worker log data.
+  wired into a run's Write phase view (see [Monitoring a run
+  live](#monitoring-a-run-live)). `VICTORIALOGS_URL`/`VICTORIALOGS_STREAM_FILTER`
+  back the phase-scoped log panels on that same page
+  ([`GET /api/runs/{runID}/logs`](configuration.md#get-apirunsrunidlogs-log-panel-issue-274),
+  issue #274); query VictoriaLogs directly (`curl` against the URL the startup
+  banner prints, e.g. `.../select/logsql/query`) for anything beyond what those
+  panels show.
 
 Both containers, the log shipper, and their volumes come down as part of the same
 `web-dev-down` teardown described above (`make web-dev-observability-up`/
