@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from 'react'
-import SubmitRunForm from './SubmitRunForm'
+import ConfigPage from './ConfigPage'
 import RunDetail from './RunDetail'
 import Dashboard from './Dashboard'
 import TapesPage from './TapesPage'
@@ -169,11 +169,11 @@ function renderRoute(route: Route, navigate: (path: string) => void) {
     case 'dashboard':
       return <Dashboard onStartRun={() => navigate('/submit')} />
     case 'submit':
-      return (
-        <CenteredView>
-          <SubmitRunForm onViewRun={(runId) => navigate(runPath(runId))} />
-        </CenteredView>
-      )
+      // ConfigPage lays out its own full-width max-w-3xl content area
+      // (issue #279 — richer than the other pre-redesign pages' centered
+      // narrow column), so it is not wrapped in CenteredView, matching
+      // TapesPage/NotFoundPage's already-redesigned pattern below.
+      return <ConfigPage onViewRun={(runId) => navigate(runPath(runId))} />
     case 'history':
       // Transient: AuthGate's effect redirects this route to "/" before the
       // next render (see route.ts's doc comment on the "history" variant).

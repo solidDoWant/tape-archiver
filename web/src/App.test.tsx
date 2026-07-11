@@ -147,13 +147,17 @@ describe('App shell (authenticated)', () => {
     })
   })
 
-  it('renders the submit form at "/submit"', async () => {
+  it('renders the config page at "/submit"', async () => {
     await renderAuthenticated()
 
     fireEvent.click(screen.getByRole('link', { name: /start new run/i }))
 
     expect(window.location.pathname).toBe('/submit')
-    expect(screen.getByRole('form', { name: /submit backup run/i })).toBeInTheDocument()
+    // The config page (issue #279) — ConfigPage.test.tsx covers its
+    // behavior in detail; this just proves App wires the route to it.
+    await waitFor(() => {
+      expect(screen.getByRole('group', { name: /config input mode/i })).toBeInTheDocument()
+    })
   })
 
   it('shows the Light/Dark/Auto theme control and applies an explicit Dark choice', async () => {

@@ -286,3 +286,44 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
   live `make web-dev` cycle was run against it — batched into issue #281 alongside the
   other redesigned pages' screenshot pass); `docs/web-ui.md` keeps the pre-redesign
   screenshots with a note, matching the precedent #272 already set for the shell.
+- 2026-07-11 (#279): the config page validates client-side against the *committed*
+  schema, served verbatim by a new `GET /api/config/schema` (a new `schemas` Go
+  package embeds `schemas/run-config.schema.json`), interpreted by a small
+  hand-written JSON-Schema-subset validator (`web/src/configSchema.ts`) covering
+  exactly the draft-2020-12 features the committed schema uses — no ajv-style
+  dependency, matching the hand-rolled-router/hand-drawn-icons precedent. Cross-field
+  "exactly one of" invariants (Source `zfsPath`/`k8s`, Redundancy
+  `targetPercentage`/`fillToCapacity`, K8sRef `name`/`labelSelector`) are not in the
+  committed schema and are not re-implemented client-side: Form mode's single-choice
+  toggles make violating them unrepresentable, and JSON mode defers to the server's
+  `internal/config.Parse` as before.
+- 2026-07-11 (#279): age keygen is server-side (`POST /api/age/keygen` wrapping the
+  new `pkg/agewrap.GenerateIdentity`, `age-keygen -pq` — post-quantum only, per SPEC
+  §7), not client-side WASM: it reuses the exact pinned binary the recovery disc
+  ships. The recipient is re-derived from the generated identity via the existing
+  `RecipientFromIdentity` (`age-keygen -y`), never parsed from keygen's comment
+  output. The identity exists only in the single response; nothing server-side logs
+  or stores it (unit-tested via a captured slog handler), and the UI shows it once
+  with a copy control and warning.
+- 2026-07-11 (#279): the Library section's blank-slot editor is a free-form
+  add/remove list of slot numbers, not the design mock's fixed 44-button slot-chip
+  grid — the mock's grid hardcodes one physical library's layout
+  (`DESIGN_ANALYSIS.md` §6), while the schema's `blankSlots` is an arbitrary
+  `[]integer`. The tape-capacity `select` uses real native capacities (LTO-6
+  **2.5 TB**, correcting the mock's 2.4 TB error, cross-checked against
+  `workflows/backup/report.go`'s generation thresholds), LTO-7 6 / LTO-8 12 /
+  LTO-9 18 TB.
+- 2026-07-11 (#279): mode-switch semantics — Form → JSON always serializes current
+  form state into the textarea; JSON → Form parses the text and populates the form
+  when it parses as an object, otherwise keeps the form's previous state and says so.
+  Neither mode's state is cleared by switching away. Advanced fields with no form
+  control (`feasibilityOverhead`, the three operator-wait timeout overrides) are
+  JSON-mode-only; Form mode omits them so the run gets `internal/config`'s defaults.
+- 2026-07-11 (#279): the Review step's summary shows only client-side-knowable facts
+  (source labels/counts, copies, redundancy policy, recipient count, disc copies) —
+  never a predicted physical-tape count, which only the Pack phase's measured
+  bin-packing can know (`DESIGN_ANALYSIS.md` §5 flags the mock's "6 physical tapes"
+  as a frontend-invented figure).
+- 2026-07-11 (#279): the config page's blocked state (run already active) reuses
+  `useActiveRun`'s one-shot `GET /api/runs` check (issue #272's sidebar mechanism) —
+  still not a live subscription; the server-side 409 remains the authoritative guard.
