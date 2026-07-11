@@ -241,3 +241,48 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
   blank or design-sample placeholder row); no run ever submitted (or a config fetch
   failure, e.g. history aged out of retention) shows an explicit "not reported" state
   instead of the card silently rendering empty.
+- 2026-07-10 (#277): run detail page rebuilt around a phase rail (`PhaseRail.tsx`) +
+  detail pane, replacing the old single-pane `RunDetail.tsx`. `RunDetail.tsx` now does
+  a plain `GET /api/runs/{runID}` *before* opening the SSE stream, purely to
+  distinguish "run does not exist" (404) from a dropped connection — a browser
+  `EventSource` cannot surface a failed connection's HTTP status, the same reasoning
+  `LogPanel.tsx` (#274) already documents for polling instead of SSE. Only once that
+  succeeds does it mount the live view (SSE + `GET /api/runs/{runID}/phases`).
+- 2026-07-10 (#277): phase display order/names are `workflows/backup/workflow.go`'s
+  `backupPhases()` order verbatim (Resolve, Prepare, Pack, `PhaseGeneratePAR2`, Verify,
+  Load, Write, Eject, Report, Burn, Deliver) — the frontend never re-sorts what
+  `GET /api/runs/{runID}/phases` returns. The one display transform: `PhaseGeneratePAR2`'s
+  Go constant value is literally `"Generate PAR2"` (kept stable for history/logging),
+  but the rail/detail pane label it `"PAR2"` per SPEC's terminology
+  (`phaseFormat.ts`'s `phaseLabel()`).
+- 2026-07-10 (#277): `GET /api/runs/{runID}/phases` returning 410 (aged out of
+  Temporal's retention) renders a dedicated "aged out" empty state, distinct from a
+  genuinely not-found run ID (caught earlier, at the existence-check step above); any
+  *other* phases-endpoint failure (an unexpected 404 despite the run existing, a 5xx,
+  a network error) falls back to a basic status view (status/last-completed-phase/
+  timing + pause controls, no phase rail) rather than a broken page — same shape the
+  pre-redesign `RunDetail.tsx` always showed.
+- 2026-07-10 (#277): the phase rail refetches `GET /api/runs/{runID}/phases` on every
+  SSE update/done event (not on a fixed poll interval) — "refresh on SSE updates" per
+  the issue's scope — but only the very first fetch shows a loading state; later
+  refreshes swap in silently so the rail never flickers while a run is progressing.
+- 2026-07-10 (#277): the run-config viewer (`ConfigSummary.tsx`, `GET
+  /api/runs/{runID}/config`) is a sources list + physical-tapes/redundancy stat cards
+  + a collapsible raw-JSON disclosure for everything else (library device paths,
+  encryption recipients, delivery/optical-burn settings) — not a bespoke renderer for
+  every config field. `SubmitRunForm.tsx` is itself still JSON-only pending a later
+  Config-page redesign issue; a fuller structured config viewer belongs there, not here.
+  "Physical tapes" is computed from the Pack phase's own observed `logicalTapes`/
+  `copies` facts (`GET /api/runs/{runID}/phases`), not re-derived from the submitted
+  config, since the *packed* plan is the actually-observed result (SPEC §4.2); it
+  reads as an em dash before Pack completes.
+- 2026-07-10 (#277): `LogPanel.tsx` (#274), `DriveMetricsPanel.tsx` (#275), and
+  `PauseActions.tsx` (#265/sub-issue 5) are reused unmodified, just re-homed into the
+  new layout (per-phase log panels, `DriveMetricsPanel` embedded only in the Write
+  phase's own view, `PauseActions` inside `RunOverview.tsx`'s operator-pause zone) —
+  none of their existing kind-generic pause handling, unavailable-state handling, or
+  terminal/live switching needed to change for the redesign.
+- 2026-07-10 (#277): screenshots for this page are not refreshed in this change (no
+  live `make web-dev` cycle was run against it — batched into issue #281 alongside the
+  other redesigned pages' screenshot pass); `docs/web-ui.md` keeps the pre-redesign
+  screenshots with a note, matching the precedent #272 already set for the shell.

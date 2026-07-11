@@ -182,12 +182,11 @@ function renderRoute(route: Route, navigate: (path: string) => void) {
       // key={route.runId}: forces a fresh RunDetail mount (and thus a fresh
       // EventSource + reset display state) whenever the viewed run changes,
       // rather than RunDetail resetting its own state from inside an effect
-      // on a prop change — see RunDetail's doc comment.
-      return (
-        <CenteredView>
-          <RunDetail key={route.runId} runId={route.runId} />
-        </CenteredView>
-      )
+      // on a prop change — see RunDetail's doc comment. Full-width, like
+      // TapesPage below — the redesigned phase-rail + detail-pane layout
+      // (issue #277) owns its own padding/centering rather than getting it
+      // from CenteredView, which the old single-pane view relied on.
+      return <RunDetail key={route.runId} runId={route.runId} />
     case 'tapes':
       return <TapesPage />
     case 'not-found':

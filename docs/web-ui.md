@@ -147,21 +147,53 @@ conflict error rather than queuing or replacing it.
 
 ## Monitoring a run live
 
-A run's detail page (`/runs/{runID}`) shows its execution status, last completed phase,
-and start/close time, updating in place as the run progresses — no manual reload. This
-is backed by a live server-sent event stream, so the moment the workflow's status or
-phase changes (or a pause starts or clears), the page reflects it within a couple of
-seconds.
+A run's detail page (`/runs/{runID}`) is a phase rail on the left plus a detail pane on
+the right. The rail lists all 11 pipeline phases in the exact order the backup workflow
+runs them (Resolve, Prepare, Pack, PAR2, Verify, Load, Write, Eject, Report, Burn,
+Deliver — SPEC §4.3), each with a status marker (done/active/failed/pending) and its
+elapsed duration; selecting any phase shows that phase's own facts and log lines
+(`GET /api/runs/{runID}/logs?phase=...`), regardless of which phase is currently
+running — useful for reviewing an earlier phase without losing track of where the run
+actually is. **Run overview**, the default view, shows the run's overall status, the
+operator-pause zone (see below), a phase-completion summary, the submitted run
+configuration (sources, redundancy target, and the full config as JSON), and which
+physical tapes/slots this run has loaded so far. The **Write** phase's own view
+additionally shows live per-drive write-rate and reposition figures, so you can watch
+tape streaming health without leaving the page.
+
+All of this updates in place as the run progresses — no manual reload. Status, phase, and
+pause changes are backed by a live server-sent event stream (the phase rail refreshes
+from it too), so the moment something changes the page reflects it within a couple of
+seconds. If the underlying connection drops, the page shows a "connection lost" notice
+and keeps retrying automatically.
+
+The screenshots below predate the issue #277 phase-rail redesign (they show the old
+single-pane status view); they will be refreshed once the redesigned pages' screenshot
+pass lands (issue #281):
 
 ![A run's live detail view](images/web-ui-run-detail-live.png)
 
-If the underlying connection drops, the page shows a "connection lost" notice and keeps
-retrying automatically; once the run reaches a terminal status (completed, failed,
-terminated, or canceled) the page shows a "run finished" notice and stops polling — there
-is nothing further to watch.
-
 Reach a run's detail page either via the **View run** link right after submitting, or by
 clicking through from the [dashboard's runs table](#dashboard).
+
+Once a run reaches a terminal status (completed, failed, terminated, or canceled), its
+detail page renders read-only — a "READ-ONLY" banner marks it, no VictoriaMetrics/live
+hardware polling happens, and the Write phase's drive figures switch from live readings
+to that run's own final recorded write-health per tape (`GET /api/runs/{runID}/tapes`).
+This works the same whether the run just finished while you were watching it, or you
+navigated straight to an already-closed run's page.
+
+Two things can go wrong reaching a run's detail:
+
+- **The run ID doesn't exist at all** — Temporal has no record of it (a mistyped ID, or
+  it was never submitted). The page says so plainly, distinct from the next case.
+- **The run existed, but its phase-by-phase history has aged out of Temporal's retention
+  window.** Temporal still remembers *that* the run happened (so this is distinguishable
+  from "doesn't exist"), but its phases and contents can no longer be reconstructed — the
+  page explains this rather than showing broken or empty phase data. If VictoriaLogs or
+  VictoriaMetrics (rather than Temporal itself) is what's unavailable, only the affected
+  panel (the log view or the drive-metrics view) shows its own "unavailable" state; the
+  rest of the page — phase rail, facts, pause controls — keeps working normally.
 
 ## Acting on an operator-in-the-loop pause
 
@@ -169,9 +201,9 @@ Some backup phases pause and wait for a human before continuing (SPEC §4.3, §1
 Eject phase when the import/export station fills, the tape write path on a load or write
 failure, and the Burn phase on a burn/verify failure or a between-set disc swap. A run's
 detail page surfaces an active pause the moment it starts (via the same live stream
-described above), with enough context to act on it — the failing phase, affected tape
-barcodes, which storage slots to reload with fresh blanks, or which burner devices need
-a fresh disc, depending on the pause kind:
+described above), on the **Run overview** view, with enough context to act on it — the
+failing phase, affected tape barcodes, which storage slots to reload with fresh blanks,
+or which burner devices need a fresh disc, depending on the pause kind:
 
 | Light | Dark |
 | --- | --- |
@@ -189,7 +221,8 @@ are consequential and, once acted on, not undoable:
 - **Abort** ends the run in a defined, reported state with no further tapes written or
   discs burned. It is not offered for an Eject pause: every tape is already safely
   written by the time an Eject pause happens, so there is nothing left for an abort to
-  protect against — the same rule `tapectl abort` follows.
+  protect against — the same rule `tapectl abort` follows. Attempting it anyway (e.g. via
+  a direct API call) is rejected by the server the same way `tapectl abort` is.
 
 If the pause status itself can't be determined right now (e.g. no worker is currently
 polling the workflow), the page shows a clear "pause status unavailable" warning rather
