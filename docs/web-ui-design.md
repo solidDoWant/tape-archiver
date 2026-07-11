@@ -374,3 +374,20 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
   `web-ui-run-detail-paused-*.png`) are deleted (the paused ones' filenames are
   reused for the new real screenshots); every page `docs/web-ui.md` embeds a
   screenshot for now has one captured from the redesigned UI.
+- 2026-07-11 (#285): mid-session 401 handling is client-side and centralized in the
+  SPA's shared fetch helper (`web/src/api.ts`), the one choke point every `/api/*`
+  request already flows through: a 401 response fires a tiny module-level
+  `onSessionExpired` pub-sub, whose sole subscriber (`identity.ts`'s `useIdentity`)
+  flips the identity state to `unauthenticated` — `AuthGate`'s existing effect then
+  routes to `/login?redirect=` exactly as it already did for a 401 at first load,
+  and pkg/webauth's callback already 302s back to that path after sign-in. No new
+  routes, contexts, or server changes. A single 401 is treated as authoritative
+  session loss with no probe/debounce/confirmation step, because pkg/webauth emits
+  401 only for a genuinely absent/invalid session; the flaky-proxy worry maps to
+  network-level failures (fetch rejecting) or non-401 statuses, which deliberately
+  do NOT trigger this path and keep rendering as each component's in-place error.
+  SSE is the one blind spot (EventSource surfaces no HTTP status), so
+  `useRunEvents`'s error handler adds a follow-up `GET /api/me` probe (deduped to
+  one in flight): if the stream died because the session did, the probe's own 401
+  cascades through the same pub-sub; any other probe outcome leaves EventSource's
+  native auto-reconnect alone.

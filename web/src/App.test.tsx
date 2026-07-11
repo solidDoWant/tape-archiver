@@ -395,3 +395,101 @@ describe('App auth gating (unauthenticated)', () => {
     })
   })
 })
+
+// issue #285: a session that expires mid-use (past maxSessionDuration) must
+// route the operator back to the styled login page instead of leaving a
+// dead component-level "unauthorized" error in place — and, on sign-in,
+// land them back where they were. The unauthenticated-first-load flow above
+// (App auth gating) is /api/me itself 401ing at mount; this covers a
+// session that was good at mount and is discovered lost later, by some
+// other in-app fetch (api.ts's apiFetch -> onSessionExpired ->
+// identity.ts's useIdentity -> this same AuthGate redirect effect).
+describe('App auth gating (mid-session 401)', () => {
+  it('routes to the login page, preserving the current path, when an in-app fetch discovers the session is gone', async () => {
+    const fetchMock = await renderAuthenticated()
+
+    await waitFor(() => {
+      expect(screen.getByText('No runs yet')).toBeInTheDocument()
+    })
+
+    // From here on, any /api/tapes call (TapesPage's own fetch, reached via
+    // the sidebar) reports the session is gone — as it would once the
+    // browser's session cookie is past maxSessionDuration — while every
+    // other endpoint keeps behaving as before.
+    fetchMock.mockImplementation((input: string) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url.split('?')[0] === '/api/tapes') {
+        return Promise.resolve(jsonResponse(401, { error: 'unauthorized' }))
+      }
+
+      return Promise.resolve(jsonResponse(200, { runs: [] }))
+    })
+
+    fireEvent.click(screen.getByRole('link', { name: /tapes/i }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /continue with sso/i })).toBeInTheDocument()
+    })
+
+    // Redirected to /login, preserving the page the operator was actually
+    // on (not wherever /api/me was last checked from).
+    expect(window.location.pathname).toBe('/login')
+    expect(window.location.search).toContain('redirect=%2Ftapes')
+
+    // The shell — and any dead component-level "unauthorized" error
+    // TapesPage might otherwise have rendered in place — is gone.
+    expect(screen.queryByRole('navigation', { name: 'Main' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/unauthorized/i)).not.toBeInTheDocument()
+  })
+
+  it('does not treat a non-401 failure (e.g. a flaky proxy hop) as session loss', async () => {
+    const fetchMock = await renderAuthenticated()
+
+    await waitFor(() => {
+      expect(screen.getByText('No runs yet')).toBeInTheDocument()
+    })
+
+    fetchMock.mockImplementation((input: string) => {
+      const url = typeof input === 'string' ? input : String(input)
+
+      if (url.split('?')[0] === '/api/tapes') {
+        return Promise.resolve(jsonResponse(503, { error: 'upstream unavailable' }))
+      }
+
+      return Promise.resolve(jsonResponse(200, { runs: [] }))
+    })
+
+    fireEvent.click(screen.getByRole('link', { name: /tapes/i }))
+
+    // TapesPage.test.tsx covers the component-level error state itself in
+    // detail; this only needs to prove the working session was not evicted
+    // over it — a real 401 is the only thing this app treats as
+    // authoritative session loss (api.ts's apiFetch doc comment).
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /tapes/i })).toBeInTheDocument()
+    })
+    expect(window.location.pathname).toBe('/tapes')
+    expect(screen.queryByRole('button', { name: /continue with sso/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
+  })
+
+  it('lands the operator back on the page they were on once they sign back in', async () => {
+    // The mid-session redirect above leaves the browser at
+    // "/login?redirect=%2Ftapes" — pkg/webauth's OIDC callback (webauth.go)
+    // sets a fresh session cookie and 302s the real browser straight back
+    // to that redirect path server-side (not through the SPA's /login route
+    // at all), so simulate that here as a fresh App mount landing directly
+    // on "/tapes" with a valid session again.
+    window.history.pushState({}, '', '/tapes')
+    stubApi()
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /tapes/i })).toBeInTheDocument()
+    })
+    expect(window.location.pathname).toBe('/tapes')
+    expect(screen.queryByRole('button', { name: /continue with sso/i })).not.toBeInTheDocument()
+  })
+})

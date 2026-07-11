@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { apiFetch } from './api'
+import { apiFetch, onSessionExpired } from './api'
 
 // Identity mirrors pkg/webauth.Identity's JSON shape, as returned by GET
 // /api/me.
@@ -24,6 +24,18 @@ export type IdentityState =
 // page request is served the SPA unconditionally now (see pkg/webauth's
 // package doc comment); this hook is what lets the client decide, from
 // inside the already-loaded app, whether to show the styled login page.
+//
+// Besides the one-shot /api/me check at mount, this also subscribes to
+// api.ts's onSessionExpired for the component's whole lifetime (issue #285):
+// any apiFetch call anywhere in the app that gets back a 401 — a session
+// that expired mid-use, e.g. past maxSessionDuration — flips this straight
+// to "unauthenticated" without a redundant re-check against /api/me (the
+// 401 that triggered it is already authoritative). App.tsx's AuthGate is
+// the sole caller of this hook, and its existing effect already reacts to
+// "unauthenticated" by redirecting to /login?redirect=(current path) — that
+// effect needs no changes for mid-session expiry to reach the login page,
+// since it does not distinguish "unauthenticated" learned at mount from
+// "unauthenticated" learned later via this subscription.
 export function useIdentity(): IdentityState {
   const [state, setState] = useState<IdentityState>({ status: 'loading' })
 
@@ -58,6 +70,12 @@ export function useIdentity(): IdentityState {
     return () => {
       cancelled = true
     }
+  }, [])
+
+  useEffect(() => {
+    return onSessionExpired(() => {
+      setState({ status: 'unauthenticated' })
+    })
   }, [])
 
   return state
