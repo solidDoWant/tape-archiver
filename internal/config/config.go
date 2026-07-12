@@ -40,8 +40,8 @@ const DefaultFeasibilityOverhead = 1.05
 
 // Config fully describes a backup run. It is the single source of truth for a run.
 type Config struct {
-	Sources             []Source   `json:"sources"`
-	Copies              int        `json:"copies"`
+	Sources             []Source   `json:"sources" jsonschema:"minItems=1"`
+	Copies              int        `json:"copies" jsonschema:"minimum=1"`
 	Library             Library    `json:"library"`
 	Redundancy          Redundancy `json:"redundancy"`
 	Encryption          Encryption `json:"encryption"`
@@ -79,8 +79,8 @@ type Source struct {
 // "groupsnapshot.storage.k8s.io/v1alpha1" + "VolumeGroupSnapshot".
 // Exactly one of Name or LabelSelector must be set.
 type K8sRef struct {
-	APIVersion    string `json:"apiVersion"`
-	Kind          string `json:"kind"`
+	APIVersion    string `json:"apiVersion" jsonschema:"minLength=1"`
+	Kind          string `json:"kind" jsonschema:"minLength=1"`
 	Namespace     string `json:"namespace"`
 	Name          string `json:"name,omitempty"`
 	LabelSelector string `json:"labelSelector,omitempty"`
@@ -99,20 +99,20 @@ func (K8sRef) JSONSchemaExtend(schema *jsonschema.Schema) {
 
 // ZFSPathSource is an explicit ZFS snapshot or dataset on the pool.
 type ZFSPathSource struct {
-	Name string `json:"name"`
+	Name string `json:"name" jsonschema:"minLength=1"`
 }
 
 // Library specifies the tape library hardware and the blank tapes to use.
 type Library struct {
-	Changer    string   `json:"changer"`
-	Drives     []string `json:"drives"`
-	BlankSlots []int    `json:"blankSlots"`
+	Changer    string   `json:"changer" jsonschema:"minLength=1"`
+	Drives     []string `json:"drives" jsonschema:"minItems=1"`
+	BlankSlots []int    `json:"blankSlots" jsonschema:"minItems=1"`
 	// TapeCapacityBytes is the native (uncompressed) capacity of one tape, in
 	// bytes (e.g. 2_500_000_000_000 for LTO-6). It is the single-tape ceiling the
 	// Resolve feasibility pre-check tests an archive's estimate against and the
 	// capacity the Pack phase bin-packs into; runs plan against native capacity
 	// with LTO hardware compression disabled (SPEC §4.3).
-	TapeCapacityBytes int64 `json:"tapeCapacityBytes"`
+	TapeCapacityBytes int64 `json:"tapeCapacityBytes" jsonschema:"minimum=1"`
 	// IOWaitTimeoutSeconds bounds how long the Eject phase waits for the operator
 	// to clear the import/export station when it fills before more tapes can be
 	// exported (SPEC §4.3 phase 8). When unset, DefaultIOWaitTimeout applies. It
@@ -163,7 +163,7 @@ func (l Library) EffectiveWriteFailureWaitTimeout() time.Duration {
 type Redundancy struct {
 	TargetPercentage *float64    `json:"targetPercentage,omitempty" jsonschema:"minimum=1,maximum=100,multipleOf=1"`
 	FillToCapacity   *FillConfig `json:"fillToCapacity,omitempty"`
-	SliceSizeBytes   int64       `json:"sliceSizeBytes"`
+	SliceSizeBytes   int64       `json:"sliceSizeBytes" jsonschema:"minimum=1"`
 }
 
 // FillConfig configures fill-to-capacity PAR2 mode, which expands redundancy to
@@ -175,7 +175,7 @@ type FillConfig struct {
 // Encryption specifies the age recipients to encrypt archives to, and the
 // matching private identity escrowed into the run's report and recovery ISO.
 type Encryption struct {
-	Recipients []string `json:"recipients"`
+	Recipients []string `json:"recipients" jsonschema:"minItems=1"`
 	// Identity is the age private identity (AGE-SECRET-KEY-PQ-1…) escrowed into
 	// the PDF report and recovery ISO so the holder of those artifacts can always
 	// decrypt (SPEC §7 key-escrow decision). It is NEVER used to encrypt —
@@ -184,7 +184,7 @@ type Encryption struct {
 	// recipient is among Recipients before embedding it. Because the report and
 	// ISO therefore carry the decryption secret, deliver and store them
 	// accordingly. Required.
-	Identity string `json:"identity"`
+	Identity string `json:"identity" jsonschema:"minLength=1"`
 }
 
 // Delivery specifies how run artifacts are delivered on success.

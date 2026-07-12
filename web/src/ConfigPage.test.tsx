@@ -85,6 +85,10 @@ async function fillMinimalValidForm() {
   fireEvent.change(screen.getByLabelText(/identity \/ private key/i), {
     target: { value: 'AGE-SECRET-KEY-PQ-1EXAMPLE' },
   })
+  // Select a blank slot: library.blankSlots is required and now minItems=1
+  // (issue #321), so a config with no slot selected no longer validates — the
+  // form must not advance to Review without one, exactly the gap this fixes.
+  fireEvent.click(screen.getByRole('button', { name: 'Slot 1' }))
 }
 
 afterEach(() => {
@@ -251,6 +255,29 @@ describe('ConfigPage', () => {
     expect(screen.getByText(/could not be loaded into the form/i)).toBeInTheDocument()
     // Falls back to the default (unmodified) form state.
     expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('')
+  })
+
+  it('blocks Review with a field-named error when a critical field is left empty (issue #321)', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Slot 1' })).toBeInTheDocument())
+
+    // Fill everything a valid run needs EXCEPT select a blank slot, so
+    // library.blankSlots is [] — present but empty, the exact gap this fixes.
+    fireEvent.change(screen.getByPlaceholderText('bulk-pool-01/dataset'), { target: { value: 'bulk-pool-01/photos' } })
+    fireEvent.change(screen.getByPlaceholderText('age1pq1…'), {
+      target: { value: 'age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4' },
+    })
+    fireEvent.change(screen.getByLabelText(/identity \/ private key/i), { target: { value: 'AGE-SECRET-KEY-PQ-1EXAMPLE' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /review →/i }))
+
+    // It must NOT advance to Review; instead it names the offending field.
+    await waitFor(() => {
+      expect(screen.getByText(/does not validate against the run-config schema/i)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/library\.blankSlots: must have at least one item/i)).toBeInTheDocument()
+    expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
   })
 
   it('advances Form mode to Review only once the config validates, then submits and shows success', async () => {

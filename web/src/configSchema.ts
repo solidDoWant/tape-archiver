@@ -10,9 +10,12 @@
 // Schema (2020-12) draft features the committed schema actually uses —
 // object/array/string/integer/number/boolean "type", "properties",
 // "required", "additionalProperties: false", "items", "$ref" (to a
-// "$defs" sibling), "if"/"then" (used once, by K8sRef), and the numeric
-// "multipleOf"/"minimum"/"maximum" keywords — not a general-purpose
-// validator. It deliberately does not pull in a full JSON Schema library
+// "$defs" sibling), "if"/"then" (used once, by K8sRef), the numeric
+// "multipleOf"/"minimum"/"maximum" keywords, and the non-empty
+// "minLength"/"minItems" keywords (issue #321 — the schema declares these on
+// every field internal/config/validate.go requires to be non-empty, since
+// "required" alone only catches a missing key, not a present-but-empty ""/[])
+// — not a general-purpose validator. It deliberately does not pull in a full JSON Schema library
 // (e.g. ajv): the schema's own feature surface is tiny and stable (config
 // regeneration is not expected for this issue), and this codebase already
 // prefers a small hand-rolled implementation over a new dependency for a
@@ -46,6 +49,8 @@ export interface JSONSchema {
   multipleOf?: number
   minimum?: number
   maximum?: number
+  minLength?: number
+  minItems?: number
 }
 
 export interface ValidationIssue {
@@ -148,6 +153,17 @@ function validateValue(
         return
       }
 
+      // minItems: the committed schema uses minItems=1 on every required list
+      // (sources, library.drives, library.blankSlots, encryption.recipients) to
+      // mirror internal/config/validate.go's "at least one … is required" gates —
+      // required only catches a missing key, never a present-but-empty [].
+      if (resolved.minItems !== undefined && value.length < resolved.minItems) {
+        issues.push({
+          path,
+          message: resolved.minItems === 1 ? 'must have at least one item' : `must have at least ${resolved.minItems} items`,
+        })
+      }
+
       if (resolved.items) {
         value.forEach((item, index) => {
           validateValue(resolved.items as JSONSchema, defs, item, `${path}[${index}]`, issues)
@@ -160,6 +176,20 @@ function validateValue(
     case 'string': {
       if (typeof value !== 'string') {
         issues.push({ path, message: 'must be a string' })
+
+        return
+      }
+
+      // minLength: the committed schema uses minLength=1 on every required
+      // non-empty string (library.changer, encryption.identity, a source's
+      // zfsPath.name / k8s.apiVersion / k8s.kind) to mirror
+      // internal/config/validate.go's "must not be empty" gates — required only
+      // catches a missing key, never a present-but-empty "".
+      if (resolved.minLength !== undefined && value.length < resolved.minLength) {
+        issues.push({
+          path,
+          message: resolved.minLength === 1 ? 'must not be empty' : `must be at least ${resolved.minLength} characters`,
+        })
       }
 
       return

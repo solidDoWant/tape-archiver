@@ -71,6 +71,44 @@ describe('validateAgainstSchema', () => {
     expect(issues).toContainEqual({ path: 'sources[1].zfsPath.name', message: 'must be a string' })
   })
 
+  it('reports a present-but-empty required string (minLength=1) — the core issue #321 gap', () => {
+    // library.changer, encryption.identity, and a source's zfsPath.name are all
+    // required AND minLength=1: a present-but-empty "" passes "required" (the key
+    // exists) but must be caught by minLength.
+    const issues = validateAgainstSchema(testRunConfigSchema, {
+      ...validConfig,
+      library: { ...validConfig.library, changer: '' },
+      encryption: { ...validConfig.encryption, identity: '' },
+      sources: [{ zfsPath: { name: '' } }],
+    })
+
+    expect(issues).toContainEqual({ path: 'library.changer', message: 'must not be empty' })
+    expect(issues).toContainEqual({ path: 'encryption.identity', message: 'must not be empty' })
+    expect(issues).toContainEqual({ path: 'sources[0].zfsPath.name', message: 'must not be empty' })
+  })
+
+  it('reports a present-but-empty required array (minItems=1)', () => {
+    // drives / blankSlots / recipients / sources are required AND minItems=1: an
+    // empty [] passes "required" but must be caught by minItems.
+    const issues = validateAgainstSchema(testRunConfigSchema, {
+      ...validConfig,
+      library: { ...validConfig.library, drives: [], blankSlots: [] },
+      encryption: { ...validConfig.encryption, recipients: [] },
+      sources: [],
+    })
+
+    expect(issues).toContainEqual({ path: 'library.drives', message: 'must have at least one item' })
+    expect(issues).toContainEqual({ path: 'library.blankSlots', message: 'must have at least one item' })
+    expect(issues).toContainEqual({ path: 'encryption.recipients', message: 'must have at least one item' })
+    expect(issues).toContainEqual({ path: 'sources', message: 'must have at least one item' })
+  })
+
+  it('reports copies below its minimum (0 is no longer accepted)', () => {
+    const issues = validateAgainstSchema(testRunConfigSchema, { ...validConfig, copies: 0 })
+
+    expect(issues).toContainEqual({ path: 'copies', message: 'must be at least 1' })
+  })
+
   it("applies K8sRef's if/then: name without namespace is reported", () => {
     const issues = validateAgainstSchema(testRunConfigSchema, {
       ...validConfig,
