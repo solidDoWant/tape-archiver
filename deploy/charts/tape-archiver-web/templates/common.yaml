@@ -216,6 +216,15 @@ resolution (deploy/charts/tape-archiver-control-worker/templates/common.yaml).
   {{- $_ := set $env "DELIVERY_WEBHOOK_URL" .Values.config.web.delivery.webhookUrl -}}
 {{- end -}}
 
+{{/* OPTICAL_BURNER_DRIVES: the deploy-owned optical burner device paths the guided
+   config form sources read-only (issue #317, docs/configuration.md), the delivery
+   analogue of LIBRARY_DRIVES above. Optional; omitted when unset (a run that enables
+   optical burn then shows the burner drives "not configured"). Renders as a
+   comma-separated list for cmd/web's splitDeviceList parser. */}}
+{{- if .Values.config.web.delivery.opticalBurnDrives -}}
+  {{- $_ := set $env "OPTICAL_BURNER_DRIVES" (join "," .Values.config.web.delivery.opticalBurnDrives) -}}
+{{- end -}}
+
 {{/* LIBRARY_SLOT_COUNT / LIBRARY_CLEANING_SLOTS / LIBRARY_IO_STATION_SLOTS: the
    deploy-owned physical library topology driving the guided config form's slot-grid
    picker (issue #305, docs/configuration.md). Each is optional and independent; omitted

@@ -12,6 +12,9 @@ const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0', '/dev/nst1'],
   webhookUrl: 'https://discord.com/api/webhooks/1/a',
+  // The deploy-owned optical burner drives (issue #317), shown read-only in the
+  // Delivery section's optical-burn subsection once burning is enabled.
+  opticalBurnDrives: ['/dev/sr0', '/dev/sr1'],
   // A small topology (issue #305): 6 storage slots, slot 5 reserved for cleaning
   // and slot 6 for the I/O station, so the slot-grid picker offers slots 1–4 as
   // selectable blank-tape targets and renders 5–6 non-selectable.
@@ -27,6 +30,7 @@ const emptyDeploy: DeployConfig = {
   changer: '',
   drives: [],
   webhookUrl: '',
+  opticalBurnDrives: [],
   slotCount: 0,
   cleaningSlots: [],
   ioStationSlots: [],
@@ -168,6 +172,32 @@ describe('ConfigForm', () => {
     fireEvent.click(screen.getByLabelText('Enable optical recovery discs'))
 
     expect(screen.getByText(/copies per run/i)).toBeInTheDocument()
+  })
+
+  it('shows the deploy-owned burner drives read-only when optical burn is enabled, with no editable input (issue #317)', () => {
+    render(<Wrapper />)
+
+    // Not shown until burn is enabled.
+    expect(screen.queryByText('/dev/sr0')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('Enable optical recovery discs'))
+
+    // The deploy-owned burner devices are shown read-only, sourced from deploy
+    // config — the operator only controls the on/off toggle and copies per run.
+    expect(screen.getByText('/dev/sr0')).toBeInTheDocument()
+    expect(screen.getByText('/dev/sr1')).toBeInTheDocument()
+    expect(screen.getByText(/from deploy config/i)).toBeInTheDocument()
+
+    // No editable burner-device input (the operator cannot type a device path).
+    expect(screen.queryByPlaceholderText('/dev/sr0')).not.toBeInTheDocument()
+  })
+
+  it('shows a not-configured notice for the burner drives when the deployment set none (issue #317)', () => {
+    render(<Wrapper deploy={emptyDeploy} deployStatus="loaded" />)
+
+    fireEvent.click(screen.getByLabelText('Enable optical recovery discs'))
+
+    expect(screen.getByText(/set OPTICAL_BURNER_DRIVES/)).toBeInTheDocument()
   })
 
   it('inserts a generated age keypair into the recipients list and identity field', async () => {

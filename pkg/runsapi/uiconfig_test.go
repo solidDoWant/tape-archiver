@@ -19,32 +19,35 @@ func TestGetUIConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                   string
-		opts                   []Option
-		expectedBaseURL        string
-		expectedNamespace      string
-		expectedChanger        string
-		expectedDrives         []string
-		expectedWebhook        string
-		expectedSlotCount      int
-		expectedCleaningSlots  []int
-		expectedIOStationSlots []int
+		name                     string
+		opts                     []Option
+		expectedBaseURL          string
+		expectedNamespace        string
+		expectedChanger          string
+		expectedDrives           []string
+		expectedWebhook          string
+		expectedOpticalBurnDrive []string
+		expectedSlotCount        int
+		expectedCleaningSlots    []int
+		expectedIOStationSlots   []int
 	}{
 		{
 			name: "configured",
 			opts: []Option{
 				WithTemporalUI("https://temporal.example.com", "prod"),
 				WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "https://discord.example/webhook"),
+				WithOpticalBurnerDrives([]string{"/dev/sr0", "/dev/sr1"}),
 				WithLibraryTopology(47, []int{45}, []int{46, 47}),
 			},
-			expectedBaseURL:        "https://temporal.example.com",
-			expectedNamespace:      "prod",
-			expectedChanger:        "/dev/sch0",
-			expectedDrives:         []string{"/dev/nst0", "/dev/nst1"},
-			expectedWebhook:        "https://discord.example/webhook",
-			expectedSlotCount:      47,
-			expectedCleaningSlots:  []int{45},
-			expectedIOStationSlots: []int{46, 47},
+			expectedBaseURL:          "https://temporal.example.com",
+			expectedNamespace:        "prod",
+			expectedChanger:          "/dev/sch0",
+			expectedDrives:           []string{"/dev/nst0", "/dev/nst1"},
+			expectedWebhook:          "https://discord.example/webhook",
+			expectedOpticalBurnDrive: []string{"/dev/sr0", "/dev/sr1"},
+			expectedSlotCount:        47,
+			expectedCleaningSlots:    []int{45},
+			expectedIOStationSlots:   []int{46, 47},
 		},
 		{
 			name:              "unconfigured reports empty so the SPA omits the link and surfaces validation",
@@ -57,6 +60,8 @@ func TestGetUIConfig(t *testing.T) {
 			// null.
 			expectedDrives:  []string{},
 			expectedWebhook: "",
+			// Same [] (never null) normalization for the burner drives.
+			expectedOpticalBurnDrive: []string{},
 			// An undeclared topology reports a 0 slot count and empty (not
 			// null) reserved-slot arrays, so the SPA's picker shows the
 			// "not configured" state.
@@ -86,6 +91,7 @@ func TestGetUIConfig(t *testing.T) {
 			assert.Equal(t, test.expectedChanger, decoded.Library.Changer)
 			assert.Equal(t, test.expectedDrives, decoded.Library.Drives)
 			assert.Equal(t, test.expectedWebhook, decoded.Delivery.WebhookURL)
+			assert.Equal(t, test.expectedOpticalBurnDrive, decoded.Delivery.OpticalBurnDrives)
 			assert.Equal(t, test.expectedSlotCount, decoded.Library.SlotCount)
 			assert.Equal(t, test.expectedCleaningSlots, decoded.Library.CleaningSlots)
 			assert.Equal(t, test.expectedIOStationSlots, decoded.Library.IOStationSlots)

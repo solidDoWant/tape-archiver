@@ -33,8 +33,9 @@ type uiConfigResponse struct {
 	// "changer must not be empty" / "at least one drive is required"
 	// validation rather than the SPA guessing a default.
 	Library uiLibraryConfig `json:"library"`
-	// Delivery carries the deployment's fixed delivery targets (issue #304) —
-	// currently just the Discord webhook URL, empty when unconfigured.
+	// Delivery carries the deployment's fixed delivery targets: the Discord
+	// webhook URL (issue #304) and the optical burner device paths (issue #317),
+	// each empty/[] when unconfigured.
 	Delivery uiDeliveryConfig `json:"delivery"`
 }
 
@@ -62,9 +63,14 @@ type uiLibraryConfig struct {
 	IOStationSlots []int `json:"ioStationSlots"`
 }
 
-// uiDeliveryConfig is uiConfigResponse's deploy-owned delivery section.
+// uiDeliveryConfig is uiConfigResponse's deploy-owned delivery section: the
+// Discord webhook URL (issue #304) and the optical burner device paths (issue
+// #317) the guided config form sources read-only. OpticalBurnDrives is [] (never
+// null) when the deployment did not configure any, in which case a run that
+// enables optical burn falls back to internal/config's own validation.
 type uiDeliveryConfig struct {
-	WebhookURL string `json:"webhookUrl"`
+	WebhookURL        string   `json:"webhookUrl"`
+	OpticalBurnDrives []string `json:"opticalBurnDrives"`
 }
 
 // getUIConfig implements GET /api/config/ui — see uiConfigResponse. It reports
@@ -87,6 +93,9 @@ func (h *handler) getUIConfig(w http.ResponseWriter, _ *http.Request) {
 		},
 		Delivery: uiDeliveryConfig{
 			WebhookURL: h.deployWebhookURL,
+			// Same nil-slice normalization as Library.Drives: the SPA maps over
+			// these, so an unconfigured set must be [] rather than null.
+			OpticalBurnDrives: append([]string{}, h.deployOpticalBurnerDrives...),
 		},
 	})
 }

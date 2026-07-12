@@ -265,6 +265,16 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	deployDrives := splitDeviceList(getenv("LIBRARY_DRIVES"))
 	deployWebhookURL := getenv("DELIVERY_WEBHOOK_URL")
 
+	// The deployment's fixed optical burner drives (issue #317), the delivery
+	// analogue of the LIBRARY_DRIVES above: a burner device path is a property
+	// of the host, not a per-run choice, so the operator sets it once here and
+	// only toggles burn on/off and sets the copy count per run. Comma-separated
+	// (e.g. "/dev/sr0,/dev/sr1"); unset simply arrives empty, in which case a
+	// run that enables optical burn falls back to internal/config's own
+	// validation. Enforced server-side only when a submitted run actually
+	// enables optical burn (runsapi.applyDeployConfig).
+	deployOpticalBurnerDrives := splitDeviceList(getenv("OPTICAL_BURNER_DRIVES"))
+
 	// The physical library's topology (issue #305): the storage slot count and
 	// the cleaning / I/O-station slot numbers, from which the guided config form
 	// renders a slot-grid picker bounded to the real library rather than a
@@ -286,6 +296,7 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		runsapi.WithDrainContext(drainCtx),
 		runsapi.WithTemporalUI(temporalUIURL, temporalNamespace),
 		runsapi.WithDeployConfig(deployChanger, deployDrives, deployWebhookURL),
+		runsapi.WithOpticalBurnerDrives(deployOpticalBurnerDrives),
 		runsapi.WithLibraryTopology(deploySlotCount, deployCleaningSlots, deployIOStationSlots),
 	))
 	if err != nil {
