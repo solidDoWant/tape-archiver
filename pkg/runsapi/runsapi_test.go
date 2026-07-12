@@ -22,6 +22,7 @@ import (
 	"go.temporal.io/sdk/converter"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -74,6 +75,11 @@ type fakeTemporalClient struct {
 	executeErr      error
 	executeOptions  client.StartWorkflowOptions
 	executeCaptured bool
+	// executeConfig is the run config actually submitted to ExecuteWorkflow —
+	// the exact document that reaches Temporal, after any server-side deploy
+	// override (applyDeployConfig) and dry-run mhvtl override. Tests assert on
+	// it to prove what the run really used, not just what the client sent.
+	executeConfig *config.Config
 
 	signalErr        error
 	signalCaptured   bool
@@ -112,9 +118,16 @@ func (f *fakeTemporalClient) QueryWorkflow(_ context.Context, _ string, _ string
 	return fakeEncodedValue{value: f.queryResult}, nil
 }
 
-func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
+func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
 	f.executeOptions = options
 	f.executeCaptured = true
+
+	// runsubmit.Submit passes the run config as the sole workflow argument.
+	if len(args) == 1 {
+		if cfg, ok := args[0].(*config.Config); ok {
+			f.executeConfig = cfg
+		}
+	}
 
 	return f.executeRun, f.executeErr
 }
@@ -811,6 +824,102 @@ func TestSubmitRun(t *testing.T) {
 			errAssert(t, decodeAPIError(t, recorder))
 		})
 	}
+
+	// The deploy-owned library devices and Discord webhook (issue #304) are host
+	// properties, not per-run choices: whatever config a client submits, the
+	// server overwrites them with this deployment's values before submit, so no
+	// client — the config page's JSON/paste mode or a raw POST — can target a
+	// changer, drive, or webhook the host does not own. Hiding the Form-mode
+	// inputs (#309) alone did not enforce this; this does.
+	t.Run("deploy config overrides the submitted library devices and webhook", func(t *testing.T) {
+		// A config deliberately naming devices/webhook different from the
+		// deployment's, as an operator could via JSON/paste mode or curl.
+		rogue := []byte(`{"config": {
+		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+		  "copies": 2,
+		  "library": {"changer": "/dev/rogue-sch", "drives": ["/dev/rogue0"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/rogue/rogue"}
+		}}`)
+
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-deploy"}}
+		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "https://discord.com/api/webhooks/deploy/deploy")))
+
+		recorder := postJSON(t, handler, "/api/runs", rogue, nil)
+
+		require.Equal(t, http.StatusCreated, recorder.Code)
+		require.True(t, fake.executeCaptured)
+		require.NotNil(t, fake.executeConfig)
+		assert.Equal(t, "/dev/sch0", fake.executeConfig.Library.Changer)
+		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, fake.executeConfig.Library.Drives)
+		assert.Equal(t, "https://discord.com/api/webhooks/deploy/deploy", fake.executeConfig.Delivery.WebhookURL)
+	})
+
+	// A dry run redirects to mhvtl devices (runsubmit.ApplyDryRun). Deploy config
+	// is real hardware, so its device override must NOT win over mhvtl — a dry
+	// run must never touch real hardware (CLAUDE.md Hardware and Safety). The
+	// deploy override runs first so ApplyDryRun still has the last word here.
+	t.Run("a dry-run's mhvtl override wins over deploy config devices", func(t *testing.T) {
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-dry-deploy"}}
+		handler := newMux(newHandler(fake, mhvtlEnv,
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`, "dryRun": true}`), nil)
+
+		require.Equal(t, http.StatusCreated, recorder.Code)
+		require.NotNil(t, fake.executeConfig)
+		assert.Equal(t, "/dev/sch9", fake.executeConfig.Library.Changer)
+		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, fake.executeConfig.Library.Drives)
+	})
+
+	// A deployment that configures nothing leaves the submitted config's
+	// devices/webhook exactly as the client sent them (today's behavior).
+	t.Run("no deploy config leaves the client's devices and webhook untouched", func(t *testing.T) {
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-plain"}}
+		handler := newMux(newHandler(fake, func(string) string { return "" }))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
+
+		require.Equal(t, http.StatusCreated, recorder.Code)
+		require.NotNil(t, fake.executeConfig)
+		assert.Equal(t, "/dev/sch0", fake.executeConfig.Library.Changer)
+		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, fake.executeConfig.Library.Drives)
+		assert.Equal(t, "https://discord.com/api/webhooks/123/abc", fake.executeConfig.Delivery.WebhookURL)
+	})
+
+	// Only the fields the deployment configured are overridden; the rest are
+	// left to the client, mirroring the per-field "not configured" the Form mode
+	// shows. Here only the changer is deploy-owned.
+	t.Run("only the configured deploy fields are overridden", func(t *testing.T) {
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-partial"}}
+		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithDeployConfig("/dev/sch0", nil, "")))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
+
+		require.Equal(t, http.StatusCreated, recorder.Code)
+		require.NotNil(t, fake.executeConfig)
+		assert.Equal(t, "/dev/sch0", fake.executeConfig.Library.Changer)
+		// drives and webhook were not deploy-configured, so the client's stand.
+		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, fake.executeConfig.Library.Drives)
+		assert.Equal(t, "https://discord.com/api/webhooks/123/abc", fake.executeConfig.Delivery.WebhookURL)
+	})
+
+	// A deployment that misconfigures its devices (here duplicate drive paths)
+	// must fail the submission before Temporal is contacted, not push an invalid
+	// config through the override.
+	t.Run("an invalid deploy override is rejected before Temporal contact", func(t *testing.T) {
+		fake := &fakeTemporalClient{}
+		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst0"}, "")))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
+
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.False(t, fake.executeCaptured)
+	})
 
 	t.Run("a dry-run submission still honors the singleton conflict policy", func(t *testing.T) {
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-dry"}}

@@ -140,8 +140,11 @@ export function newSourceFormState(): SourceFormState {
 // supplied by GET /api/config/ui (uiConfig.ts's deployConfigFrom), not typed
 // into the form. buildConfig fills these into the submitted config so it still
 // carries them (SPEC §4.2 — the run config stays the single source of truth);
-// they are simply not FormState fields. JSON/paste mode, by contrast, is the
-// full-schema escape hatch and can still override them per run.
+// they are simply not FormState fields. This is also enforced server-side: where
+// a deployment configures one of these, cmd/web overwrites it onto every
+// submitted config regardless of mode (pkg/runsapi applyDeployConfig), so JSON /
+// paste mode cannot override a deploy-owned device/webhook either — only a field
+// the deployment left unset can be supplied per run.
 //
 // slotCount/cleaningSlots/ioStationSlots are the physical library topology
 // (issue #305): the storage slot count and the reserved cleaning / I/O-station

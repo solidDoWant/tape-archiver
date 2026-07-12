@@ -21,15 +21,18 @@ function stubApi(overrides: Record<string, { status: number; body: unknown }> = 
     '/api/runs': { status: 200, body: { runs: [] } },
     '/api/config/schema': { status: 200, body: testRunConfigSchema },
     // Deploy-owned library devices + webhook (issue #304): ConfigPage fetches
-    // these once via useUiConfig; Form mode fills them into the submitted
-    // config, so a fully-configured deployment is what lets a Form-mode
-    // submission validate without the operator typing device paths.
+    // these once via useUiConfig; buildConfig fills them into the submitted
+    // config (they are no longer shown in the form), so a fully-configured
+    // deployment is what lets a Form-mode submission validate without the
+    // operator typing device paths. The topology (issue #305) drives the visible
+    // blank-slot picker — its rendered slots are the "deploy config loaded"
+    // signal fillMinimalValidForm waits on.
     '/api/config/ui': {
       status: 200,
       body: {
         temporalUiBaseUrl: '',
         temporalNamespace: '',
-        library: { changer: '/dev/sch0', drives: ['/dev/nst0'] },
+        library: { changer: '/dev/sch0', drives: ['/dev/nst0'], slotCount: 8, cleaningSlots: [], ioStationSlots: [] },
         delivery: { webhookUrl: 'https://discord.com/api/webhooks/deploy/xyz' },
       },
     },
@@ -66,10 +69,12 @@ function renderPage(overrides?: Record<string, { status: number; body: unknown }
 }
 
 async function fillMinimalValidForm() {
-  // Wait for the deploy-owned library devices (issue #304) to load and render
-  // read-only — a Form-mode submission fills changer/drives/webhook from deploy
-  // config, so the config only validates once useUiConfig has resolved.
-  await waitFor(() => expect(screen.getByText('/dev/sch0')).toBeInTheDocument())
+  // Wait for the deploy config to load: buildConfig fills the deploy-owned
+  // changer/drives/webhook (issue #304) into the submitted config, so it only
+  // validates once useUiConfig has resolved. Those values are no longer shown in
+  // the form, so wait on the topology-driven blank-slot picker (issue #305)
+  // rendering its slots — a positive DOM signal that the fetch resolved.
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Slot 1' })).toBeInTheDocument())
 
   fireEvent.change(screen.getByPlaceholderText('bulk-pool-01/dataset'), {
     target: { value: 'bulk-pool-01/photos' },

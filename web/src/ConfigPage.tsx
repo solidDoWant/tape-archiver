@@ -120,7 +120,10 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
       // JSON text itself and are dropped once Form mode re-serializes; (2) the
       // deploy-owned device/webhook fields (deployOwnedFields, issue #304) are
       // replaced by the deployment's own config, since Form mode sources them
-      // from deploy config rather than the JSON.
+      // from deploy config rather than the JSON — and, where this deployment
+      // configures them, the server applies its own values to every submitted
+      // run regardless of mode (pkg/runsapi applyDeployConfig), so JSON / paste
+      // mode is no longer an override for them either.
       const dropped = unmodeledFields(config)
       const deployOwned = deployOwnedFields(config)
 
@@ -134,7 +137,7 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
 
       if (deployOwned.length > 0) {
         notices.push(
-          `Form mode sources ${deployOwned.join(', ')} from this deployment's config, so the ${deployOwned.length === 1 ? 'value' : 'values'} in this JSON ${deployOwned.length === 1 ? 'is' : 'are'} replaced by deploy config (switch back to JSON mode to keep ${deployOwned.length === 1 ? 'it' : 'them'}).`,
+          `Form mode sources ${deployOwned.join(', ')} from this deployment's config, replacing the ${deployOwned.length === 1 ? 'value' : 'values'} in this JSON. Where this deployment configures ${deployOwned.length === 1 ? 'it' : 'them'}, the server applies its own ${deployOwned.length === 1 ? 'value' : 'values'} to every run — JSON / paste mode included.`,
         )
       }
 

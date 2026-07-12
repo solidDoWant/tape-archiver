@@ -399,10 +399,25 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
   #305, extends further — nested under a `library` object so it can). Form mode shows
   them read-only and `buildConfig` fills them into the submitted run config, so the
   config stays the single source of truth (SPEC §4.2) and `internal/config` validation
-  is unchanged; only *where the operator supplies them* moves. No server-side injection:
-  JSON / paste mode is the full-schema escape hatch and can still override them per run
-  (e.g. a one-off drive swap), so a JSON → Form switch that carries device/webhook values
-  shows a notice that Form mode replaces them with deploy config — the same
-  nothing-silently-discarded contract as the advanced-fields (`unmodeledFields`) notice.
-  An unconfigured deployment leaves the field empty and lets the Review step's existing
-  validation report it, rather than the UI inventing a default.
+  is unchanged; only *where the operator supplies them* moves. A JSON → Form switch that
+  carries device/webhook values shows a notice that Form mode replaces them with deploy
+  config — the same nothing-silently-discarded contract as the advanced-fields
+  (`unmodeledFields`) notice. An unconfigured deployment leaves the field empty and lets
+  the Review step's existing validation report it, rather than the UI inventing a default.
+- 2026-07-12 (#304, revised): the original #304 decision left JSON / paste mode as a
+  full-schema escape hatch that could still override the deploy-owned devices/webhook per
+  run, with no server-side injection. That only hid the Form-mode inputs — it did not stop
+  a client (JSON / paste mode, or a direct `POST /api/runs`) from targeting a changer,
+  drive, or webhook the host does not own, which is the whole point of making them
+  deploy-owned. **Revised to enforce server-side:** `pkg/runsapi`'s `submitRun` now calls
+  `applyDeployConfig` to overwrite each configured deploy-owned field onto every submitted
+  run config before it reaches Temporal. The overwrite runs *before* the dry-run mhvtl
+  redirect (`runsubmit.ApplyDryRun`), so a dry run still lands on the virtual library and
+  never touches real hardware; a field the deployment left unset is not overwritten, so it
+  can still be supplied per run (and Review reports the validation error if it is missing).
+  With the server now authoritative, the read-only device/webhook displays the original
+  decision added to Form mode were **removed** — they showed values the operator could not
+  change and that no longer needed confirming in the form, so Form mode now has no control
+  for them at all (only the slot-grid picker, issue #305, remains deploy-driven in the
+  form). The JSON → Form deploy-owned-replacement notice stays, since those fields are
+  still dropped from a config carried into Form mode.

@@ -12,10 +12,14 @@ import { ltoGenerations } from './ltoGenerations'
 export interface ConfigFormProps {
   form: FormState
   setForm: (updater: (previous: FormState) => FormState) => void
-  // deploy carries the deploy-owned library devices and Discord webhook (issue
-  // #304) the Library and Delivery sections render read-only instead of as
-  // per-run inputs; deployStatus drives their loading/unavailable/unconfigured
-  // messaging. Sourced by ConfigPage from GET /api/config/ui (uiConfig.ts).
+  // deploy carries the deploy-owned config the form still needs: the physical
+  // library topology (issue #305) that bounds the blank-slot grid picker.
+  // deployStatus drives the picker's loading/unavailable/unconfigured messaging.
+  // Sourced by ConfigPage from GET /api/config/ui (uiConfig.ts). The library
+  // changer/drive devices and Discord webhook (issue #304) are deploy-owned too
+  // but are NOT shown in the form at all — they are filled into the submitted
+  // config by buildConfig and enforced server-side (pkg/runsapi applyDeployConfig),
+  // so there is no per-run form control for them.
   deploy: DeployConfig
   deployStatus: UiConfigState['status']
 }
@@ -100,12 +104,14 @@ function StringListEditor({
 // membership in the per-run library.blankSlots array — the topology only bounds
 // the choice; which blanks a given run uses is still a per-run decision.
 //
-// The topology is deploy-owned like the changer/drive devices, so this mirrors
-// DeployField's loading/unavailable/unconfigured states: while the config fetch
-// is in flight it shows a loading line, on failure an unavailable notice, and
-// when the deployment declared no topology (slotCount 0) an actionable notice
-// naming the env var to set — with JSON / paste mode as the escape hatch for
-// setting blank slots without a declared topology.
+// The topology is deploy-owned (like the changer/drive devices, which the form
+// no longer shows at all — see ConfigFormProps), so the picker handles the same
+// config-fetch states: while the fetch is in flight it shows a loading line, on
+// failure an unavailable notice, and when the deployment declared no topology
+// (slotCount 0) an actionable notice naming the env var to set — with JSON /
+// paste mode as the escape hatch for setting blank slots without a declared
+// topology. Unlike the devices/webhook, the blank-slot *selection* is a per-run
+// choice, so this stays a form control rather than being dropped.
 function SlotGridEditor({
   status,
   slotCount,
@@ -222,64 +228,6 @@ function SlotGridEditor({
   )
 }
 
-// DeployField renders one deploy-owned value (issue #304) read-only: the
-// library changer/drive devices and Discord webhook are properties of the
-// deployment/host (GET /api/config/ui), not per-run choices, so the operator
-// sees the value that will be used rather than a free-text input they must
-// re-type. It shows a loading state while the config fetch is in flight, an
-// unavailable state if it failed, the value(s) once loaded, or — when the
-// deployment configured nothing — an actionable notice naming the env var to
-// set (or JSON mode as the escape hatch), so an unconfigured deployment reads
-// as a fix-me rather than a silent blank that only fails at Review.
-function DeployField({
-  label,
-  status,
-  values,
-  envHint,
-}: {
-  label: string
-  status: UiConfigState['status']
-  values: string[]
-  envHint: string
-}) {
-  return (
-    <div>
-      <label className={fieldLabelClass}>
-        {label} <span className="text-text-faint">— from deploy config</span>
-      </label>
-
-      {status === 'loading' ? (
-        <p role="status" className="font-mono text-[11px] text-text-faint">
-          Loading deploy config…
-        </p>
-      ) : null}
-
-      {status === 'error' ? (
-        <p className="font-mono text-[11px] text-amber">
-          Deploy config unavailable — could not load {label.toLowerCase()}.
-        </p>
-      ) : null}
-
-      {status === 'loaded' && values.length > 0 ? (
-        <div className="flex flex-col gap-1.5">
-          {values.map((value) => (
-            <div
-              key={value}
-              className="w-full rounded-lg border border-border bg-inset px-2.5 py-2 font-mono text-[12px] text-text-dim break-all"
-            >
-              {value}
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {status === 'loaded' && values.length === 0 ? (
-        <p className="font-mono text-[11px] text-amber">Not configured for this deployment — set {envHint}.</p>
-      ) : null}
-    </div>
-  )
-}
-
 // ConfigForm is the config page's guided Form mode (DESIGN_ANALYSIS.md §2
 // "D. Config"): sources, copies & redundancy, library, encryption, and
 // delivery sections that together build a FormState, converted to a
@@ -290,10 +238,6 @@ function DeployField({
 // config can never carry both halves of a schema "exactly one of" pair —
 // see configModel.ts's buildConfig doc comment.
 function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
-  const deployDrives = deploy.drives.filter((drive) => drive.trim() !== '')
-  const deployChanger = deploy.changer.trim() !== '' ? [deploy.changer] : []
-  const deployWebhook = deploy.webhookUrl.trim() !== '' ? [deploy.webhookUrl] : []
-
   const updateSource = (id: string, patch: Partial<SourceFormState>) => {
     setForm((previous) => ({
       ...previous,
@@ -581,20 +525,6 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
         <div className={sectionTitleClass}>Library</div>
 
         <div className="flex flex-col gap-3">
-          <DeployField
-            label="changer device"
-            status={deployStatus}
-            values={deployChanger}
-            envHint="LIBRARY_CHANGER (or use JSON / paste mode)"
-          />
-
-          <DeployField
-            label="drive devices"
-            status={deployStatus}
-            values={deployDrives}
-            envHint="LIBRARY_DRIVES (or use JSON / paste mode)"
-          />
-
           <div className="w-fit">
             <label className={fieldLabelClass} htmlFor="config-tape-generation">
               tape capacity
@@ -687,14 +617,7 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
       <div className={cardClass}>
         <div className={sectionTitleClass}>Delivery</div>
 
-        <DeployField
-          label="Discord webhook URL"
-          status={deployStatus}
-          values={deployWebhook}
-          envHint="DELIVERY_WEBHOOK_URL (or use JSON / paste mode)"
-        />
-
-        <div className="mt-3.5 flex items-center justify-between">
+        <div className="flex items-center justify-between">
           <div>
             <div className="text-[12.5px] font-medium text-text">Optical recovery discs</div>
             <div className="mt-0.5 font-mono text-[11px] text-text-faint">Burned on the configured burner drives</div>

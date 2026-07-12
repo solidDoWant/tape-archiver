@@ -192,33 +192,29 @@ describe('ConfigForm', () => {
     expect(latest?.recipients).toContain('age1pq1generated')
   })
 
-  it('shows the deploy-owned changer, drives, and webhook read-only, with no editable inputs (issue #304)', () => {
+  it('does not render the deploy-owned changer, drives, or webhook in the form at all (issue #304)', () => {
     render(<Wrapper />)
 
-    // The read-only values from deploy config are shown...
-    expect(screen.getByText('/dev/sch0')).toBeInTheDocument()
-    expect(screen.getByText('/dev/nst0')).toBeInTheDocument()
-    expect(screen.getByText('/dev/nst1')).toBeInTheDocument()
-    expect(screen.getByText('https://discord.com/api/webhooks/1/a')).toBeInTheDocument()
+    // The deploy-owned devices/webhook are enforced server-side and filled into
+    // the submitted config by buildConfig, so the form shows no control — not
+    // even a read-only display — for them: neither the values nor any input.
+    expect(screen.queryByText('/dev/sch0')).not.toBeInTheDocument()
+    expect(screen.queryByText('/dev/nst0')).not.toBeInTheDocument()
+    expect(screen.queryByText('/dev/nst1')).not.toBeInTheDocument()
+    expect(screen.queryByText('https://discord.com/api/webhooks/1/a')).not.toBeInTheDocument()
 
-    // ...and there is no free-text input for any of them (the former
-    // /dev/sch0, /dev/nst0, and webhook placeholders are gone).
+    expect(screen.queryByText(/changer device/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/drive devices/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Discord webhook/i)).not.toBeInTheDocument()
+
     expect(screen.queryByPlaceholderText('/dev/sch0')).not.toBeInTheDocument()
     expect(screen.queryByPlaceholderText('/dev/nst0')).not.toBeInTheDocument()
     expect(screen.queryByPlaceholderText('https://discord.com/api/webhooks/…')).not.toBeInTheDocument()
-  })
 
-  it('names the env var to set when the deployment configured no devices/webhook', () => {
-    render(<Wrapper deploy={emptyDeploy} deployStatus="loaded" />)
-
-    expect(screen.getByText(/set LIBRARY_CHANGER/)).toBeInTheDocument()
-    expect(screen.getByText(/set LIBRARY_DRIVES/)).toBeInTheDocument()
-    expect(screen.getByText(/set DELIVERY_WEBHOOK_URL/)).toBeInTheDocument()
-  })
-
-  it('shows a loading state for the deploy-owned fields while the config fetch is in flight', () => {
-    render(<Wrapper deploy={emptyDeploy} deployStatus="loading" />)
-
-    expect(screen.getAllByText('Loading deploy config…').length).toBeGreaterThan(0)
+    // A deployment that configured none of them likewise shows no device/webhook
+    // env-var hint in the form (only the slot-grid picker keeps its own notice).
+    expect(screen.queryByText(/set LIBRARY_CHANGER/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/set LIBRARY_DRIVES/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/set DELIVERY_WEBHOOK_URL/)).not.toBeInTheDocument()
   })
 })

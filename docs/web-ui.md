@@ -177,17 +177,20 @@ needs (see [`docs/configuration.md`](configuration.md) for what every field mean
 
 **Deploy-owned fields (changer, drives, Discord webhook).** The library changer/drive
 device paths and the Discord webhook URL are properties of the deployment/host, not
-per-run choices, so Form mode does **not** expose them as free-text inputs an operator
-re-types (or mis-types) each run. They come from the deployment's own config
+per-run choices, so Form mode has **no field for them at all** — not even a read-only
+display. They come from the deployment's own config
 (`LIBRARY_CHANGER` / `LIBRARY_DRIVES` / `DELIVERY_WEBHOOK_URL` on `cmd/web`, surfaced by
 `GET /api/config/ui` — see
 [Web UI environment variables](configuration.md#web-ui-environment-variables-cmdweb)),
-are shown read-only, and are filled into the submitted run config so it still carries
-them. A deployment that has not configured one shows that field as "not configured" and
-the Review step reports the matching validation error rather than the UI inventing a
-default. To override a device or webhook for a one-off run (e.g. a temporary drive swap),
-use JSON / paste mode, which is the full-schema escape hatch and submits exactly what you
-give it.
+and are filled into the submitted run config so it still carries them. This is also
+enforced on the server: `cmd/web` overwrites any configured changer/drive/webhook onto
+**every** submitted run config before the run starts, so no submission path — Form mode,
+JSON / paste mode, or a direct `POST /api/runs` — can target a device or webhook the host
+does not own. For a field a deployment has not configured, Form mode has no control to
+fill it, so a Form-mode run leaves it empty and the Review step reports the matching
+validation error rather than the UI inventing a default; only that unset field can be
+supplied per run
+via JSON / paste mode.
 
 **Deploy-owned library topology (slot-grid picker).** The physical library's slot
 layout is likewise a deployment property, so the Library section's blank/write-target

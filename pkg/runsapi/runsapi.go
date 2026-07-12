@@ -608,6 +608,25 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Overwrite the deploy-owned library devices and Discord webhook with this
+	// deployment's own values (issue #304) before submit. Hiding the Form-mode
+	// inputs (#309) only stopped one client path; sourcing the values here —
+	// server-side, over whatever config was submitted — is what actually stops
+	// any client (the config page's JSON/paste mode, or a raw POST) from
+	// targeting a changer, drive, or webhook the host does not own. Runs before
+	// the dry-run block below so a dry run's mhvtl override still wins: a dry run
+	// must never touch real hardware.
+	if applied := h.applyDeployConfig(cfg); applied {
+		// Re-validate: an override replaces already-parsed fields with the
+		// deployment's values, so a deployment that misconfigured them (e.g.
+		// duplicate drive paths) surfaces here rather than reaching Temporal.
+		if err := cfg.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid config after applying deploy-owned devices/webhook: %w", err))
+
+			return
+		}
+	}
+
 	if request.DryRun {
 		// io.Discard: there is no stderr-shaped place to surface the
 		// optical-burn advisory over HTTP; the response already reports
@@ -630,6 +649,40 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/api/runs/"+run.GetRunID())
 	writeJSON(w, http.StatusCreated, SubmitRunResponse{WorkflowID: run.GetID(), RunID: run.GetRunID()})
+}
+
+// applyDeployConfig overwrites cfg's deploy-owned fields — the library
+// changer/drive devices and the Discord webhook URL — with the values this
+// deployment supplied via WithDeployConfig, and reports whether it changed
+// anything. These are properties of the host, not per-run choices (issue #304),
+// so the deployment, not the submitter, is authoritative on them regardless of
+// how the config was built.
+//
+// Each field is overridden only when the deployment configured it, so a
+// deployment that sets none leaves the submitted config untouched (today's
+// behavior), and one that sets some overrides exactly those — mirroring the
+// per-field "not configured" the guided Form mode shows for an unset value.
+// Drives are copied, not aliased, so the shared handler slice can never be
+// mutated through the returned config.
+func (h *handler) applyDeployConfig(cfg *config.Config) bool {
+	changed := false
+
+	if h.deployChanger != "" {
+		cfg.Library.Changer = h.deployChanger
+		changed = true
+	}
+
+	if len(h.deployDrives) > 0 {
+		cfg.Library.Drives = append([]string{}, h.deployDrives...)
+		changed = true
+	}
+
+	if h.deployWebhookURL != "" {
+		cfg.Delivery.WebhookURL = h.deployWebhookURL
+		changed = true
+	}
+
+	return changed
 }
 
 // resumeRun implements POST /api/runs/{runID}/resume: send
