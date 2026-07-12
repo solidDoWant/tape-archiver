@@ -6,6 +6,7 @@ import PhaseDetail from './PhaseDetail'
 import RunOverview from './RunOverview'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 import { useRunEvents, type RunEventDetail } from './runEvents'
+import { headerRuntime, runStatusView, usePublishRunHeader } from './runHeader'
 
 // RunEventDetail's definition lives in runEvents.ts alongside the shared
 // useRunEvents hook (issue #276's dashboard factored the SSE subscription
@@ -233,6 +234,19 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
   // run) — connection stays 'connecting'/'live' briefly in that case, but
   // detail.closeTime is already set from the initial fetch.
   const terminal = Boolean(detail.closeTime) || connection === 'terminal'
+
+  // Publish this run's status + runtime to the app-shell header (App.tsx), which
+  // is the run page's single header — RunDetail renders no title bar of its own.
+  // Live: recomputed from the latest SSE frame each render, and cleared when the
+  // page unmounts (usePublishRunHeader) so other pages' headers stay plain.
+  const pause = detail.currentPause
+  const isPaused = pause.kind !== ''
+  const view = runStatusView(detail.status, isPaused, Boolean(pause.unknown))
+  usePublishRunHeader({
+    statusLabel: view.label,
+    tone: view.tone,
+    runtime: headerRuntime(detail.startTime, detail.closeTime, isPaused, terminal),
+  })
 
   const selectedPhaseIndex = phases.status === 'ready' ? phases.phases.findIndex((phase) => phase.name === selected) : -1
   const selectedPhase = selectedPhaseIndex >= 0 && phases.status === 'ready' ? phases.phases[selectedPhaseIndex] : undefined

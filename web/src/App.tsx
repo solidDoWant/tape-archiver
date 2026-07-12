@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import ConfigPage from './ConfigPage'
 import RunDetail from './RunDetail'
 import Dashboard from './Dashboard'
@@ -10,6 +10,15 @@ import { RouterProvider } from './router'
 import { runPath, sanitizeRedirectPath, useNavigate, useRoute, type Route } from './route'
 import { useTheme, type ThemePreference } from './theme'
 import { useIdentity, type Identity } from './identity'
+import {
+  pillDotClass,
+  pillToneClass,
+  RunHeaderSetContext,
+  RunHeaderStateContext,
+  useRunHeaderInfo,
+  type RunHeaderInfo,
+  type RunHeaderTone,
+} from './runHeader'
 
 // App is the persistent shell for the tape-archiver web UI (issue #272's
 // design-tokens/shell/login/404 foundation): a themed sidebar (Sidebar.tsx)
@@ -130,6 +139,52 @@ interface ShellProps {
   onPreferenceChange: (preference: ThemePreference) => void
 }
 
+// RunHeaderProvider holds the current run's header info (status + runtime),
+// published by RunDetail and read by ShellHeader below — see runHeader.ts. The
+// setter context wraps the state context so a publisher subscribes only to the
+// (stable) setter and never re-renders when the info flows back to the header.
+function RunHeaderProvider({ children }: { children: ReactNode }) {
+  const [info, setInfo] = useState<RunHeaderInfo | null>(null)
+
+  return (
+    <RunHeaderSetContext.Provider value={setInfo}>
+      <RunHeaderStateContext.Provider value={info}>{children}</RunHeaderStateContext.Provider>
+    </RunHeaderSetContext.Provider>
+  )
+}
+
+// RunStatusPill is the header's at-a-glance run status: a tone-coloured dot and
+// label (RUNNING/PAUSED/COMPLETE/FAILED), matching the design mockup's header.
+function RunStatusPill({ label, tone }: { label: string; tone: RunHeaderTone }) {
+  return (
+    <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 ${pillToneClass[tone]}`}>
+      <span className={`h-2 w-2 rounded-full ${pillDotClass[tone]}`} aria-hidden="true" />
+      <span className="font-mono text-[11px] font-semibold tracking-[0.03em]">{label}</span>
+    </div>
+  )
+}
+
+// ShellHeader is the single page-title bar every route shares. For a run it also
+// shows the runtime line and status pill RunDetail published (runHeader.ts) — the
+// header info the design mockup carries and the reason RunDetail renders no title
+// bar of its own; other pages publish nothing, so it stays just the title.
+function ShellHeader({ route }: { route: Route }) {
+  const runInfo = useRunHeaderInfo()
+
+  return (
+    <header className="sticky top-0 z-5 flex items-center gap-3.5 border-b border-border bg-bg/80 px-5 py-4 backdrop-blur-sm sm:px-7">
+      <div className="min-w-0">
+        <div className="text-base font-semibold tracking-tight">{pageTitle(route)}</div>
+        {runInfo?.runtime ? (
+          <div className="mt-0.5 font-mono text-[11px] text-text-faint">{runInfo.runtime}</div>
+        ) : null}
+      </div>
+      <div className="flex-1" />
+      {runInfo ? <RunStatusPill label={runInfo.statusLabel} tone={runInfo.tone} /> : null}
+    </header>
+  )
+}
+
 // Shell renders the sidebar and the current route's view, once AuthGate has
 // confirmed a session exists. Theme state comes from AuthGate (see its
 // comment), not a useTheme() call of its own.
@@ -141,17 +196,17 @@ function Shell({ identity, preference, onPreferenceChange }: ShellProps) {
   // content on narrow viewports (see Sidebar.tsx's own comment) so nothing
   // ever needs horizontal page scrolling.
   return (
-    <div className="flex min-h-screen flex-col bg-bg text-text md:flex-row">
-      <Sidebar identity={identity} preference={preference} onPreferenceChange={onPreferenceChange} />
+    <RunHeaderProvider>
+      <div className="flex min-h-screen flex-col bg-bg text-text md:flex-row">
+        <Sidebar identity={identity} preference={preference} onPreferenceChange={onPreferenceChange} />
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-5 border-b border-border bg-bg/80 px-5 py-4 backdrop-blur-sm sm:px-7">
-          <div className="text-base font-semibold tracking-tight">{pageTitle(route)}</div>
-        </header>
+        <main className="flex min-w-0 flex-1 flex-col">
+          <ShellHeader route={route} />
 
-        <div className="flex flex-1 flex-col overflow-auto">{renderRoute(route, navigate)}</div>
-      </main>
-    </div>
+          <div className="flex flex-1 flex-col overflow-auto">{renderRoute(route, navigate)}</div>
+        </main>
+      </div>
+    </RunHeaderProvider>
   )
 }
 

@@ -256,6 +256,30 @@ describe('App shell (authenticated)', () => {
     expect(screen.queryByRole('form', { name: /submit backup run/i })).not.toBeInTheDocument()
   })
 
+  it('surfaces the run status and runtime in the shell header (design mockup)', async () => {
+    window.history.pushState({}, '', '/runs/run-xyz')
+
+    await renderAuthenticated({
+      '/api/runs/run-xyz': {
+        status: 200,
+        body: {
+          workflowId: 'backup',
+          runId: 'run-xyz',
+          status: 'Completed',
+          startTime: '2026-07-09T12:00:00Z',
+          closeTime: '2026-07-09T17:14:00Z',
+          lastCompletedPhase: 'Deliver',
+          currentPause: { kind: '' },
+        },
+      },
+    })
+
+    // RunDetail publishes its status + runtime to the single shell header once the
+    // run's detail loads — the status pill and runtime line the design mockup shows.
+    expect(await screen.findByText('COMPLETE')).toBeInTheDocument()
+    expect(screen.getByText('ran 5h 14m')).toBeInTheDocument()
+  })
+
   it('navigates from a history row straight to that run detail view', async () => {
     window.history.pushState({}, '', '/history')
 

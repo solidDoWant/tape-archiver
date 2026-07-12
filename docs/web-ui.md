@@ -288,7 +288,10 @@ with a conflict error rather than queuing or replacing it.
 ## Monitoring a run live
 
 A run's detail page (`/runs/{runID}`) is a phase rail on the left plus a detail pane on
-the right. The rail lists all 11 pipeline phases in the exact order the backup workflow
+the right. The page header names the run and, alongside it, shows the run's current
+status (a colour-coded pill — RUNNING, PAUSED, COMPLETE, or FAILED) and its runtime
+("started 2h 41m ago" while running, "paused … in" while paused, "ran 5h 14m" once
+closed); both update live as the run progresses. The rail lists all 11 pipeline phases in the exact order the backup workflow
 runs them (Resolve, Prepare, Pack, PAR2, Verify, Load, Write, Eject, Report, Burn,
 Deliver — SPEC §4.3), each with a status marker (done/active/failed/pending) and its
 elapsed duration; selecting any phase shows that phase's own facts and log lines

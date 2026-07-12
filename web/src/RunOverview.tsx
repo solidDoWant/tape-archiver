@@ -1,42 +1,12 @@
 import type { PhaseInfo, RunEventDetail } from './RunDetail'
 import { formatDuration, phaseLabel } from './phaseFormat'
+import { runStatusView } from './runHeader'
 import PauseActions from './PauseActions'
 import ConfigSummary from './ConfigSummary'
 import DriveMetricsPanel from './DriveMetricsPanel'
 import TapesSection from './TapesSection'
 import { temporalWorkflowUrl, useUiConfig } from './uiConfig'
 import { useReportMessageUrl } from './runDelivery'
-
-function heroCopy(status: string, paused: boolean, pauseUnknown: boolean): { label: string; title: string; badgeClass: string } {
-  // Order matters: a confirmed pause (kind !== '') wins, but a failed pause
-  // query (unknown) must NOT assert "Backup paused" — the run may or may
-  // not be waiting on an operator, and the hero saying PAUSED while
-  // PauseActions right below says "pause status unavailable" would
-  // contradict itself. The hero states the uncertainty instead;
-  // PauseActions renders the full warning for the same state.
-  if (paused) {
-    return { label: 'PAUSED', title: 'Backup paused', badgeClass: 'text-amber' }
-  }
-
-  if (pauseUnknown) {
-    return { label: 'PAUSE STATUS UNKNOWN', title: 'Backup in progress', badgeClass: 'text-amber' }
-  }
-
-  switch (status) {
-    case 'Running':
-      return { label: 'RUNNING', title: 'Backup in progress', badgeClass: 'text-blue' }
-    case 'Completed':
-      return { label: 'COMPLETE', title: 'Backup completed', badgeClass: 'text-green' }
-    case 'Failed':
-    case 'Terminated':
-    case 'TimedOut':
-      return { label: status.toUpperCase(), title: 'Backup failed', badgeClass: 'text-red' }
-    case 'Canceled':
-      return { label: 'CANCELED', title: 'Backup canceled', badgeClass: 'text-text-dim' }
-    default:
-      return { label: status.toUpperCase(), title: status, badgeClass: 'text-text-dim' }
-  }
-}
 
 // factValue looks up one PhaseFact's numeric value from a phase's facts
 // list, parsed from its pre-formatted display text (facts.go's intFact
@@ -75,7 +45,7 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
   const pause = detail.currentPause
   const isPaused = pause.kind !== ''
   const pauseUnknown = Boolean(pause.unknown)
-  const hero = heroCopy(detail.status, isPaused, pauseUnknown)
+  const hero = runStatusView(detail.status, isPaused, pauseUnknown)
 
   const completedCount = phases.filter((phase) => phase.status === 'completed').length
   const failedPhase = phases.find((phase) => phase.status === 'failed')
