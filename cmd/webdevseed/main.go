@@ -88,6 +88,12 @@ func run(ctx context.Context, getenv func(string) string) error {
 
 	source := envOr(getenv, "WEBDEVSEED_SOURCE", defaultSource)
 
+	// WEBDEVSEED_WEBHOOK_URL points seeded runs' report delivery at the local
+	// fake Discord receiver (cmd/webdevdiscord, wired by scripts/web-dev-up.sh)
+	// so the web UI's "Discord report ↗" deep-link renders locally. Unset (any
+	// context other than web-dev) leaves delivery a no-op — see buildSeedConfig.
+	webhookURL := getenv("WEBDEVSEED_WEBHOOK_URL")
+
 	identity, recipient, err := generateKeypair(ctx)
 	if err != nil {
 		return fmt.Errorf("generate sample age keypair: %w", err)
@@ -102,7 +108,7 @@ func run(ctx context.Context, getenv func(string) string) error {
 	for i := range count {
 		slot := slotPoolStart + i%slotPoolSize
 
-		cfg := buildSeedConfig(source, recipient, identity, slot)
+		cfg := buildSeedConfig(source, recipient, identity, slot, webhookURL)
 		if err := runsubmit.ApplyDryRun(cfg, getenv, os.Stdout); err != nil {
 			return fmt.Errorf("apply dry-run override: %w", err)
 		}
@@ -170,12 +176,15 @@ func submitWithRetry(ctx context.Context, temporalClient runsubmit.TemporalClien
 }
 
 // buildSeedConfig builds a config.Config for one sample dry-run: a single ZFS
-// source, one copy, small redundancy slicing, and no delivery webhook (empty
-// WebhookURL is documented pkg/webhook no-op behavior — see
-// pkg/webhook/webhook.go — so seeding never makes a real network call).
-// Library.Changer/Drives are placeholders overwritten unconditionally by
-// runsubmit.ApplyDryRun; only BlankSlots and AllowNonBlankTapes matter here.
-func buildSeedConfig(source, recipient, identity string, slot int) *config.Config {
+// source, one copy, small redundancy slicing, and the given delivery webhook.
+// webhookURL is empty in most contexts (an empty WebhookURL is documented
+// pkg/webhook no-op behavior — see pkg/webhook/webhook.go — so seeding makes no
+// network call); `make web-dev` points it at the local fake Discord receiver
+// (cmd/webdevdiscord) so a seeded run actually delivers its report and the web
+// UI's "Discord report ↗" deep-link renders locally. Library.Changer/Drives are
+// placeholders overwritten unconditionally by runsubmit.ApplyDryRun; only
+// BlankSlots and AllowNonBlankTapes matter here.
+func buildSeedConfig(source, recipient, identity string, slot int, webhookURL string) *config.Config {
 	return &config.Config{
 		Sources: []config.Source{
 			{ZFSPath: &config.ZFSPathSource{Name: source}},
@@ -196,7 +205,9 @@ func buildSeedConfig(source, recipient, identity string, slot int) *config.Confi
 			Recipients: []string{recipient},
 			Identity:   identity,
 		},
-		Delivery: config.Delivery{},
+		Delivery: config.Delivery{
+			WebhookURL: webhookURL,
+		},
 	}
 }
 

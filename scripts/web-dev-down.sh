@@ -139,6 +139,7 @@ stop_daemon webdevseed
 stop_daemon worker-control
 stop_daemon worker-data
 stop_daemon webdevoidc
+stop_daemon webdevdiscord
 
 echo "==> removing $WEB_DEV_STATE_DIR"
 # sudo: worker-data (running as root — see web-dev-up.sh) writes real staging

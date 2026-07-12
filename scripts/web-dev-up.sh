@@ -88,6 +88,19 @@ VICTORIALOGS_URL="${VICTORIALOGS_URL:-http://127.0.0.1:9428}"
 VICTORIALOGS_STREAM_FILTER="${VICTORIALOGS_STREAM_FILTER:-*}"
 VICTORIAMETRICS_URL="${VICTORIAMETRICS_URL:-http://127.0.0.1:8428}"
 
+# Temporal Web UI base: `make temporal-up` (a web-dev prerequisite) serves the
+# dev Temporal UI here, so wiring it as cmd/web's TEMPORAL_UI_URL makes the run
+# overview's "Temporal workflow ↗" deep-link work locally.
+TEMPORAL_UI_URL="${TEMPORAL_UI_URL:-http://127.0.0.1:8233}"
+
+# Fake Discord webhook receiver (cmd/webdevdiscord): stands in for Discord so
+# seeded runs can actually deliver their PDF report and the run overview's
+# "Discord report ↗" deep-link (issue #306) renders locally, instead of the
+# delivery failing against an unreachable placeholder discord.com URL. Both
+# cmd/web (Form-mode display) and the seeder (real delivery) point at DEV_WEBHOOK_URL.
+WEBDEVDISCORD_LISTEN_ADDR="${WEBDEVDISCORD_LISTEN_ADDR:-127.0.0.1:9997}"
+DEV_WEBHOOK_URL="${DEV_WEBHOOK_URL:-http://${WEBDEVDISCORD_LISTEN_ADDR}/webhook/dev}"
+
 # ---------------------------------------------------------------------------
 # Sanity checks
 # ---------------------------------------------------------------------------
@@ -99,7 +112,7 @@ for cmd in age-keygen mkltfs setsid curl docker; do
   }
 done
 
-for bin in web worker webdevoidc webdevseed; do
+for bin in web worker webdevoidc webdevseed webdevdiscord; do
   [ -x "$BIN_DIR/$bin" ] || {
     echo "error: $BIN_DIR/$bin not found — this should have been built as a 'web-dev' prerequisite" >&2
     exit 1
@@ -372,6 +385,18 @@ start_daemon webdevoidc env \
 wait_for_ready webdevoidc ":${OIDC_LISTEN_ADDR##*:}" "/.well-known/openid-configuration"
 
 # ---------------------------------------------------------------------------
+# Fake Discord webhook receiver (report + alert deliveries land here locally)
+# ---------------------------------------------------------------------------
+
+start_daemon webdevdiscord env \
+  WEBDEVDISCORD_LISTEN_ADDR="$WEBDEVDISCORD_LISTEN_ADDR" \
+  "$BIN_DIR/webdevdiscord"
+
+# The webhook path answers GET with the (fake) webhook object, so it doubles as
+# the readiness probe.
+wait_for_ready webdevdiscord ":${WEBDEVDISCORD_LISTEN_ADDR##*:}" "/webhook/dev"
+
+# ---------------------------------------------------------------------------
 # Control + data workers (real cmd/worker, both roles) — needed so seeded (and
 # any ad hoc, browser-submitted) runs actually progress to completion instead
 # of sitting in "Running" forever with no worker polling their task queues.
@@ -432,6 +457,9 @@ start_daemon webdevseed env \
   MHVTL_DRIVE1_DEV="$MHVTL_DRIVE1_DEV" \
   WEBDEVSEED_SOURCE="${WEBDEVSEED_SOURCE:-$TAPE_POOL_DATASET@$TAPE_TEST_SNAPSHOT}" \
   WEBDEVSEED_COUNT="${WEBDEVSEED_COUNT:-3}" \
+  `# Deliver each seeded run's report to the local fake Discord receiver so the` \
+  `# run overview's "Discord report" deep-link renders (issue #313).` \
+  WEBDEVSEED_WEBHOOK_URL="$DEV_WEBHOOK_URL" \
   "$BIN_DIR/webdevseed"
 SEED_LOG="$LOG_DIR/webdevseed.log"
 
@@ -499,17 +527,26 @@ env \
   MHVTL_CHANGER_DEV="$MHVTL_CHANGER_DEV" \
   MHVTL_DRIVE0_DEV="$MHVTL_DRIVE0_DEV" \
   MHVTL_DRIVE1_DEV="$MHVTL_DRIVE1_DEV" \
+  `# Temporal Web UI base so the run overview's "Temporal workflow" deep-link` \
+  `# resolves against the local make-temporal-up UI (issue #306's link, #313).` \
+  TEMPORAL_UI_URL="$TEMPORAL_UI_URL" \
   `# Deploy-owned library devices + webhook the guided config form shows` \
-  `# read-only (issue #304). Point them at the same mhvtl nodes the dry-run` \
-  `# override uses, and a placeholder webhook, so Form mode is pre-filled locally.` \
+  `# read-only (issue #304). Devices point at the same mhvtl nodes the dry-run` \
+  `# override uses; the webhook points at the local fake Discord receiver` \
+  `# (cmd/webdevdiscord) — the same URL the seeder delivers to — so Form mode` \
+  `# is pre-filled and the delivered-report deep-link resolves locally.` \
   LIBRARY_CHANGER="$MHVTL_CHANGER_DEV" \
   LIBRARY_DRIVES="$MHVTL_DRIVE0_DEV,$MHVTL_DRIVE1_DEV" \
-  DELIVERY_WEBHOOK_URL="https://discord.com/api/webhooks/000/dev-webhook" \
+  DELIVERY_WEBHOOK_URL="$DEV_WEBHOOK_URL" \
   `# Deploy-owned library topology driving the slot-grid picker (issue #305).` \
   `# The mhvtl dev library (scripts/mhvtl-up.sh) has 47 storage slots and 3 MAPs;` \
-  `# the MAPs are a separate I/O-station address space, so only the storage count` \
-  `# is declared here and Form mode renders a real 47-slot grid locally.` \
+  `# the MAPs are a separate I/O-station address space that does not map into the` \
+  `# 1..47 grid, so the cleaning/I/O-station slots below are illustrative dev` \
+  `# values (high slots, away from the seeder's 20-22 pool) purely so Form mode` \
+  `# demonstrates the picker's non-selectable cells locally.` \
   LIBRARY_SLOT_COUNT="47" \
+  LIBRARY_CLEANING_SLOTS="47" \
+  LIBRARY_IO_STATION_SLOTS="45,46" \
   VICTORIALOGS_URL="$VICTORIALOGS_URL" \
   VICTORIALOGS_STREAM_FILTER="$VICTORIALOGS_STREAM_FILTER" \
   VICTORIAMETRICS_URL="$VICTORIAMETRICS_URL" \

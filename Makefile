@@ -359,10 +359,11 @@ $(BIN_DIR)/web: $(CMD_WEB_DIST_STAMP) $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/web
 
-# webdevoidc/webdevseed (issue #265, `make web-dev`) are dev-tooling-only
-# binaries — deliberately NOT part of `build`'s default binary set below (they
-# are never shipped in an image or used outside a developer's own machine);
-# the web-dev target below builds them directly as its own prerequisites.
+# webdevoidc/webdevseed/webdevdiscord (issues #265/#313, `make web-dev`) are
+# dev-tooling-only binaries — deliberately NOT part of `build`'s default binary
+# set below (they are never shipped in an image or used outside a developer's
+# own machine); the web-dev target below builds them directly as its own
+# prerequisites.
 $(BIN_DIR)/webdevoidc: $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/webdevoidc
@@ -370,6 +371,10 @@ $(BIN_DIR)/webdevoidc: $(GO_SOURCE_FILES)
 $(BIN_DIR)/webdevseed: $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/webdevseed
+
+$(BIN_DIR)/webdevdiscord: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/webdevdiscord
 
 .PHONY: build
 build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl $(BIN_DIR)/web ## Build all binaries into bin/.
@@ -492,7 +497,7 @@ web-dev-observability-down: ## Stop the web-dev-only VictoriaLogs/VictoriaMetric
 # comment above) but the same conclusion: web-dev-up.sh instead calls
 # zpool-up.sh and the observability compose stack directly, each only when
 # needed/in the right order.
-web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics + a local OIDC provider + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
+web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed $(BIN_DIR)/webdevdiscord recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics + a local OIDC provider + a fake Discord webhook + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
 	@BIN_DIR=$(BIN_DIR) WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-up.sh
 
 .PHONY: web-dev-down
