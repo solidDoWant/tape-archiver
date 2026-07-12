@@ -16,6 +16,12 @@
 //   - GET {webhook} — the webhook object fetch (Client.FetchWebhookGuild).
 //     Responds 200 with {"guild_id"} so the deep-link can name the guild.
 //
+// One exception: a report upload whose path contains "reject" (webdevseed's
+// WEBDEVSEED_FAIL_WEBHOOK_URL) is answered with a permanent 403, so the Deliver
+// phase treats it as a non-retryable rejection and the run fails — this is how
+// `make web-dev` seeds a deliberately-failed run. The no-wait alert on that same
+// path is still accepted (204), so the failed run's SPEC §11 alert still lands.
+//
 // The IDs are fixed, syntactically-valid snowflakes so the constructed
 // https://discord.com/channels/{guild}/{channel}/{message} link is well-formed;
 // each delivered report gets a distinct message id from an in-process counter.
@@ -44,6 +50,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -140,8 +147,22 @@ func newHandler(guildID, channelID string) http.Handler {
 
 			if r.URL.Query().Get("wait") != "true" {
 				// A no-wait alert (Client.Send): Discord answers 204 with no body.
+				// Accepted even on the reject path, so a run failed via a rejected
+				// report upload still lands its SPEC §11 failure alert here.
 				slog.Info("webdevdiscord: alert received", "path", r.URL.Path)
 				w.WriteHeader(http.StatusNoContent)
+
+				return
+			}
+
+			if isRejectPath(r.URL.Path) {
+				// The reject endpoint (webdevseed's WEBDEVSEED_FAIL_WEBHOOK_URL):
+				// answer a permanent 4xx so the Deliver phase treats it as a
+				// deterministic, non-retryable rejection and fails the run. A 403
+				// stands in for Discord refusing the upload (a deleted/forbidden
+				// webhook) — a non-retryable status per pkg/webhook.StatusError.
+				slog.Info("webdevdiscord: report upload rejected (reject endpoint)", "path", r.URL.Path)
+				http.Error(w, "forbidden (fake reject endpoint)", http.StatusForbidden)
 
 				return
 			}
@@ -158,6 +179,13 @@ func newHandler(guildID, channelID string) http.Handler {
 	})
 
 	return mux
+}
+
+// isRejectPath reports whether a webhook path is the deliberate-failure endpoint
+// (webdevseed points its seeded-to-fail runs at ".../webhook/reject"). Matched by
+// substring so any path a developer routes there works, not one hard-coded route.
+func isRejectPath(path string) bool {
+	return strings.Contains(path, "reject")
 }
 
 // writeJSON writes v as a 200 JSON response, matching the content type Discord

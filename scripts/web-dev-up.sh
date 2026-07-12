@@ -100,6 +100,9 @@ TEMPORAL_UI_URL="${TEMPORAL_UI_URL:-http://127.0.0.1:8233}"
 # cmd/web (Form-mode display) and the seeder (real delivery) point at DEV_WEBHOOK_URL.
 WEBDEVDISCORD_LISTEN_ADDR="${WEBDEVDISCORD_LISTEN_ADDR:-127.0.0.1:9997}"
 DEV_WEBHOOK_URL="${DEV_WEBHOOK_URL:-http://${WEBDEVDISCORD_LISTEN_ADDR}/webhook/dev}"
+# The receiver's reject endpoint: it 4xx's a report upload so a run pointed at it
+# fails terminally at Deliver — how the seeder plants a deliberately-failed run.
+DEV_WEBHOOK_REJECT_URL="${DEV_WEBHOOK_REJECT_URL:-http://${WEBDEVDISCORD_LISTEN_ADDR}/webhook/reject}"
 
 # ---------------------------------------------------------------------------
 # Sanity checks
@@ -457,9 +460,15 @@ start_daemon webdevseed env \
   MHVTL_DRIVE1_DEV="$MHVTL_DRIVE1_DEV" \
   WEBDEVSEED_SOURCE="${WEBDEVSEED_SOURCE:-$TAPE_POOL_DATASET@$TAPE_TEST_SNAPSHOT}" \
   WEBDEVSEED_COUNT="${WEBDEVSEED_COUNT:-3}" \
+  `# Seed a mix: of WEBDEVSEED_COUNT runs, this many are made to fail (their` \
+  `# report delivery is rejected, so they fail terminally at Deliver) — giving` \
+  `# the failed-run UI and the failure-alert path something to show. 0 disables.` \
+  WEBDEVSEED_FAIL_COUNT="${WEBDEVSEED_FAIL_COUNT:-1}" \
   `# Deliver each seeded run's report to the local fake Discord receiver so the` \
-  `# run overview's "Discord report" deep-link renders (issue #313).` \
+  `# run overview's "Discord report" deep-link renders (issue #313); failing runs` \
+  `# deliver to the reject endpoint instead.` \
   WEBDEVSEED_WEBHOOK_URL="$DEV_WEBHOOK_URL" \
+  WEBDEVSEED_FAIL_WEBHOOK_URL="$DEV_WEBHOOK_REJECT_URL" \
   "$BIN_DIR/webdevseed"
 SEED_LOG="$LOG_DIR/webdevseed.log"
 

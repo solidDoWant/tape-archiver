@@ -57,6 +57,69 @@ func TestBuildSeedConfig_slotVariesByCall(t *testing.T) {
 	assert.NotEqual(t, first.Library.BlankSlots, second.Library.BlankSlots)
 }
 
+func TestEffectiveFailCount(t *testing.T) {
+	tests := []struct {
+		name           string
+		failCount      int
+		failWebhookURL string
+		want           int
+	}{
+		{
+			name:           "keeps the count when a reject webhook is configured",
+			failCount:      2,
+			failWebhookURL: "http://127.0.0.1:9997/webhook/reject",
+			want:           2,
+		},
+		{
+			name:           "drops to zero with no reject webhook (nothing to fail against)",
+			failCount:      2,
+			failWebhookURL: "",
+			want:           0,
+		},
+		{
+			name:           "zero stays zero regardless of webhook",
+			failCount:      0,
+			failWebhookURL: "",
+			want:           0,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, effectiveFailCount(test.failCount, test.failWebhookURL))
+		})
+	}
+}
+
+func TestEnvNonNegativeInt(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		fallback int
+		want     int
+		wantErr  require.ErrorAssertionFunc
+	}{
+		{name: "unset uses the fallback", raw: "", fallback: 1, want: 1, wantErr: require.NoError},
+		{name: "zero is accepted", raw: "0", fallback: 1, want: 0, wantErr: require.NoError},
+		{name: "positive is accepted", raw: "2", fallback: 1, want: 2, wantErr: require.NoError},
+		{name: "negative is rejected", raw: "-1", fallback: 1, wantErr: require.Error},
+		{name: "non-numeric is rejected", raw: "lots", fallback: 1, wantErr: require.Error},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			getenv := func(string) string { return test.raw }
+
+			got, err := envNonNegativeInt(getenv, "WEBDEVSEED_FAIL_COUNT", test.fallback)
+			test.wantErr(t, err)
+
+			if err == nil {
+				assert.Equal(t, test.want, got)
+			}
+		})
+	}
+}
+
 // fakeSubmitClient is a hand-rolled fake of runsubmit.TemporalClient (mirroring
 // pkg/runsubmit's own test double of the same interface), driving
 // submitWithRetry's logic without a real Temporal connection: it returns a

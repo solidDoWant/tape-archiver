@@ -460,6 +460,19 @@ is a real run against `mhvtl` and the ZFS test pool (staging, tar, age encryptio
 LTFS write, eject, report), so the dashboard's runs table fills in progressively over
 the next few minutes rather than all at once.
 
+By default one of the seeded runs is a deliberately **failed** run (set
+`WEBDEVSEED_FAIL_COUNT`, default `1`, to `0` to disable, or higher for more) so the
+failed-run surfaces have something to show locally too — the history table's failed row,
+the run detail page's error console and failure hero, and the SPEC §11 failure-alert path
+to the fake Discord webhook. A failed seed run runs the full pipeline, then delivers its
+report to the fake receiver's reject endpoint, which rejects the upload with a permanent
+`403`; the `Deliver` phase treats that as a non-retryable rejection and the run fails
+there. (Delivery is the failure lever because its retry policy is bounded — an earlier
+phase like `Resolve` retries under Temporal's server-default unlimited policy and would
+leave the run stuck `Running` rather than failing.) The failed runs are seeded first, so
+the most-recent run — the dashboard's idle "last run" summary — stays a successful one;
+the failed run is one click away in the history table.
+
 Interrupting `make web-dev` (Ctrl+C, which sends `SIGINT` to the whole foreground
 process group, or `SIGTERM` sent the same way — e.g. by a supervisor) tears the entire
 stack back down: `cmd/web` shuts down gracefully first, and once it has actually

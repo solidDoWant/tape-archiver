@@ -59,6 +59,36 @@ func TestHandler_DriveTheRealWebhookClient(t *testing.T) {
 	})
 }
 
+// TestHandler_RejectEndpoint covers the deliberately-failing delivery path: a
+// report upload to a "reject" webhook must fail with a NON-retryable status, so
+// the Deliver phase (workflows/backup/deliver.go) fails the run on the first
+// attempt — this is exactly what makes webdevseed's seeded-to-fail runs fail.
+// The no-wait failure alert on the same endpoint must still succeed, so the
+// failed run's SPEC §11 alert still lands.
+func TestHandler_RejectEndpoint(t *testing.T) {
+	server := httptest.NewServer(newHandler("guild-1", "channel-1"))
+	defer server.Close()
+
+	client := webhook.New(server.URL + "/webhook/reject")
+
+	t.Run("report upload is rejected with a non-retryable status", func(t *testing.T) {
+		path := writeTempFile(t, "report that will be rejected")
+
+		posted, err := client.SendFile(t.Context(), path)
+		require.Error(t, err)
+		assert.Nil(t, posted)
+
+		var statusErr *webhook.StatusError
+		require.ErrorAs(t, err, &statusErr)
+		assert.False(t, statusErr.Retryable(), "the reject status must be non-retryable so Deliver fails on the first attempt")
+	})
+
+	t.Run("the failure alert still lands on the reject endpoint", func(t *testing.T) {
+		err := client.Send(t.Context(), webhook.Message{Content: "run failed"})
+		require.NoError(t, err)
+	})
+}
+
 func writeTempFile(t *testing.T, contents string) string {
 	t.Helper()
 
