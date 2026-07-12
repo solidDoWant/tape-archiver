@@ -2,6 +2,7 @@ import type { PhaseInfo, RunEventDetail } from './RunDetail'
 import { formatDuration, phaseLabel } from './phaseFormat'
 import PauseActions from './PauseActions'
 import ConfigSummary from './ConfigSummary'
+import DriveMetricsPanel from './DriveMetricsPanel'
 import TapesSection from './TapesSection'
 import { temporalWorkflowUrl, useUiConfig } from './uiConfig'
 import { useReportMessageUrl } from './runDelivery'
@@ -63,9 +64,10 @@ export interface RunOverviewProps {
 // RunOverview is the run detail page's default "Run overview" view
 // (DESIGN_ANALYSIS.md §2.B's "isSummary" sub-view): a status hero, the
 // operator pause zone (or a "no action needed" placeholder while healthy),
-// a phase-completion summary, a failed-run error console, the run-config
-// viewer (ConfigSummary), and this run's own tape/slot outcomes
-// (TapesSection). It owns none of the data fetching for the latter two —
+// a phase-completion summary, a live per-drive write-health glance while the
+// run is writing (DriveMetricsPanel, issue #307), a failed-run error console,
+// the run-config viewer (ConfigSummary), and this run's own tape/slot outcomes
+// (TapesSection). It owns none of the data fetching for the panels —
 // each is a self-contained panel, same pattern as LogPanel/DriveMetricsPanel
 // — so a VictoriaLogs/VictoriaMetrics-style outage in one never blocks the
 // rest of this view (issue #277 AC4).
@@ -81,6 +83,19 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
   const packPhase = phases.find((phase) => phase.name === 'Pack')
   const logicalTapes = factValue(packPhase, 'logicalTapes')
   const copies = factValue(packPhase, 'copies')
+
+  // Live drive write-health glance (issue #307): the same per-drive
+  // rate/floor/reposition gauges DriveMetricsPanel renders on the Write phase,
+  // surfaced on the overview once there are actually drive writes to watch.
+  // Shown only for a still-running run whose Write phase has begun (active or
+  // completed) — the by-barcode VictoriaMetrics readings stay valid through the
+  // running tail (Report/Burn/Deliver), but there is nothing to glance at
+  // before Write starts, so the section is omitted then rather than showing an
+  // empty "no measurement yet" gauge. A terminal run is excluded on purpose:
+  // TapesSection below already reports each tape's final recorded write-health,
+  // so the live panel would only duplicate it.
+  const writePhase = phases.find((phase) => phase.name === 'Write')
+  const showLiveDriveHealth = !terminal && (writePhase?.status === 'active' || writePhase?.status === 'completed')
 
   // The Temporal Web UI deep-link (design's "Temporal workflow ↗"): shown only
   // when the deployment configured a UI base URL (cmd/web's TEMPORAL_UI_URL);
@@ -156,6 +171,17 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
           />
         </div>
       </div>
+
+      {showLiveDriveHealth ? (
+        <div>
+          <h3 className="mb-1 text-[12.5px] font-medium text-text-dim">Drive write health</h3>
+          <p className="mb-2 max-w-[560px] text-[11.5px] text-text-faint">
+            Rate is measured once per tape when its write window closes — not a continuous trace, so a drive can read
+            idle mid-write.
+          </p>
+          <DriveMetricsPanel runId={runId} terminal={false} />
+        </div>
+      ) : null}
 
       {failedPhase?.error ? (
         <div className="overflow-hidden rounded-xl border border-red-line bg-console-bg">
