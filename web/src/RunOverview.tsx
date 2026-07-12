@@ -89,9 +89,6 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
           <span className="font-mono text-[11px] text-text-faint">{formatDuration(detail.startTime, detail.closeTime)}</span>
         </div>
         <h2 className="text-[27px] font-semibold tracking-tight">{hero.title}</h2>
-        <p className="mt-1.5 max-w-[560px] text-[13.5px] text-text-dim">
-          Last completed phase: {detail.lastCompletedPhase || '—'}
-        </p>
         {temporalUrl || reportUrl ? (
           <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
             {temporalUrl ? (
