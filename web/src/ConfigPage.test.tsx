@@ -20,6 +20,19 @@ function stubApi(overrides: Record<string, { status: number; body: unknown }> = 
   const routes: Record<string, { status: number; body: unknown }> = {
     '/api/runs': { status: 200, body: { runs: [] } },
     '/api/config/schema': { status: 200, body: testRunConfigSchema },
+    // Deploy-owned library devices + webhook (issue #304): ConfigPage fetches
+    // these once via useUiConfig; Form mode fills them into the submitted
+    // config, so a fully-configured deployment is what lets a Form-mode
+    // submission validate without the operator typing device paths.
+    '/api/config/ui': {
+      status: 200,
+      body: {
+        temporalUiBaseUrl: '',
+        temporalNamespace: '',
+        library: { changer: '/dev/sch0', drives: ['/dev/nst0'] },
+        delivery: { webhookUrl: 'https://discord.com/api/webhooks/deploy/xyz' },
+      },
+    },
     ...overrides,
   }
 
@@ -53,6 +66,11 @@ function renderPage(overrides?: Record<string, { status: number; body: unknown }
 }
 
 async function fillMinimalValidForm() {
+  // Wait for the deploy-owned library devices (issue #304) to load and render
+  // read-only — a Form-mode submission fills changer/drives/webhook from deploy
+  // config, so the config only validates once useUiConfig has resolved.
+  await waitFor(() => expect(screen.getByText('/dev/sch0')).toBeInTheDocument())
+
   fireEvent.change(screen.getByPlaceholderText('bulk-pool-01/dataset'), {
     target: { value: 'bulk-pool-01/photos' },
   })
@@ -61,9 +79,6 @@ async function fillMinimalValidForm() {
   })
   fireEvent.change(screen.getByLabelText(/identity \/ private key/i), {
     target: { value: 'AGE-SECRET-KEY-PQ-1EXAMPLE' },
-  })
-  fireEvent.change(screen.getByPlaceholderText(/discord.com\/api\/webhooks/i), {
-    target: { value: 'https://discord.com/api/webhooks/123/abc' },
   })
 }
 
@@ -190,6 +205,34 @@ describe('ConfigPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Form' }))
 
     expect(screen.queryByText(/the form has no controls for/i)).not.toBeInTheDocument()
+  })
+
+  it('warns that Form mode replaces the JSON device/webhook values with deploy config on a JSON → Form switch (issue #304)', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
+
+    // A JSON config that overrides the deploy-owned device/webhook values.
+    const config = {
+      sources: [{ zfsPath: { name: 'bulk-pool-01/override' } }],
+      copies: 2,
+      library: { changer: '/dev/sch9', drives: ['/dev/nst8'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
+      delivery: { webhookUrl: 'https://discord.com/api/webhooks/override/1' },
+    }
+
+    fireEvent.change(screen.getByLabelText('Run config (JSON)'), { target: { value: JSON.stringify(config) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Form' }))
+
+    // The form loads, but the notice names exactly which deploy-owned fields
+    // will be replaced by deploy config — JSON mode remains the escape hatch
+    // that keeps them.
+    const notice = screen.getByText(/form mode sources/i)
+    expect(notice).toHaveTextContent('library.changer')
+    expect(notice).toHaveTextContent('library.drives')
+    expect(notice).toHaveTextContent('delivery.webhookUrl')
   })
 
   it('keeps the form unchanged and shows a notice when switching from malformed JSON to Form mode', async () => {

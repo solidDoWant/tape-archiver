@@ -32,6 +32,28 @@ func TestListenAddr(t *testing.T) {
 	}
 }
 
+// TestSplitDeviceList checks the LIBRARY_DRIVES parser trims each entry, drops
+// empties, and always returns a non-nil slice (so GET /api/config/ui reports
+// [] rather than null for an unconfigured drive set — issue #304).
+func TestSplitDeviceList(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []string
+	}{
+		{name: "unset yields empty slice", value: "", want: []string{}},
+		{name: "single device", value: "/dev/nst0", want: []string{"/dev/nst0"}},
+		{name: "two devices", value: "/dev/nst0,/dev/nst1", want: []string{"/dev/nst0", "/dev/nst1"}},
+		{name: "trims whitespace and drops blanks", value: " /dev/nst0 , ,/dev/nst1 ,", want: []string{"/dev/nst0", "/dev/nst1"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, splitDeviceList(test.value))
+		})
+	}
+}
+
 // requireBuiltFrontend skips the calling test with an actionable reason when
 // the embedded SPA has not actually been built (dist/ still only holds the
 // committed dist/.gitkeep placeholder — see assets.go). `make test` builds

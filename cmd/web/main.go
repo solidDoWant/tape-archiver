@@ -60,6 +60,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -249,10 +250,25 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		}
 	}
 
+	// Deploy-owned library device targets and the Discord webhook URL, which
+	// the guided config form sources read-only rather than exposing as per-run
+	// free-text inputs (issue #304): a changer/drive device path or a webhook
+	// URL is a property of the deployment/host, not a per-run choice. LIBRARY_-
+	// DRIVES is a comma-separated list (e.g. "/dev/nst0,/dev/nst1"). All three
+	// are optional; any left unset arrives empty at the SPA, whose Review step
+	// then surfaces internal/config's own validation rather than a guessed
+	// default. These are the real-hardware analogue of the dry-run-only
+	// MHVTL_* device vars (runsubmit.ApplyDryRun still overrides both for a
+	// dry-run submission).
+	deployChanger := getenv("LIBRARY_CHANGER")
+	deployDrives := splitDeviceList(getenv("LIBRARY_DRIVES"))
+	deployWebhookURL := getenv("DELIVERY_WEBHOOK_URL")
+
 	handler, err := webserver.NewHandler(assets, runsapi.New(
 		temporalClient,
 		runsapi.WithDrainContext(drainCtx),
 		runsapi.WithTemporalUI(temporalUIURL, temporalNamespace),
+		runsapi.WithDeployConfig(deployChanger, deployDrives, deployWebhookURL),
 	))
 	if err != nil {
 		return fmt.Errorf("build web server handler: %w", err)
@@ -359,6 +375,23 @@ func logShutdownStage(name string, stage func()) {
 
 	// .String() for the same human-readability reason as the total in run().
 	slog.Info("web: shutdown stage complete", "stage", name, "duration", time.Since(start).Round(time.Millisecond).String())
+}
+
+// splitDeviceList parses a comma-separated device-path list (the LIBRARY_DRIVES
+// env var) into a slice, trimming surrounding whitespace on each entry and
+// dropping empties, so " /dev/nst0, /dev/nst1 " and an unset/blank value both
+// yield the obvious result (two paths, or an empty slice). It returns a
+// non-nil, possibly-empty slice.
+func splitDeviceList(value string) []string {
+	drives := make([]string, 0)
+
+	for _, entry := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			drives = append(drives, trimmed)
+		}
+	}
+
+	return drives
 }
 
 // listenAddr resolves the TCP address to listen on: WEB_LISTEN_ADDRESS when

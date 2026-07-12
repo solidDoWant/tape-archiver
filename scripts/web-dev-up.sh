@@ -499,6 +499,12 @@ env \
   MHVTL_CHANGER_DEV="$MHVTL_CHANGER_DEV" \
   MHVTL_DRIVE0_DEV="$MHVTL_DRIVE0_DEV" \
   MHVTL_DRIVE1_DEV="$MHVTL_DRIVE1_DEV" \
+  `# Deploy-owned library devices + webhook the guided config form shows` \
+  `# read-only (issue #304). Point them at the same mhvtl nodes the dry-run` \
+  `# override uses, and a placeholder webhook, so Form mode is pre-filled locally.` \
+  LIBRARY_CHANGER="$MHVTL_CHANGER_DEV" \
+  LIBRARY_DRIVES="$MHVTL_DRIVE0_DEV,$MHVTL_DRIVE1_DEV" \
+  DELIVERY_WEBHOOK_URL="https://discord.com/api/webhooks/000/dev-webhook" \
   VICTORIALOGS_URL="$VICTORIALOGS_URL" \
   VICTORIALOGS_STREAM_FILTER="$VICTORIALOGS_STREAM_FILTER" \
   VICTORIAMETRICS_URL="$VICTORIAMETRICS_URL" \

@@ -3,19 +3,39 @@ import {
   buildConfig,
   configToFormState,
   defaultFormState,
+  deployOwnedFields,
   newSourceFormState,
   unmodeledFields,
+  type DeployConfig,
   type RunConfig,
 } from './configModel'
 
+// testDeploy is the deploy-owned config (issue #304) buildConfig fills into the
+// submitted run config: the library changer/drive devices and Discord webhook
+// the guided form no longer edits per run. Tests pass this explicitly so the
+// injection is exercised rather than assumed.
+const testDeploy: DeployConfig = {
+  changer: '/dev/sch0',
+  drives: ['/dev/nst0', '/dev/nst1'],
+  webhookUrl: 'https://discord.com/api/webhooks/1/a',
+}
+
 describe('buildConfig', () => {
   it('builds a schema-shaped config from the default form state', () => {
-    const config = buildConfig(defaultFormState())
+    const config = buildConfig(defaultFormState(), testDeploy)
 
     expect(config.copies).toBe(2)
     expect(config.library.tapeCapacityBytes).toBe(2_500_000_000_000)
     expect(config.redundancy).toEqual({ targetPercentage: 10, sliceSizeBytes: 4 * 1024 ** 3 })
     expect(config.delivery.opticalBurn).toBeUndefined()
+  })
+
+  it('fills the deploy-owned library devices and webhook from deploy config, not the form', () => {
+    const config = buildConfig(defaultFormState(), testDeploy)
+
+    expect(config.library.changer).toBe('/dev/sch0')
+    expect(config.library.drives).toEqual(['/dev/nst0', '/dev/nst1'])
+    expect(config.delivery.webhookUrl).toBe('https://discord.com/api/webhooks/1/a')
   })
 
   it('builds exactly one of zfsPath/k8s per source, never both', () => {
@@ -32,7 +52,7 @@ describe('buildConfig', () => {
       },
     ]
 
-    const config = buildConfig(form)
+    const config = buildConfig(form, testDeploy)
 
     expect(config.sources[0].zfsPath).toEqual({ name: 'pool/data' })
     expect(config.sources[0].k8s).toBeUndefined()
@@ -58,7 +78,7 @@ describe('buildConfig', () => {
       },
     ]
 
-    const config = buildConfig(form)
+    const config = buildConfig(form, testDeploy)
 
     expect(config.sources[0].k8s).toEqual({
       apiVersion: 'groupsnapshot.storage.k8s.io/v1alpha1',
@@ -72,7 +92,7 @@ describe('buildConfig', () => {
     form.redundancyMode = 'fillToCapacity'
     form.fillFloor = 7
 
-    const config = buildConfig(form)
+    const config = buildConfig(form, testDeploy)
 
     expect(config.redundancy).toEqual({ fillToCapacity: { floor: 7 }, sliceSizeBytes: 4 * 1024 ** 3 })
     expect(config.redundancy.targetPercentage).toBeUndefined()
@@ -84,7 +104,7 @@ describe('buildConfig', () => {
     form.opticalDrives = ['/dev/sr0']
     form.opticalCopies = 2
 
-    const config = buildConfig(form)
+    const config = buildConfig(form, testDeploy)
 
     expect(config.delivery.opticalBurn).toEqual({
       drives: ['/dev/sr0'],
@@ -93,20 +113,39 @@ describe('buildConfig', () => {
     })
   })
 
-  it('filters blank recipient/drive entries out of the built config', () => {
+  it('filters blank recipient entries out of the built config', () => {
     const form = defaultFormState()
     form.recipients = ['age1pq1abc', '', '  ']
-    form.drives = ['/dev/nst0', '']
 
-    const config = buildConfig(form)
+    const config = buildConfig(form, testDeploy)
 
     expect(config.encryption.recipients).toEqual(['age1pq1abc'])
+  })
+
+  it('filters blank deploy drive entries out of the built config', () => {
+    const config = buildConfig(defaultFormState(), {
+      changer: '/dev/sch0',
+      drives: ['/dev/nst0', '', '  '],
+      webhookUrl: '',
+    })
+
     expect(config.library.drives).toEqual(['/dev/nst0'])
+  })
+
+  it('leaves the library changer empty and drives empty when the deployment is unconfigured', () => {
+    // An unconfigured deployment yields empty deploy values; buildConfig stays
+    // total (never throws) and the empty changer/drives then fail the schema
+    // at the Review step rather than the SPA inventing a default.
+    const config = buildConfig(defaultFormState(), { changer: '', drives: [], webhookUrl: '' })
+
+    expect(config.library.changer).toBe('')
+    expect(config.library.drives).toEqual([])
+    expect(config.delivery.webhookUrl).toBe('')
   })
 })
 
 describe('configToFormState', () => {
-  it('round-trips a full config built by buildConfig back into an equivalent form state', () => {
+  it('round-trips form-owned fields built by buildConfig back into an equivalent form state', () => {
     const form = defaultFormState()
     form.sources = [
       { ...newSourceFormState(), type: 'zfs', zfsName: 'pool/data', label: 'data' },
@@ -121,12 +160,11 @@ describe('configToFormState', () => {
     ]
     form.recipients = ['age1pq1abc']
     form.identity = 'AGE-SECRET-KEY-PQ-1abc'
-    form.webhookUrl = 'https://discord.com/api/webhooks/1/a'
     form.opticalBurnEnabled = true
     form.opticalDrives = ['/dev/sr0']
     form.opticalCopies = 3
 
-    const roundTripped = configToFormState(buildConfig(form))
+    const roundTripped = configToFormState(buildConfig(form, testDeploy))
 
     expect(roundTripped.sources).toHaveLength(2)
     expect(roundTripped.sources[0].type).toBe('zfs')
@@ -137,7 +175,6 @@ describe('configToFormState', () => {
     expect(roundTripped.sources[1].k8sName).toBe('media-pvc')
     expect(roundTripped.recipients).toEqual(['age1pq1abc'])
     expect(roundTripped.identity).toBe('AGE-SECRET-KEY-PQ-1abc')
-    expect(roundTripped.webhookUrl).toBe('https://discord.com/api/webhooks/1/a')
     expect(roundTripped.opticalBurnEnabled).toBe(true)
     expect(roundTripped.opticalDrives).toEqual(['/dev/sr0'])
     expect(roundTripped.opticalCopies).toBe(3)
@@ -207,17 +244,56 @@ describe('unmodeledFields', () => {
     ])
   })
 
-  it('exactly covers what configToFormState drops: re-building from the mapped form restores every other field', () => {
-    // The invariant the ConfigPage notice relies on: for a config with none
-    // of the unmodeled fields, JSON -> Form -> JSON round-trips losslessly
-    // (modulo defaulted booleans buildConfig always emits explicitly).
-    const roundTripped = buildConfig(configToFormState(baseConfig))
+  it('re-building from the mapped form restores every other field when deploy config mirrors the deploy-owned values', () => {
+    // The invariant the ConfigPage notice relies on: for a config with none of
+    // the unmodeled fields, JSON -> Form -> JSON round-trips losslessly (modulo
+    // defaulted booleans buildConfig always emits explicitly) — provided the
+    // deploy config supplies the same deploy-owned device/webhook values the
+    // JSON carried (issue #304), since Form mode now sources those from deploy
+    // config rather than the JSON.
+    const deploy: DeployConfig = {
+      changer: baseConfig.library.changer,
+      drives: baseConfig.library.drives,
+      webhookUrl: baseConfig.delivery.webhookUrl,
+    }
+
+    const roundTripped = buildConfig(configToFormState(baseConfig), deploy)
 
     expect(roundTripped.feasibilityOverhead).toBeUndefined()
     expect(roundTripped.sources[0].zfsPath).toEqual({ name: 'pool/data' })
     expect(roundTripped.copies).toBe(2)
     expect(roundTripped.library.tapeCapacityBytes).toBe(2_500_000_000_000)
+    expect(roundTripped.library.changer).toBe(baseConfig.library.changer)
+    expect(roundTripped.library.drives).toEqual(baseConfig.library.drives)
     expect(roundTripped.encryption).toEqual(baseConfig.encryption)
     expect(roundTripped.delivery.webhookUrl).toBe(baseConfig.delivery.webhookUrl)
+  })
+})
+
+describe('deployOwnedFields', () => {
+  it('names the deploy-owned device/webhook fields a JSON config sets, as dotted paths', () => {
+    const config: RunConfig = {
+      sources: [],
+      copies: 1,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
+      redundancy: { sliceSizeBytes: 1 },
+      encryption: { recipients: [], identity: '' },
+      delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
+    }
+
+    expect(deployOwnedFields(config)).toEqual(['library.changer', 'library.drives', 'delivery.webhookUrl'])
+  })
+
+  it('returns nothing when the JSON leaves the deploy-owned fields empty', () => {
+    const config: RunConfig = {
+      sources: [],
+      copies: 1,
+      library: { changer: '', drives: [], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
+      redundancy: { sliceSizeBytes: 1 },
+      encryption: { recipients: [], identity: '' },
+      delivery: { webhookUrl: '' },
+    }
+
+    expect(deployOwnedFields(config)).toEqual([])
   })
 })

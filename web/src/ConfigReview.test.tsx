@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import ConfigReview from './ConfigReview'
-import { buildConfig, defaultFormState } from './configModel'
+import { buildConfig, defaultFormState, type DeployConfig } from './configModel'
+
+// testDeploy supplies the deploy-owned library devices + webhook (issue #304)
+// buildConfig fills into the config under review.
+const testDeploy: DeployConfig = { changer: '/dev/sch0', drives: ['/dev/nst0'], webhookUrl: '' }
 
 describe('ConfigReview', () => {
   it('renders the mode, summary fields, and the full config JSON', () => {
@@ -10,7 +14,7 @@ describe('ConfigReview', () => {
     form.sources[0].label = 'photos'
     form.recipients = ['age1pq1abc']
 
-    const config = buildConfig(form)
+    const config = buildConfig(form, testDeploy)
 
     render(<ConfigReview config={config} dryRun={true} />)
 
@@ -31,7 +35,7 @@ describe('ConfigReview', () => {
     form.opticalBurnEnabled = true
     form.opticalCopies = 3
 
-    render(<ConfigReview config={buildConfig(form)} dryRun={false} />)
+    render(<ConfigReview config={buildConfig(form, testDeploy)} dryRun={false} />)
 
     expect(screen.getByText('Production')).toBeInTheDocument()
     expect(screen.getByText(/on · 3 copies/)).toBeInTheDocument()
@@ -42,7 +46,7 @@ describe('ConfigReview', () => {
     form.redundancyMode = 'fillToCapacity'
     form.fillFloor = 5
 
-    render(<ConfigReview config={buildConfig(form)} dryRun={false} />)
+    render(<ConfigReview config={buildConfig(form, testDeploy)} dryRun={false} />)
 
     expect(screen.getByText(/fill to capacity · floor 5%/)).toBeInTheDocument()
   })

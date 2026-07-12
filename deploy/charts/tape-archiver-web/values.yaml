@@ -137,6 +137,29 @@ config:
       mhvtlDrive0Dev: ""
       mhvtlDrive1Dev: ""
 
+    # library carries the deployment's fixed tape-library device targets the
+    # guided config form ("Start new run" -> Form mode) sources read-only rather
+    # than as per-run free-text inputs (issue #304 — LIBRARY_CHANGER /
+    # LIBRARY_DRIVES, docs/configuration.md). These are the real-hardware
+    # analogue of dryRun.mhvtl* above: they are the actual library the form fills
+    # into a submitted run config, so the operator never re-types (or mis-types)
+    # a changer/drive path per run. Leave empty (the default) to make Form mode
+    # show these as "not configured"; the operator can still supply them per run
+    # via the config page's JSON / paste mode.
+    library:
+      # changer is the changer/medium-changer device path (e.g. "/dev/sch0").
+      changer: ""
+      # drives is the list of tape-drive device paths (e.g. ["/dev/nst0",
+      # "/dev/nst1"]), rendered to LIBRARY_DRIVES as a comma-separated list.
+      drives: []
+
+    # delivery carries the deployment's fixed Discord report webhook the guided
+    # config form sources read-only (issue #304 — DELIVERY_WEBHOOK_URL,
+    # docs/configuration.md), for the same reason as library above. Leave empty
+    # to show the webhook field as "not configured" in Form mode.
+    delivery:
+      webhookUrl: ""
+
 # resources follows the bjw-s app-template schema, same convention as
 # deploy/charts/tape-archiver-control-worker. Values here are deep-merged over the
 # chart-computed controller, Service, env vars, and podMonitor; user-supplied values

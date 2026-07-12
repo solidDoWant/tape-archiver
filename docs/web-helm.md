@@ -146,6 +146,7 @@ chart — it has no `ScaledJob` path.
 | `oidc.clientSecret.secretKeyRef.{name,key}` | `""` (**required**) | OIDC client secret from a `Secret` — see [Secrets](#secrets-required). No plaintext fallback. |
 | `sessionKey.secretKeyRef.{name,key}` | `""` (**required**) | Session-cookie encryption key from a `Secret` — see [Secrets](#secrets-required). No plaintext fallback. |
 | `dryRun.mhvtlChangerDev` / `dryRun.mhvtlDrive0Dev` / `dryRun.mhvtlDrive1Dev` | `""` | mhvtl device nodes a dry-run `POST /api/runs` submission redirects to (`MHVTL_CHANGER_DEV`/`MHVTL_DRIVE0_DEV`/`MHVTL_DRIVE1_DEV`). Leave all three empty (the default, appropriate for a production deployment against a real library) to make dry-run submissions fail closed with `400`. Must be set together or not at all — rendering fails otherwise. |
+| `library.changer` / `library.drives` / `delivery.webhookUrl` | `""` / `[]` / `""` | Deploy-owned library device targets and Discord webhook the guided config form ("Start new run" → Form mode) shows **read-only** rather than as per-run inputs (`LIBRARY_CHANGER` / `LIBRARY_DRIVES` / `DELIVERY_WEBHOOK_URL` — [Web UI environment variables](configuration.md#web-ui-environment-variables-cmdweb)). `library.drives` is a list (rendered comma-separated). Each is optional and independent; unset ones show as "not configured" in Form mode and the operator can still supply them per run via JSON / paste mode. These are the real-hardware analogue of `dryRun.mhvtl*` — the actual library a submitted run targets. |
 
 ### Kubernetes resources (`resources`)
 

@@ -134,6 +134,20 @@ export function newSourceFormState(): SourceFormState {
   }
 }
 
+// DeployConfig is the deploy-owned subset of a run config the guided Form mode
+// does NOT let the operator edit per run (issue #304): the library changer/drive
+// device paths and the Discord webhook URL are properties of the deployment/host
+// supplied by GET /api/config/ui (uiConfig.ts's deployConfigFrom), not typed
+// into the form. buildConfig fills these into the submitted config so it still
+// carries them (SPEC §4.2 — the run config stays the single source of truth);
+// they are simply not FormState fields. JSON/paste mode, by contrast, is the
+// full-schema escape hatch and can still override them per run.
+export interface DeployConfig {
+  changer: string
+  drives: string[]
+  webhookUrl: string
+}
+
 export interface FormState {
   sources: SourceFormState[]
   copies: number
@@ -141,14 +155,11 @@ export interface FormState {
   targetPercentage: number
   fillFloor: number
   sliceSizeGiB: number
-  changer: string
-  drives: string[]
   blankSlots: number[]
   tapeGeneration: string
   allowNonBlankTapes: boolean
   recipients: string[]
   identity: string
-  webhookUrl: string
   opticalBurnEnabled: boolean
   opticalDrives: string[]
   opticalCopies: number
@@ -163,14 +174,11 @@ export function defaultFormState(): FormState {
     targetPercentage: 10,
     fillFloor: 5,
     sliceSizeGiB: 4,
-    changer: '/dev/sch0',
-    drives: ['/dev/nst0', '/dev/nst1'],
     blankSlots: [],
     tapeGeneration: 'LTO-6',
     allowNonBlankTapes: false,
     recipients: [''],
     identity: '',
-    webhookUrl: '',
     opticalBurnEnabled: false,
     opticalDrives: ['/dev/sr0'],
     opticalCopies: 2,
@@ -221,12 +229,16 @@ function buildSource(source: SourceFormState): Source {
 }
 
 // buildConfig assembles a schema-shaped RunConfig from the guided Form
-// mode's current state. It is deliberately a pure, total function — it never
-// throws and never drops data, even for a still-incomplete form (e.g. a
-// blank ZFS dataset name) — so it can back both the live JSON preview and
-// the Review step; configSchema.ts's validator is what tells the operator
-// what, if anything, is still wrong with the result.
-export function buildConfig(form: FormState): RunConfig {
+// mode's current state and the deploy-owned config (issue #304): the library
+// changer/drive device paths and the Discord webhook URL come from deploy
+// (GET /api/config/ui), not FormState, since they are deployment/host
+// properties the operator does not re-type per run — see DeployConfig. It is
+// deliberately a pure, total function — it never throws and never drops data,
+// even for a still-incomplete form (e.g. a blank ZFS dataset name) or an
+// unconfigured deployment (empty deploy values) — so it can back both the live
+// JSON preview and the Review step; configSchema.ts's validator is what tells
+// the operator what, if anything, is still wrong with the result.
+export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
   const tapeCapacityBytes =
     ltoGenerations.find((generation) => generation.label === form.tapeGeneration)?.capacityBytes ??
     defaultLtoGeneration.capacityBytes
@@ -237,14 +249,14 @@ export function buildConfig(form: FormState): RunConfig {
       : { fillToCapacity: { floor: form.fillFloor }, sliceSizeBytes: Math.round(form.sliceSizeGiB * bytesPerGiB) }
 
   const library: Library = {
-    changer: form.changer.trim(),
-    drives: form.drives.map((drive) => drive.trim()).filter((drive) => drive !== ''),
+    changer: deploy.changer.trim(),
+    drives: deploy.drives.map((drive) => drive.trim()).filter((drive) => drive !== ''),
     blankSlots: form.blankSlots,
     tapeCapacityBytes,
     allowNonBlankTapes: form.allowNonBlankTapes,
   }
 
-  const delivery: Delivery = { webhookUrl: form.webhookUrl.trim() }
+  const delivery: Delivery = { webhookUrl: deploy.webhookUrl.trim() }
 
   if (form.opticalBurnEnabled) {
     delivery.opticalBurn = {
@@ -333,13 +345,44 @@ export function unmodeledFields(config: RunConfig): string[] {
   return dropped
 }
 
+// deployOwnedFields lists (as dotted paths) the deploy-owned fields (issue
+// #304) a JSON config sets to a non-empty value that a JSON → Form switch will
+// replace with the deployment's own config: Form mode sources
+// library.changer/drives and delivery.webhookUrl from deploy config
+// (buildConfig's deploy argument), not FormState, so a custom value typed into
+// JSON mode does not survive the switch. ConfigPage warns the operator by name
+// at switch time (its mode-switch notice), rather than swapping them silently —
+// unlike unmodeledFields, these are not lost but *replaced by* the deploy
+// values, which the read-only Library/Delivery displays then show.
+export function deployOwnedFields(config: RunConfig): string[] {
+  const overridden: string[] = []
+
+  if (config.library?.changer) {
+    overridden.push('library.changer')
+  }
+
+  if (config.library?.drives?.length) {
+    overridden.push('library.drives')
+  }
+
+  if (config.delivery?.webhookUrl) {
+    overridden.push('delivery.webhookUrl')
+  }
+
+  return overridden
+}
+
 // configToFormState is buildConfig's inverse: a best-effort reconstruction
 // of Form-mode state from an arbitrary schema-shaped config (e.g. one
 // parsed from JSON-mode text), used when the operator switches from JSON
 // mode into Form mode (ConfigPage.tsx's mode toggle — see its doc comment
 // for the switch's documented semantics). Fields Form mode has no controls
 // for are dropped (unmodeledFields above enumerates them; ConfigPage warns
-// the operator at switch time). Every field has a safe fallback,
+// the operator at switch time), and the deploy-owned device/webhook fields
+// (deployOwnedFields above) are not mapped out of the JSON at all — Form mode
+// sources them from deploy config, so they are left to buildConfig's deploy
+// argument rather than reconstructed into FormState. Every field has a safe
+// fallback,
 // so this never throws: a tapeCapacityBytes with no exact match in
 // ltoGenerations falls back to defaultLtoGeneration (Form mode's <select>
 // can only ever choose one of that fixed table's values — an operator
@@ -360,8 +403,11 @@ export function configToFormState(config: RunConfig): FormState {
     form.targetPercentage = config.redundancy.targetPercentage
   }
 
-  form.changer = config.library.changer
-  form.drives = config.library.drives.length > 0 ? config.library.drives : form.drives
+  // library.changer/drives and delivery.webhookUrl are deploy-owned (issue
+  // #304): Form mode has no controls for them and sources them from deploy
+  // config at buildConfig time, so a JSON → Form switch deliberately does not
+  // map them out of the JSON into FormState — see configToFormState's doc
+  // comment and ConfigPage's mode-switch notice.
   form.blankSlots = config.library.blankSlots
   form.tapeGeneration = (ltoGenerationForCapacity(config.library.tapeCapacityBytes) ?? defaultLtoGeneration).label
   form.allowNonBlankTapes = config.library.allowNonBlankTapes ?? false
@@ -369,7 +415,6 @@ export function configToFormState(config: RunConfig): FormState {
   form.recipients = config.encryption.recipients.length > 0 ? config.encryption.recipients : form.recipients
   form.identity = config.encryption.identity
 
-  form.webhookUrl = config.delivery.webhookUrl
   form.opticalBurnEnabled = Boolean(config.delivery.opticalBurn && config.delivery.opticalBurn.drives.length > 0)
 
   if (config.delivery.opticalBurn) {

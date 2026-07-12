@@ -2,13 +2,33 @@ import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import ConfigForm from './ConfigForm'
-import { buildConfig, defaultFormState, type FormState } from './configModel'
+import { buildConfig, defaultFormState, type DeployConfig, type FormState } from './configModel'
+import type { UiConfigState } from './uiConfig'
 
-function Wrapper({ onForm }: { onForm?: (form: FormState) => void }) {
+// testDeploy is a fully-configured deployment (issue #304): the Library and
+// Delivery sections render these read-only, and buildConfig fills them into the
+// submitted config.
+const testDeploy: DeployConfig = {
+  changer: '/dev/sch0',
+  drives: ['/dev/nst0', '/dev/nst1'],
+  webhookUrl: 'https://discord.com/api/webhooks/1/a',
+}
+
+function Wrapper({
+  onForm,
+  deploy = testDeploy,
+  deployStatus = 'loaded',
+}: {
+  onForm?: (form: FormState) => void
+  deploy?: DeployConfig
+  deployStatus?: UiConfigState['status']
+}) {
   const [form, setForm] = useState(defaultFormState)
   onForm?.(form)
 
-  return <ConfigForm form={form} setForm={(updater) => setForm(updater)} />
+  return (
+    <ConfigForm form={form} setForm={(updater) => setForm(updater)} deploy={deploy} deployStatus={deployStatus} />
+  )
 }
 
 afterEach(() => {
@@ -25,7 +45,7 @@ describe('ConfigForm', () => {
     })
 
     expect(latest?.sources[0].zfsName).toBe('bulk-pool-01/photos')
-    expect(buildConfig(latest as FormState).sources[0].zfsPath).toEqual({ name: 'bulk-pool-01/photos' })
+    expect(buildConfig(latest as FormState, testDeploy).sources[0].zfsPath).toEqual({ name: 'bulk-pool-01/photos' })
   })
 
   it('switches a source to k8s and exposes the by-name fields', () => {
@@ -40,7 +60,7 @@ describe('ConfigForm', () => {
     fireEvent.change(screen.getByPlaceholderText('media'), { target: { value: 'media-ns' } })
     fireEvent.change(screen.getByPlaceholderText('media-pvc'), { target: { value: 'media-pvc' } })
 
-    const config = buildConfig(latest as FormState)
+    const config = buildConfig(latest as FormState, testDeploy)
     expect(config.sources[0].k8s).toEqual({
       apiVersion: 'snapshot.storage.k8s.io/v1',
       kind: 'VolumeSnapshot',
@@ -116,5 +136,35 @@ describe('ConfigForm', () => {
     })
 
     expect(latest?.recipients).toContain('age1pq1generated')
+  })
+
+  it('shows the deploy-owned changer, drives, and webhook read-only, with no editable inputs (issue #304)', () => {
+    render(<Wrapper />)
+
+    // The read-only values from deploy config are shown...
+    expect(screen.getByText('/dev/sch0')).toBeInTheDocument()
+    expect(screen.getByText('/dev/nst0')).toBeInTheDocument()
+    expect(screen.getByText('/dev/nst1')).toBeInTheDocument()
+    expect(screen.getByText('https://discord.com/api/webhooks/1/a')).toBeInTheDocument()
+
+    // ...and there is no free-text input for any of them (the former
+    // /dev/sch0, /dev/nst0, and webhook placeholders are gone).
+    expect(screen.queryByPlaceholderText('/dev/sch0')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('/dev/nst0')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('https://discord.com/api/webhooks/…')).not.toBeInTheDocument()
+  })
+
+  it('names the env var to set when the deployment configured no devices/webhook', () => {
+    render(<Wrapper deploy={{ changer: '', drives: [], webhookUrl: '' }} deployStatus="loaded" />)
+
+    expect(screen.getByText(/set LIBRARY_CHANGER/)).toBeInTheDocument()
+    expect(screen.getByText(/set LIBRARY_DRIVES/)).toBeInTheDocument()
+    expect(screen.getByText(/set DELIVERY_WEBHOOK_URL/)).toBeInTheDocument()
+  })
+
+  it('shows a loading state for the deploy-owned fields while the config fetch is in flight', () => {
+    render(<Wrapper deploy={{ changer: '', drives: [], webhookUrl: '' }} deployStatus="loading" />)
+
+    expect(screen.getAllByText('Loading deploy config…').length).toBeGreaterThan(0)
   })
 })

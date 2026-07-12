@@ -1,11 +1,24 @@
 import { useState, type ChangeEvent } from 'react'
 import AgeKeygenPanel, { type AgeKeypair } from './AgeKeygenPanel'
-import { k8sApiVersions, newSourceFormState, type FormState, type SourceFormState } from './configModel'
+import {
+  k8sApiVersions,
+  newSourceFormState,
+  type DeployConfig,
+  type FormState,
+  type SourceFormState,
+} from './configModel'
+import type { UiConfigState } from './uiConfig'
 import { ltoGenerations } from './ltoGenerations'
 
 export interface ConfigFormProps {
   form: FormState
   setForm: (updater: (previous: FormState) => FormState) => void
+  // deploy carries the deploy-owned library devices and Discord webhook (issue
+  // #304) the Library and Delivery sections render read-only instead of as
+  // per-run inputs; deployStatus drives their loading/unavailable/unconfigured
+  // messaging. Sourced by ConfigPage from GET /api/config/ui (uiConfig.ts).
+  deploy: DeployConfig
+  deployStatus: UiConfigState['status']
 }
 
 const cardClass = 'rounded-xl border border-border bg-surface p-4.5 shadow-card sm:p-5'
@@ -145,6 +158,64 @@ function SlotListEditor({ slots, onChange }: { slots: number[]; onChange: (slots
   )
 }
 
+// DeployField renders one deploy-owned value (issue #304) read-only: the
+// library changer/drive devices and Discord webhook are properties of the
+// deployment/host (GET /api/config/ui), not per-run choices, so the operator
+// sees the value that will be used rather than a free-text input they must
+// re-type. It shows a loading state while the config fetch is in flight, an
+// unavailable state if it failed, the value(s) once loaded, or — when the
+// deployment configured nothing — an actionable notice naming the env var to
+// set (or JSON mode as the escape hatch), so an unconfigured deployment reads
+// as a fix-me rather than a silent blank that only fails at Review.
+function DeployField({
+  label,
+  status,
+  values,
+  envHint,
+}: {
+  label: string
+  status: UiConfigState['status']
+  values: string[]
+  envHint: string
+}) {
+  return (
+    <div>
+      <label className={fieldLabelClass}>
+        {label} <span className="text-text-faint">— from deploy config</span>
+      </label>
+
+      {status === 'loading' ? (
+        <p role="status" className="font-mono text-[11px] text-text-faint">
+          Loading deploy config…
+        </p>
+      ) : null}
+
+      {status === 'error' ? (
+        <p className="font-mono text-[11px] text-amber">
+          Deploy config unavailable — could not load {label.toLowerCase()}.
+        </p>
+      ) : null}
+
+      {status === 'loaded' && values.length > 0 ? (
+        <div className="flex flex-col gap-1.5">
+          {values.map((value) => (
+            <div
+              key={value}
+              className="w-full rounded-lg border border-border bg-inset px-2.5 py-2 font-mono text-[12px] text-text-dim break-all"
+            >
+              {value}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {status === 'loaded' && values.length === 0 ? (
+        <p className="font-mono text-[11px] text-amber">Not configured for this deployment — set {envHint}.</p>
+      ) : null}
+    </div>
+  )
+}
+
 // ConfigForm is the config page's guided Form mode (DESIGN_ANALYSIS.md §2
 // "D. Config"): sources, copies & redundancy, library, encryption, and
 // delivery sections that together build a FormState, converted to a
@@ -154,7 +225,11 @@ function SlotListEditor({ slots, onChange }: { slots: number[]; onChange: (slots
 // is a segmented control rather than independent checkboxes, so the built
 // config can never carry both halves of a schema "exactly one of" pair —
 // see configModel.ts's buildConfig doc comment.
-function ConfigForm({ form, setForm }: ConfigFormProps) {
+function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
+  const deployDrives = deploy.drives.filter((drive) => drive.trim() !== '')
+  const deployChanger = deploy.changer.trim() !== '' ? [deploy.changer] : []
+  const deployWebhook = deploy.webhookUrl.trim() !== '' ? [deploy.webhookUrl] : []
+
   const updateSource = (id: string, patch: Partial<SourceFormState>) => {
     setForm((previous) => ({
       ...previous,
@@ -442,24 +517,18 @@ function ConfigForm({ form, setForm }: ConfigFormProps) {
         <div className={sectionTitleClass}>Library</div>
 
         <div className="flex flex-col gap-3">
-          <div>
-            <label className={fieldLabelClass} htmlFor="config-changer">
-              changer device
-            </label>
-            <input
-              id="config-changer"
-              value={form.changer}
-              placeholder="/dev/sch0"
-              onChange={(event) => setForm((previous) => ({ ...previous, changer: event.target.value }))}
-              className={inputClass}
-            />
-          </div>
+          <DeployField
+            label="changer device"
+            status={deployStatus}
+            values={deployChanger}
+            envHint="LIBRARY_CHANGER (or use JSON / paste mode)"
+          />
 
-          <StringListEditor
+          <DeployField
             label="drive devices"
-            values={form.drives}
-            placeholder="/dev/nst0"
-            onChange={(drives) => setForm((previous) => ({ ...previous, drives }))}
+            status={deployStatus}
+            values={deployDrives}
+            envHint="LIBRARY_DRIVES (or use JSON / paste mode)"
           />
 
           <div className="w-fit">
@@ -550,18 +619,12 @@ function ConfigForm({ form, setForm }: ConfigFormProps) {
       <div className={cardClass}>
         <div className={sectionTitleClass}>Delivery</div>
 
-        <div>
-          <label className={fieldLabelClass} htmlFor="config-webhook">
-            Discord webhook URL
-          </label>
-          <input
-            id="config-webhook"
-            value={form.webhookUrl}
-            placeholder="https://discord.com/api/webhooks/…"
-            onChange={(event) => setForm((previous) => ({ ...previous, webhookUrl: event.target.value }))}
-            className={inputClass}
-          />
-        </div>
+        <DeployField
+          label="Discord webhook URL"
+          status={deployStatus}
+          values={deployWebhook}
+          envHint="DELIVERY_WEBHOOK_URL (or use JSON / paste mode)"
+        />
 
         <div className="mt-3.5 flex items-center justify-between">
           <div>

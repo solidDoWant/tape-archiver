@@ -5,10 +5,12 @@ import {
   buildConfig,
   configToFormState,
   defaultFormState,
+  deployOwnedFields,
   unmodeledFields,
   type FormState,
   type RunConfig,
 } from './configModel'
+import { deployConfigFrom, useUiConfig } from './uiConfig'
 import { fetchConfigSchema, validateAgainstSchema, type ValidationIssue } from './configSchema'
 import ConfigForm from './ConfigForm'
 import ConfigReview from './ConfigReview'
@@ -76,6 +78,12 @@ function segmentButtonClass(active: boolean): string {
 // uses (issue #272) — no new endpoint or live subscription.
 function ConfigPage({ onViewRun }: ConfigPageProps) {
   const activeRunState = useActiveRun()
+  // Deploy-owned library devices + Discord webhook (issue #304): Form mode
+  // shows them read-only and buildConfig fills them into the submitted config,
+  // rather than the operator re-typing them per run. One cached fetch, same
+  // pattern as the run overview's Temporal-UI link.
+  const uiConfigState = useUiConfig()
+  const deploy = deployConfigFrom(uiConfigState)
 
   const [mode, setMode] = useState<Mode>('form')
   const [step, setStep] = useState<Step>('edit')
@@ -88,7 +96,7 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
   const [submitState, setSubmitState] = useState<SubmitState>({ status: 'idle' })
 
   const switchToJson = () => {
-    setJsonText(JSON.stringify(buildConfig(form), null, 2))
+    setJsonText(JSON.stringify(buildConfig(form, deploy), null, 2))
     setModeSwitchNotice('')
     setMode('json')
     setStep('edit')
@@ -106,18 +114,31 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
 
       setForm(configToFormState(config))
 
-      // The form has no controls for a few advanced fields, so a config
-      // carrying them survives only as long as the JSON text itself:
-      // continuing in Form mode (whose next Form → JSON switch or Review
-      // re-serializes from form state) drops them. Say so by name up
-      // front rather than losing them silently.
+      // Two kinds of field don't survive a JSON → Form switch, called out by
+      // name up front rather than changed silently: (1) advanced fields the
+      // form has no controls for (unmodeledFields) survive only as long as the
+      // JSON text itself and are dropped once Form mode re-serializes; (2) the
+      // deploy-owned device/webhook fields (deployOwnedFields, issue #304) are
+      // replaced by the deployment's own config, since Form mode sources them
+      // from deploy config rather than the JSON.
       const dropped = unmodeledFields(config)
+      const deployOwned = deployOwnedFields(config)
 
-      setModeSwitchNotice(
-        dropped.length > 0
-          ? `The form has no controls for ${dropped.join(', ')} — continuing in Form mode drops ${dropped.length === 1 ? 'this field' : 'these fields'} (switch back to JSON mode to keep ${dropped.length === 1 ? 'it' : 'them'}).`
-          : '',
-      )
+      const notices: string[] = []
+
+      if (dropped.length > 0) {
+        notices.push(
+          `The form has no controls for ${dropped.join(', ')} — continuing in Form mode drops ${dropped.length === 1 ? 'this field' : 'these fields'} (switch back to JSON mode to keep ${dropped.length === 1 ? 'it' : 'them'}).`,
+        )
+      }
+
+      if (deployOwned.length > 0) {
+        notices.push(
+          `Form mode sources ${deployOwned.join(', ')} from this deployment's config, so the ${deployOwned.length === 1 ? 'value' : 'values'} in this JSON ${deployOwned.length === 1 ? 'is' : 'are'} replaced by deploy config (switch back to JSON mode to keep ${deployOwned.length === 1 ? 'it' : 'them'}).`,
+        )
+      }
+
+      setModeSwitchNotice(notices.join(' '))
     } catch {
       setModeSwitchNotice(
         'The current JSON could not be loaded into the form (it is not valid JSON), so the form keeps its last state.',
@@ -132,7 +153,7 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
 
     try {
       const schema = await fetchConfigSchema()
-      const issues = validateAgainstSchema(schema, buildConfig(form))
+      const issues = validateAgainstSchema(schema, buildConfig(form, deploy))
 
       setReviewIssues(issues)
 
@@ -175,7 +196,7 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
   }
 
   const handleSubmitReview = () => {
-    void submit(buildConfig(form))
+    void submit(buildConfig(form, deploy))
   }
 
   const handleSubmitJson = () => {
@@ -256,9 +277,9 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
         </p>
       ) : null}
 
-      {step === 'edit' && mode === 'form' ? <ConfigForm form={form} setForm={setForm} /> : null}
+      {step === 'edit' && mode === 'form' ? <ConfigForm form={form} setForm={setForm} deploy={deploy} deployStatus={uiConfigState.status} /> : null}
       {step === 'edit' && mode === 'json' ? <ConfigJsonMode text={jsonText} onTextChange={setJsonText} /> : null}
-      {step === 'review' ? <ConfigReview config={buildConfig(form)} dryRun={dryRun} /> : null}
+      {step === 'review' ? <ConfigReview config={buildConfig(form, deploy)} dryRun={dryRun} /> : null}
 
       {reviewIssues.length > 0 ? (
         <div role="alert" className="rounded-lg border border-red-line bg-red-bg p-3.5 text-[12px] text-red">
