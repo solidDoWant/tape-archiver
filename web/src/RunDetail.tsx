@@ -117,10 +117,9 @@ function RunDetail({ runId }: RunDetailProps) {
 
   return (
     <div className="flex min-w-0 flex-1 flex-col">
-      <div className="border-b border-border px-5 py-4 sm:px-7">
-        <h1 className="text-lg font-semibold tracking-tight">Run {runId}</h1>
-      </div>
-
+      {/* The run name is shown by the app shell's page-title header (App.tsx),
+          the same one every page uses — no second title bar here, matching the
+          dashboard and config pages. */}
       {initial.status === 'loading' ? (
         <p role="status" className="p-5 text-[12px] text-text-faint sm:p-7">
           Loading run…

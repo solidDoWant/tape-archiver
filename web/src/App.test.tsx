@@ -250,7 +250,9 @@ describe('App shell (authenticated)', () => {
 
     await renderAuthenticated()
 
-    expect(screen.getByRole('heading', { name: /run run-xyz/i })).toBeInTheDocument()
+    // The app shell's page-title header names the run (it's a single header now —
+    // RunDetail no longer renders its own duplicate title bar).
+    expect(screen.getByText('Run run-xyz')).toBeInTheDocument()
     expect(screen.queryByRole('form', { name: /submit backup run/i })).not.toBeInTheDocument()
   })
 
@@ -279,7 +281,7 @@ describe('App shell (authenticated)', () => {
 
     fireEvent.click(screen.getByRole('link', { name: 'run-1' }))
 
-    expect(screen.getByRole('heading', { name: /run run-1/i })).toBeInTheDocument()
+    expect(screen.getByText('Run run-1')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/runs/run-1')
   })
 

@@ -159,10 +159,13 @@ async function renderReady(overrides: Record<string, { status: number; body: unk
 }
 
 describe('RunDetail', () => {
-  it('always shows a heading naming the run being viewed', async () => {
+  it('does not render its own run-name title bar (the app shell header shows it — no double header)', async () => {
     render(<RunDetail runId="run-abc" />)
 
-    expect(screen.getByRole('heading', { name: /run run-abc/i })).toBeInTheDocument()
+    // RunDetail no longer duplicates the shell's page-title header; the shell
+    // (App.tsx) is the single "Run {runId}" header. App.test.tsx covers that the
+    // shell shows the run name for a run route.
+    expect(screen.queryByRole('heading', { name: /run run-abc/i })).not.toBeInTheDocument()
   })
 
   it('renders the phase rail with all 11 phases, in pipeline order, once loaded', async () => {
