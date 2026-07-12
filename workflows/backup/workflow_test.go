@@ -95,7 +95,7 @@ func expectReportDeliverSuccess(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
 		Return(ReportOutput{}, nil)
 	env.OnActivity((&DeliverActivities{}).Deliver, mock.Anything, mock.Anything).
-		Return(nil)
+		Return(&DeliverResult{}, nil)
 }
 
 // validBackupConfig returns a run config that passes config.Validate, mirroring

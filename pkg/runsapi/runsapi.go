@@ -341,6 +341,7 @@ func newMux(h *handler) http.Handler {
 	mux.HandleFunc("GET /api/runs/{runID}/phases", h.getRunPhases)
 	mux.HandleFunc("GET /api/runs/{runID}/config", h.getRunConfig)
 	mux.HandleFunc("GET /api/runs/{runID}/tapes", h.getRunTapes)
+	mux.HandleFunc("GET /api/runs/{runID}/delivery", h.getRunDelivery)
 	mux.HandleFunc("GET /api/tapes", h.listTapes)
 	// Live VictoriaMetrics-backed drive metrics (issue #275): a thin,
 	// allowlisted PromQL proxy scoped to this run's own tapes — see

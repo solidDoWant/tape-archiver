@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -115,18 +116,39 @@ func (c *Client) Send(ctx context.Context, msg Message) error {
 	return c.do(req)
 }
 
+// PostedMessage identifies a message a webhook execution created. Discord returns
+// it only when the webhook is posted with ?wait=true (see SendFile); without that
+// the endpoint answers 204 with no body. It carries just what a jump-to-message
+// deep-link needs — https://discord.com/channels/{guild}/{channel}/{message} —
+// minus the guild, which the execution response omits (obtain it via
+// FetchWebhookGuild).
+type PostedMessage struct {
+	// ID is the created message's snowflake ID (the {message} path segment).
+	ID string
+	// ChannelID is the channel the message landed in (the {channel} segment).
+	ChannelID string
+}
+
 // SendFile uploads the file at path to the webhook as a multipart attachment
-// (Discord's files[0] form field). It returns nil on an HTTP 2xx response and a
-// non-nil error if the file cannot be read or the endpoint returns a non-2xx
-// status. When the client's URL is empty, SendFile is a no-op and returns nil.
-func (c *Client) SendFile(ctx context.Context, path string) error {
+// (Discord's files[0] form field), posting with ?wait=true so Discord returns the
+// created message. It returns the posted message's identity on an HTTP 2xx
+// response and a non-nil error if the file cannot be read or the endpoint returns
+// a non-2xx status. When the client's URL is empty, SendFile is a no-op and
+// returns (nil, nil).
+//
+// The returned *PostedMessage is best-effort and orthogonal to delivery success:
+// a nil error always means the report was delivered. If the 2xx response body
+// cannot be parsed (an unexpected Discord response), SendFile returns (nil, nil) —
+// delivered, identity unknown — rather than failing the upload, so a missing
+// deep-link never costs the run its report.
+func (c *Client) SendFile(ctx context.Context, path string) (*PostedMessage, error) {
 	if c.url == "" {
-		return nil
+		return nil, nil
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("webhook: opening %q: %w", path, err)
+		return nil, fmt.Errorf("webhook: opening %q: %w", path, err)
 	}
 	defer func() { _ = file.Close() }()
 
@@ -136,25 +158,91 @@ func (c *Client) SendFile(ctx context.Context, path string) error {
 
 	part, err := writer.CreateFormFile("files[0]", filepath.Base(path))
 	if err != nil {
-		return fmt.Errorf("webhook: creating form file: %w", err)
+		return nil, fmt.Errorf("webhook: creating form file: %w", err)
 	}
 
 	if _, err := io.Copy(part, file); err != nil {
-		return fmt.Errorf("webhook: copying %q into request: %w", path, err)
+		return nil, fmt.Errorf("webhook: copying %q into request: %w", path, err)
 	}
 
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("webhook: finalizing multipart body: %w", err)
+		return nil, fmt.Errorf("webhook: finalizing multipart body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, withWait(c.url), &body)
 	if err != nil {
-		return fmt.Errorf("webhook: creating request: %w", err)
+		return nil, fmt.Errorf("webhook: creating request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	return c.do(req)
+	respBody, err := c.doReturningBody(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var posted struct {
+		ID        string `json:"id"`
+		ChannelID string `json:"channel_id"`
+	}
+	if err := json.Unmarshal(respBody, &posted); err != nil {
+		// The report was delivered (2xx); only the deep-link identity is lost.
+		// Degrade to "delivered, identity unknown" rather than failing the run.
+		slog.WarnContext(ctx, "webhook: could not decode posted-message response; deep-link unavailable", "error", err)
+		return nil, nil
+	}
+
+	return &PostedMessage{ID: posted.ID, ChannelID: posted.ChannelID}, nil
+}
+
+// FetchWebhookGuild fetches the webhook object (GET on the webhook URL) and
+// returns the ID of the guild its channel belongs to, so a jump-to-message
+// deep-link can name the guild — Discord's ?wait=true execution response
+// (SendFile) carries the message and channel IDs but not the guild. It is
+// best-effort: the webhook object's guild_id may be absent (returned as ""), and
+// a transport/status/decode failure returns an error the caller is free to
+// ignore, since the report has already been delivered and a missing guild only
+// costs the deep-link. An empty client URL returns ("", nil).
+func (c *Client) FetchWebhookGuild(ctx context.Context) (string, error) {
+	if c.url == "" {
+		return "", nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	if err != nil {
+		return "", fmt.Errorf("webhook: creating request: %w", err)
+	}
+
+	body, err := c.doReturningBody(req)
+	if err != nil {
+		return "", err
+	}
+
+	var hook struct {
+		GuildID string `json:"guild_id"`
+	}
+	if err := json.Unmarshal(body, &hook); err != nil {
+		return "", fmt.Errorf("webhook: decoding webhook object: %w", err)
+	}
+
+	return hook.GuildID, nil
+}
+
+// withWait returns rawURL with the wait=true query parameter set, so a Discord
+// webhook execution returns the created message object instead of a bare 204.
+// A URL that fails to parse is returned unchanged; the malformed URL then surfaces
+// a clearer error at request-construction time than a parse failure here would.
+func withWait(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	query := parsed.Query()
+	query.Set("wait", "true")
+	parsed.RawQuery = query.Encode()
+
+	return parsed.String()
 }
 
 // SendFailure posts a concise failure alert naming the run, the failing phase,
@@ -359,4 +447,28 @@ func (c *Client) do(req *http.Request) error {
 	}
 
 	return nil
+}
+
+// doReturningBody is do's variant for the endpoints whose 2xx response carries a
+// body worth reading (SendFile's ?wait=true message object, FetchWebhookGuild's
+// webhook object). It maps the response identically — a *StatusError for a non-2xx
+// status, a wrapped transport error otherwise — but returns the response body on
+// success. The body is always drained and closed.
+func (c *Client) doReturningBody(req *http.Request) ([]byte, error) {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("webhook: sending request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("webhook: reading response body: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &StatusError{Code: resp.StatusCode}
+	}
+
+	return body, nil
 }

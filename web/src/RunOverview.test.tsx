@@ -177,4 +177,45 @@ describe('RunOverview', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /temporal workflow/i })).not.toBeInTheDocument()
   })
+
+  it('links to the Discord report message when the run delivered one', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : String(input)
+
+        if (url.endsWith('/delivery')) {
+          return Promise.resolve(jsonResponse(200, { runId: 'run-1', messageUrl: 'https://discord.com/channels/g1/c1/m1' }))
+        }
+
+        return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
+      }),
+    )
+
+    render(<RunOverview runId="run-1" detail={{ ...runningDetail, status: 'Completed' }} phases={phases} terminal />)
+
+    const link = await screen.findByRole('link', { name: /discord report/i })
+    expect(link).toHaveAttribute('href', 'https://discord.com/channels/g1/c1/m1')
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it('shows no Discord report link when the run delivered none', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : String(input)
+
+        if (url.endsWith('/delivery')) {
+          return Promise.resolve(jsonResponse(200, { runId: 'run-1', messageUrl: '' }))
+        }
+
+        return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
+      }),
+    )
+
+    render(<RunOverview runId="run-1" detail={{ ...runningDetail, status: 'Completed' }} phases={phases} terminal />)
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: /backup completed/i })).toBeInTheDocument())
+    expect(screen.queryByRole('link', { name: /discord report/i })).not.toBeInTheDocument()
+  })
 })
