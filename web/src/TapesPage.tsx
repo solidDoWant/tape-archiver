@@ -268,7 +268,7 @@ function TapesPage() {
               tape — check back after a run's Load phase, or submit a new run.
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-border bg-surface shadow-card">
+            <div className="max-w-3xl overflow-x-auto rounded-xl border border-border bg-surface shadow-card">
               <table className="w-full min-w-[720px] border-collapse text-left text-[12.5px]">
                 <thead>
                   <tr className="border-b border-border bg-surface-2 text-[11px] tracking-wide text-text-faint uppercase">
