@@ -179,7 +179,7 @@ func (c *Client) SendFailure(ctx context.Context, runID, phase string, runErr er
 	}
 
 	if err := c.Send(ctx, msg); err != nil {
-		slog.Error("failed to deliver webhook failure alert",
+		slog.ErrorContext(ctx, "failed to deliver webhook failure alert",
 			"run_id", runID,
 			"phase", phase,
 			"delivery_error", err,
@@ -213,7 +213,7 @@ func (c *Client) SendOperatorPause(ctx context.Context, runID string, readyForRe
 	}
 
 	if err := c.Send(ctx, msg); err != nil {
-		slog.Error("failed to deliver webhook operator-pause alert",
+		slog.ErrorContext(ctx, "failed to deliver webhook operator-pause alert",
 			"run_id", runID,
 			"awaiting", awaiting,
 			"delivery_error", err,
@@ -255,7 +255,7 @@ func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, af
 	}
 
 	if err := c.Send(ctx, msg); err != nil {
-		slog.Error("failed to deliver webhook write-path pause alert",
+		slog.ErrorContext(ctx, "failed to deliver webhook write-path pause alert",
 			"run_id", runID,
 			"phase", phase,
 			"delivery_error", err,
@@ -296,7 +296,7 @@ func (c *Client) SendBurnPause(ctx context.Context, runID string, devices []stri
 	}
 
 	if err := c.Send(ctx, msg); err != nil {
-		slog.Error("failed to deliver webhook burn pause alert",
+		slog.ErrorContext(ctx, "failed to deliver webhook burn pause alert",
 			"run_id", runID,
 			"delivery_error", err,
 		)

@@ -436,9 +436,14 @@ so they can reach the dev workers' loopback-bound ports directly:
   `$WEB_DEV_STATE_DIR/logs/<name>.log`; a **`vector`** container tails those files,
   parses each line as JSON, and ships it into VictoriaLogs' JSON stream API
   (`/insert/jsonline`), preserving every field the worker logged — including the
-  Temporal SDK's own `WorkflowID`/`RunID`/`WorkflowType` tags (added automatically by
-  `workflow.GetLogger`/`activity.GetLogger`), which is what makes a run's logs
-  matchable by LogsQL.
+  `WorkflowID`/`RunID` tags, which is what makes a run's logs matchable by LogsQL.
+  Those tags land on **every** line an activity emits, not just the Temporal
+  SDK's context-logger (`workflow.GetLogger`/`activity.GetLogger`) lines: the
+  worker installs an activity interceptor (`cmd/worker/logtags.go`) that seeds the
+  activity context with the run's `WorkflowID`/`RunID`, and `pkg/logging`'s handler
+  lifts them onto every record logged with that context. Without this, only the
+  handful of SDK error-path log lines carried `RunID`, so a successful run's log
+  panel came up empty (#303).
 - **`victoriametrics`** (VictoriaMetrics) scrapes both dev workers' Prometheus
   `/metrics` endpoints directly (`scripts/web-dev-vm-scrape.yml`: static targets at the
   control/data workers' fixed dev-stack `METRICS_ADDR` ports, 19090/19091), including

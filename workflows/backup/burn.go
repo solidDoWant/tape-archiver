@@ -193,7 +193,7 @@ func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (Bur
 			// Reclaiming a non-blank disc is deliberate (AllowNonBlankDiscs) but
 			// irreversible: warn loudly, naming the drive whose disc is being wiped,
 			// so the destroyed data is observable in the run's durable log (SPEC §10).
-			slog.Warn("optical: reclaiming a NON-BLANK rewritable disc before burning "+
+			slog.WarnContext(ctx, "optical: reclaiming a NON-BLANK rewritable disc before burning "+
 				"(Delivery.OpticalBurn.AllowNonBlankDiscs is set); existing disc contents will be destroyed",
 				"device", input.Device)
 
