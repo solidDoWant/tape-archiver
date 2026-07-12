@@ -85,10 +85,13 @@ async function fillMinimalValidForm() {
   fireEvent.change(screen.getByLabelText(/identity \/ private key/i), {
     target: { value: 'AGE-SECRET-KEY-PQ-1EXAMPLE' },
   })
-  // Select a blank slot: library.blankSlots is required and now minItems=1
+  // Select blank slots: library.blankSlots is required and now minItems=1
   // (issue #321), so a config with no slot selected no longer validates — the
-  // form must not advance to Review without one, exactly the gap this fixes.
+  // form must not advance to Review without one. Select two, matching the
+  // default copies=2, so the blank count is a whole multiple of copies (each
+  // logical tape needs one blank per copy) and the config validates.
   fireEvent.click(screen.getByRole('button', { name: 'Slot 1' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Slot 2' }))
 }
 
 afterEach(() => {
@@ -277,6 +280,34 @@ describe('ConfigPage', () => {
       expect(screen.getByText(/does not validate against the run-config schema/i)).toBeInTheDocument()
     })
     expect(screen.getByText(/library\.blankSlots: must have at least one item/i)).toBeInTheDocument()
+    expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
+  })
+
+  it('blocks Review when the blank-slot count is not a multiple of copies', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Slot 1' })).toBeInTheDocument())
+
+    fireEvent.change(screen.getByPlaceholderText('bulk-pool-01/dataset'), { target: { value: 'bulk-pool-01/photos' } })
+    fireEvent.change(screen.getByPlaceholderText('age1pq1…'), {
+      target: { value: 'age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4' },
+    })
+    fireEvent.change(screen.getByLabelText(/identity \/ private key/i), { target: { value: 'AGE-SECRET-KEY-PQ-1EXAMPLE' } })
+
+    // Default copies is 2; select a single blank slot so the count (1) is not a
+    // whole multiple of copies. This is schema-valid (minItems=1) but fails the
+    // cross-field gate the server also enforces.
+    fireEvent.click(screen.getByRole('button', { name: 'Slot 1' }))
+
+    fireEvent.click(screen.getByRole('button', { name: /review →/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/does not validate against the run-config schema/i)).toBeInTheDocument()
+    })
+    // The issues panel names the offending field; match its path-prefixed entry
+    // specifically, since the form's inline picker warning carries the same
+    // message text.
+    expect(screen.getByText(/library\.blankSlots:.*not a multiple of 2 copies/i)).toBeInTheDocument()
     expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
   })
 

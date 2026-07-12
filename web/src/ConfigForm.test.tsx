@@ -5,15 +5,15 @@ import ConfigForm from './ConfigForm'
 import { buildConfig, defaultFormState, type DeployConfig, type FormState } from './configModel'
 import type { UiConfigState } from './uiConfig'
 
-// testDeploy is a fully-configured deployment (issue #304): the Library and
-// Delivery sections render these read-only, and buildConfig fills them into the
-// submitted config.
+// testDeploy is a fully-configured deployment (issue #304): the deploy-owned
+// devices/webhook are not shown in the form at all, and buildConfig fills them
+// into the submitted config.
 const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0', '/dev/nst1'],
   webhookUrl: 'https://discord.com/api/webhooks/1/a',
-  // The deploy-owned optical burner drives (issue #317), shown read-only in the
-  // Delivery section's optical-burn subsection once burning is enabled.
+  // The deploy-owned optical burner drives: enforced server-side and never
+  // rendered in the form (like the changer/drives).
   opticalBurnDrives: ['/dev/sr0', '/dev/sr1'],
   // A small topology (issue #305): 6 storage slots, slot 5 reserved for cleaning
   // and slot 6 for the I/O station, so the slot-grid picker offers slots 1–4 as
@@ -150,6 +150,19 @@ describe('ConfigForm', () => {
     expect(screen.getByText('0 blank slot(s) selected')).toBeInTheDocument()
   })
 
+  it('warns inline when the selected blank-slot count is not a multiple of copies, and clears the warning once it is', () => {
+    render(<Wrapper />)
+
+    // Default copies is 2. One blank slot cannot form a whole logical-tape copy
+    // set, so the picker warns.
+    fireEvent.click(screen.getByRole('button', { name: 'Slot 1' }))
+    expect(screen.getByRole('alert')).toHaveTextContent(/not a multiple of 2 copies/i)
+
+    // A second blank slot makes the count a whole multiple of copies — warning gone.
+    fireEvent.click(screen.getByRole('button', { name: 'Slot 2' }))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('adapts the grid to a different slot count with no code change (issue #305)', () => {
     render(<Wrapper deploy={{ ...testDeploy, slotCount: 10, cleaningSlots: [], ioStationSlots: [] }} />)
 
@@ -174,30 +187,20 @@ describe('ConfigForm', () => {
     expect(screen.getByText(/copies per run/i)).toBeInTheDocument()
   })
 
-  it('shows the deploy-owned burner drives read-only when optical burn is enabled, with no editable input (issue #317)', () => {
+  it('does not render the deploy-owned burner drives in the form at all, even when optical burn is enabled', () => {
     render(<Wrapper />)
 
-    // Not shown until burn is enabled.
+    fireEvent.click(screen.getByLabelText('Enable optical recovery discs'))
+
+    // The burner drives are deploy-owned and enforced server-side (like the
+    // changer/drive devices), so the form shows no control — not even a
+    // read-only display — for them: neither the device paths nor any label.
     expect(screen.queryByText('/dev/sr0')).not.toBeInTheDocument()
+    expect(screen.queryByText('/dev/sr1')).not.toBeInTheDocument()
+    expect(screen.queryByText(/burner devices/i)).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByLabelText('Enable optical recovery discs'))
-
-    // The deploy-owned burner devices are shown read-only, sourced from deploy
-    // config — the operator only controls the on/off toggle and copies per run.
-    expect(screen.getByText('/dev/sr0')).toBeInTheDocument()
-    expect(screen.getByText('/dev/sr1')).toBeInTheDocument()
-    expect(screen.getByText(/from deploy config/i)).toBeInTheDocument()
-
-    // No editable burner-device input (the operator cannot type a device path).
-    expect(screen.queryByPlaceholderText('/dev/sr0')).not.toBeInTheDocument()
-  })
-
-  it('shows a not-configured notice for the burner drives when the deployment set none (issue #317)', () => {
-    render(<Wrapper deploy={emptyDeploy} deployStatus="loaded" />)
-
-    fireEvent.click(screen.getByLabelText('Enable optical recovery discs'))
-
-    expect(screen.getByText(/set OPTICAL_BURNER_DRIVES/)).toBeInTheDocument()
+    // The operator still controls the copies-per-run input.
+    expect(screen.getByText(/copies per run/i)).toBeInTheDocument()
   })
 
   it('inserts a generated age keypair into the recipients list and identity field', async () => {

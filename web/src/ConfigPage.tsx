@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { apiFetch, ApiError, describeNetworkError } from './api'
 import { useActiveRun } from './activeRun'
 import {
+  blankSlotsCopiesIssue,
   buildConfig,
   configToFormState,
   defaultFormState,
@@ -156,7 +157,18 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
 
     try {
       const schema = await fetchConfigSchema()
-      const issues = validateAgainstSchema(schema, buildConfig(form, deploy))
+      const config = buildConfig(form, deploy)
+      const issues = validateAgainstSchema(schema, config)
+
+      // The blank-slots-multiple-of-copies rule is a cross-field invariant the
+      // schema validator deliberately does not encode (see configSchema.ts), so
+      // gate it here too — matching the server's internal/config/validate.go —
+      // rather than only warning inline in the form, so it can never be clicked
+      // past into Review.
+      const copiesIssue = blankSlotsCopiesIssue(config.copies, config.library.blankSlots.length)
+      if (copiesIssue !== null) {
+        issues.push({ path: 'library.blankSlots', message: copiesIssue })
+      }
 
       setReviewIssues(issues)
 

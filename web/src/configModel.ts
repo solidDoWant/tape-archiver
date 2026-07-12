@@ -208,6 +208,22 @@ export function defaultFormState(): FormState {
   }
 }
 
+// blankSlotsCopiesIssue mirrors internal/config/validate.go's cross-field gate:
+// every logical tape needs one blank per copy (physical tapes = logical tapes ×
+// copies, SPEC §4.3), so the selected blank slots only form whole logical-tape
+// sets when their count is a positive multiple of copies. Returns a human
+// message when the selection violates that (a leftover count that can never
+// complete another copy set), else null. The empty-selection and copies < 1
+// cases are left to the schema validator's own minItems / minimum gates, so this
+// stays a single-purpose cross-field check and does not double-report them.
+export function blankSlotsCopiesIssue(copies: number, blankSlotCount: number): string | null {
+  if (copies < 1 || blankSlotCount === 0 || blankSlotCount % copies === 0) {
+    return null
+  }
+
+  return `${blankSlotCount} blank slot(s) selected is not a multiple of ${copies} copies — each logical tape needs ${copies} tape(s), so select a multiple of ${copies}.`
+}
+
 // buildSource converts one Form-mode source row into a schema-shaped Source.
 // The ZFS/k8s toggle and (within k8s) the by-name/by-label-selector toggle
 // are each a single-choice UI control, so the built object always carries

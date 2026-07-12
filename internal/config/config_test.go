@@ -221,8 +221,10 @@ func TestConfigValidate(t *testing.T) {
 		{
 			// Copies may exceed the drive count: the tape path writes the copies
 			// of each logical tape in successive drive-sets (issue #66).
-			name:    "copies exceeds drives is allowed",
-			mutate:  func(c *Config) { c.Copies = 5 },
+			name: "copies exceeds drives is allowed",
+			// Give a full copy-set of blanks (a multiple of copies) so the only
+			// thing under test is that copies may exceed the drive count.
+			mutate:  func(c *Config) { c.Copies = 5; c.Library.BlankSlots = []int{1, 2, 3, 4, 5} },
 			wantErr: require.NoError,
 		},
 		{
@@ -275,6 +277,19 @@ func TestConfigValidate(t *testing.T) {
 		{
 			name:    "library distinct non-negative blank slots is allowed",
 			mutate:  func(c *Config) { c.Library.BlankSlots = []int{0, 1, 2, 3} },
+			wantErr: require.NoError,
+		},
+		{
+			// 3 blanks with 2 copies leaves one blank that can never complete
+			// another logical tape's copy set (physical tapes = tapes × copies).
+			name:        "library blank slots not a multiple of copies",
+			mutate:      func(c *Config) { c.Copies = 2; c.Library.BlankSlots = []int{1, 2, 3} },
+			wantErr:     require.Error,
+			errContains: "must be a positive multiple of copies",
+		},
+		{
+			name:    "library blank slots a multiple of copies is allowed",
+			mutate:  func(c *Config) { c.Copies = 3; c.Library.BlankSlots = []int{1, 2, 3, 4, 5, 6} },
 			wantErr: require.NoError,
 		},
 		{

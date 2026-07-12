@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  blankSlotsCopiesIssue,
   buildConfig,
   configToFormState,
   defaultFormState,
@@ -332,5 +333,28 @@ describe('deployOwnedFields', () => {
     }
 
     expect(deployOwnedFields(config)).toEqual([])
+  })
+})
+
+describe('blankSlotsCopiesIssue', () => {
+  it('returns null when the blank-slot count is a positive multiple of copies', () => {
+    expect(blankSlotsCopiesIssue(1, 1)).toBeNull()
+    expect(blankSlotsCopiesIssue(2, 2)).toBeNull()
+    expect(blankSlotsCopiesIssue(2, 4)).toBeNull()
+    expect(blankSlotsCopiesIssue(3, 6)).toBeNull()
+  })
+
+  it('returns a message naming both counts when the blanks are not a multiple of copies', () => {
+    const message = blankSlotsCopiesIssue(3, 5)
+
+    expect(message).toContain('5')
+    expect(message).toContain('3')
+    expect(message).toMatch(/multiple of 3/i)
+  })
+
+  it('defers the empty-selection and copies < 1 cases to the schema validator, returning null', () => {
+    // blankSlotCount 0 is covered by minItems=1; copies < 1 by minimum=1.
+    expect(blankSlotsCopiesIssue(2, 0)).toBeNull()
+    expect(blankSlotsCopiesIssue(0, 3)).toBeNull()
   })
 })

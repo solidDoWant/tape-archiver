@@ -1,5 +1,6 @@
 import AgeKeygenPanel, { type AgeKeypair } from './AgeKeygenPanel'
 import {
+  blankSlotsCopiesIssue,
   k8sApiVersions,
   newSourceFormState,
   type DeployConfig,
@@ -118,6 +119,7 @@ function SlotGridEditor({
   cleaningSlots,
   ioStationSlots,
   selected,
+  copies,
   onChange,
 }: {
   status: UiConfigState['status']
@@ -125,6 +127,7 @@ function SlotGridEditor({
   cleaningSlots: number[]
   ioStationSlots: number[]
   selected: number[]
+  copies: number
   onChange: (slots: number[]) => void
 }) {
   const label = (
@@ -183,6 +186,12 @@ function SlotGridEditor({
     (slot) => slot >= 1 && slot <= slotCount && !cleaning.has(slot) && !ioStation.has(slot),
   ).length
 
+  // Warn inline when the chosen blanks can't form whole logical-tape copy sets
+  // (count not a positive multiple of copies) — the same cross-field gate the
+  // server enforces (internal/config/validate.go) and Review re-checks, surfaced
+  // here at the point of selection so the operator sees it as they pick slots.
+  const copiesIssue = blankSlotsCopiesIssue(copies, selectableCount)
+
   return (
     <div>
       {label}
@@ -214,8 +223,8 @@ function SlotGridEditor({
               onClick={() => toggle(slot)}
               className={
                 isSelected
-                  ? 'flex h-8 w-8 items-center justify-center rounded-md border border-green-line bg-green-bg font-mono text-[11px] font-semibold text-green'
-                  : 'flex h-8 w-8 items-center justify-center rounded-md border border-border-strong bg-surface-2 font-mono text-[11px] text-text transition-colors hover:border-green-line hover:text-green'
+                  ? 'flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-green-line bg-green-bg font-mono text-[11px] font-semibold text-green'
+                  : 'flex h-8 w-8 cursor-pointer items-center justify-center rounded-md border border-border-strong bg-surface-2 font-mono text-[11px] text-text transition-colors hover:border-green-line hover:text-green'
               }
             >
               {slot}
@@ -224,68 +233,11 @@ function SlotGridEditor({
         })}
       </div>
       <div className="mt-1.5 font-mono text-[11px] text-text-faint">{selectableCount} blank slot(s) selected</div>
-    </div>
-  )
-}
-
-// BurnerDrivesDisplay is the Delivery section's read-only view of the deploy-
-// owned optical burner device paths (issue #317). The burner drives are a
-// property of the deployment/host, not a per-run choice, so — like the
-// changer/drive devices (issue #304) — the operator does not type them; unlike
-// those, though, they are *shown* here (read-only) when optical burn is enabled,
-// so the operator can see which devices a burn will target while still
-// controlling only the on/off toggle and the copy count. Sourced from GET
-// /api/config/ui (deploy config), so it handles the same fetch states as the
-// slot picker: a loading line in flight, an unavailable notice on failure, and,
-// when the deployment declared no burner drives, an actionable notice naming the
-// env var to set (JSON / paste mode remains the escape hatch).
-function BurnerDrivesDisplay({ status, drives }: { status: UiConfigState['status']; drives: string[] }) {
-  const label = <label className={fieldLabelClass}>burner devices — from deploy config</label>
-
-  if (status === 'loading') {
-    return (
-      <div>
-        {label}
-        <p role="status" className="font-mono text-[11px] text-text-faint">
-          Loading deploy config…
+      {copiesIssue !== null ? (
+        <p role="alert" className="mt-1 font-mono text-[11px] text-amber">
+          {copiesIssue}
         </p>
-      </div>
-    )
-  }
-
-  if (status === 'error') {
-    return (
-      <div>
-        {label}
-        <p className="font-mono text-[11px] text-amber">Deploy config unavailable — could not load the burner drives.</p>
-      </div>
-    )
-  }
-
-  if (drives.length === 0) {
-    return (
-      <div>
-        {label}
-        <p className="font-mono text-[11px] text-amber">
-          No burner drives configured — set OPTICAL_BURNER_DRIVES (or use JSON / paste mode).
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <div>
-      {label}
-      <div className="flex flex-col gap-1.5">
-        {drives.map((drive) => (
-          <div
-            key={drive}
-            className="rounded-lg border border-border bg-inset px-2.5 py-2 font-mono text-[12px] text-text-dim"
-          >
-            {drive}
-          </div>
-        ))}
-      </div>
+      ) : null}
     </div>
   )
 }
@@ -611,6 +563,7 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
             cleaningSlots={deploy.cleaningSlots}
             ioStationSlots={deploy.ioStationSlots}
             selected={form.blankSlots}
+            copies={form.copies}
             onChange={(blankSlots) => setForm((previous) => ({ ...previous, blankSlots }))}
           />
         </div>
@@ -699,8 +652,6 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
 
         {form.opticalBurnEnabled ? (
           <div className="mt-3.5 flex flex-col gap-3 border-t border-border pt-3.5">
-            <BurnerDrivesDisplay status={deployStatus} drives={deploy.opticalBurnDrives} />
-
             <div className="w-40">
               <label className={fieldLabelClass} htmlFor="config-optical-copies">
                 copies per run
