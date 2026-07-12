@@ -13,7 +13,19 @@ import type { DeployConfig } from './configModel'
 export interface UiConfig {
   temporalUiBaseUrl: string
   temporalNamespace: string
-  library: { changer: string; drives: string[] }
+  // library carries the deploy-owned changer/drive device targets (issue #304)
+  // and the physical library topology (issue #305): slotCount is the number of
+  // storage slots (numbered 1..slotCount by the slot-grid picker), and
+  // cleaningSlots/ioStationSlots are the slot numbers the picker renders
+  // non-selectable. slotCount is 0 and the slot arrays [] when the deployment
+  // did not declare a topology.
+  library: {
+    changer: string
+    drives: string[]
+    slotCount: number
+    cleaningSlots: number[]
+    ioStationSlots: number[]
+  }
   delivery: { webhookUrl: string }
 }
 
@@ -52,22 +64,26 @@ export function useUiConfig(): UiConfigState {
 }
 
 // deployConfigFrom extracts the deploy-owned library devices and Discord
-// webhook (issue #304) the guided config form fills into a submitted run
-// config, from the GET /api/config/ui fetch state. Until the fetch has loaded
-// (or if it failed), it yields empty values — the guided form then shows a
-// loading/unavailable state for those read-only fields, and its Review step
-// surfaces the run-config schema's own "changer must not be empty" / "at least
-// one drive is required" validation rather than the SPA inventing a default.
+// webhook (issue #304), plus the physical library topology (issue #305), that
+// the guided config form needs, from the GET /api/config/ui fetch state. Until
+// the fetch has loaded (or if it failed), it yields empty values — the guided
+// form then shows a loading/unavailable state for the read-only device/webhook
+// fields and the slot picker, and its Review step surfaces the run-config
+// schema's own "changer must not be empty" / "at least one drive is required"
+// validation rather than the SPA inventing a default.
 export function deployConfigFrom(state: UiConfigState): DeployConfig {
   if (state.status === 'loaded') {
     return {
       changer: state.config.library.changer,
       drives: state.config.library.drives,
       webhookUrl: state.config.delivery.webhookUrl,
+      slotCount: state.config.library.slotCount,
+      cleaningSlots: state.config.library.cleaningSlots,
+      ioStationSlots: state.config.library.ioStationSlots,
     }
   }
 
-  return { changer: '', drives: [], webhookUrl: '' }
+  return { changer: '', drives: [], webhookUrl: '', slotCount: 0, cleaningSlots: [], ioStationSlots: [] }
 }
 
 // temporalWorkflowUrl builds the Temporal Web UI deep-link for one workflow

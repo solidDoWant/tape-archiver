@@ -142,10 +142,20 @@ export function newSourceFormState(): SourceFormState {
 // carries them (SPEC §4.2 — the run config stays the single source of truth);
 // they are simply not FormState fields. JSON/paste mode, by contrast, is the
 // full-schema escape hatch and can still override them per run.
+//
+// slotCount/cleaningSlots/ioStationSlots are the physical library topology
+// (issue #305): the storage slot count and the reserved cleaning / I/O-station
+// slot numbers, from which ConfigForm's slot-grid picker draws a grid bounded to
+// the real library. Unlike the devices above, the per-run *selection* of blank
+// slots (library.blankSlots) is still an operator choice — the topology only
+// bounds it — so blankSlots stays a FormState field; the topology does not.
 export interface DeployConfig {
   changer: string
   drives: string[]
   webhookUrl: string
+  slotCount: number
+  cleaningSlots: number[]
+  ioStationSlots: number[]
 }
 
 export interface FormState {

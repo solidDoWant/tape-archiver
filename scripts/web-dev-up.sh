@@ -505,6 +505,11 @@ env \
   LIBRARY_CHANGER="$MHVTL_CHANGER_DEV" \
   LIBRARY_DRIVES="$MHVTL_DRIVE0_DEV,$MHVTL_DRIVE1_DEV" \
   DELIVERY_WEBHOOK_URL="https://discord.com/api/webhooks/000/dev-webhook" \
+  `# Deploy-owned library topology driving the slot-grid picker (issue #305).` \
+  `# The mhvtl dev library (scripts/mhvtl-up.sh) has 47 storage slots and 3 MAPs;` \
+  `# the MAPs are a separate I/O-station address space, so only the storage count` \
+  `# is declared here and Form mode renders a real 47-slot grid locally.` \
+  LIBRARY_SLOT_COUNT="47" \
   VICTORIALOGS_URL="$VICTORIALOGS_URL" \
   VICTORIALOGS_STREAM_FILTER="$VICTORIALOGS_STREAM_FILTER" \
   VICTORIAMETRICS_URL="$VICTORIAMETRICS_URL" \

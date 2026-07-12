@@ -18,6 +18,9 @@ const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0', '/dev/nst1'],
   webhookUrl: 'https://discord.com/api/webhooks/1/a',
+  slotCount: 47,
+  cleaningSlots: [45],
+  ioStationSlots: [46, 47],
 }
 
 describe('buildConfig', () => {
@@ -127,6 +130,9 @@ describe('buildConfig', () => {
       changer: '/dev/sch0',
       drives: ['/dev/nst0', '', '  '],
       webhookUrl: '',
+      slotCount: 0,
+      cleaningSlots: [],
+      ioStationSlots: [],
     })
 
     expect(config.library.drives).toEqual(['/dev/nst0'])
@@ -136,7 +142,14 @@ describe('buildConfig', () => {
     // An unconfigured deployment yields empty deploy values; buildConfig stays
     // total (never throws) and the empty changer/drives then fail the schema
     // at the Review step rather than the SPA inventing a default.
-    const config = buildConfig(defaultFormState(), { changer: '', drives: [], webhookUrl: '' })
+    const config = buildConfig(defaultFormState(), {
+      changer: '',
+      drives: [],
+      webhookUrl: '',
+      slotCount: 0,
+      cleaningSlots: [],
+      ioStationSlots: [],
+    })
 
     expect(config.library.changer).toBe('')
     expect(config.library.drives).toEqual([])
@@ -255,6 +268,9 @@ describe('unmodeledFields', () => {
       changer: baseConfig.library.changer,
       drives: baseConfig.library.drives,
       webhookUrl: baseConfig.delivery.webhookUrl,
+      slotCount: 0,
+      cleaningSlots: [],
+      ioStationSlots: [],
     }
 
     const roundTripped = buildConfig(configToFormState(baseConfig), deploy)

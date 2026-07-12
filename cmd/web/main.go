@@ -60,6 +60,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -264,11 +265,28 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	deployDrives := splitDeviceList(getenv("LIBRARY_DRIVES"))
 	deployWebhookURL := getenv("DELIVERY_WEBHOOK_URL")
 
+	// The physical library's topology (issue #305): the storage slot count and
+	// the cleaning / I/O-station slot numbers, from which the guided config form
+	// renders a slot-grid picker bounded to the real library rather than a
+	// free-form list. Like the devices above, these describe the deployment's
+	// hardware, not a per-run choice. LIBRARY_SLOT_COUNT is a single integer;
+	// LIBRARY_CLEANING_SLOTS / LIBRARY_IO_STATION_SLOTS are comma-separated slot
+	// numbers. All optional; an unset/blank slot count arrives as 0 and the form
+	// shows the picker "not configured" (the operator can still set blank slots
+	// via JSON / paste mode). A non-numeric LIBRARY_SLOT_COUNT is treated as
+	// unconfigured (0) rather than failing startup — a mistyped topology is never
+	// worth refusing to serve the app over, and the picker degrades to the same
+	// not-configured state.
+	deploySlotCount, _ := strconv.Atoi(strings.TrimSpace(getenv("LIBRARY_SLOT_COUNT")))
+	deployCleaningSlots := splitIntList(getenv("LIBRARY_CLEANING_SLOTS"))
+	deployIOStationSlots := splitIntList(getenv("LIBRARY_IO_STATION_SLOTS"))
+
 	handler, err := webserver.NewHandler(assets, runsapi.New(
 		temporalClient,
 		runsapi.WithDrainContext(drainCtx),
 		runsapi.WithTemporalUI(temporalUIURL, temporalNamespace),
 		runsapi.WithDeployConfig(deployChanger, deployDrives, deployWebhookURL),
+		runsapi.WithLibraryTopology(deploySlotCount, deployCleaningSlots, deployIOStationSlots),
 	))
 	if err != nil {
 		return fmt.Errorf("build web server handler: %w", err)
@@ -392,6 +410,31 @@ func splitDeviceList(value string) []string {
 	}
 
 	return drives
+}
+
+// splitIntList parses a comma-separated list of slot numbers (the
+// LIBRARY_CLEANING_SLOTS / LIBRARY_IO_STATION_SLOTS env vars) into a slice,
+// trimming whitespace and dropping empty or non-numeric entries, so
+// " 45, 46 " yields two numbers and an unset/blank value yields an empty slice.
+// A malformed entry is skipped rather than failing startup — mirroring
+// LIBRARY_SLOT_COUNT's own tolerant parse in run(), a mistyped topology is never
+// worth refusing to serve the app over. It returns a non-nil, possibly-empty
+// slice so GET /api/config/ui reports [] (an array the SPA maps over), not null.
+func splitIntList(value string) []int {
+	slots := make([]int, 0)
+
+	for _, entry := range strings.Split(value, ",") {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+
+		if slot, err := strconv.Atoi(trimmed); err == nil {
+			slots = append(slots, slot)
+		}
+	}
+
+	return slots
 }
 
 // listenAddr resolves the TCP address to listen on: WEB_LISTEN_ADDRESS when

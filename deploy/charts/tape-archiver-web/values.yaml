@@ -152,6 +152,25 @@ config:
       # drives is the list of tape-drive device paths (e.g. ["/dev/nst0",
       # "/dev/nst1"]), rendered to LIBRARY_DRIVES as a comma-separated list.
       drives: []
+      # topology is the physical library's slot layout (issue #305 —
+      # LIBRARY_SLOT_COUNT / LIBRARY_CLEANING_SLOTS / LIBRARY_IO_STATION_SLOTS,
+      # docs/configuration.md), from which the guided config form renders the
+      # blank/write-target slot-grid picker bounded to this deployment's real
+      # library instead of a free-form list of slot numbers. Like the devices
+      # above, it describes the deployment's hardware, not a per-run choice.
+      # Leave slotCount 0 (the default) to show the picker "not configured"; the
+      # operator can still set blank slots per run via the config page's JSON /
+      # paste mode.
+      topology:
+        # slotCount is the number of physical storage slots; the picker numbers
+        # them 1..slotCount.
+        slotCount: 0
+        # cleaningSlots / ioStationSlots are the slot numbers reserved for
+        # cleaning cartridges and the I/O station (import/export / mail slot),
+        # rendered non-selectable in the picker. Each renders to a
+        # comma-separated list (e.g. [45] -> "45", [46, 47] -> "46,47").
+        cleaningSlots: []
+        ioStationSlots: []
 
     # delivery carries the deployment's fixed Discord report webhook the guided
     # config form sources read-only (issue #304 — DELIVERY_WEBHOOK_URL,

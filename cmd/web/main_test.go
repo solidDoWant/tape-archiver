@@ -54,6 +54,30 @@ func TestSplitDeviceList(t *testing.T) {
 	}
 }
 
+// TestSplitIntList checks the LIBRARY_CLEANING_SLOTS / LIBRARY_IO_STATION_SLOTS
+// parser trims each entry, drops empty and non-numeric entries (a mistyped
+// topology degrades rather than failing startup), and always returns a non-nil
+// slice (so GET /api/config/ui reports [] rather than null — issue #305).
+func TestSplitIntList(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []int
+	}{
+		{name: "unset yields empty slice", value: "", want: []int{}},
+		{name: "single slot", value: "45", want: []int{45}},
+		{name: "two slots", value: "46,47", want: []int{46, 47}},
+		{name: "trims whitespace and drops blanks", value: " 46 , ,47 ,", want: []int{46, 47}},
+		{name: "drops non-numeric entries", value: "45,notaslot,47", want: []int{45, 47}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, splitIntList(test.value))
+		})
+	}
+}
+
 // requireBuiltFrontend skips the calling test with an actionable reason when
 // the embedded SPA has not actually been built (dist/ still only holds the
 // committed dist/.gitkeep placeholder — see assets.go). `make test` builds

@@ -39,10 +39,27 @@ type uiConfigResponse struct {
 }
 
 // uiLibraryConfig is uiConfigResponse's deploy-owned library section: the
-// changer and drive device paths the guided form fills in from deploy config.
+// changer and drive device paths the guided form fills in from deploy config
+// (issue #304), plus the library's physical topology (issue #305) — the storage
+// slot count and the cleaning / I/O-station slot numbers — from which the guided
+// form renders a real slot-grid picker bounded to that library instead of a
+// free-form list of slot numbers. The topology is deploy-owned for the same
+// reason as the devices: it is a property of the physical library, not a per-run
+// choice.
 type uiLibraryConfig struct {
 	Changer string   `json:"changer"`
 	Drives  []string `json:"drives"`
+	// SlotCount is the number of physical storage slots; the SPA numbers them
+	// 1..SlotCount to draw the slot-grid picker. 0 when the deployment did not
+	// declare a topology, in which case the form shows the picker as "not
+	// configured" (see ConfigForm.tsx).
+	SlotCount int `json:"slotCount"`
+	// CleaningSlots and IOStationSlots are storage-slot numbers reserved for
+	// cleaning cartridges and the I/O station (import/export / mail slot); the
+	// picker renders them disabled so they can never be chosen as a blank
+	// write-target slot. Each is [] when unconfigured, never null.
+	CleaningSlots  []int `json:"cleaningSlots"`
+	IOStationSlots []int `json:"ioStationSlots"`
 }
 
 // uiDeliveryConfig is uiConfigResponse's deploy-owned delivery section.
@@ -61,7 +78,12 @@ func (h *handler) getUIConfig(w http.ResponseWriter, _ *http.Request) {
 			Changer: h.deployChanger,
 			// A nil slice marshals to JSON null; the SPA expects an array, so
 			// normalize an unconfigured drive set to [].
-			Drives: append([]string{}, h.deployDrives...),
+			Drives:    append([]string{}, h.deployDrives...),
+			SlotCount: h.deploySlotCount,
+			// Same nil-slice normalization as Drives above: the SPA maps over
+			// these, so an unconfigured set must be [] rather than null.
+			CleaningSlots:  append([]int{}, h.deployCleaningSlots...),
+			IOStationSlots: append([]int{}, h.deployIOStationSlots...),
 		},
 		Delivery: uiDeliveryConfig{
 			WebhookURL: h.deployWebhookURL,

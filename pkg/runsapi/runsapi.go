@@ -277,6 +277,24 @@ func WithDeployConfig(changer string, drives []string, webhookURL string) Option
 	}
 }
 
+// WithLibraryTopology supplies the physical library's topology (issue #305): the
+// storage slot count and the cleaning / I/O-station slot numbers. GET
+// /api/config/ui reports these so the guided config form renders a slot-grid
+// picker bounded to the real library — a grid of storage slots 1..slotCount with
+// the cleaning and I/O-station slots rendered non-selectable — instead of a
+// free-form list of arbitrary slot numbers. Like the devices in WithDeployConfig,
+// the topology is a property of the deployment's physical library, not a per-run
+// choice; a zero slotCount simply arrives unconfigured at the SPA, whose picker
+// then shows a "not configured" state (the operator can still set blank slots via
+// JSON / paste mode).
+func WithLibraryTopology(slotCount int, cleaningSlots, ioStationSlots []int) Option {
+	return func(h *handler) {
+		h.deploySlotCount = slotCount
+		h.deployCleaningSlots = cleaningSlots
+		h.deployIOStationSlots = ioStationSlots
+	}
+}
+
 // New builds the /api/runs HTTP handler. temporalClient must be non-nil.
 func New(temporalClient TemporalClient, opts ...Option) http.Handler {
 	return newMux(newHandler(temporalClient, os.Getenv, opts...))
@@ -369,6 +387,16 @@ type handler struct {
 	deployChanger    string
 	deployDrives     []string
 	deployWebhookURL string
+	// deploySlotCount, deployCleaningSlots, and deployIOStationSlots are the
+	// physical library's topology (issue #305), reported by GET /api/config/ui
+	// so the guided config form can render a slot-grid picker bounded to the
+	// real library — storage slots numbered 1..deploySlotCount, with the
+	// cleaning and I/O-station slot numbers rendered non-selectable. All zero /
+	// empty when the deployment did not declare a topology; set via
+	// WithLibraryTopology.
+	deploySlotCount      int
+	deployCleaningSlots  []int
+	deployIOStationSlots []int
 }
 
 // listRuns implements GET /api/runs: every execution of the singleton backup

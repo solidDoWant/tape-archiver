@@ -8,7 +8,7 @@ function uiConfig(overrides: Partial<UiConfig>): UiConfig {
   return {
     temporalUiBaseUrl: '',
     temporalNamespace: '',
-    library: { changer: '', drives: [] },
+    library: { changer: '', drives: [], slotCount: 0, cleaningSlots: [], ioStationSlots: [] },
     delivery: { webhookUrl: '' },
     ...overrides,
   }
@@ -49,11 +49,17 @@ describe('temporalWorkflowUrl', () => {
 })
 
 describe('deployConfigFrom', () => {
-  it('extracts the deploy-owned library devices and webhook once loaded', () => {
+  it('extracts the deploy-owned library devices, webhook, and topology once loaded', () => {
     const state: UiConfigState = {
       status: 'loaded',
       config: uiConfig({
-        library: { changer: '/dev/sch0', drives: ['/dev/nst0', '/dev/nst1'] },
+        library: {
+          changer: '/dev/sch0',
+          drives: ['/dev/nst0', '/dev/nst1'],
+          slotCount: 47,
+          cleaningSlots: [45],
+          ioStationSlots: [46, 47],
+        },
         delivery: { webhookUrl: 'https://discord.example/webhook' },
       }),
     }
@@ -62,14 +68,31 @@ describe('deployConfigFrom', () => {
       changer: '/dev/sch0',
       drives: ['/dev/nst0', '/dev/nst1'],
       webhookUrl: 'https://discord.example/webhook',
+      slotCount: 47,
+      cleaningSlots: [45],
+      ioStationSlots: [46, 47],
     })
   })
 
   it('yields empty values while loading, so the form shows a loading state and Review surfaces validation', () => {
-    expect(deployConfigFrom({ status: 'loading' })).toEqual({ changer: '', drives: [], webhookUrl: '' })
+    expect(deployConfigFrom({ status: 'loading' })).toEqual({
+      changer: '',
+      drives: [],
+      webhookUrl: '',
+      slotCount: 0,
+      cleaningSlots: [],
+      ioStationSlots: [],
+    })
   })
 
   it('yields empty values on a failed fetch', () => {
-    expect(deployConfigFrom({ status: 'error' })).toEqual({ changer: '', drives: [], webhookUrl: '' })
+    expect(deployConfigFrom({ status: 'error' })).toEqual({
+      changer: '',
+      drives: [],
+      webhookUrl: '',
+      slotCount: 0,
+      cleaningSlots: [],
+      ioStationSlots: [],
+    })
   })
 })

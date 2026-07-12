@@ -5,7 +5,14 @@ import { buildConfig, defaultFormState, type DeployConfig } from './configModel'
 
 // testDeploy supplies the deploy-owned library devices + webhook (issue #304)
 // buildConfig fills into the config under review.
-const testDeploy: DeployConfig = { changer: '/dev/sch0', drives: ['/dev/nst0'], webhookUrl: '' }
+const testDeploy: DeployConfig = {
+  changer: '/dev/sch0',
+  drives: ['/dev/nst0'],
+  webhookUrl: '',
+  slotCount: 0,
+  cleaningSlots: [],
+  ioStationSlots: [],
+}
 
 describe('ConfigReview', () => {
   it('renders the mode, summary fields, and the full config JSON', () => {

@@ -12,6 +12,24 @@ const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0', '/dev/nst1'],
   webhookUrl: 'https://discord.com/api/webhooks/1/a',
+  // A small topology (issue #305): 6 storage slots, slot 5 reserved for cleaning
+  // and slot 6 for the I/O station, so the slot-grid picker offers slots 1–4 as
+  // selectable blank-tape targets and renders 5–6 non-selectable.
+  slotCount: 6,
+  cleaningSlots: [5],
+  ioStationSlots: [6],
+}
+
+// emptyDeploy is a deployment that configured neither devices/webhook nor a
+// library topology — every field empty. The Library/Delivery sections then show
+// their "not configured" notices and the slot grid its "not configured" state.
+const emptyDeploy: DeployConfig = {
+  changer: '',
+  drives: [],
+  webhookUrl: '',
+  slotCount: 0,
+  cleaningSlots: [],
+  ioStationSlots: [],
 }
 
 function Wrapper({
@@ -95,15 +113,51 @@ describe('ConfigForm', () => {
     expect(screen.queryByLabelText('target %')).not.toBeInTheDocument()
   })
 
-  it('adds a blank slot number via the slot editor', () => {
+  it('renders a slot grid bounded to the deploy topology, excluding cleaning and I/O-station slots (issue #305)', () => {
+    render(<Wrapper />)
+
+    // Storage slots 1–4 are selectable buttons...
+    expect(screen.getByRole('button', { name: 'Slot 1' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Slot 4' })).toBeInTheDocument()
+
+    // ...the cleaning (5) and I/O-station (6) slots are rendered but not
+    // selectable...
+    expect(screen.queryByRole('button', { name: 'Slot 5' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Slot 5 — reserved for cleaning')).toBeInTheDocument()
+    expect(screen.getByLabelText('Slot 6 — reserved for I/O station')).toBeInTheDocument()
+
+    // ...and the grid stops at the declared slot count (no slot 7).
+    expect(screen.queryByRole('button', { name: 'Slot 7' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Slot 7 — reserved for cleaning')).not.toBeInTheDocument()
+  })
+
+  it('toggles a blank storage slot by clicking its grid cell', () => {
     let latest: FormState | undefined
     render(<Wrapper onForm={(form) => (latest = form)} />)
 
-    fireEvent.change(screen.getByLabelText('New blank slot number'), { target: { value: '3' } })
-    fireEvent.click(screen.getByRole('button', { name: /\+ add slot/i }))
-
+    fireEvent.click(screen.getByRole('button', { name: 'Slot 3' }))
     expect(latest?.blankSlots).toEqual([3])
-    expect(screen.getByText('1 blank slot(s) configured')).toBeInTheDocument()
+    expect(screen.getByText('1 blank slot(s) selected')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Slot 3' })).toHaveAttribute('aria-pressed', 'true')
+
+    // Clicking a selected slot deselects it.
+    fireEvent.click(screen.getByRole('button', { name: 'Slot 3' }))
+    expect(latest?.blankSlots).toEqual([])
+    expect(screen.getByText('0 blank slot(s) selected')).toBeInTheDocument()
+  })
+
+  it('adapts the grid to a different slot count with no code change (issue #305)', () => {
+    render(<Wrapper deploy={{ ...testDeploy, slotCount: 10, cleaningSlots: [], ioStationSlots: [] }} />)
+
+    // Ten selectable storage slots, driven entirely by the deploy value.
+    expect(screen.getAllByRole('button', { name: /^Slot \d+$/ })).toHaveLength(10)
+  })
+
+  it('shows a not-configured notice for the slot picker when the deployment declared no topology', () => {
+    render(<Wrapper deploy={emptyDeploy} deployStatus="loaded" />)
+
+    expect(screen.getByText(/set LIBRARY_SLOT_COUNT/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Slot \d+$/ })).not.toBeInTheDocument()
   })
 
   it('reveals the optical-burn fields only once enabled', () => {
@@ -155,7 +209,7 @@ describe('ConfigForm', () => {
   })
 
   it('names the env var to set when the deployment configured no devices/webhook', () => {
-    render(<Wrapper deploy={{ changer: '', drives: [], webhookUrl: '' }} deployStatus="loaded" />)
+    render(<Wrapper deploy={emptyDeploy} deployStatus="loaded" />)
 
     expect(screen.getByText(/set LIBRARY_CHANGER/)).toBeInTheDocument()
     expect(screen.getByText(/set LIBRARY_DRIVES/)).toBeInTheDocument()
@@ -163,7 +217,7 @@ describe('ConfigForm', () => {
   })
 
   it('shows a loading state for the deploy-owned fields while the config fetch is in flight', () => {
-    render(<Wrapper deploy={{ changer: '', drives: [], webhookUrl: '' }} deployStatus="loading" />)
+    render(<Wrapper deploy={emptyDeploy} deployStatus="loading" />)
 
     expect(screen.getAllByText('Loading deploy config…').length).toBeGreaterThan(0)
   })
