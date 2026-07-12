@@ -17,8 +17,8 @@ export const testRunConfigSchema: JSONSchema = {
       additionalProperties: false,
       required: ['sources', 'copies', 'library', 'redundancy', 'encryption', 'delivery'],
       properties: {
-        sources: { type: 'array', items: { $ref: '#/$defs/Source' } },
-        copies: { type: 'integer' },
+        sources: { type: 'array', minItems: 1, items: { $ref: '#/$defs/Source' } },
+        copies: { type: 'integer', minimum: 1 },
         library: { $ref: '#/$defs/Library' },
         redundancy: { $ref: '#/$defs/Redundancy' },
         encryption: { $ref: '#/$defs/Encryption' },
@@ -40,8 +40,8 @@ export const testRunConfigSchema: JSONSchema = {
       additionalProperties: false,
       required: ['recipients', 'identity'],
       properties: {
-        recipients: { type: 'array', items: { type: 'string' } },
-        identity: { type: 'string' },
+        recipients: { type: 'array', minItems: 1, items: { type: 'string' } },
+        identity: { type: 'string', minLength: 1 },
       },
     },
     FillConfig: {
@@ -59,11 +59,11 @@ export const testRunConfigSchema: JSONSchema = {
       if: { required: ['name'] },
       then: { required: ['namespace'] },
       properties: {
-        apiVersion: { type: 'string' },
-        kind: { type: 'string' },
+        apiVersion: { type: 'string', minLength: 1 },
+        kind: { type: 'string', minLength: 1 },
         namespace: { type: 'string' },
-        name: { type: 'string' },
-        labelSelector: { type: 'string' },
+        name: { type: 'string', minLength: 1 },
+        labelSelector: { type: 'string', minLength: 1 },
       },
     },
     Library: {
@@ -71,10 +71,10 @@ export const testRunConfigSchema: JSONSchema = {
       additionalProperties: false,
       required: ['changer', 'drives', 'blankSlots', 'tapeCapacityBytes'],
       properties: {
-        changer: { type: 'string' },
-        drives: { type: 'array', items: { type: 'string' } },
-        blankSlots: { type: 'array', items: { type: 'integer' } },
-        tapeCapacityBytes: { type: 'integer' },
+        changer: { type: 'string', minLength: 1 },
+        drives: { type: 'array', minItems: 1, items: { type: 'string' } },
+        blankSlots: { type: 'array', minItems: 1, items: { type: 'integer' } },
+        tapeCapacityBytes: { type: 'integer', minimum: 1 },
         ioWaitTimeoutSeconds: { type: 'integer' },
         writeFailureWaitTimeoutSeconds: { type: 'integer' },
         allowNonBlankTapes: { type: 'boolean' },
@@ -98,7 +98,7 @@ export const testRunConfigSchema: JSONSchema = {
       properties: {
         targetPercentage: { type: 'number', multipleOf: 1, minimum: 1, maximum: 100 },
         fillToCapacity: { $ref: '#/$defs/FillConfig' },
-        sliceSizeBytes: { type: 'integer' },
+        sliceSizeBytes: { type: 'integer', minimum: 1 },
       },
     },
     Source: {
@@ -116,7 +116,7 @@ export const testRunConfigSchema: JSONSchema = {
       additionalProperties: false,
       required: ['name'],
       properties: {
-        name: { type: 'string' },
+        name: { type: 'string', minLength: 1 },
       },
     },
   },

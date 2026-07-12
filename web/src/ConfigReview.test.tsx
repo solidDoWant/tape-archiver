@@ -38,6 +38,17 @@ describe('ConfigReview', () => {
     expect(jsonBlock).toHaveTextContent('"age1pq1abc"')
   })
 
+  it('falls back to "(unlabeled)" for a source with an empty label and an empty-string name', () => {
+    // A present-but-empty field must never render as a blank summary (issue: the
+    // sources line showed an empty value). Construct such a source directly.
+    const config = buildConfig(defaultFormState(), testDeploy)
+    config.sources = [{ compression: true, k8s: { apiVersion: 'snapshot.storage.k8s.io/v1', kind: 'VolumeSnapshot', name: '' } }]
+
+    render(<ConfigReview config={config} dryRun={false} />)
+
+    expect(screen.getByText('1 · (unlabeled)')).toBeInTheDocument()
+  })
+
   it('shows Production mode and recovery-disc copies when set', () => {
     const form = defaultFormState()
     form.opticalBurnEnabled = true

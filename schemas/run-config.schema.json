@@ -9,10 +9,12 @@
           "items": {
             "$ref": "#/$defs/Source"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         },
         "copies": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 1
         },
         "library": {
           "$ref": "#/$defs/Library"
@@ -62,10 +64,12 @@
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         },
         "identity": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false,
@@ -103,19 +107,23 @@
       },
       "properties": {
         "apiVersion": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "kind": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "namespace": {
           "type": "string"
         },
         "name": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "labelSelector": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false,
@@ -128,22 +136,26 @@
     "Library": {
       "properties": {
         "changer": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "drives": {
           "items": {
             "type": "string"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         },
         "blankSlots": {
           "items": {
             "type": "integer"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         },
         "tapeCapacityBytes": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 1
         },
         "ioWaitTimeoutSeconds": {
           "type": "integer"
@@ -201,7 +213,8 @@
           "$ref": "#/$defs/FillConfig"
         },
         "sliceSizeBytes": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 1
         }
       },
       "additionalProperties": false,
@@ -231,7 +244,8 @@
     "ZFSPathSource": {
       "properties": {
         "name": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false,

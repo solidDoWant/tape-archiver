@@ -6,11 +6,11 @@ export interface ConfigReviewProps {
 }
 
 function summaryLabel(source: RunConfig['sources'][number]): string {
-  if (source.label) {
-    return source.label
-  }
-
-  return source.zfsPath?.name ?? source.k8s?.name ?? source.k8s?.labelSelector ?? '(unlabeled)'
+  // `||`, not `??`: a present-but-empty field ("" — e.g. a k8s ref's name/
+  // labelSelector, or a source still being filled in) must fall through to the
+  // next candidate and ultimately "(unlabeled)", never render as a blank
+  // summary. (`??` would stop at the empty string.)
+  return source.label || source.zfsPath?.name || source.k8s?.name || source.k8s?.labelSelector || '(unlabeled)'
 }
 
 // ConfigReview is the config page's Review step (issue #279's acceptance
