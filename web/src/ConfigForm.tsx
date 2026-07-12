@@ -1,4 +1,3 @@
-import { useState, type ChangeEvent } from 'react'
 import AgeKeygenPanel, { type AgeKeypair } from './AgeKeygenPanel'
 import {
   k8sApiVersions,
@@ -91,69 +90,134 @@ function StringListEditor({
   )
 }
 
-// SlotListEditor is the Library section's blank-slot editor: a free-form
-// add/remove list of slot numbers rather than a fixed-size button grid.
-// The design mock's grid hardcodes one physical library's 44-slot layout
-// (DESIGN_ANALYSIS.md §6 flags this as wrong to bake into the frontend —
-// library.blankSlots in the schema is an arbitrary []integer with no fixed
-// count), so this works for any library size.
-function SlotListEditor({ slots, onChange }: { slots: number[]; onChange: (slots: number[]) => void }) {
-  const [draft, setDraft] = useState('')
+// SlotGridEditor is the Library section's blank/write-target slot picker: a grid
+// of the deployment's real storage slots (issue #305), bounded by the library
+// topology from deploy config (GET /api/config/ui) rather than the design mock's
+// hardcoded 44-slot layout (DESIGN_ANALYSIS.md §6 flags a fixed count as wrong to
+// bake into the frontend). Storage slots are numbered 1..slotCount; the cleaning
+// and I/O-station slot numbers are rendered non-selectable, so an operator can
+// only choose real, loadable storage slots. Selecting a slot toggles its
+// membership in the per-run library.blankSlots array — the topology only bounds
+// the choice; which blanks a given run uses is still a per-run decision.
+//
+// The topology is deploy-owned like the changer/drive devices, so this mirrors
+// DeployField's loading/unavailable/unconfigured states: while the config fetch
+// is in flight it shows a loading line, on failure an unavailable notice, and
+// when the deployment declared no topology (slotCount 0) an actionable notice
+// naming the env var to set — with JSON / paste mode as the escape hatch for
+// setting blank slots without a declared topology.
+function SlotGridEditor({
+  status,
+  slotCount,
+  cleaningSlots,
+  ioStationSlots,
+  selected,
+  onChange,
+}: {
+  status: UiConfigState['status']
+  slotCount: number
+  cleaningSlots: number[]
+  ioStationSlots: number[]
+  selected: number[]
+  onChange: (slots: number[]) => void
+}) {
+  const label = (
+    <label className={fieldLabelClass}>
+      blank storage slots <span className="text-text-faint">— slots holding blank tapes for this run</span>
+    </label>
+  )
 
-  const addSlot = () => {
-    const parsed = Number.parseInt(draft, 10)
-    if (Number.isFinite(parsed) && parsed >= 0 && !slots.includes(parsed)) {
-      onChange([...slots, parsed].sort((a, b) => a - b))
-    }
-    setDraft('')
+  if (status === 'loading') {
+    return (
+      <div>
+        {label}
+        <p role="status" className="font-mono text-[11px] text-text-faint">
+          Loading deploy config…
+        </p>
+      </div>
+    )
   }
+
+  if (status === 'error') {
+    return (
+      <div>
+        {label}
+        <p className="font-mono text-[11px] text-amber">Deploy config unavailable — could not load the library topology.</p>
+      </div>
+    )
+  }
+
+  if (slotCount <= 0) {
+    return (
+      <div>
+        {label}
+        <p className="font-mono text-[11px] text-amber">
+          Library topology not configured — set LIBRARY_SLOT_COUNT (or use JSON / paste mode).
+        </p>
+      </div>
+    )
+  }
+
+  const cleaning = new Set(cleaningSlots)
+  const ioStation = new Set(ioStationSlots)
+  const selectedSet = new Set(selected)
+
+  const toggle = (slot: number) => {
+    if (selectedSet.has(slot)) {
+      onChange(selected.filter((existing) => existing !== slot))
+    } else {
+      onChange([...selected, slot].sort((a, b) => a - b))
+    }
+  }
+
+  // Only real storage slots are selectable, so the "selected" count reflects
+  // the blanks the operator actually chose, not any stale out-of-range or
+  // reserved value that a JSON-mode edit might have left in blankSlots.
+  const selectableCount = selected.filter(
+    (slot) => slot >= 1 && slot <= slotCount && !cleaning.has(slot) && !ioStation.has(slot),
+  ).length
 
   return (
     <div>
-      <label className={fieldLabelClass}>
-        blank storage slots <span className="text-text-faint">— slot numbers holding blank tapes</span>
-      </label>
-      <div className="flex flex-wrap gap-1.5">
-        {slots.map((slot) => (
-          <span
-            key={slot}
-            className="flex items-center gap-1.5 rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-[11px] text-text"
-          >
-            {slot}
+      {label}
+      <div className="flex flex-wrap gap-1.5" role="group" aria-label="Blank storage slots">
+        {Array.from({ length: slotCount }, (_, index) => index + 1).map((slot) => {
+          const reservedFor = cleaning.has(slot) ? 'cleaning' : ioStation.has(slot) ? 'I/O station' : null
+
+          if (reservedFor !== null) {
+            return (
+              <span
+                key={slot}
+                aria-label={`Slot ${slot} — reserved for ${reservedFor}`}
+                title={`Reserved for ${reservedFor}`}
+                className="flex h-8 w-8 items-center justify-center rounded-md border border-dashed border-border bg-inset font-mono text-[11px] text-text-faint"
+              >
+                {slot}
+              </span>
+            )
+          }
+
+          const isSelected = selectedSet.has(slot)
+
+          return (
             <button
+              key={slot}
               type="button"
-              aria-label={`Remove slot ${slot}`}
-              onClick={() => onChange(slots.filter((existing) => existing !== slot))}
-              className="text-text-faint hover:text-red"
+              aria-label={`Slot ${slot}`}
+              aria-pressed={isSelected}
+              onClick={() => toggle(slot)}
+              className={
+                isSelected
+                  ? 'flex h-8 w-8 items-center justify-center rounded-md border border-green-line bg-green-bg font-mono text-[11px] font-semibold text-green'
+                  : 'flex h-8 w-8 items-center justify-center rounded-md border border-border-strong bg-surface-2 font-mono text-[11px] text-text transition-colors hover:border-green-line hover:text-green'
+              }
             >
-              ×
+              {slot}
             </button>
-          </span>
-        ))}
+          )
+        })}
       </div>
-      <div className="mt-2 flex items-center gap-1.5">
-        <input
-          value={draft}
-          onChange={(event: ChangeEvent<HTMLInputElement>) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              addSlot()
-            }
-          }}
-          placeholder="slot number"
-          aria-label="New blank slot number"
-          className="w-32 rounded-lg border border-border-strong bg-surface-2 px-2.5 py-1.5 font-mono text-[12px] text-text outline-none"
-        />
-        <button
-          type="button"
-          onClick={addSlot}
-          className="rounded-lg border border-dashed border-border-strong px-3 py-1.5 text-[11px] font-medium text-text-dim transition-colors hover:bg-surface-2 hover:text-text"
-        >
-          + Add slot
-        </button>
-      </div>
-      <div className="mt-1.5 font-mono text-[11px] text-text-faint">{slots.length} blank slot(s) configured</div>
+      <div className="mt-1.5 font-mono text-[11px] text-text-faint">{selectableCount} blank slot(s) selected</div>
     </div>
   )
 }
@@ -549,8 +613,12 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
             </select>
           </div>
 
-          <SlotListEditor
-            slots={form.blankSlots}
+          <SlotGridEditor
+            status={deployStatus}
+            slotCount={deploy.slotCount}
+            cleaningSlots={deploy.cleaningSlots}
+            ioStationSlots={deploy.ioStationSlots}
+            selected={form.blankSlots}
             onChange={(blankSlots) => setForm((previous) => ({ ...previous, blankSlots }))}
           />
         </div>

@@ -157,9 +157,12 @@ needs (see [`docs/configuration.md`](configuration.md) for what every field mean
 - **Library** — the changer device and drive device list, shown **read-only** from
   deploy config (these are host properties, not per-run choices — see below); the
   tape generation (the capacity `select` lists LTO-6 2.5 TB through LTO-9 18 TB
-  native capacities); a free-form list of blank storage slot numbers (any library
-  size — not tied to one fixed slot layout); and the deliberately scary "allow
-  non-blank tapes" opt-out.
+  native capacities); a **slot-grid picker** for the run's blank/write-target
+  storage slots, bounded to the deployment's real library topology from deploy
+  config (slot count, with cleaning and I/O-station slots rendered non-selectable —
+  see below), so an operator only ever clicks real, loadable slots rather than
+  typing arbitrary numbers; and the deliberately scary "allow non-blank tapes"
+  opt-out.
 - **Encryption** — the age recipient list and escrowed identity, plus a
   **Generate new age keypair** button: it calls the server's
   [`POST /api/age/keygen`](configuration.md#post-apiagekeygen-age-keypair-generation-issue-279)
@@ -185,6 +188,21 @@ the Review step reports the matching validation error rather than the UI inventi
 default. To override a device or webhook for a one-off run (e.g. a temporary drive swap),
 use JSON / paste mode, which is the full-schema escape hatch and submits exactly what you
 give it.
+
+**Deploy-owned library topology (slot-grid picker).** The physical library's slot
+layout is likewise a deployment property, so the Library section's blank/write-target
+**slot picker** is a grid bounded to that layout rather than a free-form list of numbers.
+It comes from `LIBRARY_SLOT_COUNT` (the storage slot count, numbered `1..N`) plus
+`LIBRARY_CLEANING_SLOTS` / `LIBRARY_IO_STATION_SLOTS` (slot numbers reserved for cleaning
+cartridges and the I/O station), all on `cmd/web` and surfaced by the same
+`GET /api/config/ui`. Reserved slots are rendered non-selectable, so a run can only target
+real, loadable storage slots; the picker adapts to any library size purely from the config
+value, with no frontend change. The per-run **selection** of which blanks a run uses
+(`library.blankSlots`) is still made in the form — the topology only bounds it. A
+deployment that declared no topology (`LIBRARY_SLOT_COUNT` unset) shows the picker as "not
+configured"; set the blank slots via JSON / paste mode in that case. This is *static*
+topology only — it does not show live per-slot occupancy (which barcode sits in which slot
+right now), which would need live changer element-status on the storage host.
 
 A few advanced tuning fields (`feasibilityOverhead` and the operator-wait timeout
 overrides) have no form controls; use JSON mode for those — the run gets their

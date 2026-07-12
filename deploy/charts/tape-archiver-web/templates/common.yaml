@@ -216,6 +216,21 @@ resolution (deploy/charts/tape-archiver-control-worker/templates/common.yaml).
   {{- $_ := set $env "DELIVERY_WEBHOOK_URL" .Values.config.web.delivery.webhookUrl -}}
 {{- end -}}
 
+{{/* LIBRARY_SLOT_COUNT / LIBRARY_CLEANING_SLOTS / LIBRARY_IO_STATION_SLOTS: the
+   deploy-owned physical library topology driving the guided config form's slot-grid
+   picker (issue #305, docs/configuration.md). Each is optional and independent; omitted
+   when unset (a 0 slot count then shows the picker "not configured"). The reserved-slot
+   lists render as comma-separated numbers for cmd/web's splitIntList parser. */}}
+{{- if gt (int .Values.config.web.library.topology.slotCount) 0 -}}
+  {{- $_ := set $env "LIBRARY_SLOT_COUNT" (printf "%d" (int .Values.config.web.library.topology.slotCount)) -}}
+{{- end -}}
+{{- if .Values.config.web.library.topology.cleaningSlots -}}
+  {{- $_ := set $env "LIBRARY_CLEANING_SLOTS" (join "," .Values.config.web.library.topology.cleaningSlots) -}}
+{{- end -}}
+{{- if .Values.config.web.library.topology.ioStationSlots -}}
+  {{- $_ := set $env "LIBRARY_IO_STATION_SLOTS" (join "," .Values.config.web.library.topology.ioStationSlots) -}}
+{{- end -}}
+
 {{/* ============================================================ */}}
 {{/* Temporal client config: temporal.toml ConfigMap + TLS mounts */}}
 {{/* ============================================================ */}}
