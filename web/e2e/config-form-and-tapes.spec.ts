@@ -81,13 +81,11 @@ test('submit a dry-run via the Form-mode config builder, then find its tapes on 
 
   await page.getByRole('button', { name: 'Submit run' }).click()
 
-  const successPanel = page.getByRole('status').filter({ hasText: 'Run submitted.' })
-  await expect(successPanel).toBeVisible({ timeout: 30_000 })
-  const runId = (await successPanel.locator('code').first().innerText()).trim()
-  expect(runId, 'the success panel must show a non-empty run ID').not.toBe('')
-
-  await successPanel.getByRole('button', { name: 'View run' }).click()
-  await expect(page).toHaveURL(new RegExp(`/runs/${runId}$`))
+  // Submitting redirects straight to the new run's detail page (no intermediate
+  // confirmation panel) — capture the run ID from the URL it lands on.
+  await expect(page).toHaveURL(/\/runs\/[^/?#]+$/, { timeout: 30_000 })
+  const runId = new URL(page.url()).pathname.split('/').pop() ?? ''
+  expect(runId, 'the redirect URL must carry a non-empty run ID').not.toBe('')
 
   // Wait for the run to reach a terminal state (the hero heading reads
   // "Backup completed" on success — RunOverview.tsx's heroCopy) before

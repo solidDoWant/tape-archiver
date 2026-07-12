@@ -203,6 +203,17 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
         return
       }
 
+      // Go straight to the new run's page rather than parking on an intermediate
+      // confirmation the operator would have to click through — a submitted run
+      // is a singleton, so the run page is the only place they'd head next. When
+      // the page is mounted without a navigation callback (standalone/tests),
+      // fall back to an inline confirmation so the run ID is not lost.
+      if (onViewRun) {
+        onViewRun(result.runId)
+
+        return
+      }
+
       setSubmitState({ status: 'success', result: { workflowId: result.workflowId, runId: result.runId } })
     } catch (error) {
       const message = error instanceof ApiError ? error.message : describeNetworkError(error)
@@ -368,6 +379,9 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
       </div>
 
       {success ? (
+        // Only reached when the page has no navigation callback (a successful
+        // submission otherwise redirects straight to the run page); this is the
+        // standalone fallback that keeps the run ID visible.
         <div
           role="status"
           className="rounded-lg border border-green-line bg-green-bg p-3.5 text-[12.5px] text-green"
@@ -379,11 +393,6 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
           <p>
             Workflow ID: <code>{success.workflowId}</code>
           </p>
-          {onViewRun ? (
-            <button type="button" onClick={() => onViewRun(success.runId)} className="mt-2 font-semibold underline">
-              View run
-            </button>
-          ) : null}
         </div>
       ) : null}
 

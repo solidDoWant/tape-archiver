@@ -82,14 +82,11 @@ test('submit a dry-run (JSON mode), watch it progress live with the phase rail, 
   await page.getByLabel(/Dry-run/).check()
   await page.getByRole('button', { name: 'Submit run' }).click()
 
-  const successPanel = page.getByRole('status').filter({ hasText: 'Run submitted.' })
-  await expect(successPanel).toBeVisible({ timeout: 30_000 })
-
-  const runId = (await successPanel.locator('code').first().innerText()).trim()
-  expect(runId, 'the success panel must show a non-empty run ID').not.toBe('')
-
-  await successPanel.getByRole('button', { name: 'View run' }).click()
-  await expect(page).toHaveURL(new RegExp(`/runs/${runId}$`))
+  // Submitting redirects straight to the new run's detail page (no intermediate
+  // confirmation panel) — capture the run ID from the URL it lands on.
+  await expect(page).toHaveURL(/\/runs\/[^/?#]+$/, { timeout: 30_000 })
+  const runId = new URL(page.url()).pathname.split('/').pop() ?? ''
+  expect(runId, 'the redirect URL must carry a non-empty run ID').not.toBe('')
 
   // Phase rail: all 11 pipeline phases listed, in order, "Run overview"
   // selected by default (issue #277).

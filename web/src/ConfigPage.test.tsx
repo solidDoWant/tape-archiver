@@ -311,10 +311,12 @@ describe('ConfigPage', () => {
     expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
   })
 
-  it('advances Form mode to Review only once the config validates, then submits and shows success', async () => {
-    const fetchMock = renderPage({
-      'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-new-1' } },
-    })
+  it('advances Form mode to Review only once the config validates, then submits and redirects to the run page', async () => {
+    const onViewRun = vi.fn()
+    const fetchMock = renderPage(
+      { 'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-new-1' } } },
+      onViewRun,
+    )
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
 
     await fillMinimalValidForm()
@@ -326,16 +328,14 @@ describe('ConfigPage', () => {
     })
     expect(screen.getByText('Review before submitting')).toBeInTheDocument()
 
-    const onViewRun = vi.fn()
     fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
 
+    // Submitting redirects straight to the new run's page — no intermediate
+    // "Run submitted" confirmation to click through.
     await waitFor(() => {
-      expect(screen.getByRole('status', { name: '' })).toBeTruthy()
+      expect(onViewRun).toHaveBeenCalledWith('run-new-1')
     })
-    await waitFor(() => {
-      expect(screen.getByText('Run submitted.')).toBeInTheDocument()
-    })
-    expect(screen.getByText('run-new-1')).toBeInTheDocument()
+    expect(screen.queryByText('Run submitted.')).not.toBeInTheDocument()
 
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/runs',
@@ -344,7 +344,6 @@ describe('ConfigPage', () => {
         body: expect.stringContaining('"dryRun":false'),
       }),
     )
-    void onViewRun
   })
 
   it('blocks the Review transition and shows the schema issue when the config does not validate', async () => {
@@ -406,10 +405,12 @@ describe('ConfigPage', () => {
     unsubscribe()
   })
 
-  it('submits JSON mode directly (no Review step) and shows success', async () => {
-    const fetchMock = renderPage({
-      'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-json-1' } },
-    })
+  it('submits JSON mode directly (no Review step) and redirects to the run page', async () => {
+    const onViewRun = vi.fn()
+    const fetchMock = renderPage(
+      { 'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-json-1' } } },
+      onViewRun,
+    )
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
@@ -427,9 +428,8 @@ describe('ConfigPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
 
     await waitFor(() => {
-      expect(screen.getByText('Run submitted.')).toBeInTheDocument()
+      expect(onViewRun).toHaveBeenCalledWith('run-json-1')
     })
-    expect(screen.getByText('run-json-1')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith('/api/runs', expect.objectContaining({ method: 'POST' }))
   })
 
@@ -454,9 +454,11 @@ describe('ConfigPage', () => {
   })
 
   it('toggles dry-run and includes it in the submission body', async () => {
-    const fetchMock = renderPage({
-      'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-dry-1' } },
-    })
+    const onViewRun = vi.fn()
+    const fetchMock = renderPage(
+      { 'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-dry-1' } } },
+      onViewRun,
+    )
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
@@ -477,7 +479,7 @@ describe('ConfigPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
 
     await waitFor(() => {
-      expect(screen.getByText('Run submitted.')).toBeInTheDocument()
+      expect(onViewRun).toHaveBeenCalledWith('run-dry-1')
     })
 
     expect(fetchMock).toHaveBeenCalledWith(
@@ -486,12 +488,10 @@ describe('ConfigPage', () => {
     )
   })
 
-  it('calls onViewRun with the new run ID when "View run" is clicked', async () => {
-    const onViewRun = vi.fn()
-    renderPage(
-      { 'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-view-1' } } },
-      onViewRun,
-    )
+  it('falls back to an inline confirmation with the run ID when rendered without a navigation callback', async () => {
+    // No onViewRun passed: nothing to navigate with, so the page keeps the run
+    // ID visible inline instead of redirecting.
+    renderPage({ 'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-view-1' } } })
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
@@ -509,9 +509,9 @@ describe('ConfigPage', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
 
-    await waitFor(() => screen.getByText('Run submitted.'))
-    fireEvent.click(screen.getByRole('button', { name: /view run/i }))
-
-    expect(onViewRun).toHaveBeenCalledWith('run-view-1')
+    await waitFor(() => expect(screen.getByText('Run submitted.')).toBeInTheDocument())
+    expect(screen.getByText('run-view-1')).toBeInTheDocument()
+    // Without a navigation callback there is no "View run" affordance.
+    expect(screen.queryByRole('button', { name: /view run/i })).not.toBeInTheDocument()
   })
 })

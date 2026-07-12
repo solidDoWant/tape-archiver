@@ -280,11 +280,10 @@ that overrides and why. A dry-run submitted through the browser fails closed wit
 clear error if the server itself isn't configured with `mhvtl` device paths — it never
 silently falls back to real hardware.
 
-A valid submission starts the backup workflow and shows its run ID and workflow ID,
-with a **View run** link straight into that run's live detail page. A malformed or
-invalid config is rejected with the validation error and nothing is submitted;
-submitting while a run is already in progress is rejected with a conflict error rather
-than queuing or replacing it.
+A valid submission starts the backup workflow and takes you straight to that run's
+live detail page. A malformed or invalid config is rejected with the validation error
+and nothing is submitted; submitting while a run is already in progress is rejected
+with a conflict error rather than queuing or replacing it.
 
 ## Monitoring a run live
 
@@ -327,7 +326,7 @@ and keeps retrying automatically.
 | ![A completed run's read-only detail view, light mode](images/web-ui-run-detail-completed-light.png) | ![A completed run's read-only detail view, dark mode](images/web-ui-run-detail-completed-dark.png) |
 | ![The Write phase's own view, with its log panel and per-drive write health, light mode](images/web-ui-run-detail-write-light.png) | ![The Write phase's own view, with its log panel and per-drive write health, dark mode](images/web-ui-run-detail-write-dark.png) |
 
-Reach a run's detail page either via the **View run** link right after submitting, or by
+Reach a run's detail page either by submitting a run (which redirects there), or by
 clicking through from the [dashboard's runs table](#dashboard).
 
 Once a run reaches a terminal status (completed, failed, terminated, or canceled), its
