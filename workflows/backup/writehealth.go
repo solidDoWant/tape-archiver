@@ -296,7 +296,7 @@ type MeasureWriteHealthInput struct {
 func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input MeasureWriteHealthInput) (WriteHealth, error) {
 	logs, err := tape.NewLogPageReader(input.Device).ReadLogPages(ctx)
 	if err != nil {
-		slog.Warn("write-health: could not read drive log pages; reporting throughput only",
+		slog.WarnContext(ctx, "write-health: could not read drive log pages; reporting throughput only",
 			"device", input.Device, "barcode", input.Barcode, "error", err)
 
 		logs = tape.LogPageResult{}
