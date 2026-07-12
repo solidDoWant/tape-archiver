@@ -409,7 +409,8 @@ provider, a real tape library). For iterating on the UI itself, `make web-dev` b
 a complete local stand-in with a couple of clicks: dev Temporal, `mhvtl`, and an ephemeral
 ZFS test pool (reusing the existing `temporal-up`/`mhvtl-up`/`zpool-up` targets and
 scripts unchanged), a local VictoriaLogs + VictoriaMetrics stack fed by the dev workers'
-own logs/metrics, a local OIDC provider, real control and data workers, and `cmd/web`
+own logs/metrics, a local OIDC provider, a local fake Discord webhook receiver, real
+control and data workers, and `cmd/web`
 itself — with a few sample dry-run backups submitted automatically so the
 [dashboard](#dashboard)'s runs table has something in it right away (the startup banner
 and `cmd/webdevseed`'s own comments still say "History" — its previous, now-folded-in
@@ -529,6 +530,36 @@ interactive login form** — it immediately authenticates the fixed test user
 "logging in" here; there is nothing to type. This provider is dev-tooling only — it is
 never built into a shipped image and is not meant to be reachable from anywhere but your
 own machine.
+
+**Fake Discord webhook receiver — so the report deep-link works locally (issue #313).**
+A run's success delivery posts the PDF report to a Discord webhook, and the run overview's
+**Discord report ↗** link is reconstructed from that posted message's identity (see
+[Reading a run](#reading-a-run)). With no real Discord webhook — and a placeholder
+`discord.com` URL that would reject the upload — neither would happen locally, so
+`make web-dev` starts a small dev-only binary (`cmd/webdevdiscord`) that stands in for
+Discord's webhook API: it implements exactly the three calls `pkg/webhook` makes (the
+`?wait=true` multipart report upload, the no-wait JSON alert, and the webhook-object
+`GET`), returning syntactically-valid but obviously-fake snowflake IDs. `cmd/web`'s
+`DELIVERY_WEBHOOK_URL` and the seeder both point at it, so every seeded run delivers its
+report there and the overview's **Discord report ↗** link renders — a well-formed
+`https://discord.com/channels/{guild}/{channel}/{message}` URL that will *not* resolve on
+real Discord (the IDs are dev fakes), but demonstrates the feature end to end. Like the
+OIDC provider, it is dev-tooling only and comes down with the rest of the stack.
+
+**Deploy-owned config the dev stack pre-fills.** So the guided config form and run
+overview exercise the deploy-config surfaces (not just the run data), `make web-dev` also
+sets, on `cmd/web`:
+
+- `TEMPORAL_UI_URL=http://127.0.0.1:8233` — the dev Temporal UI `make temporal-up`
+  already serves — so a run overview's **Temporal workflow ↗** deep-link resolves.
+- `LIBRARY_CHANGER`/`LIBRARY_DRIVES` (the `mhvtl` nodes) and `LIBRARY_SLOT_COUNT=47`
+  (the dev library's storage-slot count), so Form mode renders a real changer/drive
+  summary and a 47-slot blank-slot grid.
+- `LIBRARY_CLEANING_SLOTS`/`LIBRARY_IO_STATION_SLOTS` — illustrative high slot numbers
+  (away from the seeder's slot pool), purely so the grid picker visibly renders
+  non-selectable cleaning / I/O-station cells locally. The `mhvtl` library's three MAPs
+  are a separate address space that does not map into the `1..47` grid, so these are
+  dev-demonstration values rather than the library's true I/O addresses.
 
 Seed configs deliberately set `library.allowNonBlankTapes` on a small, fixed pool of
 `mhvtl` storage slots, so repeat `make web-dev` invocations can keep reusing them

@@ -21,7 +21,7 @@ const (
 )
 
 func TestBuildSeedConfig(t *testing.T) {
-	cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 21)
+	cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 21, "")
 
 	require.Len(t, cfg.Sources, 1)
 	require.NotNil(t, cfg.Sources[0].ZFSPath)
@@ -31,7 +31,7 @@ func TestBuildSeedConfig(t *testing.T) {
 	assert.True(t, cfg.Library.AllowNonBlankTapes, "seed configs must tolerate reusing an already-written dev slot")
 	assert.Equal(t, []string{testRecipient}, cfg.Encryption.Recipients)
 	assert.Equal(t, testIdentity, cfg.Encryption.Identity)
-	assert.Empty(t, cfg.Delivery.WebhookURL, "seed runs must not attempt a real webhook delivery")
+	assert.Empty(t, cfg.Delivery.WebhookURL, "an unset webhook must leave delivery a no-op (empty WebhookURL)")
 
 	// The config must be structurally valid on its own (before runsubmit.ApplyDryRun
 	// rewrites the placeholder changer/drives) — an invalid seed config would be a
@@ -39,9 +39,20 @@ func TestBuildSeedConfig(t *testing.T) {
 	assert.NoError(t, cfg.Validate())
 }
 
+func TestBuildSeedConfig_threadsWebhookURL(t *testing.T) {
+	// `make web-dev` passes the local fake Discord receiver's URL so seeded runs
+	// deliver a report and the "Discord report ↗" deep-link renders locally.
+	const webhookURL = "http://127.0.0.1:9997/webhook/dev"
+
+	cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 21, webhookURL)
+
+	assert.Equal(t, webhookURL, cfg.Delivery.WebhookURL)
+	assert.NoError(t, cfg.Validate())
+}
+
 func TestBuildSeedConfig_slotVariesByCall(t *testing.T) {
-	first := buildSeedConfig(testSource, testRecipient, testIdentity, 20)
-	second := buildSeedConfig(testSource, testRecipient, testIdentity, 21)
+	first := buildSeedConfig(testSource, testRecipient, testIdentity, 20, "")
+	second := buildSeedConfig(testSource, testRecipient, testIdentity, 21, "")
 
 	assert.NotEqual(t, first.Library.BlankSlots, second.Library.BlankSlots)
 }
@@ -70,7 +81,7 @@ func (f *fakeSubmitClient) ExecuteWorkflow(_ context.Context, _ client.StartWork
 func TestSubmitWithRetry(t *testing.T) {
 	t.Run("succeeds immediately with no conflict", func(t *testing.T) {
 		fake := &fakeSubmitClient{conflictsBeforeSuccess: 0}
-		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20)
+		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20, "")
 
 		_, err := submitWithRetry(t.Context(), fake, cfg)
 		require.NoError(t, err)
@@ -83,7 +94,7 @@ func TestSubmitWithRetry(t *testing.T) {
 		submitRetryWait = time.Millisecond
 
 		fake := &fakeSubmitClient{conflictsBeforeSuccess: 3}
-		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20)
+		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20, "")
 
 		_, err := submitWithRetry(t.Context(), fake, cfg)
 		require.NoError(t, err)
@@ -96,7 +107,7 @@ func TestSubmitWithRetry(t *testing.T) {
 		submitRetryWait = time.Millisecond
 
 		fake := &fakeSubmitClient{conflictsBeforeSuccess: maxSubmitAttempts + 1}
-		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20)
+		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20, "")
 
 		_, err := submitWithRetry(t.Context(), fake, cfg)
 		require.Error(t, err)
@@ -108,7 +119,7 @@ func TestSubmitWithRetry(t *testing.T) {
 
 	t.Run("a non-conflict error is not retried", func(t *testing.T) {
 		fake := &conflictOnceThenOtherErrorClient{}
-		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20)
+		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20, "")
 
 		_, err := submitWithRetry(t.Context(), fake, cfg)
 		require.Error(t, err)
@@ -122,7 +133,7 @@ func TestSubmitWithRetry(t *testing.T) {
 		submitRetryWait = time.Hour
 
 		fake := &fakeSubmitClient{conflictsBeforeSuccess: maxSubmitAttempts + 1}
-		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20)
+		cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 20, "")
 
 		ctx, cancel := context.WithCancel(t.Context())
 
@@ -220,4 +231,4 @@ func TestEnvInt(t *testing.T) {
 
 // Compile-time sanity check that config.Config from buildSeedConfig is the
 // type submitWithRetry/runsubmit.Submit actually expect.
-var _ = func() *config.Config { return buildSeedConfig("", "", "", 0) }
+var _ = func() *config.Config { return buildSeedConfig("", "", "", 0, "") }

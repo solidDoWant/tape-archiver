@@ -97,7 +97,8 @@ as the project is implemented; keep this list current):
 - `make web-dev` / `make web-dev-down` — one-command local web UI: dev Temporal +
   mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics (`docker-compose.web-dev.yml`,
   fed by a `vector` shipper tailing the dev workers' structured log files) +
-  a local-only fake OIDC provider (`cmd/webdevoidc`) + real control/data
+  a local-only fake OIDC provider (`cmd/webdevoidc`) + a local-only fake
+  Discord webhook receiver (`cmd/webdevdiscord`) + real control/data
   workers, seeded with a few sample dry-run backups (`cmd/webdevseed`),
   `cmd/web` running in the foreground. Interrupting it (Ctrl+C/SIGINT or
   SIGTERM) waits for `cmd/web` to shut down gracefully, then runs the full
