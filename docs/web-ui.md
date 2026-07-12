@@ -285,9 +285,13 @@ report was posted to — the message's identity (guild/channel/message) is captu
 report is uploaded and reconstructed from the run's workflow history (`GET
 /api/runs/{runID}/delivery`), so it needs no extra configuration; a run with delivery
 disabled, a delivery that failed, or a message whose guild could not be resolved simply
-shows no link. The **Write** phase's own view additionally shows live per-drive
-write-rate and reposition figures, so you can watch tape streaming health without leaving
-the page.
+shows no link. While a run is actively writing, the overview also folds in a **Drive write
+health** glance — the same live per-drive write-rate/floor/reposition gauges the Write
+phase shows (sourced from the existing VictoriaMetrics endpoint) — so streaming health is
+visible without leaving the summary; the rate is measured once per tape at write-close
+(not a continuous trace), so a drive can read idle mid-write, and where VictoriaMetrics is
+unconfigured the gauges show an "unavailable" state rather than a broken panel. The
+**Write** phase's own view shows the fuller version of the same figures alongside its log.
 
 All of this updates in place as the run progresses — no manual reload. Status, phase, and
 pause changes are backed by a live server-sent event stream (the phase rail refreshes

@@ -218,4 +218,109 @@ describe('RunOverview', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: /backup completed/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /discord report/i })).not.toBeInTheDocument()
   })
+
+  // writingPhases advances the running fixture to the Write phase, so the
+  // overview's live drive-write-health section (issue #307) is in scope.
+  const writingPhases: PhaseInfo[] = phases.map((phase) => {
+    if (phase.name === 'Pack' || phase.name === 'Generate PAR2' || phase.name === 'Verify' || phase.name === 'Load') {
+      return { ...phase, status: 'completed' }
+    }
+
+    return phase.name === 'Write' ? { ...phase, status: 'active' } : phase
+  })
+
+  it('surfaces the live per-drive write-rate gauges once the run is writing (AC1)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : String(input)
+
+        if (url.includes('/metrics/drives/TA0001L6/history')) {
+          return Promise.resolve(
+            jsonResponse(200, {
+              runId: 'run-1',
+              barcode: 'TA0001L6',
+              metric: 'throughput',
+              points: [{ time: '2026-07-09T12:30:00Z', value: 142 }],
+            }),
+          )
+        }
+
+        if (url.includes('/metrics/drives')) {
+          return Promise.resolve(
+            jsonResponse(200, {
+              runId: 'run-1',
+              drives: [
+                {
+                  barcode: 'TA0001L6',
+                  tapeIndex: 0,
+                  copyIndex: 0,
+                  driveIndex: 0,
+                  result: 'loaded',
+                  hasData: true,
+                  throughputMBps: 142,
+                  repositions: 0,
+                  tapeAlertFlagCount: 0,
+                  belowFloor: false,
+                  floorMBps: 50,
+                  floorKnown: true,
+                },
+              ],
+            }),
+          )
+        }
+
+        return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
+      }),
+    )
+
+    render(<RunOverview runId="run-1" detail={runningDetail} phases={writingPhases} terminal={false} />)
+
+    // The rate / floor / reposition figures come from the existing
+    // VictoriaMetrics-backed /metrics/drives endpoint — no new backend.
+    expect(await screen.findByText('142 MB/s')).toBeInTheDocument()
+    expect(screen.getByText('floor 50')).toBeInTheDocument()
+    expect(screen.getByText(/0 rehits/)).toBeInTheDocument()
+  })
+
+  it('degrades the gauges to the unavailable state when VictoriaMetrics is unset, keeping the overview intact (AC2)', async () => {
+    // Every fetch (including /metrics/drives) 503s, standing in for a
+    // deployment with VICTORIAMETRICS_URL unset.
+    stubPanels()
+
+    render(<RunOverview runId="run-1" detail={runningDetail} phases={writingPhases} terminal={false} />)
+
+    // The section renders its styled "unavailable" state, never a broken panel,
+    // and the rest of the overview is unaffected.
+    expect(await screen.findByText(/metrics unavailable/i)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument()
+    expect(screen.getByText('6 of 11 phases complete')).toBeInTheDocument()
+  })
+
+  it('omits the live drive-health section before the Write phase begins', () => {
+    stubPanels()
+
+    // phases has Write still pending — the section must not render an empty
+    // gauge during earlier phases.
+    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+
+    expect(screen.queryByText('Drive write health')).not.toBeInTheDocument()
+  })
+
+  it('omits the live drive-health section for a terminal run (TapesSection already reports final health)', () => {
+    stubPanels()
+
+    const doneWrite: PhaseInfo[] = writingPhases.map((phase) => (phase.name === 'Write' ? { ...phase, status: 'completed' } : phase))
+
+    render(
+      <RunOverview
+        runId="run-1"
+        detail={{ ...runningDetail, status: 'Completed', closeTime: '2026-07-09T13:00:00Z' }}
+        phases={doneWrite}
+        terminal
+      />,
+    )
+
+    expect(screen.queryByText('Drive write health')).not.toBeInTheDocument()
+  })
 })
