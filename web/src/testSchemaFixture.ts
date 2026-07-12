@@ -62,8 +62,8 @@ export const testRunConfigSchema: JSONSchema = {
         apiVersion: { type: 'string', minLength: 1 },
         kind: { type: 'string', minLength: 1 },
         namespace: { type: 'string' },
-        name: { type: 'string' },
-        labelSelector: { type: 'string' },
+        name: { type: 'string', minLength: 1 },
+        labelSelector: { type: 'string', minLength: 1 },
       },
     },
     Library: {

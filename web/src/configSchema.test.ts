@@ -118,6 +118,18 @@ describe('validateAgainstSchema', () => {
     expect(issues).toContainEqual({ path: 'sources[0].k8s.namespace', message: 'is required' })
   })
 
+  it('reports a present-but-empty k8s name (minLength=1) — not just the namespace', () => {
+    // The guided form's by-name selection emits a present-but-empty name:"" for
+    // an unfilled name; without minLength on name, only the if/then namespace
+    // requirement fired, so the empty name itself went unvalidated.
+    const issues = validateAgainstSchema(testRunConfigSchema, {
+      ...validConfig,
+      sources: [{ k8s: { apiVersion: 'snapshot.storage.k8s.io/v1', kind: 'VolumeSnapshot', namespace: 'ns', name: '' } }],
+    })
+
+    expect(issues).toContainEqual({ path: 'sources[0].k8s.name', message: 'must not be empty' })
+  })
+
   it("K8sRef's if/then does not fire when name is absent (labelSelector-only ref)", () => {
     const issues = validateAgainstSchema(testRunConfigSchema, {
       ...validConfig,

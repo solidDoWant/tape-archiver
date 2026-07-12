@@ -79,11 +79,17 @@ type Source struct {
 // "groupsnapshot.storage.k8s.io/v1alpha1" + "VolumeGroupSnapshot".
 // Exactly one of Name or LabelSelector must be set.
 type K8sRef struct {
-	APIVersion    string `json:"apiVersion" jsonschema:"minLength=1"`
-	Kind          string `json:"kind" jsonschema:"minLength=1"`
-	Namespace     string `json:"namespace"`
-	Name          string `json:"name,omitempty"`
-	LabelSelector string `json:"labelSelector,omitempty"`
+	APIVersion string `json:"apiVersion" jsonschema:"minLength=1"`
+	Kind       string `json:"kind" jsonschema:"minLength=1"`
+	Namespace  string `json:"namespace"`
+	// Name and LabelSelector are the mutually-exclusive "which snapshot(s)" pair
+	// (exactly one is set — see validate.go). Each is omitempty, so minLength=1
+	// only constrains whichever one is present: a by-name ref must carry a
+	// non-empty name, a by-selector ref a non-empty selector. Without this, the
+	// guided form's by-name selection emits a present-but-empty name:"" that
+	// passes validation (only the if/then namespace requirement fires).
+	Name          string `json:"name,omitempty" jsonschema:"minLength=1"`
+	LabelSelector string `json:"labelSelector,omitempty" jsonschema:"minLength=1"`
 }
 
 // JSONSchemaExtend encodes the conditional namespace requirement that struct tags
