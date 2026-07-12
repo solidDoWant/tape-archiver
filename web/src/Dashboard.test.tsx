@@ -38,6 +38,17 @@ function jsonResponse(status: number, body: unknown) {
 function stubApi(routes: Record<string, { status: number; body: unknown }>) {
   const defaults: Record<string, { status: number; body: unknown }> = {
     '/api/tapes': { status: 200, body: { tapes: [] } },
+    // The hardware & environment card sources deploy config from here (#318),
+    // independent of any run — give every Dashboard test a real config to load.
+    '/api/config/ui': {
+      status: 200,
+      body: {
+        temporalUiBaseUrl: '',
+        temporalNamespace: '',
+        library: { changer: '/dev/sch0', drives: [], slotCount: 0, cleaningSlots: [], ioStationSlots: [] },
+        delivery: { webhookUrl: '', opticalBurnDrives: [] },
+      },
+    },
     ...routes,
   }
 
@@ -91,9 +102,12 @@ describe('Dashboard', () => {
       expect(screen.getAllByText(/no runs yet/i)).toHaveLength(2)
     })
 
-    // The hardware card's "not reported" (no run to source config from) —
-    // every card degrades independently.
-    expect(screen.getByText(/no run has been submitted yet/i)).toBeInTheDocument()
+    // The hardware & environment card renders deploy config sourced from
+    // /api/config/ui even though no run has ever been submitted (#318) — every
+    // card degrades (or here, sources) independently.
+    await waitFor(() => {
+      expect(screen.getByText('/dev/sch0')).toBeInTheDocument()
+    })
 
     fireEvent.click(screen.getAllByRole('button', { name: /start a run/i })[0])
     expect(onStartRun).toHaveBeenCalled()
@@ -114,10 +128,6 @@ describe('Dashboard', () => {
         body: {
           runs: [{ workflowId: 'backup', runId: 'run-live', status: 'Running', startTime: '2026-07-01T00:00:00Z' }],
         },
-      },
-      '/api/runs/run-live/config': {
-        status: 200,
-        body: { runId: 'run-live', config: { library: { changer: '/dev/sch0', drives: [] }, delivery: {}, encryption: { recipients: [] } } },
       },
     })
 
@@ -144,7 +154,8 @@ describe('Dashboard', () => {
     const row = screen.getByRole('link', { name: 'run-live' })
     expect(row).toHaveTextContent('Write')
 
-    // The hardware/environment card sourced this run's own submitted config.
+    // The hardware/environment card sources deploy config from /api/config/ui,
+    // not this run's own submitted config (#318).
     await waitFor(() => {
       expect(screen.getByText('/dev/sch0')).toBeInTheDocument()
     })

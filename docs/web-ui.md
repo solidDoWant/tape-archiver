@@ -117,12 +117,18 @@ recent run history (the same `GET /api/tapes` endpoint behind the [Tapes
 page](#browsing-tapes)), clearly labeled as history-derived rather than the library's
 current physical state.
 
-The **hardware & environment** card shows the changer/drive/burner device paths, the
-delivery webhook (configured or not — the value itself is never shown, since a Discord
-webhook URL is a credential), and the encryption recipient(s), all read from the
-current (or, once idle, most recently submitted) run's own configuration — never
-hardcoded. A value that isn't set in that config simply has no row, rather than a blank
-or placeholder one.
+The **hardware & environment** card describes the deployment's fixed environment, read
+from the deploy-config endpoint (`GET /api/config/ui`) rather than any one run's
+submitted config: the changer/drive/burner device paths, the delivery webhook
+(configured or not — the value itself is never shown, since a Discord webhook URL is a
+credential), the physical library topology (storage-slot count, cleaning and
+I/O-station slots), and the Temporal UI base URL and namespace. Sourcing it from deploy
+config means it is correct before the first run is ever submitted, and it never reflects
+the mhvtl virtual devices a dry-run substitutes for the real changer/drives. A value the
+deployment hasn't set simply has no row, rather than a blank or placeholder one (the
+webhook is the exception — it always shows *configured* or *not configured*). The
+per-run encryption recipient is deliberately not shown here: it has no deploy-config
+source and is a run-detail concern, not part of the fixed environment.
 
 | Light | Dark |
 | --- | --- |
