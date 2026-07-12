@@ -17,7 +17,7 @@ export interface DashboardProps {
 // active), the paginated runs table that used to be the standalone
 // "/history" page (route.ts's "history" route now redirects here), a
 // history-derived library summary, and a hardware/environment card sourced
-// from the current/last submitted run's own config. Every card degrades
+// from the deploy-config endpoint (GET /api/config/ui). Every card degrades
 // independently (loading/error/empty states of its own) rather than the
 // whole page failing over one data source.
 //
@@ -71,12 +71,6 @@ function Dashboard({ onStartRun }: DashboardProps) {
 
   const live = useRunEvents(activeRun?.runId ?? null)
 
-  // Hardware/environment reads the active run's config while one is in
-  // progress, otherwise the most recently submitted run's — so the card has
-  // something real to show between runs too, per DESIGN_ANALYSIS.md §4
-  // (never hardcoded; always sourced from an actual submitted run).
-  const configRunId = activeRun?.runId ?? mostRecentRun?.runId ?? null
-
   return (
     <div className="flex max-w-[980px] flex-col gap-4 p-6 sm:p-7">
       <CurrentRunCard
@@ -98,7 +92,7 @@ function Dashboard({ onStartRun }: DashboardProps) {
 
       <LibraryCard />
 
-      <HardwareEnvCard runId={configRunId} />
+      <HardwareEnvCard />
     </div>
   )
 }
