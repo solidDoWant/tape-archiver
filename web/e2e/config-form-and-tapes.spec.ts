@@ -48,11 +48,12 @@ test('submit a dry-run via the Form-mode config builder, then find its tapes on 
   // keep track of.
   await page.locator('#config-copies').fill('1')
 
-  // Library section: changer/drives already have usable defaultFormState
-  // values (/dev/sch0, /dev/nst0+/dev/nst1) — the Dry-run toggle below
-  // overrides them server-side with real mhvtl paths regardless
-  // (pkg/runsubmit.ApplyDryRun), so this test only needs to add a blank
-  // slot.
+  // Library section: the changer/drive devices are deploy-owned and shown
+  // read-only from GET /api/config/ui (issue #304 — the deployed cmd/web sets
+  // them via the web chart's config.web.library.*, see e2e/web_test.go), so
+  // there is nothing to type here; the Dry-run toggle below overrides them
+  // server-side with real mhvtl paths regardless (pkg/runsubmit.ApplyDryRun).
+  // This test only needs to add a blank slot.
   await page.getByLabel('New blank slot number').fill(blankSlotRaw)
   await page.getByRole('button', { name: '+ Add slot' }).click()
   // SlotListEditor's counter reads "{slots.length} blank slot(s) configured" —

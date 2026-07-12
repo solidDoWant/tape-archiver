@@ -154,10 +154,12 @@ needs (see [`docs/configuration.md`](configuration.md) for what every field mean
   you), with a per-source zstd compression toggle and an optional label.
 - **Copies & redundancy** — tape copy count, slice size, and the PAR2 policy (fixed
   target percentage, or fill-to-capacity with a floor).
-- **Library** — changer device, drive device list, the tape generation (the
-  capacity `select` lists LTO-6 2.5 TB through LTO-9 18 TB native capacities), a
-  free-form list of blank storage slot numbers (any library size — not tied to one
-  fixed slot layout), and the deliberately scary "allow non-blank tapes" opt-out.
+- **Library** — the changer device and drive device list, shown **read-only** from
+  deploy config (these are host properties, not per-run choices — see below); the
+  tape generation (the capacity `select` lists LTO-6 2.5 TB through LTO-9 18 TB
+  native capacities); a free-form list of blank storage slot numbers (any library
+  size — not tied to one fixed slot layout); and the deliberately scary "allow
+  non-blank tapes" opt-out.
 - **Encryption** — the age recipient list and escrowed identity, plus a
   **Generate new age keypair** button: it calls the server's
   [`POST /api/age/keygen`](configuration.md#post-apiagekeygen-age-keypair-generation-issue-279)
@@ -166,8 +168,23 @@ needs (see [`docs/configuration.md`](configuration.md) for what every field mean
   store-this-now warning. There is no way to retrieve it again from the app afterward
   — not after a reload, not after generating another pair; the server never persists
   or logs it.
-- **Delivery** — the Discord webhook URL and the optional optical recovery-disc
-  burning section (burner devices, copies per run, rewritable-disc reclaim opt-out).
+- **Delivery** — the Discord webhook URL, shown **read-only** from deploy config
+  (see below), and the optional optical recovery-disc burning section (burner
+  devices, copies per run, rewritable-disc reclaim opt-out).
+
+**Deploy-owned fields (changer, drives, Discord webhook).** The library changer/drive
+device paths and the Discord webhook URL are properties of the deployment/host, not
+per-run choices, so Form mode does **not** expose them as free-text inputs an operator
+re-types (or mis-types) each run. They come from the deployment's own config
+(`LIBRARY_CHANGER` / `LIBRARY_DRIVES` / `DELIVERY_WEBHOOK_URL` on `cmd/web`, surfaced by
+`GET /api/config/ui` — see
+[Web UI environment variables](configuration.md#web-ui-environment-variables-cmdweb)),
+are shown read-only, and are filled into the submitted run config so it still carries
+them. A deployment that has not configured one shows that field as "not configured" and
+the Review step reports the matching validation error rather than the UI inventing a
+default. To override a device or webhook for a one-off run (e.g. a temporary drive swap),
+use JSON / paste mode, which is the full-schema escape hatch and submits exactly what you
+give it.
 
 A few advanced tuning fields (`feasibilityOverhead` and the operator-wait timeout
 overrides) have no form controls; use JSON mode for those — the run gets their
@@ -208,7 +225,11 @@ if the JSON carries any of the advanced fields the form has no controls for
 `delivery.opticalBurn.burnWaitTimeoutSeconds`), the page shows a notice naming
 exactly those fields: they survive only in the JSON text, so continuing to edit in
 Form mode (whose state is what any later serialization or Review uses) drops them.
-Switch back to JSON mode to keep them.
+Switch back to JSON mode to keep them. The same notice also names any deploy-owned
+device/webhook fields (`library.changer`, `library.drives`, `delivery.webhookUrl`)
+the JSON sets: Form mode sources those from deploy config, so a value typed into JSON
+is **replaced by** the deployment's own config on the switch — keep it by staying in
+JSON mode.
 
 ### Dry-run and submission
 

@@ -391,3 +391,18 @@ Foundation lands first, then parallel feature work; all PRs target `feature/web-
   one in flight): if the stream died because the session did, the probe's own 401
   cascades through the same pub-sub; any other probe outcome leaves EventSource's
   native auto-reconnect alone.
+- 2026-07-12 (#304): the guided Form mode's host-specific fields — the library
+  changer/drive devices and the Discord webhook — are deploy-owned, not per-run: they
+  come from `cmd/web`'s `LIBRARY_CHANGER`/`LIBRARY_DRIVES`/`DELIVERY_WEBHOOK_URL`,
+  surfaced by extending the existing `GET /api/config/ui` route (the same deploy-config
+  surface the Temporal-UI link uses, and the one the companion library-topology work,
+  #305, extends further — nested under a `library` object so it can). Form mode shows
+  them read-only and `buildConfig` fills them into the submitted run config, so the
+  config stays the single source of truth (SPEC §4.2) and `internal/config` validation
+  is unchanged; only *where the operator supplies them* moves. No server-side injection:
+  JSON / paste mode is the full-schema escape hatch and can still override them per run
+  (e.g. a one-off drive swap), so a JSON → Form switch that carries device/webhook values
+  shows a notice that Form mode replaces them with deploy config — the same
+  nothing-silently-discarded contract as the advanced-fields (`unmodeledFields`) notice.
+  An unconfigured deployment leaves the field empty and lets the Review step's existing
+  validation report it, rather than the UI inventing a default.

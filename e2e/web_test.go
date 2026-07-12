@@ -249,6 +249,14 @@ func TestWebUIEndToEnd(t *testing.T) {
 		"--set", "config.web.dryRun.mhvtlChangerDev="+testutil.ChangerDev(t),
 		"--set", "config.web.dryRun.mhvtlDrive0Dev="+testutil.Drive0Dev(t),
 		"--set", "config.web.dryRun.mhvtlDrive1Dev="+testutil.Drive1Dev(t),
+		// Deploy-owned library devices the guided Form mode sources read-only
+		// (issue #304): the Form-mode e2e spec builds a config that must pass the
+		// Review step's client-side validation (changer non-empty, >=1 drive), so
+		// the deployed cmd/web has to serve real values via GET /api/config/ui.
+		// The dry-run submission still redirects to the mhvtl nodes server-side
+		// (pkg/runsubmit.ApplyDryRun), so these need only be non-empty/valid.
+		"--set", "config.web.library.changer="+testutil.ChangerDev(t),
+		"--set", "config.web.library.drives={"+testutil.Drive0Dev(t)+","+testutil.Drive1Dev(t)+"}",
 		"--set-string", imagePath+".repository="+webRepo,
 		"--set-string", imagePath+".tag="+imageVersion,
 		"--set", imagePath+".pullPolicy=Never",

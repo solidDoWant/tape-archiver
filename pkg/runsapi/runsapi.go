@@ -262,6 +262,21 @@ func WithTemporalUI(baseURL, namespace string) Option {
 	}
 }
 
+// WithDeployConfig supplies the deployment's fixed library device targets and
+// Discord webhook URL, which the guided config form sources read-only rather
+// than exposing as per-run free-text inputs (issue #304 — see uiconfig.go).
+// They are reported by GET /api/config/ui; any left empty simply arrives empty
+// at the SPA, and the guided form's Review step then surfaces internal/config's
+// own validation (changer must not be empty, at least one drive is required)
+// rather than the server guessing a default.
+func WithDeployConfig(changer string, drives []string, webhookURL string) Option {
+	return func(h *handler) {
+		h.deployChanger = changer
+		h.deployDrives = drives
+		h.deployWebhookURL = webhookURL
+	}
+}
+
 // New builds the /api/runs HTTP handler. temporalClient must be non-nil.
 func New(temporalClient TemporalClient, opts ...Option) http.Handler {
 	return newMux(newHandler(temporalClient, os.Getenv, opts...))
@@ -346,6 +361,14 @@ type handler struct {
 	// the client dials). Both are set via WithTemporalUI.
 	temporalUIBaseURL string
 	temporalNamespace string
+	// deployChanger, deployDrives, and deployWebhookURL are the deployment's
+	// fixed library device targets and Discord webhook URL, reported by GET
+	// /api/config/ui so the guided config form can source them read-only
+	// instead of as per-run free-text inputs (issue #304). Empty when
+	// unconfigured; set via WithDeployConfig.
+	deployChanger    string
+	deployDrives     []string
+	deployWebhookURL string
 }
 
 // listRuns implements GET /api/runs: every execution of the singleton backup
