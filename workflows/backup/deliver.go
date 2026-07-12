@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -59,13 +60,31 @@ type DeliverInput struct {
 	ReportPath string
 }
 
+// DeliverResult records the identity of the Discord message the report was posted
+// to, so the run's overview can deep-link to it
+// (https://discord.com/channels/{guild}/{channel}/{message}, issue #306). It is
+// persisted in Temporal workflow history as the activity's result and later
+// reconstructed by pkg/runsapi — no external catalog, honoring SPEC §4.2. Every
+// field is best-effort: delivery with no webhook configured, or a Discord response
+// the client could not parse, yields a zero-value result (an empty DeliverResult),
+// which the runs API renders as "no link". A failed delivery produces no completed
+// Deliver result at all.
+type DeliverResult struct {
+	// GuildID, ChannelID and MessageID are the three path segments of the
+	// jump-to-message link. GuildID comes from a best-effort webhook lookup
+	// (webhook.FetchWebhookGuild); the other two from the ?wait=true post response.
+	GuildID   string
+	ChannelID string
+	MessageID string
+}
+
 // Deliver uploads the report to the configured Discord webhook (SPEC §4.3 phase 11,
 // §11). A transient failure (a 429/5xx response or a transport error) fails the
 // activity and Temporal retries it up to deliverMaxAttempts; a deterministic
 // rejection (a permanent 4xx — a deleted/rotated webhook or an oversize report) is
 // returned non-retryable so the run fails fast and the failure alert fires. An empty
 // webhook URL makes the upload a no-op.
-func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) error {
+func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) (*DeliverResult, error) {
 	client := webhook.New(input.WebhookURL)
 
 	// Emit liveness heartbeats during the multipart upload so a hard data-worker
@@ -73,13 +92,41 @@ func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) err
 	// than only after the 30-minute deliverTimeout. The HeartbeatTimeout on the
 	// activity options requires these heartbeats — without them Temporal would fail
 	// the (otherwise non-heartbeating) activity spuriously.
+	var posted *webhook.PostedMessage
+
 	if err := withActivityHeartbeat(ctx, func() error {
-		return client.SendFile(ctx, input.ReportPath)
+		var sendErr error
+
+		posted, sendErr = client.SendFile(ctx, input.ReportPath)
+
+		return sendErr
 	}); err != nil {
-		return classifyDeliverError(fmt.Errorf("deliver report %q: %w", input.ReportPath, err))
+		return nil, classifyDeliverError(fmt.Errorf("deliver report %q: %w", input.ReportPath, err))
 	}
 
-	return nil
+	// Delivery succeeded. Everything from here is best-effort deep-link metadata
+	// (issue #306): it must never turn a delivered report into a failed run. A
+	// no-op webhook (empty URL) or an unparseable response leaves posted nil, so
+	// the result stays zero-valued and the runs API shows no link.
+	result := &DeliverResult{}
+	if posted == nil {
+		return result, nil
+	}
+
+	result.ChannelID = posted.ChannelID
+	result.MessageID = posted.ID
+
+	// The ?wait=true post response gives the channel and message but not the guild
+	// a jump-to-message URL also needs. Fetch it from the webhook object, tolerating
+	// any error — a missing guild only omits the link (SPEC §4.2: no external
+	// catalog, the run's own history carries the identity).
+	if guildID, err := client.FetchWebhookGuild(ctx); err != nil {
+		slog.WarnContext(ctx, "deliver: could not resolve webhook guild; report deep-link omitted", "error", err)
+	} else {
+		result.GuildID = guildID
+	}
+
+	return result, nil
 }
 
 // classifyDeliverError maps a Deliver upload failure to its Temporal retry semantics,
@@ -123,5 +170,9 @@ func deliverPhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 		ReportPath: state.reportPath,
 	}
 
+	// The result (the posted message's identity) is captured in workflow history
+	// as the activity's completion payload; pkg/runsapi reconstructs the run
+	// overview's Discord deep-link from it (issue #306). The workflow keeps no copy
+	// — history is the sole source (SPEC §4.2).
 	return workflow.ExecuteActivity(dataCtx, activities.Deliver, input).Get(dataCtx, nil)
 }

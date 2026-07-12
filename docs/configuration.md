@@ -589,9 +589,10 @@ the submit form's success state.
 #### History-derived run endpoints
 
 `GET /api/runs/{runID}/phases`, `GET /api/runs/{runID}/config`,
-`GET /api/runs/{runID}/tapes`, and `GET /api/tapes` reconstruct richer per-run data —
-a full phase timeline, the originally submitted run config, and per-run/aggregate
-tape outcomes — entirely on demand from the run's raw Temporal workflow event history
+`GET /api/runs/{runID}/tapes`, `GET /api/runs/{runID}/delivery`, and `GET /api/tapes`
+reconstruct richer per-run data — a full phase timeline, the originally submitted run
+config, per-run/aggregate tape outcomes, and the report's Discord deep-link — entirely
+on demand from the run's raw Temporal workflow event history
 (`GetWorkflowHistory`). There is no persistent catalog and no cross-run state (SPEC
 §4.2): everything below is derived from Temporal's own records at request time, and a
 run whose history has aged out of Temporal's retention window is therefore genuinely
@@ -672,6 +673,16 @@ when present, is the tape's observational write-health verdict (SPEC §14):
 false` means the measurement could not be taken at all (the run still succeeds; every
 other field is then a zero placeholder), so an unmeasured tape is distinguishable
 from one measured and found unhealthy (`healthy` is `false` in both cases).
+
+`GET /api/runs/{runID}/delivery` returns `{"runId": "...", "messageUrl": "..."}` —
+the Discord jump-to-message deep-link
+(`https://discord.com/channels/{guild}/{channel}/{message}`) for the run's posted PDF
+report, reconstructed from the `Deliver` activity's recorded result (the message's
+guild/channel/message identity, captured when the report is uploaded with
+`?wait=true`). `messageUrl` is `""` — and the run overview shows no **Discord report ↗**
+link — when the run delivered no report (delivery disabled or not yet reached), the
+delivery failed, or the guild could not be resolved. Needs no configuration: the
+identity travels in the run's own history, not an external catalog (SPEC §4.2).
 
 `GET /api/tapes` returns `{"tapes": [...], "runErrors": [...]}` — the tape outcomes
 above aggregated across the most recent runs still in Temporal visibility, newest run

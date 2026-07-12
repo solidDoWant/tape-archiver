@@ -489,7 +489,13 @@ transient upload failure (a 429 rate-limit or a 5xx, or a transport blip) is ret
 bounded number of times so a brief outage still delivers; a deterministic rejection (a
 permanent 4xx — a deleted or rotated webhook, or a report the endpoint refuses as too
 large) fails the run fast rather than retrying forever, so the failure alert below fires
-instead of the run wedging silently after all tapes are already written.
+instead of the run wedging silently after all tapes are already written. The report is
+posted with `?wait=true` so Discord returns the created message; the Deliver activity
+records that message's identity (its channel and message IDs, plus the webhook's guild
+from a best-effort webhook lookup) as its result, so the web UI can deep-link to the
+posted report from the run overview. That capture is best-effort — it never turns a
+delivered report into a failed run — and is reconstructed on demand from workflow
+history, adding no persistent state (§4.2).
 
 **Failure alert (operational, configured via env var).** A separate failure webhook,
 configured on the worker via the `DISCORD_FAILURE_WEBHOOK_URL` environment variable
