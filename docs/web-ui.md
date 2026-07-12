@@ -172,8 +172,9 @@ needs (see [`docs/configuration.md`](configuration.md) for what every field mean
   — not after a reload, not after generating another pair; the server never persists
   or logs it.
 - **Delivery** — the Discord webhook URL, shown **read-only** from deploy config
-  (see below), and the optional optical recovery-disc burning section (burner
-  devices, copies per run, rewritable-disc reclaim opt-out).
+  (see below), and the optional optical recovery-disc burning section: an on/off
+  toggle, the copies per run, and the rewritable-disc reclaim opt-out, plus the
+  burner device paths shown **read-only** from deploy config (see below).
 
 **Deploy-owned fields (changer, drives, Discord webhook).** The library changer/drive
 device paths and the Discord webhook URL are properties of the deployment/host, not
@@ -191,6 +192,18 @@ fill it, so a Form-mode run leaves it empty and the Review step reports the matc
 validation error rather than the UI inventing a default; only that unset field can be
 supplied per run
 via JSON / paste mode.
+
+**Deploy-owned optical burner drives.** The optical burner device paths are a
+deployment property too (`OPTICAL_BURNER_DRIVES` on `cmd/web`, surfaced by the same
+`GET /api/config/ui`), so the operator does not type them — Form mode sources them from
+deploy config. Unlike the changer/drive devices above, though, they **are** shown
+(read-only) in the Delivery section's optical-burn subsection when the operator enables
+burning, so the operator can see which devices a burn will target while still controlling
+only the on/off toggle and the copies per run. The server enforces them the same way as
+the other deploy-owned fields, but only when a submitted run actually enables optical
+burn (carries a `delivery.opticalBurn` block): a burn-off run never gains a spurious one.
+When the deployment configured no burner drives, the subsection shows a "not configured"
+notice naming the env var to set; JSON / paste mode remains the escape hatch.
 
 **Deploy-owned library topology (slot-grid picker).** The physical library's slot
 layout is likewise a deployment property, so the Library section's blank/write-target

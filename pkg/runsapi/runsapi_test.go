@@ -921,6 +921,47 @@ func TestSubmitRun(t *testing.T) {
 		assert.False(t, fake.executeCaptured)
 	})
 
+	// The deploy-owned optical burner drives (issue #317) are a host property too,
+	// so a run that enables optical burn has its opticalBurn.drives overwritten
+	// with the deployment's list — no client can burn on a device the host does
+	// not own, whatever it submitted.
+	t.Run("deploy config overrides a burn-enabled run's optical burner drives", func(t *testing.T) {
+		burnConfig := `{
+		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+		  "copies": 2,
+		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc", "opticalBurn": {"drives": ["/dev/rogue-burner"], "copies": 2}}
+		}`
+
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-burn"}}
+		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithOpticalBurnerDrives([]string{"/dev/sr0", "/dev/sr1"})))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+burnConfig+`}`), nil)
+
+		require.Equal(t, http.StatusCreated, recorder.Code)
+		require.NotNil(t, fake.executeConfig)
+		require.NotNil(t, fake.executeConfig.Delivery.OpticalBurn)
+		assert.Equal(t, []string{"/dev/sr0", "/dev/sr1"}, fake.executeConfig.Delivery.OpticalBurn.Drives)
+	})
+
+	// A run that does not enable optical burn (no opticalBurn block) must never
+	// gain a spurious one just because the deployment configured burner drives —
+	// the override only replaces drives on an already-present block.
+	t.Run("deploy burner drives add no opticalBurn block to a burn-off run", func(t *testing.T) {
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-noburn"}}
+		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithOpticalBurnerDrives([]string{"/dev/sr0", "/dev/sr1"})))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
+
+		require.Equal(t, http.StatusCreated, recorder.Code)
+		require.NotNil(t, fake.executeConfig)
+		assert.Nil(t, fake.executeConfig.Delivery.OpticalBurn)
+	})
+
 	t.Run("a dry-run submission still honors the singleton conflict policy", func(t *testing.T) {
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-dry"}}
 		handler := newMux(newHandler(fake, mhvtlEnv))

@@ -178,6 +178,16 @@ config:
     # to show the webhook field as "not configured" in Form mode.
     delivery:
       webhookUrl: ""
+      # opticalBurnDrives is the deployment's fixed optical burner device paths
+      # (issue #317 — OPTICAL_BURNER_DRIVES, docs/configuration.md), the delivery
+      # analogue of library.drives above: a burner device path (e.g. "/dev/sr0")
+      # is a property of the host, not a per-run choice, so the guided config
+      # form sources it read-only and the operator only toggles optical burn
+      # on/off and sets the copy count per run. Rendered to OPTICAL_BURNER_DRIVES
+      # as a comma-separated list. Leave empty (the default) to show the burner
+      # drives as "not configured" when a run enables optical burn; the operator
+      # can still supply them per run via the config page's JSON / paste mode.
+      opticalBurnDrives: []
 
 # resources follows the bjw-s app-template schema, same convention as
 # deploy/charts/tape-archiver-control-worker. Values here are deep-merged over the

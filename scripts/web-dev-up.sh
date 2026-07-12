@@ -547,6 +547,11 @@ env \
   LIBRARY_CHANGER="$MHVTL_CHANGER_DEV" \
   LIBRARY_DRIVES="$MHVTL_DRIVE0_DEV,$MHVTL_DRIVE1_DEV" \
   DELIVERY_WEBHOOK_URL="$DEV_WEBHOOK_URL" \
+  `# Deploy-owned optical burner drives the guided config form shows read-only` \
+  `# when optical burn is enabled (issue #317). mhvtl has no optical drive, and` \
+  `# these dry-run runs disable burning anyway, so this is an illustrative dev` \
+  `# value purely so Form mode demonstrates the read-only burner-drive display.` \
+  OPTICAL_BURNER_DRIVES="/dev/sr0" \
   `# Deploy-owned library topology driving the slot-grid picker (issue #305).` \
   `# The mhvtl dev library (scripts/mhvtl-up.sh) has 47 storage slots and 3 MAPs;` \
   `# the MAPs are a separate I/O-station address space that does not map into the` \

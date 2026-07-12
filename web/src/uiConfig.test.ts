@@ -9,7 +9,7 @@ function uiConfig(overrides: Partial<UiConfig>): UiConfig {
     temporalUiBaseUrl: '',
     temporalNamespace: '',
     library: { changer: '', drives: [], slotCount: 0, cleaningSlots: [], ioStationSlots: [] },
-    delivery: { webhookUrl: '' },
+    delivery: { webhookUrl: '', opticalBurnDrives: [] },
     ...overrides,
   }
 }
@@ -49,7 +49,7 @@ describe('temporalWorkflowUrl', () => {
 })
 
 describe('deployConfigFrom', () => {
-  it('extracts the deploy-owned library devices, webhook, and topology once loaded', () => {
+  it('extracts the deploy-owned library devices, webhook, burner drives, and topology once loaded', () => {
     const state: UiConfigState = {
       status: 'loaded',
       config: uiConfig({
@@ -60,7 +60,7 @@ describe('deployConfigFrom', () => {
           cleaningSlots: [45],
           ioStationSlots: [46, 47],
         },
-        delivery: { webhookUrl: 'https://discord.example/webhook' },
+        delivery: { webhookUrl: 'https://discord.example/webhook', opticalBurnDrives: ['/dev/sr0', '/dev/sr1'] },
       }),
     }
 
@@ -68,6 +68,7 @@ describe('deployConfigFrom', () => {
       changer: '/dev/sch0',
       drives: ['/dev/nst0', '/dev/nst1'],
       webhookUrl: 'https://discord.example/webhook',
+      opticalBurnDrives: ['/dev/sr0', '/dev/sr1'],
       slotCount: 47,
       cleaningSlots: [45],
       ioStationSlots: [46, 47],
@@ -79,6 +80,7 @@ describe('deployConfigFrom', () => {
       changer: '',
       drives: [],
       webhookUrl: '',
+      opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
       ioStationSlots: [],
@@ -90,6 +92,7 @@ describe('deployConfigFrom', () => {
       changer: '',
       drives: [],
       webhookUrl: '',
+      opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
       ioStationSlots: [],

@@ -135,16 +135,18 @@ export function newSourceFormState(): SourceFormState {
 }
 
 // DeployConfig is the deploy-owned subset of a run config the guided Form mode
-// does NOT let the operator edit per run (issue #304): the library changer/drive
-// device paths and the Discord webhook URL are properties of the deployment/host
-// supplied by GET /api/config/ui (uiConfig.ts's deployConfigFrom), not typed
-// into the form. buildConfig fills these into the submitted config so it still
-// carries them (SPEC §4.2 — the run config stays the single source of truth);
-// they are simply not FormState fields. This is also enforced server-side: where
-// a deployment configures one of these, cmd/web overwrites it onto every
-// submitted config regardless of mode (pkg/runsapi applyDeployConfig), so JSON /
-// paste mode cannot override a deploy-owned device/webhook either — only a field
-// the deployment left unset can be supplied per run.
+// does NOT let the operator edit per run (issues #304 and #317): the library
+// changer/drive device paths, the Discord webhook URL, and the optical burner
+// device paths are properties of the deployment/host supplied by GET
+// /api/config/ui (uiConfig.ts's deployConfigFrom), not typed into the form.
+// buildConfig fills these into the submitted config so it still carries them
+// (SPEC §4.2 — the run config stays the single source of truth); they are simply
+// not FormState fields. This is also enforced server-side: where a deployment
+// configures one of these, cmd/web overwrites it onto every submitted config
+// regardless of mode (pkg/runsapi applyDeployConfig), so JSON / paste mode cannot
+// override a deploy-owned device/webhook either — only a field the deployment
+// left unset can be supplied per run. (The burner drives are applied server-side
+// only when the run actually enables optical burn.)
 //
 // slotCount/cleaningSlots/ioStationSlots are the physical library topology
 // (issue #305): the storage slot count and the reserved cleaning / I/O-station
@@ -156,6 +158,11 @@ export interface DeployConfig {
   changer: string
   drives: string[]
   webhookUrl: string
+  // opticalBurnDrives is the deploy-owned optical burner device paths (issue
+  // #317), the delivery analogue of drives above: the operator toggles optical
+  // burn on/off and sets the copy count per run, but the burner devices come
+  // from deploy config. [] when the deployment configured none.
+  opticalBurnDrives: string[]
   slotCount: number
   cleaningSlots: number[]
   ioStationSlots: number[]
@@ -174,7 +181,10 @@ export interface FormState {
   recipients: string[]
   identity: string
   opticalBurnEnabled: boolean
-  opticalDrives: string[]
+  // The burner device paths are deploy-owned (issue #317) and sourced from
+  // DeployConfig.opticalBurnDrives at buildConfig time, so — like the library
+  // changer/drives (issue #304) — they are not a FormState field. The operator
+  // still controls the on/off toggle and the copy count per run.
   opticalCopies: number
   allowNonBlankDiscs: boolean
 }
@@ -193,7 +203,6 @@ export function defaultFormState(): FormState {
     recipients: [''],
     identity: '',
     opticalBurnEnabled: false,
-    opticalDrives: ['/dev/sr0'],
     opticalCopies: 2,
     allowNonBlankDiscs: false,
   }
@@ -272,8 +281,12 @@ export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
   const delivery: Delivery = { webhookUrl: deploy.webhookUrl.trim() }
 
   if (form.opticalBurnEnabled) {
+    // The burner drives are deploy-owned (issue #317): sourced from deploy
+    // config, not the form, mirroring library.changer/drives above. The server
+    // re-applies them over the submitted config (applyDeployConfig), so this is
+    // only where the operator's config first picks them up.
     delivery.opticalBurn = {
-      drives: form.opticalDrives.map((drive) => drive.trim()).filter((drive) => drive !== ''),
+      drives: deploy.opticalBurnDrives.map((drive) => drive.trim()).filter((drive) => drive !== ''),
       copies: form.opticalCopies,
       allowNonBlankDiscs: form.allowNonBlankDiscs,
     }
@@ -358,12 +371,12 @@ export function unmodeledFields(config: RunConfig): string[] {
   return dropped
 }
 
-// deployOwnedFields lists (as dotted paths) the deploy-owned fields (issue
-// #304) a JSON config sets to a non-empty value that a JSON → Form switch will
-// replace with the deployment's own config: Form mode sources
-// library.changer/drives and delivery.webhookUrl from deploy config
-// (buildConfig's deploy argument), not FormState, so a custom value typed into
-// JSON mode does not survive the switch. ConfigPage warns the operator by name
+// deployOwnedFields lists (as dotted paths) the deploy-owned fields (issues
+// #304 and #317) a JSON config sets to a non-empty value that a JSON → Form
+// switch will replace with the deployment's own config: Form mode sources
+// library.changer/drives, delivery.webhookUrl, and delivery.opticalBurn.drives
+// from deploy config (buildConfig's deploy argument), not FormState, so a custom
+// value typed into JSON mode does not survive the switch. ConfigPage warns the operator by name
 // at switch time (its mode-switch notice), rather than swapping them silently —
 // unlike unmodeledFields, these are not lost but *replaced by* the deploy
 // values, which the read-only Library/Delivery displays then show.
@@ -380,6 +393,12 @@ export function deployOwnedFields(config: RunConfig): string[] {
 
   if (config.delivery?.webhookUrl) {
     overridden.push('delivery.webhookUrl')
+  }
+
+  // Burner drives are deploy-owned too (issue #317): a JSON → Form switch
+  // replaces any drives typed in JSON mode with the deployment's own list.
+  if (config.delivery?.opticalBurn?.drives?.length) {
+    overridden.push('delivery.opticalBurn.drives')
   }
 
   return overridden
@@ -428,11 +447,15 @@ export function configToFormState(config: RunConfig): FormState {
   form.recipients = config.encryption.recipients.length > 0 ? config.encryption.recipients : form.recipients
   form.identity = config.encryption.identity
 
-  form.opticalBurnEnabled = Boolean(config.delivery.opticalBurn && config.delivery.opticalBurn.drives.length > 0)
+  // The burner drives are deploy-owned (issue #317) and sourced from deploy
+  // config at buildConfig time, so — like library.changer/drives — they are not
+  // mapped out of the JSON. Optical burn is "enabled" when the block is present
+  // with a positive copy count; the drives no longer gate it (a Form-built
+  // config carries deploy drives, and a JSON config may legitimately leave them
+  // empty for the server to fill).
+  form.opticalBurnEnabled = Boolean(config.delivery.opticalBurn && config.delivery.opticalBurn.copies > 0)
 
   if (config.delivery.opticalBurn) {
-    form.opticalDrives =
-      config.delivery.opticalBurn.drives.length > 0 ? config.delivery.opticalBurn.drives : form.opticalDrives
     form.opticalCopies = config.delivery.opticalBurn.copies
     form.allowNonBlankDiscs = config.delivery.opticalBurn.allowNonBlankDiscs ?? false
   }

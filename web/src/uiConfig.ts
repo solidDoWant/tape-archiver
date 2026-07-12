@@ -26,7 +26,11 @@ export interface UiConfig {
     cleaningSlots: number[]
     ioStationSlots: number[]
   }
-  delivery: { webhookUrl: string }
+  // delivery carries the deploy-owned Discord webhook URL (issue #304) and the
+  // optical burner device paths (issue #317) the guided config form sources
+  // read-only. opticalBurnDrives is [] (never null) when the deployment did not
+  // configure any burner drives.
+  delivery: { webhookUrl: string; opticalBurnDrives: string[] }
 }
 
 export type UiConfigState =
@@ -77,13 +81,22 @@ export function deployConfigFrom(state: UiConfigState): DeployConfig {
       changer: state.config.library.changer,
       drives: state.config.library.drives,
       webhookUrl: state.config.delivery.webhookUrl,
+      opticalBurnDrives: state.config.delivery.opticalBurnDrives,
       slotCount: state.config.library.slotCount,
       cleaningSlots: state.config.library.cleaningSlots,
       ioStationSlots: state.config.library.ioStationSlots,
     }
   }
 
-  return { changer: '', drives: [], webhookUrl: '', slotCount: 0, cleaningSlots: [], ioStationSlots: [] }
+  return {
+    changer: '',
+    drives: [],
+    webhookUrl: '',
+    opticalBurnDrives: [],
+    slotCount: 0,
+    cleaningSlots: [],
+    ioStationSlots: [],
+  }
 }
 
 // temporalWorkflowUrl builds the Temporal Web UI deep-link for one workflow

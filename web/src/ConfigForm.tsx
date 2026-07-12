@@ -228,6 +228,68 @@ function SlotGridEditor({
   )
 }
 
+// BurnerDrivesDisplay is the Delivery section's read-only view of the deploy-
+// owned optical burner device paths (issue #317). The burner drives are a
+// property of the deployment/host, not a per-run choice, so — like the
+// changer/drive devices (issue #304) — the operator does not type them; unlike
+// those, though, they are *shown* here (read-only) when optical burn is enabled,
+// so the operator can see which devices a burn will target while still
+// controlling only the on/off toggle and the copy count. Sourced from GET
+// /api/config/ui (deploy config), so it handles the same fetch states as the
+// slot picker: a loading line in flight, an unavailable notice on failure, and,
+// when the deployment declared no burner drives, an actionable notice naming the
+// env var to set (JSON / paste mode remains the escape hatch).
+function BurnerDrivesDisplay({ status, drives }: { status: UiConfigState['status']; drives: string[] }) {
+  const label = <label className={fieldLabelClass}>burner devices — from deploy config</label>
+
+  if (status === 'loading') {
+    return (
+      <div>
+        {label}
+        <p role="status" className="font-mono text-[11px] text-text-faint">
+          Loading deploy config…
+        </p>
+      </div>
+    )
+  }
+
+  if (status === 'error') {
+    return (
+      <div>
+        {label}
+        <p className="font-mono text-[11px] text-amber">Deploy config unavailable — could not load the burner drives.</p>
+      </div>
+    )
+  }
+
+  if (drives.length === 0) {
+    return (
+      <div>
+        {label}
+        <p className="font-mono text-[11px] text-amber">
+          No burner drives configured — set OPTICAL_BURNER_DRIVES (or use JSON / paste mode).
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {label}
+      <div className="flex flex-col gap-1.5">
+        {drives.map((drive) => (
+          <div
+            key={drive}
+            className="rounded-lg border border-border bg-inset px-2.5 py-2 font-mono text-[12px] text-text-dim"
+          >
+            {drive}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ConfigForm is the config page's guided Form mode (DESIGN_ANALYSIS.md §2
 // "D. Config"): sources, copies & redundancy, library, encryption, and
 // delivery sections that together build a FormState, converted to a
@@ -637,12 +699,7 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
 
         {form.opticalBurnEnabled ? (
           <div className="mt-3.5 flex flex-col gap-3 border-t border-border pt-3.5">
-            <StringListEditor
-              label="burner devices"
-              values={form.opticalDrives}
-              placeholder="/dev/sr0"
-              onChange={(opticalDrives) => setForm((previous) => ({ ...previous, opticalDrives }))}
-            />
+            <BurnerDrivesDisplay status={deployStatus} drives={deploy.opticalBurnDrives} />
 
             <div className="w-40">
               <label className={fieldLabelClass} htmlFor="config-optical-copies">

@@ -18,6 +18,7 @@ const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0', '/dev/nst1'],
   webhookUrl: 'https://discord.com/api/webhooks/1/a',
+  opticalBurnDrives: ['/dev/sr0'],
   slotCount: 47,
   cleaningSlots: [45],
   ioStationSlots: [46, 47],
@@ -101,19 +102,30 @@ describe('buildConfig', () => {
     expect(config.redundancy.targetPercentage).toBeUndefined()
   })
 
-  it('includes opticalBurn only when enabled', () => {
+  it('includes opticalBurn only when enabled, sourcing the burner drives from deploy config', () => {
     const form = defaultFormState()
     form.opticalBurnEnabled = true
-    form.opticalDrives = ['/dev/sr0']
     form.opticalCopies = 2
 
     const config = buildConfig(form, testDeploy)
 
+    // drives come from deploy config (issue #317), not the form; copies and the
+    // reclaim opt-out stay per-run.
     expect(config.delivery.opticalBurn).toEqual({
       drives: ['/dev/sr0'],
       copies: 2,
       allowNonBlankDiscs: false,
     })
+  })
+
+  it('filters blank deploy burner-drive entries out of the built optical-burn block', () => {
+    const form = defaultFormState()
+    form.opticalBurnEnabled = true
+    form.opticalCopies = 2
+
+    const config = buildConfig(form, { ...testDeploy, opticalBurnDrives: ['/dev/sr0', '', '  ', '/dev/sr1'] })
+
+    expect(config.delivery.opticalBurn?.drives).toEqual(['/dev/sr0', '/dev/sr1'])
   })
 
   it('filters blank recipient entries out of the built config', () => {
@@ -130,6 +142,7 @@ describe('buildConfig', () => {
       changer: '/dev/sch0',
       drives: ['/dev/nst0', '', '  '],
       webhookUrl: '',
+      opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
       ioStationSlots: [],
@@ -146,6 +159,7 @@ describe('buildConfig', () => {
       changer: '',
       drives: [],
       webhookUrl: '',
+      opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
       ioStationSlots: [],
@@ -174,7 +188,6 @@ describe('configToFormState', () => {
     form.recipients = ['age1pq1abc']
     form.identity = 'AGE-SECRET-KEY-PQ-1abc'
     form.opticalBurnEnabled = true
-    form.opticalDrives = ['/dev/sr0']
     form.opticalCopies = 3
 
     const roundTripped = configToFormState(buildConfig(form, testDeploy))
@@ -189,7 +202,6 @@ describe('configToFormState', () => {
     expect(roundTripped.recipients).toEqual(['age1pq1abc'])
     expect(roundTripped.identity).toBe('AGE-SECRET-KEY-PQ-1abc')
     expect(roundTripped.opticalBurnEnabled).toBe(true)
-    expect(roundTripped.opticalDrives).toEqual(['/dev/sr0'])
     expect(roundTripped.opticalCopies).toBe(3)
     expect(roundTripped.tapeGeneration).toBe('LTO-6')
   })
@@ -268,6 +280,7 @@ describe('unmodeledFields', () => {
       changer: baseConfig.library.changer,
       drives: baseConfig.library.drives,
       webhookUrl: baseConfig.delivery.webhookUrl,
+      opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
       ioStationSlots: [],
@@ -287,17 +300,25 @@ describe('unmodeledFields', () => {
 })
 
 describe('deployOwnedFields', () => {
-  it('names the deploy-owned device/webhook fields a JSON config sets, as dotted paths', () => {
+  it('names the deploy-owned device/webhook/burner fields a JSON config sets, as dotted paths', () => {
     const config: RunConfig = {
       sources: [],
       copies: 1,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
       redundancy: { sliceSizeBytes: 1 },
       encryption: { recipients: [], identity: '' },
-      delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
+      delivery: {
+        webhookUrl: 'https://discord.com/api/webhooks/1/a',
+        opticalBurn: { drives: ['/dev/sr0'], copies: 2 },
+      },
     }
 
-    expect(deployOwnedFields(config)).toEqual(['library.changer', 'library.drives', 'delivery.webhookUrl'])
+    expect(deployOwnedFields(config)).toEqual([
+      'library.changer',
+      'library.drives',
+      'delivery.webhookUrl',
+      'delivery.opticalBurn.drives',
+    ])
   })
 
   it('returns nothing when the JSON leaves the deploy-owned fields empty', () => {

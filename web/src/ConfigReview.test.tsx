@@ -9,6 +9,7 @@ const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0'],
   webhookUrl: '',
+  opticalBurnDrives: [],
   slotCount: 0,
   cleaningSlots: [],
   ioStationSlots: [],

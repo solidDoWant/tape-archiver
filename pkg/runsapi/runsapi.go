@@ -277,6 +277,21 @@ func WithDeployConfig(changer string, drives []string, webhookURL string) Option
 	}
 }
 
+// WithOpticalBurnerDrives supplies the deployment's fixed optical burner device
+// paths (issue #317), the delivery analogue of the library drives in
+// WithDeployConfig: a burner device path (e.g. /dev/sr0) is a property of the
+// deployment/host, not a per-run choice, so the guided config form sources it
+// read-only and the operator only toggles optical burn on/off and sets the copy
+// count per run. Reported by GET /api/config/ui; an empty list simply arrives
+// empty at the SPA. Unlike the library devices/webhook, this is applied server-
+// side only when a submitted run actually enables optical burn (see
+// applyDeployConfig), so an unset/disabled burn never gains a spurious block.
+func WithOpticalBurnerDrives(drives []string) Option {
+	return func(h *handler) {
+		h.deployOpticalBurnerDrives = drives
+	}
+}
+
 // WithLibraryTopology supplies the physical library's topology (issue #305): the
 // storage slot count and the cleaning / I/O-station slot numbers. GET
 // /api/config/ui reports these so the guided config form renders a slot-grid
@@ -388,6 +403,14 @@ type handler struct {
 	deployChanger    string
 	deployDrives     []string
 	deployWebhookURL string
+	// deployOpticalBurnerDrives is the deployment's fixed optical burner device
+	// paths (issue #317), reported by GET /api/config/ui so the guided config
+	// form sources them read-only instead of as a per-run free-text input — the
+	// delivery analogue of deployDrives. Empty when unconfigured; set via
+	// WithOpticalBurnerDrives. Unlike the fields above it is applied only when a
+	// submitted run actually enables optical burn (see applyDeployConfig), so a
+	// run with no opticalBurn block never gains a spurious one.
+	deployOpticalBurnerDrives []string
 	// deploySlotCount, deployCleaningSlots, and deployIOStationSlots are the
 	// physical library's topology (issue #305), reported by GET /api/config/ui
 	// so the guided config form can render a slot-grid picker bounded to the
@@ -652,17 +675,20 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyDeployConfig overwrites cfg's deploy-owned fields — the library
-// changer/drive devices and the Discord webhook URL — with the values this
-// deployment supplied via WithDeployConfig, and reports whether it changed
-// anything. These are properties of the host, not per-run choices (issue #304),
-// so the deployment, not the submitter, is authoritative on them regardless of
-// how the config was built.
+// changer/drive devices, the Discord webhook URL (issue #304), and the optical
+// burner drives (issue #317) — with the values this deployment supplied via
+// WithDeployConfig / WithOpticalBurnerDrives, and reports whether it changed
+// anything. These are properties of the host, not per-run choices, so the
+// deployment, not the submitter, is authoritative on them regardless of how the
+// config was built.
 //
 // Each field is overridden only when the deployment configured it, so a
 // deployment that sets none leaves the submitted config untouched (today's
 // behavior), and one that sets some overrides exactly those — mirroring the
-// per-field "not configured" the guided Form mode shows for an unset value.
-// Drives are copied, not aliased, so the shared handler slice can never be
+// per-field "not configured" the guided Form mode shows for an unset value. The
+// burner drives additionally require the submitted run to enable optical burn
+// (carry an opticalBurn block): a burn-off run never gains a spurious block.
+// Slices are copied, not aliased, so the shared handler slices can never be
 // mutated through the returned config.
 func (h *handler) applyDeployConfig(cfg *config.Config) bool {
 	changed := false
@@ -679,6 +705,17 @@ func (h *handler) applyDeployConfig(cfg *config.Config) bool {
 
 	if h.deployWebhookURL != "" {
 		cfg.Delivery.WebhookURL = h.deployWebhookURL
+		changed = true
+	}
+
+	// Optical burner drives (issue #317) differ from the fields above: they are
+	// applied only when the submitted run actually enables optical burn — i.e.
+	// carries an opticalBurn block. A run with no block (burn off) must never
+	// gain a spurious one, so we override the drives in place rather than
+	// creating the section. Whether the block then burns anything is still the
+	// operator's per-run choice (a positive copy count — OpticalBurn.Enabled).
+	if len(h.deployOpticalBurnerDrives) > 0 && cfg.Delivery.OpticalBurn != nil {
+		cfg.Delivery.OpticalBurn.Drives = append([]string{}, h.deployOpticalBurnerDrives...)
 		changed = true
 	}
 
