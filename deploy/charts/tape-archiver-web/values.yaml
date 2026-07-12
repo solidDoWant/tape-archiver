@@ -66,6 +66,11 @@ config:
     # logLevel is passed verbatim to the web server's logging setup via LOG_LEVEL
     # (empty -> info).
     logLevel: info
+    # temporalUiUrl is the browsable Temporal Web UI base URL (rendered to
+    # TEMPORAL_UI_URL — docs/configuration.md). When set, each run's overview page
+    # links to that run's workflow-history view in the Temporal UI, targeting the
+    # namespace from config.temporal.namespace above. Leave empty to show no link.
+    temporalUiUrl: ""
     # metricsScrapeWaitTimeout overrides METRICS_SCRAPE_WAIT_TIMEOUT (a Go duration
     # string, e.g. "60s") — how long shutdown waits for a final Prometheus scrape.
     # Leave empty to use cmd/web's own default (0s — no wait; the pod drains within

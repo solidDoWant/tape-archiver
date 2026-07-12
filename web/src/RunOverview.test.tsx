@@ -134,4 +134,47 @@ describe('RunOverview', () => {
       expect(screen.getByText('6')).toBeInTheDocument() // 3 logical tapes × 2 copies.
     })
   })
+
+  it('links to the Temporal workflow history when a UI base URL is configured', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : String(input)
+
+        if (url.endsWith('/api/config/ui')) {
+          return Promise.resolve(jsonResponse(200, { temporalUiBaseUrl: 'https://temporal.example.com', temporalNamespace: 'prod' }))
+        }
+
+        return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
+      }),
+    )
+
+    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+
+    const link = await screen.findByRole('link', { name: /temporal workflow/i })
+    expect(link).toHaveAttribute('href', 'https://temporal.example.com/namespaces/prod/workflows/backup/run-1/history')
+    expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it('shows no Temporal workflow link when no UI base URL is configured', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : String(input)
+
+        if (url.endsWith('/api/config/ui')) {
+          return Promise.resolve(jsonResponse(200, { temporalUiBaseUrl: '', temporalNamespace: '' }))
+        }
+
+        return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
+      }),
+    )
+
+    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+
+    // The overview's own content is synchronous; wait a tick for the config
+    // fetch to resolve, then confirm the link never appears.
+    await waitFor(() => expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument())
+    expect(screen.queryByRole('link', { name: /temporal workflow/i })).not.toBeInTheDocument()
+  })
 })

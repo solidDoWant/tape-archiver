@@ -169,6 +169,12 @@ resolution (deploy/charts/tape-archiver-control-worker/templates/common.yaml).
   {{- $_ := set $env "METRICS_SCRAPE_WAIT_TIMEOUT" .Values.config.web.metricsScrapeWaitTimeout -}}
 {{- end -}}
 
+{{/* TEMPORAL_UI_URL: optional browsable Temporal Web UI base for the run-overview
+   workflow deep-link (docs/configuration.md). Omitted when empty — no link shown. */}}
+{{- if .Values.config.web.temporalUiUrl -}}
+  {{- $_ := set $env "TEMPORAL_UI_URL" .Values.config.web.temporalUiUrl -}}
+{{- end -}}
+
 {{/* TEMPORAL_API_KEY: env var (not TOML) so the SDK's env-over-file precedence
    keeps the secret out of the ConfigMap. */}}
 {{- if $temporalAPIKeySecretName -}}

@@ -251,6 +251,17 @@ func WithDrainContext(ctx context.Context) Option {
 	return func(h *handler) { h.drain = ctx }
 }
 
+// WithTemporalUI supplies the browsable Temporal Web UI base URL and the
+// namespace runs execute in, so the SPA can deep-link a run to its workflow
+// history in the Temporal UI (served by GET /api/config/ui). An empty baseURL
+// disables the link: the endpoint reports it empty and the SPA shows no link.
+func WithTemporalUI(baseURL, namespace string) Option {
+	return func(h *handler) {
+		h.temporalUIBaseURL = baseURL
+		h.temporalNamespace = namespace
+	}
+}
+
 // New builds the /api/runs HTTP handler. temporalClient must be non-nil.
 func New(temporalClient TemporalClient, opts ...Option) http.Handler {
 	return newMux(newHandler(temporalClient, os.Getenv, opts...))
@@ -312,6 +323,10 @@ func newMux(h *handler) http.Handler {
 	// see configschema.go's and agekeygen.go's doc comments.
 	mux.HandleFunc("GET /api/config/schema", h.getConfigSchema)
 	mux.HandleFunc("POST /api/age/keygen", h.generateAgeKeypair)
+	// Server-provided deploy config the SPA needs to build outbound links
+	// (currently the run overview's Temporal Web UI deep-link) — see
+	// uiconfig.go.
+	mux.HandleFunc("GET /api/config/ui", h.getUIConfig)
 
 	return mux
 }
@@ -323,6 +338,14 @@ type handler struct {
 	// drain is done when the hosting server has begun graceful shutdown —
 	// see WithDrainContext. Defaults to context.Background() (never done).
 	drain context.Context
+	// temporalUIBaseURL is the browsable Temporal Web UI base URL (cmd/web's
+	// TEMPORAL_UI_URL); empty when unconfigured, in which case GET
+	// /api/config/ui reports it empty and the SPA omits the run overview's
+	// Temporal-workflow deep-link. temporalNamespace is the namespace those
+	// deep-links target (temporalclient.ResolveNamespace — the same profile
+	// the client dials). Both are set via WithTemporalUI.
+	temporalUIBaseURL string
+	temporalNamespace string
 }
 
 // listRuns implements GET /api/runs: every execution of the singleton backup

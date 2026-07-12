@@ -229,7 +229,31 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	drainCtx, startDrain := context.WithCancel(context.Background())
 	defer startDrain()
 
-	handler, err := webserver.NewHandler(assets, runsapi.New(temporalClient, runsapi.WithDrainContext(drainCtx)))
+	// Optional Temporal Web UI deep-linking (run overview → this run's
+	// workflow history). TEMPORAL_UI_URL is the browsable Temporal UI base
+	// (e.g. https://temporal.example.com); unset means no link is shown. The
+	// namespace comes from the same client config profile the Temporal client
+	// dialed above, so the link targets the namespace runs actually execute
+	// in without a second source of truth.
+	temporalUIURL := getenv("TEMPORAL_UI_URL")
+	temporalNamespace := ""
+
+	if temporalUIURL != "" {
+		temporalNamespace, err = temporalclient.ResolveNamespace()
+		if err != nil {
+			// A convenience deep-link is never worth refusing to serve the
+			// app over: log and disable it rather than failing startup.
+			slog.Warn("web: disabling Temporal UI deep-links — could not resolve namespace", "error", err)
+
+			temporalUIURL = ""
+		}
+	}
+
+	handler, err := webserver.NewHandler(assets, runsapi.New(
+		temporalClient,
+		runsapi.WithDrainContext(drainCtx),
+		runsapi.WithTemporalUI(temporalUIURL, temporalNamespace),
+	))
 	if err != nil {
 		return fmt.Errorf("build web server handler: %w", err)
 	}

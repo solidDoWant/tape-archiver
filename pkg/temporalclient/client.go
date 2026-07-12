@@ -84,6 +84,34 @@ func New(ctx context.Context, reg prometheus.Registerer) (client.Client, func(),
 // `defer shutdown()` without a nil check.
 func noopShutdown() {}
 
+// defaultNamespace is what ResolveNamespace reports when the loaded client
+// config profile names no namespace — Temporal's own built-in default.
+const defaultNamespace = "default"
+
+// ResolveNamespace loads the Temporal client config profile from the same
+// envconfig sources New dials with (the TEMPORAL_* env vars and/or the file at
+// TEMPORAL_CONFIG_FILE) and returns the namespace it resolves to. cmd/web uses
+// it to label Temporal Web UI deep-links with the namespace runs actually
+// execute in, without duplicating New's profile-loading. Returns
+// defaultNamespace when the profile specifies none.
+func ResolveNamespace() (string, error) {
+	profile, err := envconfig.LoadClientConfigProfile(envconfig.LoadClientConfigProfileOptions{})
+	if err != nil {
+		return "", fmt.Errorf("load temporal profile: %w", err)
+	}
+
+	opts, err := profile.ToClientOptions(envconfig.ToClientOptionsRequest{})
+	if err != nil {
+		return "", fmt.Errorf("build temporal client options: %w", err)
+	}
+
+	if opts.Namespace == "" {
+		return defaultNamespace, nil
+	}
+
+	return opts.Namespace, nil
+}
+
 // buildOptions loads client.Options via envconfig, replacing a file:// API
 // key with dynamic credentials backed by os.ReadFile, and wiring the SDK's
 // MetricsHandler/Logger to the host application's observability stack.

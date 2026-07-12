@@ -3,6 +3,7 @@ import { formatDuration, phaseLabel } from './phaseFormat'
 import PauseActions from './PauseActions'
 import ConfigSummary from './ConfigSummary'
 import TapesSection from './TapesSection'
+import { temporalWorkflowUrl, useUiConfig } from './uiConfig'
 
 function heroCopy(status: string, paused: boolean, pauseUnknown: boolean): { label: string; title: string; badgeClass: string } {
   // Order matters: a confirmed pause (kind !== '') wins, but a failed pause
@@ -80,6 +81,13 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
   const logicalTapes = factValue(packPhase, 'logicalTapes')
   const copies = factValue(packPhase, 'copies')
 
+  // The Temporal Web UI deep-link (design's "Temporal workflow ↗"): shown only
+  // when the deployment configured a UI base URL (cmd/web's TEMPORAL_UI_URL);
+  // otherwise there is no browsable UI to link to, so the row is omitted.
+  const uiConfig = useUiConfig()
+  const temporalUrl =
+    uiConfig.status === 'loaded' ? temporalWorkflowUrl(uiConfig.config, detail.workflowId, runId) : null
+
   return (
     <div className="flex max-w-[840px] flex-col gap-5">
       <div>
@@ -91,6 +99,18 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
         <p className="mt-1.5 max-w-[560px] text-[13.5px] text-text-dim">
           Last completed phase: {detail.lastCompletedPhase || '—'}
         </p>
+        {temporalUrl ? (
+          <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+            <a
+              href={temporalUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-mono text-blue transition-opacity hover:opacity-70"
+            >
+              Temporal workflow ↗
+            </a>
+          </div>
+        ) : null}
       </div>
 
       {isPaused || pauseUnknown ? (

@@ -237,9 +237,12 @@ running — useful for reviewing an earlier phase without losing track of where 
 actually is. **Run overview**, the default view, shows the run's overall status, the
 operator-pause zone (see below), a phase-completion summary, the submitted run
 configuration (sources, redundancy target, and the full config as JSON), and which
-physical tapes/slots this run has loaded so far. The **Write** phase's own view
-additionally shows live per-drive write-rate and reposition figures, so you can watch
-tape streaming health without leaving the page.
+physical tapes/slots this run has loaded so far. When the deployment sets `TEMPORAL_UI_URL`
+(see [configuration](configuration.md#web-ui-environment-variables-cmdweb)), the overview
+also shows a **Temporal workflow ↗** link straight to this run's workflow-history view in
+the Temporal Web UI. The **Write** phase's own view additionally shows live per-drive
+write-rate and reposition figures, so you can watch tape streaming health without leaving
+the page.
 
 All of this updates in place as the run progresses — no manual reload. Status, phase, and
 pause changes are backed by a live server-sent event stream (the phase rail refreshes
