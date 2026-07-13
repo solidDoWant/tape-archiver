@@ -33,7 +33,7 @@ function RestartRunButton({ runId }: RestartRunButtonProps) {
         onClick={() => navigate(submitPath(runId))}
         disabled={!canRestart}
         title={blockedByActiveRun ? 'A run is already in progress — only one runs at a time.' : undefined}
-        className="rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-colors hover:bg-surface-2 disabled:opacity-50"
+        className="rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-colors enabled:cursor-pointer hover:bg-surface-2 disabled:opacity-50"
       >
         Restart run
       </button>

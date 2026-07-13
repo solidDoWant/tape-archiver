@@ -52,7 +52,7 @@ function CancelRunButton({ runId }: CancelRunButtonProps) {
       <button
         type="button"
         onClick={() => setState({ status: 'confirming' })}
-        className="rounded-lg border border-red-line bg-red-bg px-4 py-2 text-[12.5px] font-medium text-red transition-opacity hover:opacity-80"
+        className="cursor-pointer rounded-lg border border-red-line bg-red-bg px-4 py-2 text-[12.5px] font-medium text-red transition-opacity hover:opacity-80"
       >
         Cancel run
       </button>
@@ -179,7 +179,7 @@ function ConfirmCancelModal({ sending, error, onConfirm, onDismiss }: ConfirmCan
             type="button"
             onClick={onDismiss}
             disabled={sending}
-            className="rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-colors hover:bg-surface-2 disabled:opacity-50"
+            className="rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-colors enabled:cursor-pointer hover:bg-surface-2 disabled:opacity-50"
           >
             Keep running
           </button>
@@ -187,7 +187,7 @@ function ConfirmCancelModal({ sending, error, onConfirm, onDismiss }: ConfirmCan
             type="button"
             onClick={onConfirm}
             disabled={sending}
-            className="rounded-lg bg-red px-4 py-2 text-[12.5px] font-semibold text-bg transition-opacity hover:opacity-85 disabled:opacity-50"
+            className="rounded-lg bg-red px-4 py-2 text-[12.5px] font-semibold text-bg transition-opacity enabled:cursor-pointer hover:opacity-85 disabled:opacity-50"
           >
             {sending ? 'Cancelling…' : 'Yes, cancel run'}
           </button>
