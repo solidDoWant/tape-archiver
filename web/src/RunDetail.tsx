@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ApiError, apiFetch, describeNetworkError, formatTimestamp } from './api'
+import CancelRunButton from './CancelRunButton'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 import PhaseDetail from './PhaseDetail'
 import PhaseRail from './PhaseRail'
@@ -379,6 +380,16 @@ function DegradedNotice({ runId, detail, message }: { runId: string; detail: Run
 
       {detail.currentPause.kind !== '' || detail.currentPause.unknown ? (
         <PauseActions runId={runId} pause={detail.currentPause} />
+      ) : null}
+
+      {/* Cancel stays reachable even in this degraded fallback: a run whose
+          phase timeline can't be loaded is exactly when an operator may most
+          need to stop it. Shown only while the run is still in progress
+          (no close time yet), the same gate RunOverview applies. */}
+      {!detail.closeTime ? (
+        <div className="flex justify-start">
+          <CancelRunButton runId={runId} />
+        </div>
       ) : null}
     </div>
   )

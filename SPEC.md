@@ -651,8 +651,14 @@ refinement as issues are implemented.
   /api/runs/{runID}/resume` / `POST /api/runs/{runID}/abort` (send the same
   `OperatorResumeSignal`/`OperatorAbortSignal` `tapectl resume`/`tapectl abort` send,
   after confirming via `CurrentPauseQuery` that the run is actually paused and the
-  signal applies to that pause kind), and `GET /api/events/runs/{runID}` (Server-Sent
-  Events live view over the same state, including pause changes). Every page and
+  signal applies to that pause kind), `POST /api/runs/{runID}/cancel` (graceful
+  Temporal cancellation of any in-progress run — paused or not — via
+  `CancelWorkflow`, after confirming the execution is still Running; the workflow's
+  deferred cleanup runs on a disconnected context so it tears down its mounts,
+  releases its hold, posts the failure/cancellation alert, and closes as
+  `Canceled` — never `TerminateWorkflow`, which would skip that cleanup), and `GET
+  /api/events/runs/{runID}` (Server-Sent Events live view over the same state,
+  including pause changes). Every page and
   `/api/*` route is gated behind OIDC authorization-code-flow authentication
   (`pkg/webauth`; provider-agnostic via standard OIDC discovery) — `cmd/web` refuses
   to start without a complete OIDC configuration. `/healthz` + `/readyz`

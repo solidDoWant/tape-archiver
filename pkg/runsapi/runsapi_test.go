@@ -87,6 +87,11 @@ type fakeTemporalClient struct {
 	signalRunID      string
 	signalName       string
 
+	cancelErr        error
+	cancelCaptured   bool
+	cancelWorkflowID string
+	cancelRunID      string
+
 	// historyFunc answers GetWorkflowHistory, keyed by the requested runID —
 	// see history_test.go's fakeHistoryIterator and newHistoryEvent helpers
 	// (used by phases/config/tapes-endpoint tests). nil yields an iterator
@@ -139,6 +144,14 @@ func (f *fakeTemporalClient) SignalWorkflow(_ context.Context, workflowID, runID
 	f.signalName = signalName
 
 	return f.signalErr
+}
+
+func (f *fakeTemporalClient) CancelWorkflow(_ context.Context, workflowID, runID string) error {
+	f.cancelCaptured = true
+	f.cancelWorkflowID = workflowID
+	f.cancelRunID = runID
+
+	return f.cancelErr
 }
 
 // fakeWorkflowRun is a minimal client.WorkflowRun standing in for the real
@@ -621,6 +634,95 @@ func TestAbortRun(t *testing.T) {
 				assert.Equal(t, backup.WorkflowID, test.client.signalWorkflowID)
 				assert.Equal(t, "run-1", test.client.signalRunID)
 				assert.Equal(t, backup.OperatorAbortSignal, test.client.signalName)
+				errAssert(t, nil)
+
+				return
+			}
+
+			errAssert(t, decodeAPIError(t, recorder))
+		})
+	}
+}
+
+// TestCancelRun covers POST /api/runs/{runID}/cancel: it must call
+// CancelWorkflow (never a pause signal) for any still-Running execution —
+// paused or not — but reject an already-closed run (409) and a missing run
+// (404) before requesting cancellation.
+func TestCancelRun(t *testing.T) {
+	start := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	closeTime := start.Add(time.Hour)
+
+	running := &workflowservice.DescribeWorkflowExecutionResponse{
+		WorkflowExecutionInfo: executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, start, nil),
+	}
+	completed := &workflowservice.DescribeWorkflowExecutionResponse{
+		WorkflowExecutionInfo: executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &closeTime),
+	}
+
+	tests := []struct {
+		name       string
+		client     *fakeTemporalClient
+		wantStatus int
+		// wantCancelAttempted is whether CancelWorkflow is called at all — true
+		// both when the request succeeds and when the cancel RPC itself fails
+		// (the request is still rejected, but only after genuinely attempting
+		// the cancel); false when the handler rejects the request before ever
+		// reaching CancelWorkflow (already closed, or the run does not exist).
+		wantCancelAttempted bool
+		errAssert           require.ErrorAssertionFunc
+	}{
+		{
+			name:                "a running run cancels: 202 and CancelWorkflow is called",
+			client:              &fakeTemporalClient{describeResponse: running},
+			wantStatus:          http.StatusAccepted,
+			wantCancelAttempted: true,
+		},
+		{
+			name:       "an already-closed run rejects cancel with 409; CancelWorkflow is never called",
+			client:     &fakeTemporalClient{describeResponse: completed},
+			wantStatus: http.StatusConflict,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "an unknown run returns 404, not a 500 or hang",
+			client:     &fakeTemporalClient{describeErr: &serviceerror.NotFound{Message: "not found"}},
+			wantStatus: http.StatusNotFound,
+			errAssert:  require.Error,
+		},
+		{
+			name:       "a non-NotFound describe failure is a 502",
+			client:     &fakeTemporalClient{describeErr: assertError{"transient RPC failure"}},
+			wantStatus: http.StatusBadGateway,
+			errAssert:  require.Error,
+		},
+		{
+			name: "a CancelWorkflow failure is reported, not swallowed",
+			client: &fakeTemporalClient{
+				describeResponse: running,
+				cancelErr:        assertError{"cancel RPC failed"},
+			},
+			wantStatus:          http.StatusBadGateway,
+			wantCancelAttempted: true,
+			errAssert:           require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			errAssert := test.errAssert
+			if errAssert == nil {
+				errAssert = require.NoError
+			}
+
+			handler := New(test.client)
+
+			recorder := postJSON(t, handler, "/api/runs/run-1/cancel", nil, nil)
+			assert.Equal(t, test.wantStatus, recorder.Code)
+			assert.Equal(t, test.wantCancelAttempted, test.client.cancelCaptured)
+
+			if test.wantStatus == http.StatusAccepted {
+				assert.Equal(t, backup.WorkflowID, test.client.cancelWorkflowID)
+				assert.Equal(t, "run-1", test.client.cancelRunID)
 				errAssert(t, nil)
 
 				return

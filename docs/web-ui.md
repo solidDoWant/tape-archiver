@@ -390,6 +390,28 @@ polling the workflow), the page shows a clear "pause status unavailable" warning
 than silently looking like a healthy, unpaused run — check `tapectl status` or retry
 shortly in that case.
 
+### Cancelling a run
+
+A still-running run's **Run overview** carries a **Cancel run** button in its status hero
+(and, if the phase timeline can't be loaded, in the degraded fallback view). Unlike
+**Resume** / **Abort**, which are pause signals that only apply once the run is already
+paused for the operator, **Cancel run** stops *any* in-progress run — paused or not — and
+so is the general "stop this run now" control. It is offered only while the run is still
+in progress; a run that has already closed shows no button.
+
+Cancel requests graceful Temporal cancellation (`POST /api/runs/{runID}/cancel` →
+`CancelWorkflow`), never a forceful terminate: the workflow's own deferred cleanup runs on
+a disconnected context, so a cancelled run tears down its LTFS mounts, releases its ZFS
+hold, posts the same failure/cancellation alert to the Discord failure webhook as any
+other run end (SPEC §10), and closes in the `Canceled` state rather than being killed
+mid-flight and left with wedged mounts. Because cancelling is consequential and not
+undoable, it asks for confirmation first in a modal dialog — a centered box over a dimmed,
+blurred backdrop that must be resolved with **Yes, cancel run** or **Keep running** (or
+dismissed with Escape) — and needs no manual refresh: the resulting `Canceled` status
+arrives over the page's live stream within one poll interval.
+The server confirms the run is still running before requesting cancellation, so a request
+that races the run closing on its own is reported cleanly rather than acted on twice.
+
 ## Browsing tapes
 
 The **Tapes** page (`/tapes`) lists every physical tape written by a run still inside

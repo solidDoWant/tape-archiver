@@ -1,3 +1,4 @@
+import CancelRunButton from './CancelRunButton'
 import ConfigSummary from './ConfigSummary'
 import DriveMetricsPanel from './DriveMetricsPanel'
 import PauseActions from './PauseActions'
@@ -83,36 +84,44 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
 
   return (
     <div className="flex max-w-[880px] flex-col gap-5">
-      <div>
-        <div className="mb-1 flex items-baseline gap-2.5">
-          <span className={`font-mono text-[11px] tracking-[0.04em] ${hero.badgeClass}`}>{hero.label}</span>
-          <span className="font-mono text-[11px] text-text-faint">{formatDuration(detail.startTime, detail.closeTime)}</span>
-        </div>
-        <h2 className="text-[27px] font-semibold tracking-tight">{hero.title}</h2>
-        {temporalUrl || reportUrl ? (
-          <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
-            {temporalUrl ? (
-              <a
-                href={temporalUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-mono text-blue transition-opacity hover:opacity-70"
-              >
-                Temporal workflow ↗
-              </a>
-            ) : null}
-            {reportUrl ? (
-              <a
-                href={reportUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="font-mono text-blue transition-opacity hover:opacity-70"
-              >
-                Discord report ↗
-              </a>
-            ) : null}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="mb-1 flex items-baseline gap-2.5">
+            <span className={`font-mono text-[11px] tracking-[0.04em] ${hero.badgeClass}`}>{hero.label}</span>
+            <span className="font-mono text-[11px] text-text-faint">{formatDuration(detail.startTime, detail.closeTime)}</span>
           </div>
-        ) : null}
+          <h2 className="text-[27px] font-semibold tracking-tight">{hero.title}</h2>
+          {temporalUrl || reportUrl ? (
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+              {temporalUrl ? (
+                <a
+                  href={temporalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-blue transition-opacity hover:opacity-70"
+                >
+                  Temporal workflow ↗
+                </a>
+              ) : null}
+              {reportUrl ? (
+                <a
+                  href={reportUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-blue transition-opacity hover:opacity-70"
+                >
+                  Discord report ↗
+                </a>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        {/* Cancel is offered only while the run is still in progress (a
+            terminal run has nothing left to stop). It sits in the status hero,
+            distinct from PauseActions' pause-specific Resume/Abort below —
+            cancel applies whether or not the run is currently paused. */}
+        {!terminal ? <CancelRunButton runId={runId} /> : null}
       </div>
 
       {isPaused || pauseUnknown ? (

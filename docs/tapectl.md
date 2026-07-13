@@ -2,7 +2,7 @@
 
 `tapectl` submits a run config to Temporal as a backup workflow, triggers dry-runs
 against the `mhvtl` virtual library, inspects the status of running or completed runs,
-and resumes or aborts a paused run. It is built into `bin/tapectl` by
+and resumes, aborts, or cancels an in-progress run. It is built into `bin/tapectl` by
 `make build`.
 
 The run config it submits is documented in [configuration.md](configuration.md); the
@@ -195,3 +195,30 @@ report covers them (as does the recovery ISO, when optical burning is enabled). 
 `abort` during a Burn-phase pause also acts: it ends the run with no further discs burned
 (the discs that already verified are kept). Outside a Load/Write pause or a Burn-phase
 pause, `abort` has no effect.
+
+---
+
+## `tapectl cancel`
+
+Cancel the in-progress backup run, whether or not it is paused. Unlike `abort` — which
+sends the operator-abort signal and only ends a run already paused on a Load/Write (or
+Burn-phase) failure — `cancel` stops *any* running backup: it requests graceful Temporal
+cancellation (`CancelWorkflow`), the same action the web UI's **Cancel run** button takes.
+Runs are a singleton (SPEC §4.2), so it takes no arguments.
+
+```
+tapectl cancel
+```
+
+```
+$ tapectl cancel
+Cancellation requested for run backup.
+```
+
+Cancellation is graceful, never a forceful terminate: it is delivered into the workflow,
+whose deferred cleanup runs on a disconnected context (SPEC §10), so the run tears down its
+LTFS mounts, releases its ZFS hold, posts the same failure/cancellation alert to the Discord
+failure webhook as any other run end, and closes in the `Canceled` state rather than being
+killed mid-flight and left with wedged mounts. The command returns as soon as the request is
+accepted; watch [`tapectl status`](#tapectl-status) (or the web UI) for the run to actually
+close. Cancelling when there is no in-progress run reports the error Temporal returns.

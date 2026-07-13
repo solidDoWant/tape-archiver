@@ -56,6 +56,29 @@ describe('RunOverview', () => {
     expect(screen.getByText('2 of 11 phases complete')).toBeInTheDocument()
   })
 
+  it('offers a Cancel run button while the run is still in progress', () => {
+    stubPanels()
+
+    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+
+    expect(screen.getByRole('button', { name: /cancel run/i })).toBeInTheDocument()
+  })
+
+  it('does not offer a Cancel run button for a terminal run (nothing left to stop)', () => {
+    stubPanels()
+
+    render(
+      <RunOverview
+        runId="run-1"
+        detail={{ ...runningDetail, status: 'Completed', closeTime: '2026-07-09T13:00:00Z' }}
+        phases={phases}
+        terminal
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: /cancel run/i })).not.toBeInTheDocument()
+  })
+
   it('shows the pause zone instead of the placeholder when paused', () => {
     stubPanels()
 

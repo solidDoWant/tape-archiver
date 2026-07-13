@@ -70,6 +70,17 @@ type TemporalClient interface {
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 	QueryWorkflow(ctx context.Context, workflowID string, runID string, queryType string, args ...interface{}) (converter.EncodedValue, error)
 	SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error
+	// CancelWorkflow requests graceful cancellation of a run (POST
+	// /api/runs/{runID}/cancel — cancelRun). Unlike SignalWorkflow's
+	// resume/abort, which only apply to a run already paused for the operator,
+	// this cancels any in-progress execution: Temporal delivers cancellation
+	// into the workflow, whose deferred cleanup (session teardown, hold-tag
+	// release, the failure/cancellation Discord alert) runs on a
+	// workflow.NewDisconnectedContext so LTFS mounts are torn down and the run
+	// closes in a defined, reported Canceled state (SPEC §10). It is the
+	// graceful counterpart the workflow was built for — never TerminateWorkflow,
+	// which would skip that cleanup and risk leaving mounts/tapes wedged.
+	CancelWorkflow(ctx context.Context, workflowID string, runID string) error
 	// GetWorkflowHistory returns an iterator over a run's raw event history.
 	// history.go's fetchRunHistory walks it to reconstruct the phase
 	// timeline, the originally submitted run config, and tape/copy outcomes
@@ -348,6 +359,7 @@ func newMux(h *handler) http.Handler {
 	mux.HandleFunc("POST /api/runs", h.submitRun)
 	mux.HandleFunc("POST /api/runs/{runID}/resume", h.resumeRun)
 	mux.HandleFunc("POST /api/runs/{runID}/abort", h.abortRun)
+	mux.HandleFunc("POST /api/runs/{runID}/cancel", h.cancelRun)
 	mux.HandleFunc("GET /api/events/runs/{runID}", h.streamRunEvents)
 	// History-derived endpoints (issue #273): reconstructed on demand from
 	// Temporal workflow history, never from a persisted catalog (SPEC §4.2).
@@ -813,6 +825,65 @@ func (h *handler) signalPausedRun(w http.ResponseWriter, r *http.Request, signal
 	writeJSON(w, http.StatusAccepted, ActionResponse{Status: verb + " signal sent"})
 }
 
+// cancelRun implements POST /api/runs/{runID}/cancel: request graceful
+// Temporal cancellation of an in-progress run (TemporalClient.CancelWorkflow).
+// Unlike resumeRun/abortRun, this is not a pause signal and needs no pause —
+// it is the operator's "stop this run now" control for any still-running
+// execution, paused or not. Cancellation is delivered into the workflow,
+// whose deferred cleanup runs on a disconnected context (SPEC §10), so the run
+// tears down its LTFS mounts, releases its ZFS hold, posts the
+// failure/cancellation alert, and closes as Canceled rather than being killed
+// mid-flight.
+//
+// It confirms via DescribeWorkflowExecution that the execution is still Running
+// before requesting cancellation, so an already-closed run is rejected with a
+// clear 409 (errRunNotInProgress) rather than the opaque error CancelWorkflow
+// returns for a completed execution. Like signalPausedRun's pause check, this
+// is NOT atomic with the CancelWorkflow that follows: a run can close in the
+// gap between the two RPCs (it finished on its own, or another operator
+// cancelled it), in which case CancelWorkflow's own error is surfaced. That is
+// harmless — cancelling an already-closed run is a no-op — and the run's real
+// closed state is authoritative over the live view (GET /api/runs/{runID} / the
+// SSE stream) either way.
+func (h *handler) cancelRun(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+
+	runID := r.PathValue("runID")
+
+	if runID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("runID is required"))
+
+		return
+	}
+
+	description, err := h.temporalClient.DescribeWorkflowExecution(ctx, backup.WorkflowID, runID)
+	if err != nil {
+		switch status := statusForTemporalError(err); status {
+		case http.StatusNotFound:
+			writeError(w, status, fmt.Errorf("run %q not found", runID))
+		default:
+			writeError(w, status, fmt.Errorf("describe workflow execution: %w", err))
+		}
+
+		return
+	}
+
+	if status := description.GetWorkflowExecutionInfo().GetStatus(); status != enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING {
+		writeError(w, statusForTemporalError(errRunNotInProgress), fmt.Errorf("%w (run is %s)", errRunNotInProgress, toRunSummary(description.GetWorkflowExecutionInfo()).Status))
+
+		return
+	}
+
+	if err := h.temporalClient.CancelWorkflow(ctx, backup.WorkflowID, runID); err != nil {
+		writeError(w, statusForTemporalError(err), fmt.Errorf("cancel workflow: %w", err))
+
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, ActionResponse{Status: "cancel requested"})
+}
+
 // queryLastCompletedPhase asks the workflow for its last completed phase via
 // the agreed query (workflows/backup/contract.go). A query failure (e.g. no
 // worker currently polling) is not fatal to the request — the execution
@@ -876,6 +947,14 @@ var errRunNotPaused = errors.New("run is not currently paused")
 // pause (see signalPausedRun's doc comment).
 var errEjectPauseCannotAbort = errors.New("this pause cannot be aborted; only resume applies to an eject pause")
 
+// errRunNotInProgress is a synthetic (non-Temporal) error cancelRun returns
+// when a cancel request targets a run that DescribeWorkflowExecution reports has
+// already closed (any status other than Running). Like errRunNotPaused, the
+// request is well-formed and the run exists, but the action conflicts with the
+// run's current state — there is no in-progress execution left to cancel — so
+// it maps to 409 Conflict via statusForTemporalError.
+var errRunNotInProgress = errors.New("run is not in progress; only a running run can be cancelled")
+
 // statusForTemporalError classifies a Temporal RPC error into the HTTP
 // status that best represents it, shared by every runsapi handler so every
 // endpoint extends one consistent mapping instead of each hand-rolling its
@@ -892,13 +971,14 @@ var errEjectPauseCannotAbort = errors.New("this pause cannot be aborted; only re
 // (via %w, see runsubmit.TranslateSubmitError) rather than replaces the
 // underlying serviceerror, so errors.As here still recovers it.
 //
-// signalPausedRun (resumeRun/abortRun) additionally passes this two synthetic,
-// non-Temporal errors — errRunNotPaused and errEjectPauseCannotAbort — both
-// mapped to 409 Conflict: the request is well-formed and the run exists, but
-// the action conflicts with the run's current (pause) state, the same
-// Conflict reasoning already used below for a singleton-submission clash.
+// signalPausedRun (resumeRun/abortRun) and cancelRun additionally pass this
+// three synthetic, non-Temporal errors — errRunNotPaused,
+// errEjectPauseCannotAbort, and errRunNotInProgress — all mapped to 409
+// Conflict: the request is well-formed and the run exists, but the action
+// conflicts with the run's current (pause or closed) state, the same Conflict
+// reasoning already used below for a singleton-submission clash.
 func statusForTemporalError(err error) int {
-	if errors.Is(err, errRunNotPaused) || errors.Is(err, errEjectPauseCannotAbort) {
+	if errors.Is(err, errRunNotPaused) || errors.Is(err, errEjectPauseCannotAbort) || errors.Is(err, errRunNotInProgress) {
 		return http.StatusConflict
 	}
 
