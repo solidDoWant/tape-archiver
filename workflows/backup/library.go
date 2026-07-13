@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -91,6 +92,8 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 
 	loaded := make([]LoadedTape, setSize)
 
+	slog.InfoContext(ctx, "load: loading blank tapes into drives and blank-checking them", "tapes", setSize)
+
 	// relocated records, per storage slot, the barcode of the unexpected tape a
 	// relocation earlier in this Load moved into it. The inventory is read once
 	// before the loop, so each iteration works from that stale snapshot. The map
@@ -160,6 +163,10 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 			SGDevice:          sgDev,
 			OverwroteNonBlank: overwroteNonBlank,
 		}
+
+		slog.InfoContext(ctx, "load: tape loaded and blank-checked",
+			"barcode", barcode, "drive", assignment.DriveIndex, "slot", targetSlot,
+			"blank", blank, "device", stDev)
 	}
 
 	return loaded, nil
@@ -559,8 +566,14 @@ func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectRes
 			return EjectResult{}, fmt.Errorf("eject tape %s (drive %d, index %d): %w", wt.Barcode, wt.DriveIndex, i, err)
 		}
 
-		if !exported {
+		if exported {
+			slog.InfoContext(ctx, "eject: written tape exported to the I/O station for removal",
+				"barcode", wt.Barcode, "drive", wt.DriveIndex)
+		} else {
 			remaining = append(remaining, wt)
+
+			slog.InfoContext(ctx, "eject: I/O station full; written tape unloaded to its storage slot to await export",
+				"barcode", wt.Barcode, "drive", wt.DriveIndex, "slot", wt.SourceSlot)
 		}
 	}
 
@@ -570,8 +583,13 @@ func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectRes
 		return EjectResult{}, fmt.Errorf("inventory after eject: %w", err)
 	}
 
+	inIOStation := barcodesInIOStation(inv)
+
+	slog.InfoContext(ctx, "eject: drive-set eject complete",
+		"exported", len(input.WrittenTapes)-len(remaining), "awaitingExport", len(remaining), "inIOStation", len(inIOStation))
+
 	return EjectResult{
-		InIOStation: barcodesInIOStation(inv),
+		InIOStation: inIOStation,
 		Remaining:   remaining,
 	}, nil
 }

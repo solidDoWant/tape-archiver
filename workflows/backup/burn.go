@@ -186,6 +186,9 @@ func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (Bur
 		return BurnResult{}, discNotWritableError(input.Device, state, input.AllowNonBlankDiscs, input.DriveHasVerifiedCopy)
 	}
 
+	slog.InfoContext(ctx, "optical: burning recovery ISO to disc",
+		"device", input.Device, "iso", input.ISOPath, "discState", state.String())
+
 	result := BurnResult{Device: input.Device}
 
 	err = withActivityHeartbeat(ctx, func() error {
@@ -213,6 +216,9 @@ func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (Bur
 	if err != nil {
 		return BurnResult{}, err
 	}
+
+	slog.InfoContext(ctx, "optical: burned recovery disc",
+		"device", input.Device, "overwroteNonBlank", result.OverwroteNonBlank)
 
 	return result, nil
 }
@@ -281,14 +287,21 @@ func (a *BurnActivities) VerifyDisc(ctx context.Context, input VerifyDiscInput) 
 
 	disc := optical.NewDisc(input.Device)
 
-	return withActivityHeartbeat(ctx, func() error {
+	if err := withActivityHeartbeat(ctx, func() error {
 		result, err := disc.Verify(ctx, manifest)
 		if err != nil {
 			return fmt.Errorf("read back disc in %s: %w", input.Device, err)
 		}
 
 		return result.Err()
-	})
+	}); err != nil {
+		return err
+	}
+
+	slog.InfoContext(ctx, "optical: verified burned disc; every file matches the disc manifest",
+		"device", input.Device, "files", len(manifest))
+
+	return nil
 }
 
 // readManifestFile reads and parses the sha256sum-format disc-content manifest at

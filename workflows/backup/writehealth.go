@@ -306,5 +306,11 @@ func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input Me
 
 	a.metrics.record(string(input.Barcode), health)
 
+	slog.InfoContext(ctx, "write-health: measured tape write performance",
+		"barcode", input.Barcode, "throughputMBps", health.ThroughputMBps,
+		"floorMBps", health.FloorMBps, "floorKnown", health.FloorKnown, "belowFloor", health.BelowFloor,
+		"repositions", health.Repositions, "repositionsMeasured", health.RepositionsMeasured,
+		"tapeAlertFlags", len(health.TapeAlertFlags), "healthy", health.Healthy())
+
 	return health, nil
 }

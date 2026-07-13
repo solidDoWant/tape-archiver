@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
@@ -131,7 +132,12 @@ func (a *ResolveControlActivities) ResolveK8sSources(ctx context.Context, cfg co
 		}
 
 		resolved = append(resolved, archive)
+
+		slog.InfoContext(ctx, "resolve: resolved k8s source to ZFS snapshot(s)",
+			"sourceIndex", index, "label", archive.Label, "snapshots", len(archive.Snapshots))
 	}
+
+	slog.InfoContext(ctx, "resolve: resolved all k8s sources on the control worker", "k8sSources", len(resolved))
 
 	return resolved, nil
 }
@@ -229,6 +235,8 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 
 	resolved := make([]ResolvedArchive, 0, len(cfg.Sources))
 
+	var totalEstimate int64
+
 	for index, source := range cfg.Sources {
 		archive, err := a.resolveDataSource(ctx, index, source, k8sByIndex)
 		if err != nil {
@@ -251,11 +259,18 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 		}
 
 		resolved = append(resolved, archive)
+		totalEstimate += estimate
+
+		slog.InfoContext(ctx, "resolve: sized source and confirmed it fits one tape",
+			"sourceIndex", index, "label", archive.Label, "estimatedBytes", estimate, "tapeUsableCapacityBytes", capacity)
 	}
 
 	if err := checkPayloadBound(resolved, cfg.Redundancy.SliceSizeBytes); err != nil {
 		return nil, err
 	}
+
+	slog.InfoContext(ctx, "resolve: work list validated; every archive fits one tape",
+		"archives", len(resolved), "totalEstimatedBytes", totalEstimate, "tapeUsableCapacityBytes", capacity)
 
 	return resolved, nil
 }

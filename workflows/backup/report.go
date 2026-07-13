@@ -220,6 +220,9 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		return ReportOutput{}, fmt.Errorf("create report output directory %q: %w", outDir, err)
 	}
 
+	slog.InfoContext(ctx, "report: escrow identity verified; building recovery artifacts",
+		"tapes", len(input.Written), "opticalBurn", input.Config.Delivery.OpticalBurn.Enabled())
+
 	// Render the PDF to memory so the same bytes are both written to disk and (when
 	// burning) embedded in the ISO (SPEC §10) — no round-trip through the filesystem.
 	pdf, err := renderReportPDF(ctx, input)
@@ -348,6 +351,9 @@ func (a *ReportActivities) rebuildReport(ctx context.Context, outDir string, inp
 	if err := os.WriteFile(reportPath, pdf, 0o644); err != nil {
 		return "", fmt.Errorf("write delivered PDF report to %q: %w", reportPath, err)
 	}
+
+	slog.InfoContext(ctx, "report: re-rendered the delivered report to record the burned discs",
+		"report", reportPath, "discs", len(input.Discs))
 
 	return reportPath, nil
 }

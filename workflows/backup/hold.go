@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -93,6 +94,9 @@ func (a *HoldActivities) HoldSnapshots(ctx context.Context, input HoldInput) err
 		}
 	}
 
+	slog.InfoContext(ctx, "hold: pinned source snapshots against pruning for the run",
+		"snapshots", len(input.Snapshots), "tag", input.Tag)
+
 	return nil
 }
 
@@ -106,6 +110,9 @@ func (a *HoldActivities) ReleaseSnapshots(ctx context.Context, input HoldInput) 
 			return fmt.Errorf("release snapshot %s tag %s: %w", snapshot, input.Tag, err)
 		}
 	}
+
+	slog.InfoContext(ctx, "hold: released the run's holds on source snapshots",
+		"snapshots", len(input.Snapshots), "tag", input.Tag)
 
 	return nil
 }

@@ -109,7 +109,15 @@ func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) (*D
 	// no-op webhook (empty URL) or an unparseable response leaves posted nil, so
 	// the result stays zero-valued and the runs API shows no link.
 	result := &DeliverResult{}
+
 	if posted == nil {
+		// posted is nil for a no-op (empty webhook URL) or a response the client
+		// could not parse. Only the configured-but-disabled case is a clean
+		// happy-path milestone worth noting.
+		if input.WebhookURL == "" {
+			slog.InfoContext(ctx, "deliver: no success webhook configured; report delivery skipped")
+		}
+
 		return result, nil
 	}
 
@@ -125,6 +133,9 @@ func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) (*D
 	} else {
 		result.GuildID = guildID
 	}
+
+	slog.InfoContext(ctx, "deliver: uploaded the report to the Discord success webhook",
+		"channel", result.ChannelID, "message", result.MessageID)
 
 	return result, nil
 }

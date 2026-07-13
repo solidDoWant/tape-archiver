@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -114,11 +115,26 @@ func verify(ctx context.Context, plan TapePlan, staged []StagedArchive, sets []P
 		par2ByIndex[set.SourceIndex] = set
 	}
 
+	slog.InfoContext(ctx, "verify: re-reading and re-checksumming the staged tree before any tape is loaded",
+		"tapes", len(plan.Tapes))
+
+	var totalBytes int64
+
 	for tapeIndex, tape := range plan.Tapes {
-		if err := verifyTape(ctx, tape, slicesByIndex, par2ByIndex); err != nil {
+		onDiskBytes, err := verifyTape(ctx, tape, slicesByIndex, par2ByIndex)
+		if err != nil {
 			return VerifiedPlan{}, fmt.Errorf("tape %d: %w", tapeIndex, err)
 		}
+
+		totalBytes += onDiskBytes
+
+		slog.InfoContext(ctx, "verify: tape tree verified and within capacity",
+			"tapeIndex", tapeIndex, "archives", len(tape.Archives),
+			"onDiskBytes", onDiskBytes, "usableCapacityBytes", tape.UsableBytes)
 	}
+
+	slog.InfoContext(ctx, "verify: all staged files verified; the run is cleared to load and write tapes",
+		"tapes", len(plan.Tapes), "totalBytes", totalBytes)
 
 	return VerifiedPlan{}, nil
 }
@@ -128,38 +144,38 @@ func verify(ctx context.Context, plan TapePlan, staged []StagedArchive, sets []P
 // SHA-256, and the tape's total on-disk footprint stays within its usable
 // capacity. A planned archive that was never staged or never given a PAR2 set is
 // itself a missing-tree failure.
-func verifyTape(ctx context.Context, tape PlannedTape, slicesByIndex map[int]StagedArchive, par2ByIndex map[int]PAR2Set) error {
+func verifyTape(ctx context.Context, tape PlannedTape, slicesByIndex map[int]StagedArchive, par2ByIndex map[int]PAR2Set) (int64, error) {
 	var onDiskBytes int64
 
 	for _, placement := range tape.Archives {
 		archive, ok := slicesByIndex[placement.SourceIndex]
 		if !ok {
-			return fmt.Errorf("sources[%d] is planned onto this tape but was not staged", placement.SourceIndex)
+			return 0, fmt.Errorf("sources[%d] is planned onto this tape but was not staged", placement.SourceIndex)
 		}
 
 		set, ok := par2ByIndex[placement.SourceIndex]
 		if !ok {
-			return fmt.Errorf("sources[%d] is planned onto this tape but has no PAR2 recovery set", placement.SourceIndex)
+			return 0, fmt.Errorf("sources[%d] is planned onto this tape but has no PAR2 recovery set", placement.SourceIndex)
 		}
 
 		sliceBytes, err := verifyFiles(ctx, archive.Slices)
 		if err != nil {
-			return fmt.Errorf("sources[%d] slices: %w", placement.SourceIndex, err)
+			return 0, fmt.Errorf("sources[%d] slices: %w", placement.SourceIndex, err)
 		}
 
 		par2Bytes, err := verifyFiles(ctx, set.Files)
 		if err != nil {
-			return fmt.Errorf("sources[%d] PAR2 set: %w", placement.SourceIndex, err)
+			return 0, fmt.Errorf("sources[%d] PAR2 set: %w", placement.SourceIndex, err)
 		}
 
 		onDiskBytes += sliceBytes + par2Bytes
 	}
 
 	if onDiskBytes > tape.UsableBytes {
-		return fmt.Errorf("planned tree is %d bytes, exceeding the tape's usable capacity of %d bytes", onDiskBytes, tape.UsableBytes)
+		return 0, fmt.Errorf("planned tree is %d bytes, exceeding the tape's usable capacity of %d bytes", onDiskBytes, tape.UsableBytes)
 	}
 
-	return nil
+	return onDiskBytes, nil
 }
 
 // verifyFiles re-reads each staged file, confirms it matches its recorded

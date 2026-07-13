@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"time"
@@ -79,8 +80,17 @@ type PackInput struct {
 
 // Pack bin-packs the staged archives onto tapes (SPEC §4.3 phase 3), returning
 // the TapePlan the Generate PAR2 and write phases build on.
-func (a *PackActivities) Pack(_ context.Context, input PackInput) (TapePlan, error) {
-	return pack(input.Config, input.Archives)
+func (a *PackActivities) Pack(ctx context.Context, input PackInput) (TapePlan, error) {
+	plan, err := pack(input.Config, input.Archives)
+	if err != nil {
+		return TapePlan{}, err
+	}
+
+	slog.InfoContext(ctx, "pack: bin-packed staged archives onto tapes",
+		"archives", len(input.Archives), "logicalTapes", len(plan.Tapes), "copies", plan.Copies,
+		"physicalTapes", len(plan.Tapes)*plan.Copies)
+
+	return plan, nil
 }
 
 // pack is the pure bin-packing the Pack activity wraps. It is split out so it can
