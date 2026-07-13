@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import PauseActions from './PauseActions'
 
 afterEach(() => {
@@ -104,6 +104,56 @@ describe('PauseActions', () => {
       expect(screen.getByText(/resuming — waiting for the run to continue/i)).toBeInTheDocument()
     })
     expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument()
+  })
+
+  it('recovers the action buttons when the run re-pauses after a resume that did not fix it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 202, json: async () => ({}) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { rerender } = render(
+      <PauseActions runId="run-1" pause={{ kind: 'write-failure', errorSummary: 'first failure' }} />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /^resume$/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/resuming — waiting for the run to continue/i)).toBeInTheDocument()
+    })
+
+    // A fresh pause frame arrives (the run re-paused because the problem wasn't
+    // fixed) — the transitional line must give way to the new pause's buttons
+    // rather than staying stuck on "Resuming…".
+    rerender(<PauseActions runId="run-1" pause={{ kind: 'write-failure', errorSummary: 'second failure' }} />)
+
+    expect(screen.getByRole('button', { name: /^resume$/i })).toBeInTheDocument()
+    expect(screen.queryByText(/resuming — waiting for the run to continue/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/second failure/i)).toBeInTheDocument()
+  })
+
+  it('restores the buttons via the safety-net timer if no distinguishable frame ever arrives', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 202, json: async () => ({}) })
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(<PauseActions runId="run-1" pause={{ kind: 'burn' }} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /^resume$/i }))
+      // Flush the fetch's microtasks so the component reaches the 'sent' state.
+      await act(async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(screen.getByText(/resuming — waiting for the run to continue/i)).toBeInTheDocument()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(8000)
+      })
+
+      expect(screen.getByRole('button', { name: /^resume$/i })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('opens a modal to confirm abort — not a native dialog — and does not call the API until confirmed', () => {

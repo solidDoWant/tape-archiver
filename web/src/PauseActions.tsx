@@ -1,6 +1,32 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ApiError, apiFetch, describeNetworkError } from './api'
 import ConfirmModal from './ConfirmModal'
+
+// pauseSignature is a stable identity for a pause's actionable content. The
+// transient "Resuming…/Aborting…" state (ActionState.sent) is cleared whenever
+// it changes, so a run that re-pauses after a resume — because the operator did
+// not actually fix the problem — drops the transitional line and shows the
+// fresh pause's buttons, rather than staying stuck on "Resuming…".
+function pauseSignature(pause: CurrentPauseInfo): string {
+  return [
+    pause.kind,
+    pause.phase ?? '',
+    (pause.affectedTapes ?? []).join(','),
+    (pause.reloadSlots ?? []).join(','),
+    pause.awaitingExport ?? '',
+    (pause.devices ?? []).join(','),
+    pause.errorSummary ?? '',
+  ].join('|')
+}
+
+// sentSafetyNetMs bounds how long the card may sit in the transitional
+// "Resuming…/Aborting…" state before it restores the buttons on its own. The
+// signature reset above handles every re-pause the live stream can distinguish;
+// this is the backstop for the one it cannot — an identical re-pause the
+// server's ~2s poll never catches a not-paused frame between — so the operator
+// can never be permanently locked out of acting. Comfortably longer than a poll
+// interval so a normal resume/abort resolves (and unmounts this card) first.
+const sentSafetyNetMs = 8000
 
 // CurrentPauseInfo mirrors pkg/runsapi.CurrentPauseInfo (the GET
 // /api/runs/{runID} and SSE JSON projection of workflows/backup's
@@ -42,12 +68,12 @@ type ActionState =
   // change) has not yet observed the workflow act on it. The card holds a
   // "Resuming…/Aborting…" transitional state through that gap so the operator
   // sees their action took, rather than the buttons snapping back to idle while
-  // the card lingers. It resets when the pause actually resolves: the parent
-  // stops rendering this component (isPaused → false), unmounting it — and since
-  // the workflow passes through a not-paused state while acting on the signal
-  // (re-driving tapes / re-reading inventory takes well over one poll interval),
-  // that unmount reliably clears this flag before any follow-on pause remounts a
-  // fresh card.
+  // the card lingers. It leaves this state three ways: the pause clears (the
+  // parent unmounts this card), a different pause frame arrives (the
+  // pauseSignature reset restores the buttons for the new pause — e.g. a
+  // re-pause because the operator did not fix the problem), or the
+  // sentSafetyNetMs timer fires (the backstop for an identical re-pause the
+  // poll can't distinguish).
   | { status: 'sent'; verb: 'resume' | 'abort' }
   | { status: 'error'; verb: 'resume' | 'abort'; error: string }
 
@@ -93,6 +119,37 @@ function pauseKindLabel(kind: string): string {
 // unmounts.
 function PauseActions({ runId, pause }: PauseActionsProps) {
   const [actionState, setActionState] = useState<ActionState>({ status: 'idle' })
+
+  // When a new pause frame arrives (the live stream pushes currentPause only on
+  // change), drop any post-action transient state so the card reflects the
+  // fresh pause — this is what recovers the buttons when a run re-pauses after a
+  // resume that did not fix the problem. Only the post-action states (sent /
+  // error) are reset; an in-progress confirm/send is left alone. This is
+  // React's "adjust state during render on prop change" pattern (guarded so it
+  // runs once per change), not an effect.
+  const signature = pauseSignature(pause)
+  const [seenSignature, setSeenSignature] = useState(signature)
+  if (signature !== seenSignature) {
+    setSeenSignature(signature)
+    if (actionState.status === 'sent' || actionState.status === 'error') {
+      setActionState({ status: 'idle' })
+    }
+  }
+
+  // Safety net for an identical re-pause the poll can't distinguish (see
+  // sentSafetyNetMs): restore the buttons after a bounded wait so the operator
+  // is never locked out. A normal resume/abort clears the pause and unmounts
+  // this card well before the timer fires; the reset above handles every
+  // distinguishable change sooner.
+  useEffect(() => {
+    if (actionState.status !== 'sent') {
+      return
+    }
+
+    const timer = setTimeout(() => setActionState({ status: 'idle' }), sentSafetyNetMs)
+
+    return () => clearTimeout(timer)
+  }, [actionState])
 
   if (pause.unknown) {
     return (
