@@ -209,6 +209,76 @@ be registered as the OIDC client's redirect URI at the identity provider) — th
 `/auth/callback` route only ever completes a login that started from that exact configured
 redirect URL.
 
+## Network policy and firewall rules
+
+The chart renders **no** `NetworkPolicy` by default — pod traffic is unrestricted unless
+your cluster enforces a default-deny baseline. In a locked-down cluster, allow the flows
+below. They can be authored as standalone manifests or rendered by this chart through the
+bjw-s passthrough at `resources.networkpolicies.<name>` (the same `resources` deep-merge
+that overrides the controller/Service — see
+[above](#kubernetes-resources-resources)); installing and running a CNI that actually
+enforces `NetworkPolicy` (Cilium, Calico, …) is the operator's responsibility, outside this
+chart's scope.
+
+Unlike the [control worker](control-worker-helm.md#network-policy-and-firewall-rules), the
+web UI *listens* for real traffic — the `http` port behind its `Service`/`Ingress` — but its
+egress set is smaller: it reads no Kubernetes API and posts to no Discord webhook itself (the
+delivery webhook is only written into the submitted run config for the data worker).
+
+### Ingress (… → web)
+
+| Source | Port | When | Purpose |
+| --- | --- | --- | --- |
+| Ingress controller (e.g. ingress-nginx) or in-cluster callers | `8080` (`http`) | always | Browser SPA + JSON API via the `main` `Service`. |
+| kubelet / node | `8081` (`health`) | always | Liveness/readiness probes. Probes originate from the **node**, not a pod — allow the node/host-network range, not just pod sources. |
+| Prometheus | `9090` (`metrics`) | `config.web.metrics.enabled` | `PodMonitor` scrape of `/metrics`. |
+
+### Egress (web → …)
+
+| Destination | Port | When | Purpose |
+| --- | --- | --- | --- |
+| Temporal frontend (`config.temporal.address`) | `7233` gRPC (`443` for Temporal Cloud) | always | Submit/inspect runs. |
+| OIDC provider (`config.web.oidc.issuerUrl`) | `443` HTTPS | always | Discovery, JWKS, and code/token exchange at login. Often egresses the cluster to a public IdP — allow it explicitly or every login hangs. |
+| VictoriaMetrics | operator-defined | live drive metrics configured | Only if you add `VICTORIAMETRICS_URL` via the container `env` passthrough (no first-class chart field) — see [Live drive metrics](configuration.md#live-drive-metrics-victoriametrics). |
+| Cluster DNS (CoreDNS/kube-dns) | `53` UDP+TCP | always | Resolve all of the above. |
+
+An egress policy **must** allow DNS (`53`) alongside the real destinations, or name
+resolution fails before any connection is attempted. (`config.web.temporalUiUrl` is a link
+the *browser* follows, not a connection the pod makes, so it needs no egress rule.)
+
+Example — allow browser traffic in from the ingress controller and the required egress out
+(tune the namespace/label selectors and CIDRs to your cluster):
+
+```yaml
+resources:
+  networkpolicies:
+    web:
+      controller: main
+      policyTypes: [Ingress, Egress]
+      rules:
+        ingress:
+          - from:                                   # ingress controller → http
+              - namespaceSelector:
+                  matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+            ports:
+              - { protocol: TCP, port: 8080 }
+        egress:
+          - to: [namespaceSelector: {}]             # cluster DNS
+            ports:
+              - { protocol: UDP, port: 53 }
+              - { protocol: TCP, port: 53 }
+          - to:                                      # Temporal frontend
+              - namespaceSelector:
+                  matchLabels: { kubernetes.io/metadata.name: temporal }
+            ports:
+              - { protocol: TCP, port: 7233 }
+          - ports:                                   # OIDC provider (external, 443)
+              - { protocol: TCP, port: 443 }
+```
+
+Add matching ingress rules for the node/host-network range (kubelet probes on `8081`) and
+Prometheus (`9090`) when metrics are enabled.
+
 ## Example: full production install
 
 ```yaml
