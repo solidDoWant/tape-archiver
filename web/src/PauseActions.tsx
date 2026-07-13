@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { apiFetch, ApiError, describeNetworkError } from './api'
+import { ApiError, apiFetch, describeNetworkError } from './api'
 
 // CurrentPauseInfo mirrors pkg/runsapi.CurrentPauseInfo (the GET
 // /api/runs/{runID} and SSE JSON projection of workflows/backup's
@@ -127,23 +127,23 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
       <div className="mt-[7px] max-w-[560px] space-y-1 text-[12.5px] text-text-dim">
         <p className="font-medium text-text">{pauseKindLabel(pause.kind)}</p>
 
-        {pause.phase ? <p>Failing phase: {pause.phase}</p> : null}
+        {pause.phase ? <p><span className="font-semibold">Failing phase:</span> {pause.phase}</p> : null}
 
         {pause.affectedTapes && pause.affectedTapes.length > 0 ? (
-          <p>Affected tapes: {pause.affectedTapes.join(', ')}</p>
+          <p><span className="font-semibold">Affected tapes:</span> {pause.affectedTapes.join(', ')}</p>
         ) : null}
 
         {pause.reloadSlots && pause.reloadSlots.length > 0 ? (
-          <p>Reload fresh blanks into slots: {pause.reloadSlots.join(', ')}</p>
+          <p><span className="font-semibold">Reload fresh blanks into slots:</span> {pause.reloadSlots.join(', ')}</p>
         ) : null}
 
         {typeof pause.awaitingExport === 'number' && pause.awaitingExport > 0 ? (
-          <p>Tapes still awaiting export: {pause.awaitingExport}</p>
+          <p><span className="font-semibold">Tapes still awaiting export:</span> {pause.awaitingExport}</p>
         ) : null}
 
-        {pause.devices && pause.devices.length > 0 ? <p>Burner devices: {pause.devices.join(', ')}</p> : null}
+        {pause.devices && pause.devices.length > 0 ? <p><span className="font-semibold">Burner devices:</span> {pause.devices.join(', ')}</p> : null}
 
-        {pause.errorSummary ? <p>Reason: {pause.errorSummary}</p> : null}
+        {pause.errorSummary ? <p><span className="font-semibold">Reason:</span> {pause.errorSummary}</p> : null}
       </div>
 
       <div className="mt-3.5 flex gap-2.5">
