@@ -173,10 +173,12 @@ needs (see [`docs/configuration.md`](configuration.md) for what every field mean
   **Generate new age keypair** button: it calls the server's
   [`POST /api/age/keygen`](configuration.md#post-apiagekeygen-age-keypair-generation-issue-279)
   endpoint, inserts the new public recipient into the config, fills the identity
-  field, and shows the private identity **exactly once** with a copy control and a
-  store-this-now warning. There is no way to retrieve it again from the app afterward
-  — not after a reload, not after generating another pair; the server never persists
-  or logs it.
+  field, and shows the private identity **exactly once** with a copy control. There is
+  no way to retrieve it again from the app afterward — not after a reload, not after
+  generating another pair; the server never persists or logs it. (It is not lost
+  outright, though: a completed run escrows the identity into its report and recovery
+  ISO — SPEC §7 — which is why the panel carries no "save it now or lose it forever"
+  warning.)
 - **Delivery** — the Discord webhook URL, shown **read-only** from deploy config
   (see below), and the optional optical recovery-disc burning section: an on/off
   toggle, the copies per run, and the rewritable-disc reclaim opt-out, plus the

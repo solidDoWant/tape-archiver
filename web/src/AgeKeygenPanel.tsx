@@ -27,14 +27,18 @@ type KeygenState =
 // (DESIGN_ANALYSIS.md §2 "D. Config", encryption section): a button that
 // calls POST /api/age/keygen (pkg/runsapi/agekeygen.go) and, on success,
 // reveals the generated identity/recipient pair exactly once, with a copy
-// control and an explicit "store this now" warning — matching issue #279's
-// acceptance criterion that "the private key is displayed once with no way
-// to retrieve it again from the app afterward". This component holds the
-// only copy of it that ever exists client-side: it is never written to
-// localStorage/sessionStorage, never logged, and the server never persists
-// it (agekeygen.go's own doc comment) or exposes any endpoint to fetch it
-// again — reloading the page, navigating away, or generating a second
+// control — matching issue #279's acceptance criterion that "the private key
+// is displayed once with no way to retrieve it again from the app afterward".
+// This component holds the only copy of it that ever exists client-side: it is
+// never written to localStorage/sessionStorage, never logged, and the server
+// never persists it (agekeygen.go's own doc comment) or exposes any endpoint to
+// fetch it again — reloading the page, navigating away, or generating a second
 // keypair all permanently lose access to a previously shown one.
+//
+// It carries no "store this now or lose it forever" warning: the identity is
+// deliberately escrowed into every completed run's report and recovery ISO (and
+// so into the report delivered to Discord — SPEC §7), so it is not irrecoverable
+// once a run has run.
 function AgeKeygenPanel({ onGenerated }: AgeKeygenPanelProps) {
   const [state, setState] = useState<KeygenState>({ status: 'idle' })
   const [copied, setCopied] = useState(false)
@@ -111,12 +115,6 @@ function AgeKeygenPanel({ onGenerated }: AgeKeygenPanelProps) {
               {copied ? 'Copied' : 'Copy identity'}
             </button>
           </div>
-
-          <p className="mt-2.5 font-mono text-[11px] leading-relaxed text-amber">
-            Store the identity now — this is the only time it is shown. It is the only key
-            that can decrypt these tapes, and there is no way to retrieve it again from this
-            app afterward.
-          </p>
         </div>
       ) : null}
     </div>
