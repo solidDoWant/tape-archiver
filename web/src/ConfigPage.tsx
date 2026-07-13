@@ -67,13 +67,17 @@ function segmentButtonClass(active: boolean): string {
 // ConfigPage is the "Start new run" page (route "/", DESIGN_ANALYSIS.md §2
 // "D. Config / Start new run"), replacing the former JSON-only
 // SubmitRunForm.tsx (issue #279). It offers two ways to build a run config —
-// a guided Form mode (ConfigForm.tsx) that ends in a Review step
-// (ConfigReview.tsx) showing the assembled JSON validated against the
-// committed schema before it can be submitted, and a JSON mode
-// (ConfigJsonMode.tsx) preserving today's paste/upload + live valid
-// indicator — sharing one sticky action bar (dry-run toggle, Review/Submit
-// controls) and one submission path (POST /api/runs, unchanged from before
-// this issue).
+// a guided Form mode (ConfigForm.tsx) and a paste/upload JSON mode
+// (ConfigJsonMode.tsx) — sharing one sticky action bar (dry-run toggle) and
+// one submission path (POST /api/runs). Both modes take the same two steps:
+// the primary "Review →" button advances to a Review step (ConfigReview.tsx)
+// showing exactly what will be submitted, and only the Review step's "Submit
+// run" actually submits — so neither mode ever submits straight from its
+// editor. The two differ only in how they reach Review: Form mode assembles
+// the config from fields and validates it against the committed schema first
+// (blocking on any issue), while JSON mode just parses the pasted text and
+// leaves validation to the server (its escape-hatch role — see
+// handleReviewJson).
 //
 // Mode-switch semantics (documented here since nothing enforces them beyond
 // this code — see docs/web-ui-design.md §9 for the same decision recorded
@@ -114,6 +118,12 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
   const [validating, setValidating] = useState(false)
   const [modeSwitchNotice, setModeSwitchNotice] = useState('')
   const [submitState, setSubmitState] = useState<SubmitState>({ status: 'idle' })
+  // reviewConfig is the exact config the Review step shows and Submit posts,
+  // snapshotted when the operator advances to Review. Both modes now go through
+  // Review before submitting: Form mode builds it from the form (buildConfig),
+  // JSON mode parses it from the pasted text — so a single Submit path serves
+  // both, and neither mode submits straight from its editor.
+  const [reviewConfig, setReviewConfig] = useState<RunConfig | null>(null)
   const [restart, setRestart] = useState<RestartState>(
     restartFromRunId ? { status: 'loading' } : { status: 'idle' },
   )
@@ -265,6 +275,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
       setReviewIssues(issues)
 
       if (issues.length === 0) {
+        setReviewConfig(config)
         setStep('review')
       }
     } catch (error) {
@@ -314,10 +325,19 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
   }
 
   const handleSubmitReview = () => {
-    void submit(buildConfig(form, deploy))
+    if (reviewConfig) {
+      void submit(reviewConfig)
+    }
   }
 
-  const handleSubmitJson = () => {
+  // handleReviewJson is JSON mode's "Review →": parse the pasted text and, if it
+  // is valid JSON, advance to the Review step showing it — the JSON-mode analogue
+  // of handleReview. It deliberately does not re-validate against the run-config
+  // schema the way Form mode does: JSON / paste mode is the escape hatch for
+  // configs the guided form can't express, so the server (POST /api/runs) stays
+  // the single validation authority for it, exactly as when this mode submitted
+  // directly. A parse failure is surfaced and blocks the advance.
+  const handleReviewJson = () => {
     let config: unknown
 
     try {
@@ -329,7 +349,9 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
       return
     }
 
-    void submit(config)
+    setSubmitState({ status: 'idle' })
+    setReviewConfig(config as RunConfig)
+    setStep('review')
   }
 
   if (activeRunState.status === 'loading') {
@@ -414,7 +436,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
 
       {step === 'edit' && mode === 'form' ? <ConfigForm form={form} setForm={setForm} deploy={deploy} deployStatus={uiConfigState.status} /> : null}
       {step === 'edit' && mode === 'json' ? <ConfigJsonMode text={jsonText} onTextChange={setJsonText} /> : null}
-      {step === 'review' ? <ConfigReview config={buildConfig(form, deploy)} dryRun={dryRun} /> : null}
+      {step === 'review' && reviewConfig ? <ConfigReview config={reviewConfig} dryRun={dryRun} /> : null}
 
       {reviewIssues.length > 0 ? (
         <div role="alert" className="rounded-lg border border-red-line bg-red-bg p-3.5 text-[12px] text-red">
@@ -457,11 +479,11 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
           {step === 'edit' && mode === 'json' ? (
             <button
               type="button"
-              onClick={handleSubmitJson}
-              disabled={submitting || jsonText.trim() === ''}
+              onClick={handleReviewJson}
+              disabled={jsonText.trim() === ''}
               className="rounded-lg bg-text px-5 py-2.25 text-[12.5px] font-semibold text-bg disabled:opacity-50"
             >
-              {submitting ? 'Submitting…' : 'Submit run'}
+              Review →
             </button>
           ) : null}
 

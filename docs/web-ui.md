@@ -138,10 +138,14 @@ source and is a run-detail concern, not part of the fixed environment.
 
 The config page (`/submit` — the sidebar's **Start new run** item) builds and submits
 a run config in either of two modes, switched by the **Form / Paste-upload** toggle at
-the top. Both modes end in the same submission the CLI makes (`POST /api/runs`, the
-exact path `tapectl run [--dry-run]` uses), and both validate against the committed
-run-config JSON Schema ([`schemas/run-config.schema.json`](configuration.md), served
-by `GET /api/config/schema`) client-side before anything reaches the server.
+the top. Both modes take the same two steps — a **Review →** button that shows exactly
+what will be submitted, then a **Submit run** button on that Review step that actually
+submits — so neither mode submits straight from its editor, and both end in the same
+submission the CLI makes (`POST /api/runs`, the exact path `tapectl run [--dry-run]`
+uses). Where they differ is validation: Form mode checks the assembled config against
+the committed run-config JSON Schema ([`schemas/run-config.schema.json`](configuration.md),
+served by `GET /api/config/schema`) before it will advance to Review, while JSON / paste
+mode leaves validation to the server (its escape-hatch role — see below).
 
 If a run is already in progress when the page opens, it shows a blocked state — "A run
 is already in progress", with an **Open current run** link — instead of the editor:
@@ -246,13 +250,16 @@ exactly as it will be submitted. Submit from there, or go **← Back to edit**.
 
 ### JSON mode (paste / upload)
 
-The original flow, unchanged in behavior: paste a run-config JSON document into the
-text area or load one from disk with the file picker (read client-side — nothing is
-uploaded until you submit), and submit directly. A live indicator below the textarea
-shows whether the current text parses and validates against the schema (with the
-first failing field path), but an invalid document is only ever *blocked* at
-submit time by the same server-side validation as always — the indicator is
-advisory.
+Paste a run-config JSON document into the text area or load one from disk with the file
+picker (read client-side — nothing is uploaded until you submit). Pressing **Review →**
+parses the text and, if it is valid JSON, advances to the same **Review** step Form mode
+uses, showing the parsed config exactly as it will be submitted; **Submit run** there
+sends it. Unlike Form mode, JSON mode does **not** re-check the document against the
+schema before Review — it is the escape hatch for configs the guided form can't express,
+so the server stays the single validation authority for it (an invalid document is
+*blocked* server-side at submit, exactly as before). A live indicator below the textarea
+still shows whether the current text parses and validates against the schema, with the
+first failing field path, as an advisory.
 
 ### Switching modes
 

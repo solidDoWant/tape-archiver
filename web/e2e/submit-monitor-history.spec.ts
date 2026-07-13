@@ -80,6 +80,11 @@ test('submit a dry-run (JSON mode), watch it progress live with the phase rail, 
   await expect(configTextarea).toHaveValue(/zfsPath/)
 
   await page.getByLabel(/Dry-run/).check()
+
+  // JSON / paste mode now also goes through the Review step before submitting
+  // (matching Form mode); only the Review step's Submit actually submits.
+  await page.getByRole('button', { name: /Review/ }).click()
+  await expect(page.getByText(/Review before submitting/i)).toBeVisible({ timeout: 30_000 })
   await page.getByRole('button', { name: 'Submit run' }).click()
 
   // Submitting redirects straight to the new run's detail page (no intermediate

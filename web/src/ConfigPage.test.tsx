@@ -405,7 +405,7 @@ describe('ConfigPage', () => {
     unsubscribe()
   })
 
-  it('submits JSON mode directly (no Review step) and redirects to the run page', async () => {
+  it('routes JSON mode through the Review step before submitting, then redirects to the run page', async () => {
     const onViewRun = vi.fn()
     const fetchMock = renderPage(
       { 'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-json-1' } } },
@@ -425,6 +425,12 @@ describe('ConfigPage', () => {
     }
     fireEvent.change(screen.getByLabelText('Run config (JSON)'), { target: { value: JSON.stringify(config) } })
 
+    // The primary JSON-mode button now reviews first — it must not submit.
+    fireEvent.click(screen.getByRole('button', { name: /review/i }))
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/runs', expect.objectContaining({ method: 'POST' }))
+
+    // The Review step shows the parsed config; only its Submit actually submits.
+    await screen.findByText(/review before submitting/i)
     fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
 
     await waitFor(() => {
@@ -433,23 +439,25 @@ describe('ConfigPage', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/runs', expect.objectContaining({ method: 'POST' }))
   })
 
-  it('reports a JSON parse error at submit time in JSON mode without contacting the server', async () => {
+  it('reports a JSON parse error at the Review step without contacting the server', async () => {
     const fetchMock = renderPage()
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
     fireEvent.change(screen.getByLabelText('Run config (JSON)'), { target: { value: 'not json' } })
 
-    fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /review/i }))
 
     // Two alerts render here on purpose — JSON mode's live parse indicator
-    // and the submit-time error — so assert on the submit-time one
+    // and the review-time error — so assert on the review-time one
     // specifically rather than getByRole (which throws on multiple matches).
     await waitFor(() => {
       const alerts = screen.getAllByRole('alert')
       expect(alerts.some((alert) => /not valid json/i.test(alert.textContent ?? ''))).toBe(true)
     })
 
+    // It stayed on the editor — the invalid config never reached Review or the server.
+    expect(screen.queryByText(/review before submitting/i)).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
   })
 
@@ -476,7 +484,8 @@ describe('ConfigPage', () => {
     })
 
     fireEvent.click(screen.getByLabelText(/dry-run/i))
-    fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /review/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /^submit run$/i }))
 
     await waitFor(() => {
       expect(onViewRun).toHaveBeenCalledWith('run-dry-1')
@@ -507,7 +516,8 @@ describe('ConfigPage', () => {
         }),
       },
     })
-    fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /review/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /^submit run$/i }))
 
     await waitFor(() => expect(screen.getByText('Run submitted.')).toBeInTheDocument())
     expect(screen.getByText('run-view-1')).toBeInTheDocument()
