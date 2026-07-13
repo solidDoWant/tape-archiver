@@ -1,6 +1,7 @@
 import CancelRunButton from './CancelRunButton'
 import ConfigSummary from './ConfigSummary'
 import DriveMetricsPanel from './DriveMetricsPanel'
+import RestartRunButton from './RestartRunButton'
 import PauseActions from './PauseActions'
 import type { PhaseInfo, RunEventDetail } from './RunDetail'
 import TapesSection from './TapesSection'
@@ -117,11 +118,12 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
           ) : null}
         </div>
 
-        {/* Cancel is offered only while the run is still in progress (a
-            terminal run has nothing left to stop). It sits in the status hero,
-            distinct from PauseActions' pause-specific Resume/Abort below —
-            cancel applies whether or not the run is currently paused. */}
-        {!terminal ? <CancelRunButton runId={runId} /> : null}
+        {/* One control occupies the hero's action slot depending on the run's
+            state: while it is still in progress, Cancel (stop it now — distinct
+            from PauseActions' pause-specific Resume/Abort below, which apply only
+            when paused); once it has closed, Restart (re-run the same config).
+            Cancel applies whether or not the run is currently paused. */}
+        {!terminal ? <CancelRunButton runId={runId} /> : <RestartRunButton runId={runId} />}
       </div>
 
       {isPaused || pauseUnknown ? (

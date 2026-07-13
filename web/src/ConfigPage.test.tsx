@@ -514,4 +514,50 @@ describe('ConfigPage', () => {
     // Without a navigation callback there is no "View run" affordance.
     expect(screen.queryByRole('button', { name: /view run/i })).not.toBeInTheDocument()
   })
+
+  it('preloads a prior run’s config for a restart, blanking the redacted age identity', async () => {
+    const priorConfig = {
+      sources: [{ zfsPath: { name: 'bulk-pool-01/archive@snap' }, label: 'archive', compression: true }],
+      copies: 2,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [1, 2], tapeCapacityBytes: 2500000000000 },
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1073741824 },
+      // The server redacts the age identity (a private key) — the restart must
+      // never load the placeholder into the form as if it were a real key.
+      encryption: { recipients: ['age1restarttestrecipient00000000000000000000000000000000000'], identity: '***redacted***' },
+      delivery: { webhookUrl: '***redacted***' },
+    }
+
+    stubApi({ '/api/runs/old-run/config': { status: 200, body: { runId: 'old-run', config: priorConfig } } })
+
+    render(
+      <RouterProvider>
+        <ConfigPage restartFromRunId="old-run" />
+      </RouterProvider>,
+    )
+
+    // The prior config's own values land in the form...
+    expect(await screen.findByDisplayValue('bulk-pool-01/archive@snap')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('age1restarttestrecipient00000000000000000000000000000000000')).toBeInTheDocument()
+
+    // ...with a notice explaining the restart and the redacted identity...
+    expect(screen.getByText(/Loaded the configuration from run old-run/i)).toBeInTheDocument()
+    expect(screen.getByText(/re-enter it before submitting/i)).toBeInTheDocument()
+
+    // ...and the redacted placeholder is never loaded into any field.
+    expect(screen.queryByDisplayValue('***redacted***')).not.toBeInTheDocument()
+  })
+
+  it('surfaces an error but still lets the operator build a run when the restart config can’t be loaded', async () => {
+    stubApi({ '/api/runs/gone/config': { status: 410, body: { error: 'run history has aged out' } } })
+
+    render(
+      <RouterProvider>
+        <ConfigPage restartFromRunId="gone" />
+      </RouterProvider>,
+    )
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load run gone.s configuration/i)
+    // The form is still usable — the restart failure is non-fatal.
+    expect(screen.getByRole('button', { name: /review/i })).toBeInTheDocument()
+  })
 })

@@ -214,12 +214,21 @@ function renderRoute(route: Route, navigate: (path: string) => void) {
   switch (route.name) {
     case 'dashboard':
       return <Dashboard onStartRun={() => navigate('/submit')} />
-    case 'submit':
+    case 'submit': {
       // ConfigPage lays out its own full-width max-w-3xl content area
       // (issue #279 — richer than the other pre-redesign pages' centered
       // narrow column), so it is not wrapped in CenteredView, matching
       // TapesPage/NotFoundPage's already-redesigned pattern below.
-      return <ConfigPage onViewRun={(runId) => navigate(runPath(runId))} />
+      //
+      // "?from=<runId>" (RestartRunButton) preloads that run's config for a
+      // restart. parseRoute resolves "submit" on pathname alone, so the query is
+      // read here directly — the same pattern LoginPage uses. key={from} gives a
+      // fresh ConfigPage (and thus a fresh preload) per restart source, rather
+      // than reusing a page that already loaded a different run's config.
+      const from = new URLSearchParams(window.location.search).get('from') ?? undefined
+
+      return <ConfigPage key={from ?? 'new'} onViewRun={(runId) => navigate(runPath(runId))} restartFromRunId={from} />
+    }
     case 'history':
       // Transient: AuthGate's effect redirects this route to "/" before the
       // next render (see route.ts's doc comment on the "history" variant).

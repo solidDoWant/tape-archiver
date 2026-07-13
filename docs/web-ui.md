@@ -412,6 +412,26 @@ arrives over the page's live stream within one poll interval.
 The server confirms the run is still running before requesting cancellation, so a request
 that races the run closing on its own is reported cleanly rather than acted on twice.
 
+### Restarting a run
+
+Once a run has closed, the **Cancel run** control in the status hero is replaced — in the
+same slot — by **Restart run**. It is the "run this again" shortcut: it opens the **Start
+new run** page preloaded with that run's own submitted configuration (`/submit?from=<runId>`
+→ `GET /api/runs/{runID}/config`), so the sources, tape/redundancy settings, recipients,
+copy count, and the rest come back without retyping. Because backup runs are a singleton
+(SPEC §4.2), the button is disabled while another run is in progress — the same restriction
+the sidebar's **Start new run** applies — with a short note explaining why.
+
+Restart lands on the **Build** step (Form mode) rather than jumping straight to **Review**
+for one reason: the run-config endpoint redacts the age identity — a private key — before
+returning a config (it also redacts the Discord webhook, but that is sourced from the
+deployment's config, so it needs no re-entry). The identity is required, and resubmitting a
+redacted or wrong one would break the archive's recoverability (the project's first
+principle), so the preload blanks it and a notice asks the operator to re-enter it before
+continuing to **Review** and submitting. Everything else is filled in; a config carrying an
+advanced field the guided form has no control for (see the config page's mode-switch notes)
+is named in the same notice, exactly as a JSON → Form switch reports it.
+
 ## Browsing tapes
 
 The **Tapes** page (`/tapes`) lists every physical tape written by a run still inside

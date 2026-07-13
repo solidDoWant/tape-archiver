@@ -1,7 +1,18 @@
+import type { ReactElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import RunOverview from './RunOverview'
+import { RouterProvider } from './router'
 import type { PhaseInfo, RunEventDetail } from './RunDetail'
+
+// renderOverview wraps RunOverview in a RouterProvider: its hero now renders
+// RestartRunButton (terminal runs) / CancelRunButton, and RestartRunButton
+// calls useNavigate, which needs the router context. useActiveRun's own
+// GET /api/runs falls through to the tests' 503 fetch default, leaving the
+// Restart button disabled — fine for these render-focused assertions.
+function renderOverview(ui: ReactElement) {
+  return render(<RouterProvider>{ui}</RouterProvider>)
+}
 
 function jsonResponse(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body }
@@ -49,7 +60,7 @@ describe('RunOverview', () => {
   it('shows a running hero and the "no action needed" placeholder when not paused', () => {
     stubPanels()
 
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument()
     expect(screen.getByText(/no operator action needed/i)).toBeInTheDocument()
@@ -59,7 +70,7 @@ describe('RunOverview', () => {
   it('offers a Cancel run button while the run is still in progress', () => {
     stubPanels()
 
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     expect(screen.getByRole('button', { name: /cancel run/i })).toBeInTheDocument()
   })
@@ -67,7 +78,7 @@ describe('RunOverview', () => {
   it('does not offer a Cancel run button for a terminal run (nothing left to stop)', () => {
     stubPanels()
 
-    render(
+    renderOverview(
       <RunOverview
         runId="run-1"
         detail={{ ...runningDetail, status: 'Completed', closeTime: '2026-07-09T13:00:00Z' }}
@@ -76,7 +87,9 @@ describe('RunOverview', () => {
       />,
     )
 
+    // Terminal runs swap the Cancel control for Restart in the same hero slot.
     expect(screen.queryByRole('button', { name: /cancel run/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /restart run/i })).toBeInTheDocument()
   })
 
   it('shows the pause zone instead of the placeholder when paused', () => {
@@ -123,7 +136,7 @@ describe('RunOverview', () => {
       phase.name === 'Write' ? { ...phase, status: 'failed', error: 'drive reported a hard write error' } : phase,
     )
 
-    render(
+    renderOverview(
       <RunOverview
         runId="run-1"
         detail={{ ...runningDetail, status: 'Failed', closeTime: '2026-07-09T13:00:00Z' }}
@@ -151,7 +164,7 @@ describe('RunOverview', () => {
       }),
     )
 
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     await waitFor(() => {
       expect(screen.getByText('6')).toBeInTheDocument() // 3 logical tapes × 2 copies.
@@ -172,7 +185,7 @@ describe('RunOverview', () => {
       }),
     )
 
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     const link = await screen.findByRole('link', { name: /temporal workflow/i })
     expect(link).toHaveAttribute('href', 'https://temporal.example.com/namespaces/prod/workflows/backup/run-1/history')
@@ -193,7 +206,7 @@ describe('RunOverview', () => {
       }),
     )
 
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     // The overview's own content is synchronous; wait a tick for the config
     // fetch to resolve, then confirm the link never appears.
@@ -215,7 +228,7 @@ describe('RunOverview', () => {
       }),
     )
 
-    render(<RunOverview runId="run-1" detail={{ ...runningDetail, status: 'Completed' }} phases={phases} terminal />)
+    renderOverview(<RunOverview runId="run-1" detail={{ ...runningDetail, status: 'Completed' }} phases={phases} terminal />)
 
     const link = await screen.findByRole('link', { name: /discord report/i })
     expect(link).toHaveAttribute('href', 'https://discord.com/channels/g1/c1/m1')
@@ -236,7 +249,7 @@ describe('RunOverview', () => {
       }),
     )
 
-    render(<RunOverview runId="run-1" detail={{ ...runningDetail, status: 'Completed' }} phases={phases} terminal />)
+    renderOverview(<RunOverview runId="run-1" detail={{ ...runningDetail, status: 'Completed' }} phases={phases} terminal />)
 
     await waitFor(() => expect(screen.getByRole('heading', { name: /backup completed/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /discord report/i })).not.toBeInTheDocument()
@@ -297,7 +310,7 @@ describe('RunOverview', () => {
       }),
     )
 
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={writingPhases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={writingPhases} terminal={false} />)
 
     // The rate / floor / reposition figures come from the existing
     // VictoriaMetrics-backed /metrics/drives endpoint — no new backend.
@@ -311,7 +324,7 @@ describe('RunOverview', () => {
     // deployment with VICTORIAMETRICS_URL unset.
     stubPanels()
 
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={writingPhases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={writingPhases} terminal={false} />)
 
     // The section renders its styled "unavailable" state, never a broken panel,
     // and the rest of the overview is unaffected.
@@ -325,7 +338,7 @@ describe('RunOverview', () => {
 
     // phases has Write still pending — the section must not render an empty
     // gauge during earlier phases.
-    render(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     expect(screen.queryByText('Drive write health')).not.toBeInTheDocument()
   })
@@ -335,7 +348,7 @@ describe('RunOverview', () => {
 
     const doneWrite: PhaseInfo[] = writingPhases.map((phase) => (phase.name === 'Write' ? { ...phase, status: 'completed' } : phase))
 
-    render(
+    renderOverview(
       <RunOverview
         runId="run-1"
         detail={{ ...runningDetail, status: 'Completed', closeTime: '2026-07-09T13:00:00Z' }}

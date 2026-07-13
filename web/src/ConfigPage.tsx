@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { apiFetch, ApiError, describeNetworkError } from './api'
 import { useActiveRun } from './activeRun'
 import {
@@ -21,10 +21,29 @@ import { runPath } from './route'
 
 export interface ConfigPageProps {
   onViewRun?: (runId: string) => void
+  // restartFromRunId, when set (App.tsx reads it from the "/submit?from=<runId>"
+  // query RestartRunButton navigates to), preloads that closed run's submitted
+  // config into the form so the operator can re-run it (see the restart effect
+  // below). Undefined for a plain "Start new run".
+  restartFromRunId?: string
 }
 
 type Mode = 'form' | 'json'
 type Step = 'edit' | 'review'
+
+// redactedSecret mirrors pkg/runsapi/config.go's redactedSecret: GET
+// /api/runs/{runID}/config replaces the two credential-bearing fields (the age
+// identity and the Discord webhook URL) with this sentinel before returning a
+// run's config. A restart preload must recognise it so it never loads the
+// literal placeholder into the form and resubmits it as a real secret.
+const redactedSecret = '***redacted***'
+
+// RestartState tracks the one-shot config preload a restart performs before the
+// form is usable.
+type RestartState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'error'; error: string }
 
 interface SubmitResult {
   workflowId: string
@@ -77,7 +96,7 @@ function segmentButtonClass(active: boolean): string {
 // AC5 (a run already in progress blocks the whole page, not just submit) is
 // answered here by the same useActiveRun one-shot check the sidebar already
 // uses (issue #272) — no new endpoint or live subscription.
-function ConfigPage({ onViewRun }: ConfigPageProps) {
+function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
   const activeRunState = useActiveRun()
   // Deploy-owned library devices + Discord webhook (issue #304): Form mode
   // shows them read-only and buildConfig fills them into the submitted config,
@@ -95,6 +114,79 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
   const [validating, setValidating] = useState(false)
   const [modeSwitchNotice, setModeSwitchNotice] = useState('')
   const [submitState, setSubmitState] = useState<SubmitState>({ status: 'idle' })
+  const [restart, setRestart] = useState<RestartState>(
+    restartFromRunId ? { status: 'loading' } : { status: 'idle' },
+  )
+
+  // Restart preload: when this page was opened as "run this again"
+  // (RestartRunButton → "/submit?from=<runId>"), fetch that run's submitted
+  // config (GET /api/runs/{runID}/config — the same endpoint ConfigSummary
+  // reads) and load it into the form, so the operator does not retype the whole
+  // config to re-run it. Landing lands on the Form/Build step rather than
+  // straight on Review on purpose: the run-config endpoint redacts the age
+  // identity (a private key — pkg/runsapi/config.go), which the schema requires,
+  // so the one field a restart can never carry must be re-entered here before
+  // the config can validate and advance to Review (submitting a redacted or
+  // wrong identity would break the archive's recoverability — the project's #1
+  // principle). The deploy-owned webhook is redacted too but is sourced from
+  // deploy config anyway (configToFormState never maps it), so it needs no
+  // special handling. Advanced fields the form has no controls for
+  // (unmodeledFields) are named in the notice, same as a JSON → Form switch.
+  useEffect(() => {
+    if (!restartFromRunId) {
+      return
+    }
+
+    let cancelled = false
+
+    apiFetch<{ runId: string; config: RunConfig }>(`/api/runs/${encodeURIComponent(restartFromRunId)}/config`)
+      .then((response) => {
+        if (cancelled) {
+          return
+        }
+
+        const loaded = response.config
+        const identityRedacted = loaded.encryption?.identity === redactedSecret
+
+        // Never load the redacted placeholder into the form as if it were a real
+        // key — blank it so the operator is prompted to re-enter their own.
+        const sanitized: RunConfig = identityRedacted
+          ? { ...loaded, encryption: { ...loaded.encryption, identity: '' } }
+          : loaded
+
+        setForm(configToFormState(sanitized))
+
+        const notices = [`Loaded the configuration from run ${restartFromRunId}.`]
+
+        if (identityRedacted) {
+          notices.push(
+            'The age identity (a private key) was redacted for security when this run was read back — re-enter it before submitting.',
+          )
+        }
+
+        const dropped = unmodeledFields(loaded)
+        if (dropped.length > 0) {
+          notices.push(
+            `The form has no controls for ${dropped.join(', ')}, so ${dropped.length === 1 ? 'it was' : 'they were'} dropped — switch to Paste / upload mode to set ${dropped.length === 1 ? 'it' : 'them'}.`,
+          )
+        }
+
+        setModeSwitchNotice(notices.join(' '))
+        setRestart({ status: 'idle' })
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return
+        }
+
+        const message = error instanceof ApiError ? error.message : describeNetworkError(error)
+        setRestart({ status: 'error', error: message })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [restartFromRunId])
 
   const switchToJson = () => {
     setJsonText(JSON.stringify(buildConfig(form, deploy), null, 2))
@@ -275,6 +367,16 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
     )
   }
 
+  if (restart.status === 'loading') {
+    return (
+      <div className="p-6 sm:p-7">
+        <p role="status" className="text-[12.5px] text-text-dim">
+          Loading run {restartFromRunId}’s configuration…
+        </p>
+      </div>
+    )
+  }
+
   const submitting = submitState.status === 'submitting'
   const success = submitState.status === 'success' ? submitState.result : undefined
 
@@ -296,6 +398,13 @@ function ConfigPage({ onViewRun }: ConfigPageProps) {
           </div>
         ) : null}
       </div>
+
+      {restart.status === 'error' ? (
+        <div role="alert" className="rounded-lg border border-red-line bg-red-bg p-3.5 text-[12px] text-red">
+          Could not load run {restartFromRunId}’s configuration to restart it: {restart.error}. You can still
+          build a new run below.
+        </div>
+      ) : null}
 
       {modeSwitchNotice ? (
         <p role="status" className="text-[11.5px] text-amber">

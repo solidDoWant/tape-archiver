@@ -101,6 +101,16 @@ export function runPath(runId: string): string {
   return `/runs/${encodeURIComponent(runId)}`
 }
 
+// submitPath builds the URL for the "Start new run" config page (parseRoute's
+// "submit" route). With a fromRunId it adds the ?from=<runId> query the config
+// page reads (App.tsx → ConfigPage's restartFromRunId) to preload that run's
+// config for a restart — RestartRunButton's target. The query is preserved in
+// the URL but ignored by parseRoute (which resolves on pathname alone), the
+// same read-the-query-directly pattern LoginPage uses for its params.
+export function submitPath(fromRunId?: string): string {
+  return fromRunId ? `/submit?from=${encodeURIComponent(fromRunId)}` : '/submit'
+}
+
 export interface RouterContextValue {
   route: Route
   navigate: (path: string) => void
