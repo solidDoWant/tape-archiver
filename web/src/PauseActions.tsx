@@ -72,12 +72,17 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
 
   if (pause.unknown) {
     return (
-      <div
-        role="alert"
-        className="rounded border border-amber-500 bg-amber-50 p-3 text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100"
-      >
-        Pause status unavailable right now — this run may be waiting on an
-        operator. Check <code>tapectl status</code> or retry shortly.
+      <div role="alert" className="rounded-xl border border-amber-line bg-amber-bg px-5 py-[18px]">
+        <div className="flex items-center gap-2.5">
+          <span aria-hidden="true" className="text-[15px]">
+            ⏸
+          </span>
+          <span className="text-[13.5px] font-semibold text-amber">Pause status unavailable</span>
+        </div>
+        <p className="mt-[7px] max-w-[560px] text-[12.5px] text-text-dim">
+          This run may be waiting on an operator. Check <code className="font-mono text-[11.5px]">tapectl status</code>{' '}
+          or retry shortly.
+        </p>
       </div>
     )
   }
@@ -111,40 +116,44 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
   }
 
   return (
-    <div
-      role="status"
-      className="flex flex-col gap-2 rounded border border-amber-500 bg-amber-50 p-3 text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100"
-    >
-      <p className="font-semibold">Paused: {pauseKindLabel(pause.kind)}</p>
+    <div role="status" className="rounded-xl border border-amber-line bg-amber-bg px-5 py-[18px]">
+      <div className="flex items-center gap-2.5">
+        <span aria-hidden="true" className="text-[15px]">
+          ⏸
+        </span>
+        <span className="text-[13.5px] font-semibold text-amber">Operator action required</span>
+      </div>
 
-      {pause.phase ? <p>Failing phase: {pause.phase}</p> : null}
+      <div className="mt-[7px] max-w-[560px] space-y-1 text-[12.5px] text-text-dim">
+        <p className="font-medium text-text">{pauseKindLabel(pause.kind)}</p>
 
-      {pause.affectedTapes && pause.affectedTapes.length > 0 ? (
-        <p>Affected tapes: {pause.affectedTapes.join(', ')}</p>
-      ) : null}
+        {pause.phase ? <p>Failing phase: {pause.phase}</p> : null}
 
-      {pause.reloadSlots && pause.reloadSlots.length > 0 ? (
-        <p>Reload fresh blanks into slots: {pause.reloadSlots.join(', ')}</p>
-      ) : null}
+        {pause.affectedTapes && pause.affectedTapes.length > 0 ? (
+          <p>Affected tapes: {pause.affectedTapes.join(', ')}</p>
+        ) : null}
 
-      {typeof pause.awaitingExport === 'number' && pause.awaitingExport > 0 ? (
-        <p>Tapes still awaiting export: {pause.awaitingExport}</p>
-      ) : null}
+        {pause.reloadSlots && pause.reloadSlots.length > 0 ? (
+          <p>Reload fresh blanks into slots: {pause.reloadSlots.join(', ')}</p>
+        ) : null}
 
-      {pause.devices && pause.devices.length > 0 ? <p>Burner devices: {pause.devices.join(', ')}</p> : null}
+        {typeof pause.awaitingExport === 'number' && pause.awaitingExport > 0 ? (
+          <p>Tapes still awaiting export: {pause.awaitingExport}</p>
+        ) : null}
 
-      {pause.errorSummary ? <p>Reason: {pause.errorSummary}</p> : null}
+        {pause.devices && pause.devices.length > 0 ? <p>Burner devices: {pause.devices.join(', ')}</p> : null}
 
-      <div className="flex gap-2 pt-1">
+        {pause.errorSummary ? <p>Reason: {pause.errorSummary}</p> : null}
+      </div>
+
+      <div className="mt-3.5 flex gap-2.5">
         <button
           type="button"
           onClick={() => void handleAction('resume')}
           disabled={sending}
-          className="rounded bg-green-700 px-3 py-1.5 font-medium text-white disabled:opacity-50"
+          className="rounded-lg bg-text px-4 py-2 text-[12.5px] font-semibold text-bg transition-all enabled:cursor-pointer enabled:hover:opacity-[0.88] enabled:hover:shadow-[0_4px_12px_rgba(0,0,0,0.15)] enabled:active:translate-y-px enabled:active:opacity-[0.82] enabled:active:shadow-none disabled:opacity-50"
         >
-          {actionState.status === 'sending' && actionState.verb === 'resume'
-            ? 'Resuming…'
-            : 'Resume'}
+          {actionState.status === 'sending' && actionState.verb === 'resume' ? 'Resuming…' : 'Resume'}
         </button>
 
         {pause.canAbort ? (
@@ -152,20 +161,15 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
             type="button"
             onClick={() => void handleAction('abort')}
             disabled={sending}
-            className="rounded bg-red-700 px-3 py-1.5 font-medium text-white disabled:opacity-50"
+            className="rounded-lg border-[1.5px] border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-all enabled:cursor-pointer enabled:hover:border-red enabled:hover:bg-red-bg enabled:hover:text-red enabled:active:translate-y-px enabled:active:bg-red-bg disabled:opacity-50"
           >
-            {actionState.status === 'sending' && actionState.verb === 'abort'
-              ? 'Aborting…'
-              : 'Abort'}
+            {actionState.status === 'sending' && actionState.verb === 'abort' ? 'Aborting…' : 'Abort'}
           </button>
         ) : null}
       </div>
 
       {actionState.status === 'error' ? (
-        <div
-          role="alert"
-          className="rounded border border-red-600 bg-red-50 p-2 text-red-900 dark:border-red-500 dark:bg-red-950 dark:text-red-100"
-        >
+        <div role="alert" className="mt-3.5 rounded-lg border border-red-line bg-red-bg p-2.5 text-[12px] text-red">
           {actionState.error}
         </div>
       ) : null}
