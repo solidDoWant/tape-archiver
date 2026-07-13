@@ -89,7 +89,7 @@ function PhaseDetail({ runId, index, phase, terminal }: PhaseDetailProps) {
           ) : null}
 
           {isWrite ? (
-            <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+            <div className="flex flex-col gap-4">
               <LogPanel runId={runId} phase={phase.name} />
               <DriveMetricsPanel runId={runId} terminal={terminal} />
             </div>
