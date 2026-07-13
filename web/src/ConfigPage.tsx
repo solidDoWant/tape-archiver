@@ -403,7 +403,11 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
   const success = submitState.status === 'success' ? submitState.result : undefined
 
   return (
-    <div className="flex w-full max-w-3xl flex-col gap-4 p-6 sm:p-7">
+    // config-controls: a pointer cursor on every button/toggle in this flow —
+    // see index.css. It covers the mode toggle, dry-run, Review/Submit/Back
+    // buttons, and every control in the ConfigForm / ConfigJsonMode / ConfigReview
+    // / AgeKeygenPanel rendered below.
+    <div className="config-controls flex w-full max-w-3xl flex-col gap-4 p-6 sm:p-7">
       <div className="flex flex-wrap items-center gap-3">
         <span className="rounded-full border border-border-strong bg-inset px-2.5 py-1 font-mono text-[11px] font-semibold text-text-dim">
           {step === 'review' ? 'STEP 2 · REVIEW' : 'STEP 1 · BUILD'}
