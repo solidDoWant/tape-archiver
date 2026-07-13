@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ApiError, apiFetch, describeNetworkError } from './api'
+import ConfirmModal from './ConfirmModal'
 
 // CurrentPauseInfo mirrors pkg/runsapi.CurrentPauseInfo (the GET
 // /api/runs/{runID} and SSE JSON projection of workflows/backup's
@@ -32,8 +33,11 @@ export interface PauseActionsProps {
 
 type ActionState =
   | { status: 'idle' }
+  // confirming-abort: the Abort confirmation modal is open (Resume has no
+  // confirmation step — it acts immediately).
+  | { status: 'confirming-abort' }
   | { status: 'sending'; verb: 'resume' | 'abort' }
-  | { status: 'error'; error: string }
+  | { status: 'error'; verb: 'resume' | 'abort'; error: string }
 
 // pauseKindLabel renders a pause Kind ("eject" | "write-failure" | "burn")
 // as operator-facing text.
@@ -51,14 +55,17 @@ function pauseKindLabel(kind: string): string {
 }
 
 // PauseActions shows why a run is currently paused (SPEC §4.3 phase 8, SPEC
-// §4.3 phases 6-8, §10) and offers Resume / Abort, each gated behind a
-// confirmation (CLAUDE.md's Hardware and Safety framing: these are
-// consequential, hard-to-reverse actions against real tape hardware) before
-// calling POST /api/runs/{runID}/resume or /abort (pkg/runsapi). It renders
-// nothing when pause.kind is "" and pause.unknown is falsy (confirmed not
-// paused); when pause.unknown is true it renders a warning instead of
-// silently rendering nothing, since a run genuinely awaiting an operator
-// must never look identical to a healthy, unpaused run.
+// §4.3 phases 6-8, §10) and offers Resume / Abort, calling POST
+// /api/runs/{runID}/resume or /abort (pkg/runsapi). Resume acts immediately —
+// it just continues a run the operator already decided to keep. Abort ends the
+// run with no further tapes written, so (per CLAUDE.md's Hardware and Safety
+// framing — a consequential, not-undoable action against real tape hardware) it
+// is gated behind an explicit modal confirmation (the shared ConfirmModal, the
+// same full-screen dialog CancelRunButton uses). It renders nothing when
+// pause.kind is "" and pause.unknown is falsy (confirmed not paused); when
+// pause.unknown is true it renders a warning instead of silently rendering
+// nothing, since a run genuinely awaiting an operator must never look identical
+// to a healthy, unpaused run.
 //
 // It intentionally does not re-fetch or hold its own copy of the run's
 // state: RunDetail.tsx (its only caller) already receives live pause state
@@ -93,17 +100,10 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
 
   const sending = actionState.status === 'sending'
 
-  const handleAction = async (verb: 'resume' | 'abort') => {
-    const confirmed = window.confirm(
-      verb === 'resume'
-        ? 'Resume this paused run? The operator-cleared blocking condition must actually be cleared first (SPEC §4.3).'
-        : 'Abort this paused run? It ends in a defined, reported state with no further tapes written. This cannot be undone.',
-    )
-
-    if (!confirmed) {
-      return
-    }
-
+  // performAction POSTs the resume/abort and reflects the outcome. Resume calls
+  // it directly on click; Abort calls it only after the confirmation modal is
+  // accepted.
+  const performAction = async (verb: 'resume' | 'abort') => {
     setActionState({ status: 'sending', verb })
 
     try {
@@ -111,9 +111,20 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
       setActionState({ status: 'idle' })
     } catch (error) {
       const message = error instanceof ApiError ? error.message : describeNetworkError(error)
-      setActionState({ status: 'error', error: message })
+      setActionState({ status: 'error', verb, error: message })
     }
   }
+
+  // The Abort flow (confirm → send → error) drives the modal; a resume failure
+  // shows inline in the box below the buttons instead, since Resume has no modal
+  // of its own to carry it.
+  const abortActive =
+    actionState.status === 'confirming-abort' ||
+    (actionState.status === 'sending' && actionState.verb === 'abort') ||
+    (actionState.status === 'error' && actionState.verb === 'abort')
+  const abortSending = actionState.status === 'sending' && actionState.verb === 'abort'
+  const abortError = actionState.status === 'error' && actionState.verb === 'abort' ? actionState.error : undefined
+  const resumeError = actionState.status === 'error' && actionState.verb === 'resume' ? actionState.error : undefined
 
   return (
     <div role="status" className="rounded-xl border border-amber-line bg-amber-bg px-5 py-[18px]">
@@ -149,7 +160,7 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
       <div className="mt-3.5 flex gap-2.5">
         <button
           type="button"
-          onClick={() => void handleAction('resume')}
+          onClick={() => void performAction('resume')}
           disabled={sending}
           className="rounded-lg bg-text px-4 py-2 text-[12.5px] font-semibold text-bg transition-all enabled:cursor-pointer enabled:hover:opacity-[0.88] enabled:hover:shadow-[0_4px_12px_rgba(0,0,0,0.15)] enabled:active:translate-y-px enabled:active:opacity-[0.82] enabled:active:shadow-none disabled:opacity-50"
         >
@@ -159,19 +170,35 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
         {pause.canAbort ? (
           <button
             type="button"
-            onClick={() => void handleAction('abort')}
+            onClick={() => setActionState({ status: 'confirming-abort' })}
             disabled={sending}
             className="rounded-lg border-[1.5px] border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-all enabled:cursor-pointer enabled:hover:border-red enabled:hover:bg-red-bg enabled:hover:text-red enabled:active:translate-y-px enabled:active:bg-red-bg disabled:opacity-50"
           >
-            {actionState.status === 'sending' && actionState.verb === 'abort' ? 'Aborting…' : 'Abort'}
+            Abort
           </button>
         ) : null}
       </div>
 
-      {actionState.status === 'error' ? (
+      {resumeError ? (
         <div role="alert" className="mt-3.5 rounded-lg border border-red-line bg-red-bg p-2.5 text-[12px] text-red">
-          {actionState.error}
+          {resumeError}
         </div>
+      ) : null}
+
+      {abortActive ? (
+        <ConfirmModal
+          title="Abort this paused run?"
+          confirmLabel={abortSending ? 'Aborting…' : 'Abort run'}
+          dismissLabel="Keep paused"
+          tone="danger"
+          sending={abortSending}
+          error={abortError}
+          onConfirm={() => void performAction('abort')}
+          onDismiss={() => setActionState({ status: 'idle' })}
+        >
+          The run ends in a defined, reported state with no further tapes written or discs burned. This can’t be
+          undone.
+        </ConfirmModal>
       ) : null}
     </div>
   )

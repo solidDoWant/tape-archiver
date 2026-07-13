@@ -373,17 +373,20 @@ staging one artificially):
 **Resume** and **Abort** send the same `OperatorResumeSignal` / `OperatorAbortSignal`
 that [`tapectl resume`](tapectl.md#tapectl-resume) and
 [`tapectl abort`](tapectl.md#tapectl-abort) do — acting from the browser has exactly the
-same effect as acting from the CLI. Both actions ask for confirmation first, since they
-are consequential and, once acted on, not undoable:
+same effect as acting from the CLI:
 
-- **Resume** only makes sense once the blocking condition is actually cleared (the I/O
-  station emptied and closed, fresh blanks loaded, a fresh disc inserted) — sending it
-  before that just re-hits the same failure.
+- **Resume** acts immediately on click — it simply continues a run the operator has
+  already decided to keep. It only makes sense once the blocking condition is actually
+  cleared (the I/O station emptied and closed, fresh blanks loaded, a fresh disc inserted)
+  — sending it before that just re-hits the same failure.
 - **Abort** ends the run in a defined, reported state with no further tapes written or
-  discs burned. It is not offered for an Eject pause: every tape is already safely
-  written by the time an Eject pause happens, so there is nothing left for an abort to
-  protect against — the same rule `tapectl abort` follows. Attempting it anyway (e.g. via
-  a direct API call) is rejected by the server the same way `tapectl abort` is.
+  discs burned. Because that is consequential and not undoable, it asks for confirmation
+  first in the same full-screen modal dialog (over a dimmed, blurred backdrop) the
+  **Cancel run** control uses — resolved with **Abort run** or **Keep paused**. It is not
+  offered for an Eject pause: every tape is already safely written by the time an Eject
+  pause happens, so there is nothing left for an abort to protect against — the same rule
+  `tapectl abort` follows. Attempting it anyway (e.g. via a direct API call) is rejected by
+  the server the same way `tapectl abort` is.
 
 If the pause status itself can't be determined right now (e.g. no worker is currently
 polling the workflow), the page shows a clear "pause status unavailable" warning rather
