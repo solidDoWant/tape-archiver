@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { apiFetch, ApiError, describeNetworkError, formatTimestamp } from './api'
-import { Link } from './router'
-import PhaseRail from './PhaseRail'
-import PhaseDetail from './PhaseDetail'
-import RunOverview from './RunOverview'
+import { ApiError, apiFetch, describeNetworkError, formatTimestamp } from './api'
 import PauseActions, { type CurrentPauseInfo } from './PauseActions'
+import PhaseDetail from './PhaseDetail'
+import PhaseRail from './PhaseRail'
+import { Link } from './router'
 import { useRunEvents, type RunEventDetail } from './runEvents'
 import { headerRuntime, runStatusView, usePublishRunHeader } from './runHeader'
+import RunOverview from './RunOverview'
 
 // RunEventDetail's definition lives in runEvents.ts alongside the shared
 // useRunEvents hook (issue #276's dashboard factored the SSE subscription
@@ -259,17 +259,6 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
         </div>
       ) : null}
 
-      {terminal ? (
-        <div className="mx-4 mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-surface-2 px-3.5 py-2 sm:mx-6">
-          <span className="rounded-full border border-border bg-inset px-2 py-0.5 font-mono text-[11px] font-semibold text-text-dim">
-            READ-ONLY
-          </span>
-          <span className="font-mono text-[11px] text-text-dim">
-            Viewing a closed run, reconstructed from Temporal history — no live hardware access is performed.
-          </span>
-        </div>
-      ) : null}
-
       {phases.status === 'loading' ? (
         <p role="status" className="p-5 text-[12px] text-text-faint sm:p-7">
           Loading phases…
@@ -281,6 +270,20 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
           <PhaseRail phases={phases.phases} selected={selected} onSelect={setSelected} />
 
           <div className="min-w-0 flex-1 p-5 sm:p-7">
+            {/* READ-ONLY sits at the top of the detail pane (above the overview
+                and per-phase views alike), matching the design mockup — not the
+                full-width outer column above the phase rail. */}
+            {terminal ? (
+              <div className="mb-5 flex flex-wrap max-w-[880px] items-center gap-3 rounded-lg border border-border bg-surface-2 px-3.5 py-2">
+                <span className="rounded-full border border-border bg-inset px-2 py-0.5 font-mono text-[11px] font-semibold text-text-dim">
+                  READ-ONLY
+                </span>
+                <span className="font-mono text-[11px] text-text-dim">
+                  Viewing a closed run, reconstructed from Temporal history — no live hardware access is performed.
+                </span>
+              </div>
+            ) : null}
+
             {selected === 'overview' || !selectedPhase ? (
               <RunOverview runId={runId} detail={detail} phases={phases.phases} terminal={terminal} />
             ) : (

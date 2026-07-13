@@ -1,12 +1,12 @@
-import type { PhaseInfo, RunEventDetail } from './RunDetail'
-import { formatDuration, phaseLabel } from './phaseFormat'
-import { runStatusView } from './runHeader'
-import PauseActions from './PauseActions'
 import ConfigSummary from './ConfigSummary'
 import DriveMetricsPanel from './DriveMetricsPanel'
+import PauseActions from './PauseActions'
+import type { PhaseInfo, RunEventDetail } from './RunDetail'
 import TapesSection from './TapesSection'
-import { temporalWorkflowUrl, useUiConfig } from './uiConfig'
+import { formatDuration, phaseLabel } from './phaseFormat'
 import { useReportMessageUrl } from './runDelivery'
+import { runStatusView } from './runHeader'
+import { temporalWorkflowUrl, useUiConfig } from './uiConfig'
 
 // factValue looks up one PhaseFact's numeric value from a phase's facts
 // list, parsed from its pre-formatted display text (facts.go's intFact
@@ -82,7 +82,7 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
   const reportUrl = useReportMessageUrl(runId, terminal)
 
   return (
-    <div className="flex max-w-[840px] flex-col gap-5">
+    <div className="flex max-w-[880px] flex-col gap-5">
       <div>
         <div className="mb-1 flex items-baseline gap-2.5">
           <span className={`font-mono text-[11px] tracking-[0.04em] ${hero.badgeClass}`}>{hero.label}</span>
