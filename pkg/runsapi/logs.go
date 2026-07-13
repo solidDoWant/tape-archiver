@@ -101,6 +101,17 @@ type LogLine struct {
 	Time    time.Time `json:"time"`
 	Level   string    `json:"level,omitempty"`
 	Message string    `json:"message"`
+	// Error is the log entry's error detail, when it carries one. Many of the
+	// most operator-relevant lines — a failing/retrying activity above all —
+	// log a terse _msg ("Activity error.") and put the actual cause in a
+	// structured field rather than the message text, so projecting _msg alone
+	// (as this endpoint first did) hid it. This surfaces that field so the log
+	// panel can show the cause without every call site having to inline it into
+	// its message: the Temporal SDK's own logger names it "Error", and this
+	// repo's slog error logs conventionally use "error" (slog.Error(msg,
+	// "error", err)); parseLogsQLResponse reads whichever is present. Empty when
+	// the line logged no error field.
+	Error string `json:"error,omitempty"`
 }
 
 // RunLogsResponse is the GET /api/runs/{runID}/logs response body.
@@ -434,16 +445,22 @@ func parseVLTime(raw string) (time.Time, error) {
 }
 
 // vlRecord is one line of VictoriaLogs' LogsQL query response, decoded down
-// to the three fields LogLine needs. VictoriaLogs' own JSON stream
+// to the fields LogLine needs. VictoriaLogs' own JSON stream
 // ingestion (docker-compose.web-dev.yml's vector container,
 // docs/web-ui.md) is configured with _msg_field=msg and _time_field=time
 // (see this package's doc comment), so a worker's slog JSON "msg"/"time"
 // keys surface here as "_msg"/"_time"; "level" passes through unchanged,
-// slog's own field name.
+// slog's own field name — as do "Error"/"error" (see LogLine.Error).
 type vlRecord struct {
 	Time  string `json:"_time"`
 	Msg   string `json:"_msg"`
 	Level string `json:"level"`
+	// Error / ErrorLower are the two conventions a log line's error detail
+	// arrives under: the Temporal SDK's own logger uses "Error", this repo's
+	// slog error logs use "error". At most one is set on any given line;
+	// parseLogsQLResponse prefers "Error" and falls back to "error".
+	Error      string `json:"Error"`
+	ErrorLower string `json:"error"`
 }
 
 // parseLogsQLResponse decodes VictoriaLogs' LogsQL query response: one JSON
@@ -476,7 +493,12 @@ func parseLogsQLResponse(body io.Reader) ([]LogLine, error) {
 			return nil, fmt.Errorf("parse victorialogs record time %q: %w", record.Time, err)
 		}
 
-		lines = append(lines, LogLine{Time: parsedTime, Level: record.Level, Message: record.Msg})
+		errText := record.Error
+		if errText == "" {
+			errText = record.ErrorLower
+		}
+
+		lines = append(lines, LogLine{Time: parsedTime, Level: record.Level, Message: record.Msg, Error: errText})
 	}
 
 	if err := scanner.Err(); err != nil {

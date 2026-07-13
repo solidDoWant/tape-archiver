@@ -159,6 +159,48 @@ func TestGetRunLogsWholeRunHappyPath(t *testing.T) {
 	assert.Contains(t, query, fmt.Sprintf("limit %d", maxLogLines))
 }
 
+// TestGetRunLogsSurfacesErrorField covers the whole point of LogLine.Error: a
+// line whose real cause lives in a structured field, not the terse _msg, must
+// come through so the log panel can show it. Both conventions are exercised —
+// the Temporal SDK's retrying-activity log ("Activity error." + capitalized
+// "Error"), and this repo's own slog error logs (lowercase "error").
+func TestGetRunLogsSurfacesErrorField(t *testing.T) {
+	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	close := start.Add(time.Hour)
+
+	sdk := fmt.Sprintf(
+		`{"_time":%q,"_msg":"Activity error.","level":"ERROR","RunID":"x","ActivityType":"ResolveK8sSources","Error":"resolve sources[0]: boom"}`,
+		start.Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	)
+	app := fmt.Sprintf(
+		`{"_time":%q,"_msg":"prepare failed","level":"ERROR","RunID":"x","error":"disk full"}`,
+		start.Add(2*time.Minute).UTC().Format(time.RFC3339Nano),
+	)
+	plain := fmt.Sprintf(
+		`{"_time":%q,"_msg":"resolving snapshots","level":"INFO","RunID":"x"}`,
+		start.Add(3*time.Minute).UTC().Format(time.RFC3339Nano),
+	)
+
+	fake := newFakeVictoriaLogs(t, http.StatusOK, sdk+"\n"+app+"\n"+plain+"\n")
+	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})
+
+	temporalClient := &fakeTemporalClient{describeResponse: describeResponseFor(testRunID, enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &close)}
+	handler := newMux(newHandler(temporalClient, getenv))
+
+	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs", nil)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var body RunLogsResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+
+	require.Len(t, body.Lines, 3)
+	assert.Equal(t, "Activity error.", body.Lines[0].Message)
+	assert.Equal(t, "resolve sources[0]: boom", body.Lines[0].Error, "the SDK's capitalized Error field must surface")
+	assert.Equal(t, "prepare failed", body.Lines[1].Message)
+	assert.Equal(t, "disk full", body.Lines[1].Error, "this repo's lowercase error field must surface")
+	assert.Empty(t, body.Lines[2].Error, "a line with no error field carries none")
+}
+
 func TestGetRunLogsWholeRunStillOpenIsLive(t *testing.T) {
 	fake := newFakeVictoriaLogs(t, http.StatusOK, "")
 	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})

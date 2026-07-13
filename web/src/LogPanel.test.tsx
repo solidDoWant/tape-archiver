@@ -104,6 +104,34 @@ describe('LogPanel', () => {
     expect(text.indexOf('resolving snapshots')).toBeLessThan(text.indexOf('pack slow'))
   })
 
+  it('shows a line’s error detail under its message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          runId: 'run-1',
+          live: false,
+          lines: [
+            {
+              time: '2026-07-10T12:00:00Z',
+              level: 'ERROR',
+              message: 'Activity error.',
+              error: 'resolve sources[0] k8s snapshot: get VolumeSnapshot asdf/asdf: boom',
+            },
+          ],
+        }),
+      ),
+    )
+
+    render(<LogPanel runId="run-1" />)
+
+    // Both the terse message and the actual cause are shown.
+    await waitFor(() => {
+      expect(screen.getByText('Activity error.')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/resolve sources\[0\] k8s snapshot.*boom/)).toBeInTheDocument()
+  })
+
   it('polls for new lines with ?since= while live, and appends them', async () => {
     vi.useFakeTimers()
 

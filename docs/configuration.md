@@ -762,9 +762,14 @@ sparkline) for one metric of one tape. `barcode` must be one this run actually l
 A read-only proxy over an external VictoriaLogs instance (`VICTORIALOGS_URL`,
 `VICTORIALOGS_STREAM_FILTER` — see the environment variable table above), never a raw
 LogsQL passthrough: `cmd/web` builds the query itself from validated parameters. Returns
-`{"runId", "phase", "lines": [{"time", "level", "message"}, ...], "live"}` — `lines` are
-the matched log lines, oldest first; `live` is `true` while more lines can still arrive
-for the requested window (the run, or the given phase, has not finished yet).
+`{"runId", "phase", "lines": [{"time", "level", "message", "error"}, ...], "live"}` —
+`lines` are the matched log lines, oldest first; `live` is `true` while more lines can
+still arrive for the requested window (the run, or the given phase, has not finished yet).
+`error` is present only when a line carried a structured error field — a failing/retrying
+activity, for example, logs a terse `message` ("Activity error.") and puts the actual
+cause in a field (the Temporal SDK's `Error`, or this repo's slog `error`), which this
+projects out so the log panel can show it without every call site inlining the cause into
+its message text.
 
 Query parameters:
 
