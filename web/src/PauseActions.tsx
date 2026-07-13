@@ -37,6 +37,18 @@ type ActionState =
   // confirmation step — it acts immediately).
   | { status: 'confirming-abort' }
   | { status: 'sending'; verb: 'resume' | 'abort' }
+  // sent: the signal was accepted, but the pause is still showing because the
+  // live pause state (SSE, re-polled every ~2s server-side and only pushed on
+  // change) has not yet observed the workflow act on it. The card holds a
+  // "Resuming…/Aborting…" transitional state through that gap so the operator
+  // sees their action took, rather than the buttons snapping back to idle while
+  // the card lingers. It resets when the pause actually resolves: the parent
+  // stops rendering this component (isPaused → false), unmounting it — and since
+  // the workflow passes through a not-paused state while acting on the signal
+  // (re-driving tapes / re-reading inventory takes well over one poll interval),
+  // that unmount reliably clears this flag before any follow-on pause remounts a
+  // fresh card.
+  | { status: 'sent'; verb: 'resume' | 'abort' }
   | { status: 'error'; verb: 'resume' | 'abort'; error: string }
 
 // pauseKindLabel renders a pause Kind ("eject" | "write-failure" | "burn")
@@ -67,13 +79,18 @@ function pauseKindLabel(kind: string): string {
 // nothing, since a run genuinely awaiting an operator must never look identical
 // to a healthy, unpaused run.
 //
-// It intentionally does not re-fetch or hold its own copy of the run's
-// state: RunDetail.tsx (its only caller) already receives live pause state
-// over the SSE stream (GET /api/events/runs/{runID}) — the poll loop behind
-// that stream compares CurrentPause on every tick (pkg/runsapi/events.go),
-// so a resume/abort this component sends shows up as a fresh "update" event
-// within one poll interval, same as any other state change, without a
-// manual refresh or a second fetch call here.
+// It does not re-fetch the run's state or decide on its own when the pause
+// clears — whether the card shows at all is driven by the live pause prop
+// RunDetail.tsx feeds it from the SSE stream (GET /api/events/runs/{runID}),
+// whose server-side poll loop compares CurrentPause every ~2s and pushes an
+// "update" only on change (pkg/runsapi/events.go). So a resume/abort clears
+// the card only once that live state observes the workflow act on the signal —
+// up to a poll interval later, plus however long the signal takes to process
+// (longer for abort, which must reach the run's terminal state). To keep that
+// gap from reading as "nothing happened", the component holds a transient
+// "sent" flag after a successful signal and shows a "Resuming…/Aborting…" line
+// in place of the buttons until the live state resolves the pause and this card
+// unmounts.
 function PauseActions({ runId, pause }: PauseActionsProps) {
   const [actionState, setActionState] = useState<ActionState>({ status: 'idle' })
 
@@ -108,7 +125,10 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
 
     try {
       await apiFetch(`/api/runs/${encodeURIComponent(runId)}/${verb}`, { method: 'POST' })
-      setActionState({ status: 'idle' })
+      // Hold a 'sent' state (not 'idle') so the card shows a transitional
+      // "Resuming…/Aborting…" until the live pause state catches up and the
+      // parent unmounts this card — see the ActionState.sent comment.
+      setActionState({ status: 'sent', verb })
     } catch (error) {
       const message = error instanceof ApiError ? error.message : describeNetworkError(error)
       setActionState({ status: 'error', verb, error: message })
@@ -117,7 +137,9 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
 
   // The Abort flow (confirm → send → error) drives the modal; a resume failure
   // shows inline in the box below the buttons instead, since Resume has no modal
-  // of its own to carry it.
+  // of its own to carry it. 'sent' is deliberately NOT part of abortActive: once
+  // the abort signal is accepted the modal closes and the card itself shows the
+  // "Aborting…" transitional state.
   const abortActive =
     actionState.status === 'confirming-abort' ||
     (actionState.status === 'sending' && actionState.verb === 'abort') ||
@@ -125,6 +147,10 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
   const abortSending = actionState.status === 'sending' && actionState.verb === 'abort'
   const abortError = actionState.status === 'error' && actionState.verb === 'abort' ? actionState.error : undefined
   const resumeError = actionState.status === 'error' && actionState.verb === 'resume' ? actionState.error : undefined
+
+  // Once a signal has been accepted, the card shows a transitional line in place
+  // of the action buttons until the live state resolves the pause.
+  const sentVerb = actionState.status === 'sent' ? actionState.verb : null
 
   return (
     <div role="status" className="rounded-xl border border-amber-line bg-amber-bg px-5 py-[18px]">
@@ -157,27 +183,34 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
         {pause.errorSummary ? <p><span className="font-semibold">Reason:</span> {pause.errorSummary}</p> : null}
       </div>
 
-      <div className="mt-3.5 flex gap-2.5">
-        <button
-          type="button"
-          onClick={() => void performAction('resume')}
-          disabled={sending}
-          className="rounded-lg bg-text px-4 py-2 text-[12.5px] font-semibold text-bg transition-all enabled:cursor-pointer enabled:hover:opacity-[0.88] enabled:hover:shadow-[0_4px_12px_rgba(0,0,0,0.15)] enabled:active:translate-y-px enabled:active:opacity-[0.82] enabled:active:shadow-none disabled:opacity-50"
-        >
-          {actionState.status === 'sending' && actionState.verb === 'resume' ? 'Resuming…' : 'Resume'}
-        </button>
-
-        {pause.canAbort ? (
+      {sentVerb ? (
+        <div className="mt-3.5 flex items-center gap-2 text-[12.5px] text-text-dim">
+          <span aria-hidden="true" className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-[1.5px] border-border-strong border-t-transparent" />
+          {sentVerb === 'resume' ? 'Resuming — waiting for the run to continue…' : 'Aborting — ending the run…'}
+        </div>
+      ) : (
+        <div className="mt-3.5 flex gap-2.5">
           <button
             type="button"
-            onClick={() => setActionState({ status: 'confirming-abort' })}
+            onClick={() => void performAction('resume')}
             disabled={sending}
-            className="rounded-lg border-[1.5px] border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-all enabled:cursor-pointer enabled:hover:border-red enabled:hover:bg-red-bg enabled:hover:text-red enabled:active:translate-y-px enabled:active:bg-red-bg disabled:opacity-50"
+            className="rounded-lg bg-text px-4 py-2 text-[12.5px] font-semibold text-bg transition-all enabled:cursor-pointer enabled:hover:opacity-[0.88] enabled:hover:shadow-[0_4px_12px_rgba(0,0,0,0.15)] enabled:active:translate-y-px enabled:active:opacity-[0.82] enabled:active:shadow-none disabled:opacity-50"
           >
-            Abort
+            {actionState.status === 'sending' && actionState.verb === 'resume' ? 'Resuming…' : 'Resume'}
           </button>
-        ) : null}
-      </div>
+
+          {pause.canAbort ? (
+            <button
+              type="button"
+              onClick={() => setActionState({ status: 'confirming-abort' })}
+              disabled={sending}
+              className="rounded-lg border-[1.5px] border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium text-text transition-all enabled:cursor-pointer enabled:hover:border-red enabled:hover:bg-red-bg enabled:hover:text-red enabled:active:translate-y-px enabled:active:bg-red-bg disabled:opacity-50"
+            >
+              Abort
+            </button>
+          ) : null}
+        </div>
+      )}
 
       {resumeError ? (
         <div role="alert" className="mt-3.5 rounded-lg border border-red-line bg-red-bg p-2.5 text-[12px] text-red">

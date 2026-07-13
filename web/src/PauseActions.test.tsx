@@ -97,6 +97,13 @@ describe('PauseActions', () => {
     // Resume has no confirmation step — no native dialog, no modal.
     expect(confirmMock).not.toHaveBeenCalled()
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+
+    // The card holds a transitional state (the buttons are replaced) until the
+    // live pause state clears it — it must not snap back to the idle buttons.
+    await waitFor(() => {
+      expect(screen.getByText(/resuming — waiting for the run to continue/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument()
   })
 
   it('opens a modal to confirm abort — not a native dialog — and does not call the API until confirmed', () => {
@@ -143,6 +150,13 @@ describe('PauseActions', () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-1/abort', expect.objectContaining({ method: 'POST' }))
     })
+
+    // The modal closes and the card shows the transitional state until the run
+    // actually ends and the live state clears the card.
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    })
+    expect(screen.getByText(/aborting — ending the run/i)).toBeInTheDocument()
   })
 
   it('shows a resume failure inline in the pause box', async () => {
