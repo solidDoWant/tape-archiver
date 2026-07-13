@@ -65,6 +65,8 @@ describe('LoginPage', () => {
 
     const button = screen.getByRole('button', { name: /continue with sso/i })
     expect(button).toBeEnabled()
+    // Focused on load so Enter/Space signs in without reaching for the mouse.
+    expect(button).toHaveFocus()
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading')).not.toBeInTheDocument()

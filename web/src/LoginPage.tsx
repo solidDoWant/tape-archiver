@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { sanitizeRedirectPath } from './route'
 import { IconSpinner, IconWarning } from './icons'
 import Footer from './Footer'
@@ -43,6 +43,17 @@ function readLoginState(search: string): { state: LoginState; redirect: string }
 function LoginPage() {
   const { state: initialState, redirect } = readLoginState(window.location.search)
   const [redirecting, setRedirecting] = useState(false)
+
+  // Focus the primary sign-in button on load so the operator can sign in with a
+  // single Enter/Space without reaching for the mouse — this page's only real
+  // action. It is enabled on mount (redirecting is only ever set after a click),
+  // so it can take focus. A ref + effect rather than autoFocus, matching the
+  // app's own focus-management pattern (ConfirmModal).
+  const signInRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    signInRef.current?.focus()
+  }, [])
 
   const state: LoginState = redirecting ? 'redirecting' : initialState
   const isError = state === 'error-denied' || state === 'error-expired'
@@ -127,6 +138,7 @@ function LoginPage() {
         )}
 
         <button
+          ref={signInRef}
           type="button"
           onClick={signIn}
           disabled={state === 'redirecting'}
