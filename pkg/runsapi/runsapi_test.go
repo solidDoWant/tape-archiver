@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/runsubmit"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -184,6 +185,39 @@ func executionInfo(runID string, status enumspb.WorkflowExecutionStatus, start t
 	}
 
 	return info
+}
+
+func TestToRunSummaryDryRun(t *testing.T) {
+	start := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+
+	dryRunMemo := func(t *testing.T, dryRun bool) *commonpb.Memo {
+		t.Helper()
+
+		payload, err := converter.GetDefaultDataConverter().ToPayload(dryRun)
+		require.NoError(t, err)
+
+		return &commonpb.Memo{Fields: map[string]*commonpb.Payload{runsubmit.MemoKeyDryRun: payload}}
+	}
+
+	tests := []struct {
+		name string
+		memo *commonpb.Memo
+		want bool
+	}{
+		{name: "a true dry-run memo decodes to a dry-run", memo: dryRunMemo(t, true), want: true},
+		{name: "a false dry-run memo decodes to production", memo: dryRunMemo(t, false), want: false},
+		{name: "a run with no memo reads as production", memo: nil, want: false},
+		{name: "an empty memo reads as production", memo: &commonpb.Memo{}, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			info := executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, nil)
+			info.Memo = test.memo
+
+			assert.Equal(t, test.want, toRunSummary(info).DryRun)
+		})
+	}
 }
 
 func doJSON(t *testing.T, handler http.Handler, method, path string, body interface{}) *httptest.ResponseRecorder {

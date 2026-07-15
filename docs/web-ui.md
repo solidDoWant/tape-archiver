@@ -293,6 +293,12 @@ live detail page. A malformed or invalid config is rejected with the validation 
 and nothing is submitted; submitting while a run is already in progress is rejected
 with a conflict error rather than queuing or replacing it.
 
+A run submitted as a dry-run stays labelled as one everywhere it is later shown — a
+blue **DRY-RUN** pill sits next to its status on the dashboard's current/last-run card,
+in the runs table, and on the run's own detail-page header — so a dry-run is never
+mistaken for a production run when browsing history. The flag is recorded on the run in
+Temporal at submission, so it survives for as long as Temporal retains the run.
+
 ## Monitoring a run live
 
 A run's detail page (`/runs/{runID}`) is a phase rail on the left plus a detail pane on

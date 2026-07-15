@@ -22,6 +22,7 @@ import (
 	"sort"
 	"time"
 
+	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
@@ -105,6 +106,12 @@ type RunSummary struct {
 	Status     string     `json:"status"`
 	StartTime  time.Time  `json:"startTime"`
 	CloseTime  *time.Time `json:"closeTime,omitempty"`
+	// DryRun is true when the run was submitted as a dry-run (the mhvtl
+	// override, runsubmit.ApplyDryRun), read back from the run's Temporal memo
+	// (runsubmit.MemoKeyDryRun). False when the memo is absent — runs submitted
+	// before this memo existed simply read as production, which is the safe
+	// default for an unlabelled run.
+	DryRun bool `json:"dryRun"`
 }
 
 // RunsResponse is the GET /api/runs response body.
@@ -675,7 +682,7 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	run, err := runsubmit.Submit(ctx, h.temporalClient, cfg)
+	run, err := runsubmit.Submit(ctx, h.temporalClient, cfg, request.DryRun)
 	if err != nil {
 		writeError(w, statusForTemporalError(err), err)
 
@@ -1015,7 +1022,28 @@ func toRunSummary(execution *workflowpb.WorkflowExecutionInfo) RunSummary {
 		summary.CloseTime = &t
 	}
 
+	summary.DryRun = dryRunFromMemo(execution.GetMemo())
+
 	return summary
+}
+
+// dryRunFromMemo reads the dry-run flag from a run's Temporal memo
+// (runsubmit.MemoKeyDryRun). A missing memo field, or any decode failure,
+// reports false: an unlabelled or unreadable run is treated as production
+// rather than mislabelled as a dry-run, and old runs predating the memo simply
+// have no field.
+func dryRunFromMemo(memo *commonpb.Memo) bool {
+	payload, ok := memo.GetFields()[runsubmit.MemoKeyDryRun]
+	if !ok {
+		return false
+	}
+
+	var dryRun bool
+	if err := converter.GetDefaultDataConverter().FromPayload(payload, &dryRun); err != nil {
+		return false
+	}
+
+	return dryRun
 }
 
 // writeJSON encodes body as the JSON response with the given status code.

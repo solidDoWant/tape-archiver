@@ -151,15 +151,28 @@ type TemporalClient interface {
 // TemporalClient.
 var _ TemporalClient = client.Client(nil)
 
+// MemoKeyDryRun is the Temporal memo field recording whether a run was
+// submitted as a dry-run. A dry-run's mhvtl override (ApplyDryRun) rewrites the
+// config's library devices, but nothing else in the persisted run distinguishes
+// it from a production run — so this memo is the one durable, submit-time signal
+// that survives into Temporal visibility/history for both `tapectl` and the web
+// UI to read back (runsapi.toRunSummary decodes it). Memos ride along on every
+// ListWorkflowExecutions/DescribeWorkflowExecution result, so no search-attribute
+// registration is needed for display.
+const MemoKeyDryRun = "dryRun"
+
 // StartOptions returns the fixed Temporal StartWorkflowOptions every backup
 // run submission must use: the singleton workflow ID on the control task
 // queue, with a conflict policy that fails a second submission while one is
 // already running rather than queuing or replacing it (SPEC §4.2 — a run is
-// a singleton, one data worker on one storage host).
-func StartOptions() client.StartWorkflowOptions {
+// a singleton, one data worker on one storage host). dryRun records the
+// submitter's dry-run intent as a memo (MemoKeyDryRun) so run-viewing surfaces
+// can label it after the fact.
+func StartOptions(dryRun bool) client.StartWorkflowOptions {
 	return client.StartWorkflowOptions{
 		ID:        backup.WorkflowID,
 		TaskQueue: backup.TaskQueue,
+		Memo:      map[string]interface{}{MemoKeyDryRun: dryRun},
 		// Refuse to start a second run while one is already running, but allow a
 		// fresh run once the previous one has closed. WorkflowExecutionError-
 		// WhenAlreadyStarted makes ExecuteWorkflow return the conflict as an
@@ -171,11 +184,13 @@ func StartOptions() client.StartWorkflowOptions {
 }
 
 // Submit starts the backup workflow with cfg as its argument, under the
-// fixed singleton StartOptions. Any error — including a singleton conflict —
-// is translated via TranslateSubmitError into an operator-facing message
-// before being returned.
-func Submit(ctx context.Context, temporalClient TemporalClient, cfg *config.Config) (client.WorkflowRun, error) {
-	run, err := temporalClient.ExecuteWorkflow(ctx, StartOptions(), backup.WorkflowType, cfg)
+// fixed singleton StartOptions. dryRun records whether the submitter applied
+// the dry-run override (ApplyDryRun), recorded as a memo so run-viewing
+// surfaces can label the run afterwards. Any error — including a singleton
+// conflict — is translated via TranslateSubmitError into an operator-facing
+// message before being returned.
+func Submit(ctx context.Context, temporalClient TemporalClient, cfg *config.Config, dryRun bool) (client.WorkflowRun, error) {
+	run, err := temporalClient.ExecuteWorkflow(ctx, StartOptions(dryRun), backup.WorkflowType, cfg)
 	if err != nil {
 		return nil, TranslateSubmitError(err)
 	}

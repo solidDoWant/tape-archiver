@@ -1,4 +1,5 @@
 import { formatTimestamp, statusBadgeClass, type RunSummary } from './api'
+import DryRunBadge from './DryRunBadge'
 import { phaseLabel } from './phaseFormat'
 import { Link } from './router'
 import { runPath } from './route'
@@ -143,6 +144,7 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
           >
             {status}
           </span>
+          <DryRunBadge dryRun={activeRun.dryRun} />
           <span className="flex-1" />
           <Link to={runPath(activeRun.runId)} className="text-[12px] font-medium text-blue hover:opacity-60">
             Open run →
@@ -197,7 +199,7 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
           {summary.runId}
         </Link>
         : <span className={`rounded px-1.5 py-0.5 ${statusBadgeClass(summary.status)}`}>{summary.status}</span>{' '}
-        · started {formatTimestamp(summary.startTime)}
+        {summary.dryRun ? <><DryRunBadge dryRun={summary.dryRun} /> </> : null}· started {formatTimestamp(summary.startTime)}
         {summary.closeTime ? <> · closed {formatTimestamp(summary.closeTime)}</> : null}
       </div>
     </div>

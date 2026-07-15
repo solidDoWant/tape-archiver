@@ -23,6 +23,7 @@ function run(overrides: Partial<RunSummary> & { runId: string }): RunSummary {
     status: 'Completed',
     startTime: '2026-07-01T00:00:00Z',
     closeTime: '2026-07-01T02:00:00Z',
+    dryRun: false,
     ...overrides,
   }
 }
@@ -57,6 +58,18 @@ describe('RunsTable', () => {
     // No live phase supplied for this row (it isn't the active run).
     expect(within(row).getByText('—')).toBeInTheDocument()
     expect(row).toHaveAttribute('href', '/runs/run-1')
+  })
+
+  it('marks a dry-run row and leaves production rows unmarked', () => {
+    renderTable({
+      runs: [
+        run({ runId: 'run-dry', dryRun: true }),
+        run({ runId: 'run-prod', dryRun: false }),
+      ],
+    })
+
+    expect(within(screen.getByRole('link', { name: 'run-dry' })).getByText('DRY-RUN')).toBeInTheDocument()
+    expect(within(screen.getByRole('link', { name: 'run-prod' })).queryByText('DRY-RUN')).not.toBeInTheDocument()
   })
 
   it('shows "Running" as the duration and the live last-completed-phase for the currently active run', () => {

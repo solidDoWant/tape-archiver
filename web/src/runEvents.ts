@@ -11,6 +11,9 @@ export interface RunEventDetail {
   status: string
   startTime: string
   closeTime?: string
+  // dryRun mirrors RunSummary.dryRun (this detail embeds the summary
+  // server-side): true when the run was submitted as a dry-run.
+  dryRun: boolean
   lastCompletedPhase: string
   // currentPause is which operator-in-the-loop pause (if any) is blocking
   // this run right now (backup.CurrentPauseQuery via pkg/runsapi). The SSE

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { formatDuration, formatTimestamp, statusBadgeClass, type RunSummary } from './api'
+import DryRunBadge from './DryRunBadge'
 import { phaseLabel } from './phaseFormat'
 import { Link } from './router'
 import { runPath } from './route'
@@ -104,12 +105,13 @@ function RunsTable({ loadState, error, runs, liveRunId, liveLastCompletedPhase }
                     <span className="font-mono text-[11px] whitespace-nowrap text-text-dim">
                       {run.status === 'Running' ? 'Running' : formatDuration(run.startTime, run.closeTime)}
                     </span>
-                    <span>
+                    <span className="flex flex-wrap items-center gap-1.5">
                       <span
                         className={`rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold tracking-[0.03em] ${statusBadgeClass(run.status)}`}
                       >
                         {run.status}
                       </span>
+                      <DryRunBadge dryRun={run.dryRun} />
                     </span>
                     <span className="font-mono text-[11px] text-text-dim">{lastPhase ? phaseLabel(lastPhase) : '—'}</span>
                   </Link>

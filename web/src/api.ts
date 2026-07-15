@@ -145,6 +145,10 @@ export interface RunSummary {
   status: string
   startTime: string
   closeTime?: string
+  // dryRun is true when the run was submitted as a dry-run (the mhvtl override).
+  // Read back from the run's Temporal memo (pkg/runsapi RunSummary.DryRun); a run
+  // predating the memo, or a production run, is false.
+  dryRun: boolean
 }
 
 export interface RunsResponse {

@@ -198,7 +198,7 @@ func TestSubmit(t *testing.T) {
 		cfg := parseConfig(t, validConfigJSON)
 		fake := &fakeSubmitClient{err: errors.New("connection refused")}
 
-		_, err := Submit(t.Context(), fake, cfg)
+		_, err := Submit(t.Context(), fake, cfg, false)
 		require.Error(t, err)
 
 		require.True(t, fake.captured)
@@ -207,12 +207,27 @@ func TestSubmit(t *testing.T) {
 		assert.True(t, fake.options.WorkflowExecutionErrorWhenAlreadyStarted)
 	})
 
+	t.Run("records the dry-run flag as a memo", func(t *testing.T) {
+		cfg := parseConfig(t, validConfigJSON)
+
+		for _, dryRun := range []bool{true, false} {
+			fake := &fakeSubmitClient{err: errors.New("connection refused")}
+
+			_, err := Submit(t.Context(), fake, cfg, dryRun)
+			require.Error(t, err)
+
+			require.True(t, fake.captured)
+			assert.Equal(t, dryRun, fake.options.Memo[MemoKeyDryRun],
+				"memo %q should carry the submitted dry-run value", MemoKeyDryRun)
+		}
+	})
+
 	t.Run("a singleton conflict is translated, not returned raw", func(t *testing.T) {
 		cfg := parseConfig(t, validConfigJSON)
 		started := serviceerror.NewWorkflowExecutionAlreadyStarted("already started", "req-1", "run-abc")
 		fake := &fakeSubmitClient{err: started}
 
-		_, err := Submit(t.Context(), fake, cfg)
+		_, err := Submit(t.Context(), fake, cfg, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "already in progress")
 

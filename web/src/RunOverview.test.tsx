@@ -52,6 +52,7 @@ const runningDetail: RunEventDetail = {
   runId: 'run-1',
   status: 'Running',
   startTime: '2026-07-09T12:00:00Z',
+  dryRun: false,
   lastCompletedPhase: 'Prepare',
   currentPause: { kind: '' },
 }

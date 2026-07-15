@@ -17,6 +17,7 @@ function run(overrides: Partial<RunSummary> & { runId: string }): RunSummary {
     workflowId: 'backup',
     status: 'Running',
     startTime: '2026-07-01T00:00:00Z',
+    dryRun: false,
     ...overrides,
   }
 }
@@ -85,6 +86,7 @@ describe('CurrentRunCard', () => {
           runId: 'run-live',
           status: 'Running',
           startTime: '2026-07-01T00:00:00Z',
+          dryRun: false,
           lastCompletedPhase: 'Write',
           currentPause: { kind: '' },
         },
@@ -108,6 +110,7 @@ describe('CurrentRunCard', () => {
           runId: 'run-live',
           status: 'Running',
           startTime: '2026-07-01T00:00:00Z',
+          dryRun: false,
           lastCompletedPhase: 'Load',
           currentPause: {
             kind: 'write-failure',

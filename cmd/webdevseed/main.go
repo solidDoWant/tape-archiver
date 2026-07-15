@@ -234,7 +234,9 @@ func submitWithRetry(ctx context.Context, temporalClient runsubmit.TemporalClien
 	var lastErr error
 
 	for attempt := range maxSubmitAttempts {
-		submittedRun, err := runsubmit.Submit(ctx, temporalClient, cfg)
+		// The seeder only ever submits dry-runs (ApplyDryRun above), so the
+		// memo is always true.
+		submittedRun, err := runsubmit.Submit(ctx, temporalClient, cfg, true)
 		if err == nil {
 			return submittedRun, nil
 		}

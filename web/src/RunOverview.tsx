@@ -1,6 +1,7 @@
 import CancelRunButton from './CancelRunButton'
 import ConfigSummary from './ConfigSummary'
 import DriveMetricsPanel from './DriveMetricsPanel'
+import DryRunBadge from './DryRunBadge'
 import RestartRunButton from './RestartRunButton'
 import PauseActions from './PauseActions'
 import type { PhaseInfo, RunEventDetail } from './RunDetail'
@@ -87,9 +88,10 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
     <div className="flex max-w-[880px] flex-col gap-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="mb-1 flex items-baseline gap-2.5">
+          <div className="mb-1 flex flex-wrap items-center gap-2.5">
             <span className={`font-mono text-[11px] tracking-[0.04em] ${hero.badgeClass}`}>{hero.label}</span>
             <span className="font-mono text-[11px] text-text-faint">{formatDuration(detail.startTime, detail.closeTime)}</span>
+            <DryRunBadge dryRun={detail.dryRun} />
           </div>
           <h2 className="text-[27px] font-semibold tracking-tight">{hero.title}</h2>
           {temporalUrl || reportUrl ? (

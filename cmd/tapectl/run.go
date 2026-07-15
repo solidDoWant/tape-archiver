@@ -56,7 +56,7 @@ func submitRun(ctx context.Context, args []string, out io.Writer) error {
 	}
 	defer shutdown()
 
-	run, err := runsubmit.Submit(ctx, temporalClient, cfg)
+	run, err := runsubmit.Submit(ctx, temporalClient, cfg, options.dryRun)
 	if err != nil {
 		return err
 	}
