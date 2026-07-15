@@ -537,7 +537,7 @@ describe('ConfigPage', () => {
       delivery: { webhookUrl: '***redacted***' },
     }
 
-    stubApi({ '/api/runs/old-run/config': { status: 200, body: { runId: 'old-run', config: priorConfig } } })
+    stubApi({ '/api/runs/old-run/config': { status: 200, body: { runId: 'old-run', config: priorConfig, dryRun: false } } })
 
     render(
       <RouterProvider>
@@ -555,6 +555,36 @@ describe('ConfigPage', () => {
 
     // ...and the redacted placeholder is never loaded into any field.
     expect(screen.queryByDisplayValue('***redacted***')).not.toBeInTheDocument()
+
+    // A restart of a production run leaves Dry-run off (its default).
+    expect(screen.getByLabelText(/dry-run/i)).not.toBeChecked()
+  })
+
+  it('carries the dry-run flag over when restarting a dry-run', async () => {
+    const priorConfig = {
+      sources: [{ zfsPath: { name: 'bulk-pool-01/archive@snap' }, compression: true }],
+      copies: 1,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [1], tapeCapacityBytes: 2500000000000 },
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1073741824 },
+      encryption: { recipients: ['age1restarttestrecipient00000000000000000000000000000000000'], identity: '***redacted***' },
+      delivery: {},
+    }
+
+    stubApi({ '/api/runs/dry-old/config': { status: 200, body: { runId: 'dry-old', config: priorConfig, dryRun: true } } })
+
+    render(
+      <RouterProvider>
+        <ConfigPage restartFromRunId="dry-old" />
+      </RouterProvider>,
+    )
+
+    // The config loads, and because the source run was a dry-run the toggle is
+    // re-selected (rather than defaulting a re-run of a dry-run to production)...
+    expect(await screen.findByDisplayValue('bulk-pool-01/archive@snap')).toBeInTheDocument()
+    expect(screen.getByLabelText(/dry-run/i)).toBeChecked()
+
+    // ...and the notice says so.
+    expect(screen.getByText(/this run was a dry-run/i)).toBeInTheDocument()
   })
 
   it('surfaces an error but still lets the operator build a run when the restart config can’t be loaded', async () => {

@@ -99,6 +99,11 @@ type runHistory struct {
 	// configuration originally submitted for this run.
 	StartInput *commonpb.Payloads
 	StartTime  time.Time
+	// StartMemo is WorkflowExecutionStarted's Memo: the submit-time metadata
+	// runsubmit.Submit attached (currently the dry-run flag, MemoKeyDryRun).
+	// Read back so a restart preload can faithfully carry the dry-run intent,
+	// which the config Input alone does not record.
+	StartMemo *commonpb.Memo
 
 	// Activities are every activity this run ever scheduled, in schedule
 	// order (append order during the history walk, which is monotonic in
@@ -168,6 +173,7 @@ func applyHistoryEvent(history *runHistory, indexByScheduled map[int64]int, even
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED:
 		attrs := event.GetWorkflowExecutionStartedEventAttributes()
 		history.StartInput = attrs.GetInput()
+		history.StartMemo = attrs.GetMemo()
 		history.StartTime = eventTime
 
 	case enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:

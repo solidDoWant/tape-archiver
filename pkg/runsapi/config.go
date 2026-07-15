@@ -21,7 +21,13 @@ const redactedSecret = "***redacted***"
 
 // RunConfigResponse is the GET /api/runs/{runID}/config response body.
 type RunConfigResponse struct {
-	RunID  string        `json:"runId"`
+	RunID string `json:"runId"`
+	// DryRun is whether this run was submitted as a dry-run (from its Temporal
+	// memo, runsubmit.MemoKeyDryRun), so a restart preload can re-select the
+	// dry-run toggle rather than silently defaulting a re-run of a dry-run to
+	// production. The Config below never records this on its own — a dry-run's
+	// only config-level trace is the mhvtl device paths ApplyDryRun substituted.
+	DryRun bool          `json:"dryRun"`
 	Config config.Config `json:"config"`
 }
 
@@ -66,7 +72,11 @@ func (h *handler) getRunConfig(w http.ResponseWriter, r *http.Request) {
 
 	redactConfigSecrets(&cfg)
 
-	writeJSON(w, http.StatusOK, RunConfigResponse{RunID: runID, Config: cfg})
+	writeJSON(w, http.StatusOK, RunConfigResponse{
+		RunID:  runID,
+		DryRun: dryRunFromMemo(history.StartMemo),
+		Config: cfg,
+	})
 }
 
 // redactConfigSecrets strips credential-bearing fields before a submitted

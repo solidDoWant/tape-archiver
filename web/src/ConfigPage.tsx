@@ -149,7 +149,9 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
 
     let cancelled = false
 
-    apiFetch<{ runId: string; config: RunConfig }>(`/api/runs/${encodeURIComponent(restartFromRunId)}/config`)
+    apiFetch<{ runId: string; config: RunConfig; dryRun: boolean }>(
+      `/api/runs/${encodeURIComponent(restartFromRunId)}/config`,
+    )
       .then((response) => {
         if (cancelled) {
           return
@@ -166,7 +168,16 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
 
         setForm(configToFormState(sanitized))
 
+        // Carry the dry-run intent over: a restart of a dry-run should re-run as
+        // a dry-run, not silently default to a production run against real tape
+        // (the config alone never records this — dry-run is a submit-time flag).
+        setDryRun(response.dryRun)
+
         const notices = [`Loaded the configuration from run ${restartFromRunId}.`]
+
+        if (response.dryRun) {
+          notices.push('This run was a dry-run, so Dry-run stays on — submitting targets the mhvtl virtual library, not real hardware.')
+        }
 
         if (identityRedacted) {
           notices.push(

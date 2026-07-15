@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/runsubmit"
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
@@ -116,6 +117,28 @@ func (b *eventBuilder) started(t *testing.T, input interface{}) {
 		Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{
 			WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{
 				Input: mustEncode(t, input),
+			},
+		},
+	})
+}
+
+// startedDryRun appends a WorkflowExecutionStarted event carrying both the
+// config Input and the dry-run memo (runsubmit.MemoKeyDryRun), the way
+// runsubmit.Submit records a dry-run submission.
+func (b *eventBuilder) startedDryRun(t *testing.T, input interface{}, dryRun bool) {
+	t.Helper()
+
+	memoPayload, err := converter.GetDefaultDataConverter().ToPayload(dryRun)
+	require.NoError(t, err)
+
+	b.events = append(b.events, &historypb.HistoryEvent{
+		EventId:   b.id(),
+		EventTime: timestamppb.New(b.tick()),
+		EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED,
+		Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{
+			WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{
+				Input: mustEncode(t, input),
+				Memo:  &commonpb.Memo{Fields: map[string]*commonpb.Payload{runsubmit.MemoKeyDryRun: memoPayload}},
 			},
 		},
 	})
@@ -813,6 +836,28 @@ func TestGetRunConfigHandler(t *testing.T) {
 	assert.Equal(t, redactedSecret, body.Config.Encryption.Identity, "the age private identity must never leave the server")
 	assert.Equal(t, redactedSecret, body.Config.Delivery.WebhookURL,
 		"the Discord webhook URL embeds its auth token and must never leave the server")
+}
+
+func TestGetRunConfigHandlerDryRun(t *testing.T) {
+	// The config endpoint surfaces the run's dry-run memo so a restart preload
+	// can re-select the dry-run toggle rather than defaulting a re-run of a
+	// dry-run to production.
+	for _, dryRun := range []bool{true, false} {
+		builder := newEventBuilder()
+		builder.startedDryRun(t, testConfig, dryRun)
+
+		fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: builder.events}
+		}}
+		handler := newMux(newHandler(fake, emptyEnv))
+
+		recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/config", nil)
+		require.Equal(t, http.StatusOK, recorder.Code)
+
+		var body RunConfigResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+		assert.Equal(t, dryRun, body.DryRun)
+	}
 }
 
 func TestGetRunTapesHandler(t *testing.T) {
