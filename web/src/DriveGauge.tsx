@@ -45,7 +45,7 @@ function ringColor(belowFloor?: boolean, tapeAlertFlagCount?: number): string {
 
 // DriveGauge is the reusable per-drive circular write-rate gauge
 // (DESIGN_ANALYSIS.md §3's "per-drive circular gauge with health label +
-// barcode + live rate '142 MB/s · floor 50 · 0 rehit'"), issue #275. It is
+// barcode + live rate '142 MB/s · floor 50 · 0 reposition'"), issue #275. It is
 // purely presentational — a container (DriveMetricsPanel) owns fetching and
 // polling and passes down whichever status/reading applies; DriveGauge
 // itself renders any of the four states from props alone, which is what
@@ -119,7 +119,7 @@ function DriveGauge({
             {floorKnown ? <span className="text-text-faint">floor {floorMBps}</span> : null}
             {typeof repositions === 'number' ? (
               <span className="text-text-faint">
-                {repositions} rehit{repositions === 1 ? '' : 's'}
+                {repositions} reposition{repositions === 1 ? '' : 's'}
               </span>
             ) : null}
           </div>

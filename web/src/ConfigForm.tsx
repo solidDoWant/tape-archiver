@@ -197,7 +197,7 @@ function SlotGridEditor({
       {label}
       <div className="flex flex-wrap gap-1.5" role="group" aria-label="Blank storage slots">
         {Array.from({ length: slotCount }, (_, index) => index + 1).map((slot) => {
-          const reservedFor = cleaning.has(slot) ? 'cleaning' : ioStation.has(slot) ? 'I/O station' : null
+          const reservedFor = cleaning.has(slot) ? 'cleaning' : ioStation.has(slot) ? 'I/O-station' : null
 
           if (reservedFor !== null) {
             return (
@@ -309,7 +309,7 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                   aria-label={`Remove source ${index + 1}`}
                   onClick={() => removeSource(source.id)}
                   disabled={form.sources.length === 1}
-                  className="h-7 w-7 flex-none rounded-md border border-border text-text-faint transition-colors hover:border-red-line hover:bg-red-bg hover:text-red disabled:opacity-40"
+                  className="h-7 w-7 flex-none rounded-md border border-border text-text-faint transition-colors hover:border-red-line hover:bg-red-bg hover:text-red disabled:opacity-50"
                 >
                   ×
                 </button>

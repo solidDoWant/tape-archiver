@@ -316,7 +316,7 @@ describe('RunOverview', () => {
     // VictoriaMetrics-backed /metrics/drives endpoint — no new backend.
     expect(await screen.findByText('142 MB/s')).toBeInTheDocument()
     expect(screen.getByText('floor 50')).toBeInTheDocument()
-    expect(screen.getByText(/0 rehits/)).toBeInTheDocument()
+    expect(screen.getByText(/0 repositions/)).toBeInTheDocument()
   })
 
   it('degrades the gauges to the unavailable state when VictoriaMetrics is unset, keeping the overview intact (AC2)', async () => {

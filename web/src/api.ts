@@ -158,16 +158,19 @@ export interface RunsResponse {
 export function statusBadgeClass(status: string): string {
   switch (status) {
     case 'Running':
-      return 'bg-blue-100 text-blue-900 dark:bg-blue-950 dark:text-blue-100'
+      return 'bg-blue-bg text-blue'
     case 'Completed':
-      return 'bg-green-100 text-green-900 dark:bg-green-950 dark:text-green-100'
+      return 'bg-green-bg text-green'
     case 'Failed':
     case 'Terminated':
     case 'TimedOut':
-      return 'bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-100'
+      return 'bg-red-bg text-red'
+    // Canceled shares the neutral tone runStatusView (runHeader.ts) gives it, so
+    // a canceled run reads the same in the dashboard table/card as in its own
+    // run-page header rather than one amber and one grey.
     case 'Canceled':
-      return 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-100'
+      return 'bg-inset text-text-dim'
     default:
-      return 'bg-slate-100 text-slate-900 dark:bg-slate-800 dark:text-slate-100'
+      return 'bg-inset text-text-dim'
   }
 }

@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, type RunSummary, type RunsResponse } from './api'
 
+// findActiveRun returns the singleton backup workflow's currently-executing
+// run, if any — the one summary in Temporal's "Running" status (SPEC §4.2
+// allows at most one run at a time). Shared by useActiveRun (the sidebar) and
+// Dashboard so the two can never drift on what "the active run" means.
+export function findActiveRun(runs: RunSummary[]): RunSummary | null {
+  return runs.find((run) => run.status === 'Running') ?? null
+}
+
 // ActiveRunState is whether the singleton backup workflow (SPEC §4.2 — at
 // most one run at a time) currently has an execution in Temporal's
 // "Running" status, for the sidebar's "Start new run" nav item.
@@ -33,8 +41,7 @@ export function useActiveRun(): ActiveRunState {
           return
         }
 
-        const activeRun = response.runs.find((run) => run.status === 'Running') ?? null
-        setState({ status: 'loaded', activeRun })
+        setState({ status: 'loaded', activeRun: findActiveRun(response.runs) })
       } catch {
         if (cancelled) {
           return

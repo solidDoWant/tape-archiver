@@ -114,7 +114,7 @@ function ConfirmModal({
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={bodyId}
-        className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-2xl"
+        className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-elevated"
       >
         <h2 id={titleId} className="text-[17px] font-semibold tracking-tight text-text">
           {title}

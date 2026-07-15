@@ -59,7 +59,7 @@ function CancelRunButton({ runId }: CancelRunButtonProps) {
       {open ? (
         <ConfirmModal
           title="Cancel this run?"
-          confirmLabel={state.status === 'sending' ? 'Cancelling…' : 'Yes, cancel run'}
+          confirmLabel={state.status === 'sending' ? 'Canceling…' : 'Yes, cancel run'}
           dismissLabel="Keep running"
           tone="danger"
           sending={state.status === 'sending'}
@@ -68,7 +68,7 @@ function CancelRunButton({ runId }: CancelRunButtonProps) {
           onDismiss={() => setState({ status: 'idle' })}
         >
           The run stops as soon as possible, tears down any tape mounts, and closes in a defined, reported state
-          with no further tapes written. This can’t be undone.
+          with no further tapes written. This can't be undone.
         </ConfirmModal>
       ) : null}
     </div>

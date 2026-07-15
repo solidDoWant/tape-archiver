@@ -286,7 +286,7 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
           onConfirm={() => void performAction('abort')}
           onDismiss={() => setActionState({ status: 'idle' })}
         >
-          The run ends in a defined, reported state with no further tapes written or discs burned. This can’t be
+          The run ends in a defined, reported state with no further tapes written or discs burned. This can't be
           undone.
         </ConfirmModal>
       ) : null}

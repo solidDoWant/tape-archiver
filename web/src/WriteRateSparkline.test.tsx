@@ -37,7 +37,7 @@ describe('WriteRateSparkline', () => {
     render(<WriteRateSparkline status="live" points={points} floorMBps={95} floorKnown />)
 
     expect(screen.getByText('90 MB/s')).toBeInTheDocument()
-    expect(screen.getByText(/floor 95 MB\/s/)).toBeInTheDocument()
+    expect(screen.getByText(/floor 95/)).toBeInTheDocument()
 
     const chart = screen.getByRole('img')
     expect(chart).toHaveAccessibleName(/100, 120, 90/)

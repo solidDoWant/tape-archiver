@@ -43,7 +43,7 @@ describe('DriveGauge', () => {
 
     expect(screen.getByText('143 MB/s')).toBeInTheDocument()
     expect(screen.getByText(/floor 50/)).toBeInTheDocument()
-    expect(screen.getByText(/2 rehits/)).toBeInTheDocument()
+    expect(screen.getByText(/2 repositions/)).toBeInTheDocument()
     expect(screen.queryByText(/below speed-matching floor/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/tapealert/i)).not.toBeInTheDocument()
   })
@@ -72,11 +72,11 @@ describe('DriveGauge', () => {
     expect(screen.getByText(/2 tapealert flags/i)).toBeInTheDocument()
   })
 
-  it('renders one rehit singular correctly', () => {
+  it('renders one reposition singular correctly', () => {
     render(
       <DriveGauge driveIndex={0} barcode="TA0001L6" status="live" throughputMBps={80} repositions={1} />,
     )
 
-    expect(screen.getByText(/1 rehit\b/)).toBeInTheDocument()
+    expect(screen.getByText(/1 reposition\b/)).toBeInTheDocument()
   })
 })

@@ -93,14 +93,14 @@ function LibraryCard() {
   }, [])
 
   return (
-    <div className="rounded-xl border border-border bg-surface p-4.5 shadow-card">
+    <div className="rounded-xl border border-border bg-surface p-5 shadow-card">
       <div className="mb-3.5 text-[12.5px] font-semibold">Library</div>
 
       <div className="mb-3.5 flex items-start gap-2 rounded-lg border border-dashed border-border-strong bg-surface-2 p-2.5 text-[11.5px] text-text-faint">
         <IconWarning className="mt-0.5 h-3.5 w-3.5 flex-none" />
         <span>
           Live drive and slot occupancy is not available — no SCSI element-status source is wired up yet. The
-          summary below is reconstructed from recent run history, not the library&apos;s current physical state.
+          summary below is reconstructed from recent run history, not the library's current physical state.
         </span>
       </div>
 

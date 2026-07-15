@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, ApiError, describeNetworkError } from './api'
+import { sourceLabel } from './sourceLabel'
 
 // Config mirrors internal/config.Config's JSON shape as returned by GET
 // /api/runs/{runID}/config (pkg/runsapi/config.go) — secrets
@@ -32,28 +33,6 @@ type ConfigState =
   | { status: 'unavailable' }
   | { status: 'error'; message: string }
   | { status: 'ready'; config: RunConfig }
-
-// sourceLabel renders one config source's identity the way DESIGN_ANALYSIS.md
-// §2.B's Sources list does: the source's own label when set, else a
-// derived name from whichever of ZFSPath/K8s it carries (internal/config.Source:
-// exactly one of the two is ever set).
-function sourceLabel(source: RunConfigSource): string {
-  if (source.label) {
-    return source.label
-  }
-
-  if (source.zfsPath) {
-    return source.zfsPath.name
-  }
-
-  if (source.k8s) {
-    const selector = source.k8s.name ?? source.k8s.labelSelector ?? ''
-
-    return `k8s · ${source.k8s.kind}/${selector} (${source.k8s.namespace})`
-  }
-
-  return 'source'
-}
 
 // compressionLabel mirrors internal/config.Source.Compression's documented
 // default: unset (undefined) means compression is ON, so only an explicit
@@ -184,7 +163,7 @@ function ConfigSummary({ runId, logicalTapes, copies }: ConfigSummaryProps) {
           <ul className="flex flex-col divide-y divide-border">
             {config.sources.map((source, index) => (
               <li key={index} className="flex items-center gap-3 py-2 text-[12px]">
-                <span className="min-w-0 flex-1 truncate font-mono">{sourceLabel(source)}</span>
+                <span className="min-w-0 flex-1 truncate font-mono">{sourceLabel(source, { detail: true })}</span>
                 <span
                   className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${
                     compressionLabel(source) === 'zstd' ? 'bg-green-bg text-green' : 'bg-inset text-text-faint'

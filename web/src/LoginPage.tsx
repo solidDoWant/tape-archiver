@@ -87,7 +87,7 @@ function LoginPage() {
       "Your account authenticated but isn't authorized for this archive. Ask the owner to grant access, then try again."
   } else if (state === 'error-expired') {
     errTitle = 'Session expired'
-    errBody = 'Your previous session timed out for security. Sign in again to pick up where you left off.'
+    errBody = 'Your session timed out. Sign in again to continue.'
   }
 
   let buttonLabel = 'Continue with SSO'

@@ -43,7 +43,7 @@ function resultBadgeClass(result: string): string {
     case 'failed':
       return 'bg-red-bg text-red border-red-line'
     default:
-      return 'bg-blue-bg text-blue border-blue-bg'
+      return 'bg-blue-bg text-blue border-blue/30'
   }
 }
 
@@ -150,7 +150,7 @@ function TapesSection({ runId, terminal }: TapesSectionProps) {
           {tape.writeHealth?.measured && tape.writeHealth.belowFloor ? (
             <span className="inline-flex items-center gap-1 rounded-full border border-amber-line bg-amber-bg px-2 py-0.5 text-[11px] font-medium text-amber">
               <IconWarning className="h-3 w-3" />
-              Below floor
+              below floor
             </span>
           ) : null}
 

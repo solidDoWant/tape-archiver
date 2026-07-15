@@ -1,4 +1,5 @@
 import { formatTimestamp, statusBadgeClass, type RunSummary } from './api'
+import { phaseLabel } from './phaseFormat'
 import { Link } from './router'
 import { runPath } from './route'
 import PauseActions from './PauseActions'
@@ -150,7 +151,7 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
 
         <div className="flex flex-wrap items-baseline gap-3">
           <div className="text-[20px] font-semibold tracking-tight">{activeRun.runId}</div>
-          <span className="font-mono text-[11px] text-text-dim">{lastCompletedPhase || 'Starting…'}</span>
+          <span className="font-mono text-[11px] text-text-dim">{lastCompletedPhase ? phaseLabel(lastCompletedPhase) : 'Starting…'}</span>
         </div>
 
         <div className="mt-3.5 h-2 overflow-hidden rounded-full bg-inset">
@@ -164,7 +165,7 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
 
         {live.state === 'error' ? (
           <p role="alert" className="mt-3 text-[11.5px] text-amber">
-            Connection lost; retrying automatically.
+            Live updates disconnected — retrying automatically.
           </p>
         ) : null}
       </div>

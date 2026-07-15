@@ -375,12 +375,12 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
           </div>
           <div className="text-[17px] font-semibold text-text">A run is already in progress</div>
           <p className="mt-2.5 max-w-md text-[13px] text-text-dim">
-            Backup runs are a singleton — the tool runs one at a time and refuses any new submission until the
-            current run finishes. Wait for it to complete, or resume/abort it from the current run.
+            The tool runs one backup at a time and refuses any new submission until the current run finishes.
+            Wait for it to complete, or resume/abort it from the current run.
           </p>
           <Link
             to={runPath(activeRun.runId)}
-            className="mt-5 rounded-lg bg-text px-4.5 py-2.25 text-[12.5px] font-semibold text-bg"
+            className="mt-5 rounded-lg bg-text px-4.5 py-2.25 text-[12.5px] font-semibold text-bg transition-opacity hover:opacity-90"
           >
             Open current run
           </Link>
@@ -393,7 +393,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
     return (
       <div className="p-6 sm:p-7">
         <p role="status" className="text-[12.5px] text-text-dim">
-          Loading run {restartFromRunId}’s configuration…
+          Loading run {restartFromRunId}'s configuration…
         </p>
       </div>
     )
@@ -427,7 +427,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
 
       {restart.status === 'error' ? (
         <div role="alert" className="rounded-lg border border-red-line bg-red-bg p-3.5 text-[12px] text-red">
-          Could not load run {restartFromRunId}’s configuration to restart it: {restart.error}. You can still
+          Could not load run {restartFromRunId}'s configuration to restart it: {restart.error}. You can still
           build a new run below.
         </div>
       ) : null}
@@ -474,7 +474,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
               type="button"
               onClick={() => void handleReview()}
               disabled={validating}
-              className="rounded-lg bg-text px-5 py-2.25 text-[12.5px] font-semibold text-bg disabled:opacity-50"
+              className="rounded-lg bg-text px-5 py-2.25 text-[12.5px] font-semibold text-bg transition-opacity enabled:hover:opacity-90 disabled:opacity-50"
             >
               {validating ? 'Validating…' : 'Review →'}
             </button>
@@ -485,7 +485,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
               type="button"
               onClick={handleReviewJson}
               disabled={jsonText.trim() === ''}
-              className="rounded-lg bg-text px-5 py-2.25 text-[12.5px] font-semibold text-bg disabled:opacity-50"
+              className="rounded-lg bg-text px-5 py-2.25 text-[12.5px] font-semibold text-bg transition-opacity enabled:hover:opacity-90 disabled:opacity-50"
             >
               Review →
             </button>
@@ -504,7 +504,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
                 type="button"
                 onClick={handleSubmitReview}
                 disabled={submitting}
-                className="rounded-lg bg-text px-5 py-2.25 text-[12.5px] font-semibold text-bg disabled:opacity-50"
+                className="rounded-lg bg-text px-5 py-2.25 text-[12.5px] font-semibold text-bg transition-opacity enabled:hover:opacity-90 disabled:opacity-50"
               >
                 {submitting ? 'Submitting…' : 'Submit run'}
               </button>

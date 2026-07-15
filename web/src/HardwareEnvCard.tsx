@@ -14,7 +14,7 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function CardShell({ children }: { children: ReactNode }) {
   return (
-    <div className="rounded-xl border border-border bg-surface p-4.5 shadow-card">
+    <div className="rounded-xl border border-border bg-surface p-5 shadow-card">
       <div className="mb-3.5 text-[12.5px] font-semibold">Hardware &amp; environment</div>
       {children}
     </div>

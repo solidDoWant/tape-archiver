@@ -324,7 +324,7 @@ function FinalTapeCard({ tape }: { tape: TapeOutcome }) {
           {health.floorKnown ? <span className="text-text-faint">floor {health.floorMBps}</span> : null}
           {health.repositionsMeasured ? (
             <span className="text-text-faint">
-              {health.repositions ?? 0} rehit{(health.repositions ?? 0) === 1 ? '' : 's'}
+              {health.repositions ?? 0} reposition{(health.repositions ?? 0) === 1 ? '' : 's'}
             </span>
           ) : null}
         </div>

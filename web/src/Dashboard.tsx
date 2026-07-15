@@ -5,6 +5,7 @@ import RunsTable from './RunsTable'
 import LibraryCard from './LibraryCard'
 import HardwareEnvCard from './HardwareEnvCard'
 import { useRunEvents } from './runEvents'
+import { findActiveRun } from './activeRun'
 
 type LoadState = { status: 'loading' } | { status: 'error'; error: string } | { status: 'loaded' }
 
@@ -66,7 +67,7 @@ function Dashboard({ onStartRun }: DashboardProps) {
   // GET /api/runs returns newest first (runsapi.go), so runs[0] is the most
   // recently started execution — the right "last run" summary for the idle
   // state and the right config source once no run is active.
-  const activeRun = runs.find((run) => run.status === 'Running') ?? null
+  const activeRun = findActiveRun(runs)
   const mostRecentRun = runs[0] ?? null
 
   const live = useRunEvents(activeRun?.runId ?? null)

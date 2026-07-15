@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { formatDuration, formatTimestamp, statusBadgeClass, type RunSummary } from './api'
+import { phaseLabel } from './phaseFormat'
 import { Link } from './router'
 import { runPath } from './route'
 
@@ -110,7 +111,7 @@ function RunsTable({ loadState, error, runs, liveRunId, liveLastCompletedPhase }
                         {run.status}
                       </span>
                     </span>
-                    <span className="font-mono text-[11px] text-text-dim">{lastPhase || '—'}</span>
+                    <span className="font-mono text-[11px] text-text-dim">{lastPhase ? phaseLabel(lastPhase) : '—'}</span>
                   </Link>
                 )
               })}
@@ -129,7 +130,7 @@ function RunsTable({ loadState, error, runs, liveRunId, liveLastCompletedPhase }
               type="button"
               disabled={clampedPage === 0}
               onClick={() => setPage(clampedPage - 1)}
-              className="rounded-lg border border-border-strong px-3 py-1.5 text-[12px] font-medium whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-surface-2"
+              className="rounded-lg border border-border-strong bg-surface px-3 py-1.5 text-[12px] font-medium whitespace-nowrap enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 enabled:hover:bg-surface-2"
             >
               ← Prev
             </button>
@@ -137,7 +138,7 @@ function RunsTable({ loadState, error, runs, liveRunId, liveLastCompletedPhase }
               type="button"
               disabled={clampedPage >= pageCount - 1}
               onClick={() => setPage(clampedPage + 1)}
-              className="rounded-lg border border-border-strong px-3 py-1.5 text-[12px] font-medium whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-surface-2"
+              className="rounded-lg border border-border-strong bg-surface px-3 py-1.5 text-[12px] font-medium whitespace-nowrap enabled:cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 enabled:hover:bg-surface-2"
             >
               Next →
             </button>

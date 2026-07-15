@@ -5,6 +5,7 @@ import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 import RestartRunButton from './RestartRunButton'
 import PhaseDetail from './PhaseDetail'
 import PhaseRail from './PhaseRail'
+import { phaseLabel } from './phaseFormat'
 import { Link } from './router'
 import { useRunEvents, type RunEventDetail } from './runEvents'
 import { headerRuntime, runStatusView, usePublishRunHeader } from './runHeader'
@@ -257,7 +258,7 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
     <div className="flex min-w-0 flex-1 flex-col">
       {connection === 'error' ? (
         <div role="alert" className="mx-4 mt-3 rounded-lg border border-amber-line bg-amber-bg px-3.5 py-2 text-[12px] text-amber sm:mx-6">
-          Live updates disconnected — this page will keep retrying automatically.
+          Live updates disconnected — retrying automatically.
         </div>
       ) : null}
 
@@ -317,7 +318,7 @@ function NotFoundNotice({ runId }: { runId: string }) {
         to="/"
         className="mt-1 rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium transition-colors hover:bg-surface-2"
       >
-        Back to runs
+        Back to dashboard
       </Link>
     </div>
   )
@@ -344,7 +345,7 @@ function AgedOutNotice({ runId }: { runId: string }) {
         to="/"
         className="mt-1 rounded-lg border border-border-strong bg-surface px-4 py-2 text-[12.5px] font-medium transition-colors hover:bg-surface-2"
       >
-        Back to runs
+        Back to dashboard
       </Link>
     </div>
   )
@@ -368,7 +369,7 @@ function DegradedNotice({ runId, detail, message }: { runId: string; detail: Run
         <dt className="text-text-dim">Status</dt>
         <dd>{detail.status}</dd>
         <dt className="text-text-dim">Last completed phase</dt>
-        <dd>{detail.lastCompletedPhase || '—'}</dd>
+        <dd>{detail.lastCompletedPhase ? phaseLabel(detail.lastCompletedPhase) : '—'}</dd>
         <dt className="text-text-dim">Started</dt>
         <dd>{formatTimestamp(detail.startTime)}</dd>
         {detail.closeTime ? (

@@ -214,9 +214,8 @@ function TapesPage() {
           ⓘ
         </span>
         <p>
-          The archiver keeps no persistent tape catalog (SPEC §4.2) — there is no
-          permanent inventory to show, and this page does not read live status from the
-          tape changer. Every row below is reconstructed on the fly from a completed or
+          The archiver keeps no persistent tape catalog, and this page does not read
+          live status from the tape changer. Every row below is reconstructed on the fly from a completed or
           in-progress run's own Temporal execution history, covering the{' '}
           {apiDefaultRunLimit} most recent runs. Once a run ages out of Temporal's
           visibility retention, the tapes it wrote drop off this list — its PDF report
@@ -265,7 +264,7 @@ function TapesPage() {
           {state.tapes.length === 0 ? (
             <div className="max-w-3xl rounded-xl border border-dashed border-border-strong bg-surface p-6 text-center text-[12.5px] text-text-faint">
               No tapes to show yet. This list fills in once a run has loaded at least one
-              tape — check back after a run's Load phase, or submit a new run.
+              tape.
             </div>
           ) : (
             <div className="max-w-3xl overflow-x-auto rounded-xl border border-border bg-surface shadow-card">

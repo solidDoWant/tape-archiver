@@ -144,7 +144,7 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
         </div>
         <div className="h-[9px] overflow-hidden rounded-md bg-inset">
           <div
-            className={`h-full rounded-md ${detail.status === 'Failed' ? 'bg-red' : 'bg-green'}`}
+            className={`h-full rounded-md ${hero.tone === 'failed' ? 'bg-red' : 'bg-green'}`}
             style={{ width: `${phases.length > 0 ? (completedCount / phases.length) * 100 : 0}%` }}
           />
         </div>

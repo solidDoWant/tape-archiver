@@ -1,16 +1,9 @@
 import type { RunConfig } from './configModel'
+import { sourceLabel } from './sourceLabel'
 
 export interface ConfigReviewProps {
   config: RunConfig
   dryRun: boolean
-}
-
-function summaryLabel(source: RunConfig['sources'][number]): string {
-  // `||`, not `??`: a present-but-empty field ("" — e.g. a k8s ref's name/
-  // labelSelector, or a source still being filled in) must fall through to the
-  // next candidate and ultimately "(unlabeled)", never render as a blank
-  // summary. (`??` would stop at the empty string.)
-  return source?.label || source?.zfsPath?.name || source?.k8s?.name || source?.k8s?.labelSelector || '(unlabeled)'
 }
 
 // ConfigReview is the config page's Review step (issue #279): a read-only
@@ -44,7 +37,7 @@ function ConfigReview({ config, dryRun }: ConfigReviewProps) {
     <div className="rounded-xl border border-border bg-surface p-5 shadow-card">
       <div className="text-[14px] font-semibold text-text">Review before submitting</div>
       <p className="mt-1 max-w-xl text-[12.5px] text-text-dim">
-        Confirm what this run will do — nothing is submitted until you press Submit.
+        Nothing is submitted until you press Submit.
       </p>
 
       <div className="mt-4 rounded-lg border border-border">
@@ -58,7 +51,7 @@ function ConfigReview({ config, dryRun }: ConfigReviewProps) {
           <div className="flex items-center justify-between px-4 py-2.5">
             <dt className="text-[12.5px] text-text-dim">Sources</dt>
             <dd className="font-mono text-[12px] text-text">
-              {sources.length} · {sources.map(summaryLabel).join(', ') || '—'}
+              {sources.length} · {sources.map((source) => sourceLabel(source)).join(', ') || '—'}
             </dd>
           </div>
           <div className="flex items-center justify-between px-4 py-2.5">
@@ -91,7 +84,7 @@ function ConfigReview({ config, dryRun }: ConfigReviewProps) {
           ⓘ
         </span>
         <span className="text-[12px] leading-relaxed text-text-dim">
-          Blank status can&rsquo;t be checked ahead of time. The run reads each target slot just before writing
+          Blank status can't be checked ahead of time. The run reads each target slot just before writing
           and fails before any write if one holds a non-blank tape, unless you allowed overwrite above.
         </span>
       </div>

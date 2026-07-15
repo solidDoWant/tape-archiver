@@ -128,7 +128,7 @@ describe('ConfigForm', () => {
     // selectable...
     expect(screen.queryByRole('button', { name: 'Slot 5' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('Slot 5 — reserved for cleaning')).toBeInTheDocument()
-    expect(screen.getByLabelText('Slot 6 — reserved for I/O station')).toBeInTheDocument()
+    expect(screen.getByLabelText('Slot 6 — reserved for I/O-station')).toBeInTheDocument()
 
     // ...and the grid stops at the declared slot count (no slot 7).
     expect(screen.queryByRole('button', { name: 'Slot 7' })).not.toBeInTheDocument()
