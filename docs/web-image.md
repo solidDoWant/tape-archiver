@@ -89,7 +89,7 @@ The image declares a `HEALTHCHECK` (`docker inspect --format
 (`http://127.0.0.1:8081/healthz`, matching `HEALTH_ADDR`'s default). This differs from the
 worker images' `HEALTHCHECK`, which instead runs the `worker healthcheck` self-probe
 subcommand and ships no HTTP client at all: `cmd/web` has no equivalent self-probe
-subcommand (adding one was out of scope for the issue that introduced this image, #255 —
+subcommand (adding one was out of scope when this image was introduced —
 packaging only, no `cmd/web` application-code changes), so this image instead bundles a
 minimal `curl` build (`curlMinimal`) for the sole purpose of this `HEALTHCHECK`. Container
 health here reflects **liveness**, not readiness (unlike the worker images' probe, which

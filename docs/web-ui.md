@@ -2,8 +2,8 @@
 
 The web UI (`cmd/web`) is a browser-based alternative to `tapectl` for day-to-day
 operation: submitting backup runs (including dry-runs), watching a run progress live,
-acting on an operator-in-the-loop pause, and browsing run history — all from a browser,
-with no local `tapectl` install or Temporal CLI access required. It talks only to the
+acting on an operator-in-the-loop pause, and browsing run history — with no local
+`tapectl` install or Temporal CLI access required. It talks only to the
 Temporal frontend and the configured OIDC identity provider; it never touches tape
 hardware or bulk data directly (SPEC §2, §4.2 — there is no UI-owned state, only Temporal
 visibility and the backup workflow's own queries).
@@ -22,8 +22,7 @@ reviewers, not this operator guide.
 Everything the UI does, `tapectl` can also do from the command line
 ([`docs/tapectl.md`](tapectl.md)) — the two share the same submit/dry-run path
 (`pkg/runsubmit`) and the same resume/abort signals, so they can never diverge on what an
-action means. Use whichever is more convenient; there is nothing the UI does that the
-CLI cannot also do, and vice versa.
+action means. Use whichever is more convenient.
 
 ## Reaching the UI
 
@@ -171,7 +170,7 @@ needs (see [`docs/configuration.md`](configuration.md) for what every field mean
   storage slots, bounded to the deployment's real library topology from deploy
   config (slot count, with cleaning and I/O-station slots rendered non-selectable —
   see below), so an operator only ever clicks real, loadable slots rather than
-  typing arbitrary numbers; and the deliberately scary "allow non-blank tapes"
+  typing arbitrary numbers; and the deliberately guarded "allow non-blank tapes"
   opt-out.
 - **Encryption** — the age recipient list and escrowed identity, plus a
   **Generate new age keypair** button: it calls the server's
@@ -484,7 +483,7 @@ empty-state message instead of an empty table.
 
 Everything above assumes a real deployment (a real Temporal cluster, a real identity
 provider, a real tape library). For iterating on the UI itself, `make web-dev` brings up
-a complete local stand-in with a couple of clicks: dev Temporal, `mhvtl`, and an ephemeral
+a complete local stand-in with one command: dev Temporal, `mhvtl`, and an ephemeral
 ZFS test pool (reusing the existing `temporal-up`/`mhvtl-up`/`zpool-up` targets and
 scripts unchanged), a local VictoriaLogs + VictoriaMetrics stack fed by the dev workers'
 own logs/metrics, a local OIDC provider, a local fake Discord webhook receiver, real
