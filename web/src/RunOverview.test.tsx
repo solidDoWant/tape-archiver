@@ -110,6 +110,32 @@ describe('RunOverview', () => {
     expect(screen.queryByText(/no operator action needed/i)).not.toBeInTheDocument()
   })
 
+  it('does not show the operator-action card for a run terminated while paused', () => {
+    stubPanels()
+
+    // A run terminated (or completed) while waiting at a pause still reports its
+    // last pause kind in currentPause, but it cannot be resumed/aborted, so the
+    // closed run must read as terminal — never PAUSED, never an action card.
+    renderOverview(
+      <RunOverview
+        runId="run-1"
+        detail={{
+          ...runningDetail,
+          status: 'Terminated',
+          closeTime: '2026-07-09T13:00:00Z',
+          currentPause: { kind: 'eject', affectedTapes: ['TA0001L6'], awaitingExport: 1 },
+        }}
+        phases={phases}
+        terminal
+      />,
+    )
+
+    expect(screen.getByText('TERMINATED')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /backup paused/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/operator action required/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /resume/i })).not.toBeInTheDocument()
+  })
+
   it('shows an uncertainty hero — not PAUSED — when the pause status is unknown', () => {
     stubPanels()
 

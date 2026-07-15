@@ -59,6 +59,26 @@ export interface RunStatusView {
   badgeClass: string
 }
 
+// livePauseState collapses a run's reported pause to what the operator can
+// actually act on right now. A *closed* run is never "currently" paused: a run
+// terminated (or completed) while waiting at a pause still reports its last
+// pause kind in currentPause, but Resume/Abort no longer apply, so it must not
+// read as PAUSED or show the operator-action card. Both the run overview (hero +
+// pause zone) and the shell header derive isPaused/pauseUnknown through this, so
+// they can never disagree on whether a closed run is paused — the omission of
+// this guard in one place but not the other is exactly what left a terminated
+// run showing "Operator action required".
+export function livePauseState(
+  pause: { kind: string; unknown?: boolean },
+  terminal: boolean,
+): { isPaused: boolean; pauseUnknown: boolean } {
+  if (terminal) {
+    return { isPaused: false, pauseUnknown: false }
+  }
+
+  return { isPaused: pause.kind !== '', pauseUnknown: Boolean(pause.unknown) }
+}
+
 // runStatusView maps a run's raw status (+ pause state) to the operator-facing
 // label, hero title, tone, and badge colour class. Single source for both the
 // RunOverview hero and the shell header pill, so a status can never read one way

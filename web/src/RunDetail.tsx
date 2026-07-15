@@ -8,7 +8,7 @@ import PhaseRail from './PhaseRail'
 import { phaseLabel } from './phaseFormat'
 import { Link } from './router'
 import { useRunEvents, type RunEventDetail } from './runEvents'
-import { headerRuntime, runStatusView, usePublishRunHeader } from './runHeader'
+import { headerRuntime, livePauseState, runStatusView, usePublishRunHeader } from './runHeader'
 import RunOverview from './RunOverview'
 
 // RunEventDetail's definition lives in runEvents.ts alongside the shared
@@ -243,8 +243,8 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
   // Live: recomputed from the latest SSE frame each render, and cleared when the
   // page unmounts (usePublishRunHeader) so other pages' headers stay plain.
   const pause = detail.currentPause
-  const isPaused = pause.kind !== ''
-  const view = runStatusView(detail.status, isPaused, Boolean(pause.unknown))
+  const { isPaused, pauseUnknown } = livePauseState(pause, terminal)
+  const view = runStatusView(detail.status, isPaused, pauseUnknown)
   usePublishRunHeader({
     statusLabel: view.label,
     tone: view.tone,

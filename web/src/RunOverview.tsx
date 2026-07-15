@@ -8,7 +8,7 @@ import type { PhaseInfo, RunEventDetail } from './RunDetail'
 import TapesSection from './TapesSection'
 import { formatDuration, phaseLabel } from './phaseFormat'
 import { useReportMessageUrl } from './runDelivery'
-import { runStatusView } from './runHeader'
+import { livePauseState, runStatusView } from './runHeader'
 import { temporalWorkflowUrl, useUiConfig } from './uiConfig'
 
 // factValue looks up one PhaseFact's numeric value from a phase's facts
@@ -46,8 +46,7 @@ export interface RunOverviewProps {
 // rest of this view (issue #277 AC4).
 function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
   const pause = detail.currentPause
-  const isPaused = pause.kind !== ''
-  const pauseUnknown = Boolean(pause.unknown)
+  const { isPaused, pauseUnknown } = livePauseState(pause, terminal)
   const hero = runStatusView(detail.status, isPaused, pauseUnknown)
 
   const completedCount = phases.filter((phase) => phase.status === 'completed').length

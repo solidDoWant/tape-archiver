@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest'
-import { headerRuntime, runStatusView } from './runHeader'
+import { headerRuntime, livePauseState, runStatusView } from './runHeader'
+
+describe('livePauseState', () => {
+  it('reports a live run at a pause as paused', () => {
+    expect(livePauseState({ kind: 'eject' }, false)).toEqual({ isPaused: true, pauseUnknown: false })
+  })
+
+  it('reports a live run with a failed pause query as unknown, not paused', () => {
+    expect(livePauseState({ kind: '', unknown: true }, false)).toEqual({ isPaused: false, pauseUnknown: true })
+  })
+
+  it('treats a closed run as not paused even if it still reports a pause kind', () => {
+    // A run terminated/completed while paused lingers its last pause kind, but
+    // it can no longer be acted on, so it must not read as paused.
+    expect(livePauseState({ kind: 'eject' }, true)).toEqual({ isPaused: false, pauseUnknown: false })
+    expect(livePauseState({ kind: '', unknown: true }, true)).toEqual({ isPaused: false, pauseUnknown: false })
+  })
+})
 
 describe('runStatusView', () => {
   it('maps a running run to the RUNNING label and running tone', () => {
