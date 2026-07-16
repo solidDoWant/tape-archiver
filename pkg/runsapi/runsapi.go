@@ -1004,8 +1004,30 @@ func statusForTemporalError(err error) int {
 		return http.StatusConflict
 	}
 
+	// A request that hit its own requestTimeout (the child context deadline
+	// each handler sets) is an upstream slowness, not an upstream fault, so it
+	// is a Gateway Timeout rather than the generic Bad Gateway below — 502
+	// would misattribute a slow-but-healthy Temporal as a broken one. A
+	// context.Canceled means the client itself went away mid-request; the
+	// response is never read, but 499 (client closed request) classifies it
+	// correctly in this proxy's own logs instead of blaming Temporal.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return statusClientClosedRequest
+	}
+
 	return http.StatusBadGateway
 }
+
+// statusClientClosedRequest is the non-standard 499 status (originated by
+// nginx) for "client closed the connection before the server answered". Go's
+// net/http defines no constant for it; runsapi uses it only to classify a
+// context.Canceled in its own logs — the client is already gone, so the code
+// itself is never delivered.
+const statusClientClosedRequest = 499
 
 // toRunSummary maps a Temporal visibility record to the API's RunSummary
 // shape.
