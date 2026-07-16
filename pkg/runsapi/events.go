@@ -29,6 +29,19 @@ import (
 // tying every test run to the real production interval.
 var eventPollInterval = 2 * time.Second
 
+// sseWriteTimeout bounds a single SSE write+flush. The server-wide
+// http.Server WriteTimeout is cleared for this response (it is an absolute
+// deadline set once at header-read, which would kill an arbitrarily
+// long-lived stream mid-flight), but leaving the write deadline off entirely
+// lets a TCP-backpressured client block a write indefinitely — and a
+// goroutine blocked inside a write never reaches the select that observes the
+// drain context, so a single stalled client would hold http.Server.Shutdown
+// open to its full deadline (issue #270). A per-write deadline, reset before
+// each write, bounds that: a healthy but idle stream is never killed (the
+// deadline only spans an actual write, not the wait between them), while a
+// stalled write fails after this window and unwinds the goroutine.
+const sseWriteTimeout = 15 * time.Second
+
 // runningStatus is the string form of WORKFLOW_EXECUTION_STATUS_RUNNING, as
 // stored in RunSummary.Status (toRunSummary uses execution.GetStatus().String()).
 // Any other status is terminal for the purposes of this stream: the run will
@@ -110,11 +123,11 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 	// how active the stream still is. http.ResponseController.SetWriteDeadline
 	// is the net/http-documented way to override that deadline for one
 	// specific response without touching the server-wide setting every other
-	// handler still relies on.
+	// handler still relies on. writeSSEEvent below resets a fresh, bounded
+	// per-write deadline (sseWriteTimeout) before each write, so an idle stream
+	// is never killed for being idle, but a stalled write cannot block forever
+	// and defeat the drain-driven shutdown (issue #270).
 	responseController := http.NewResponseController(w)
-	if err := responseController.SetWriteDeadline(time.Time{}); err != nil {
-		slog.WarnContext(r.Context(), "runsapi: could not clear write deadline for SSE stream", "run_id", runID, "error", err)
-	}
 
 	if !writeSSEEvent(w, responseController, sseEventUpdate, detail) {
 		return
@@ -236,6 +249,15 @@ func writeSSEEvent(w http.ResponseWriter, responseController *http.ResponseContr
 
 		return false
 	}
+
+	// Bound this write+flush with a fresh deadline: a TCP-backpressured client
+	// must not block the handler goroutine indefinitely (which would keep it
+	// off the drain-observing select and stall graceful shutdown — see
+	// sseWriteTimeout). Reset per write, so it only ever spans one write, never
+	// the idle wait between events. A ResponseController that does not support
+	// deadlines returns ErrNotSupported here, which is fine to ignore — the
+	// stream simply falls back to the server-wide timeout behavior.
+	_ = responseController.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 
 	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
 		return false
