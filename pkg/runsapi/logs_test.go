@@ -206,6 +206,32 @@ func TestGetRunLogsSurfacesErrorField(t *testing.T) {
 	assert.Empty(t, body.Lines[2].Error, "a line with no error field carries none")
 }
 
+func TestGetRunLogsOversizedLineIsSkippedNotFatal(t *testing.T) {
+	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	close := start.Add(time.Hour)
+
+	good1 := vlLine(start.Add(time.Minute), "INFO", "before the big line")
+	// A single record larger than maxLogLineBytes (a huge structured field).
+	huge := fmt.Sprintf(`{"_time":%q,"_msg":%q,"level":"INFO","RunID":"x"}`,
+		start.Add(2*time.Minute).UTC().Format(time.RFC3339Nano), strings.Repeat("x", maxLogLineBytes+1))
+	good2 := vlLine(start.Add(3*time.Minute), "WARN", "after the big line")
+
+	fake := newFakeVictoriaLogs(t, http.StatusOK, good1+"\n"+huge+"\n"+good2+"\n")
+	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})
+
+	temporalClient := &fakeTemporalClient{describeResponse: describeResponseFor(testRunID, enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &close)}
+	handler := newMux(newHandler(temporalClient, getenv))
+
+	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs", nil)
+	require.Equal(t, http.StatusOK, recorder.Code, "one oversized line must not fail the whole response")
+
+	var body RunLogsResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+	require.Len(t, body.Lines, 2, "both good lines survive; only the oversized one is skipped")
+	assert.Equal(t, "before the big line", body.Lines[0].Message)
+	assert.Equal(t, "after the big line", body.Lines[1].Message, "the tail after the oversized line is not dropped")
+}
+
 func TestGetRunLogsWholeRunStillOpenIsLive(t *testing.T) {
 	fake := newFakeVictoriaLogs(t, http.StatusOK, "")
 	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})

@@ -489,56 +489,100 @@ type vlRecord struct {
 	ErrorLower string `json:"error"`
 }
 
+// maxLogLineBytes bounds one VictoriaLogs NDJSON record. Ordinary log lines
+// are far smaller; a pathological one (e.g. a stack trace or a large manifest
+// embedded in a single structured field) is skipped rather than allowed to
+// allocate without bound. Crucially, skipping it must NOT abort the scan or
+// drop the lines that follow — the previous bufio.Scanner cap turned one
+// over-long line into a whole-response failure (503), blanking the tail an
+// operator opened the console to read — so readBoundedLine streams past it
+// and parsing continues with the next line.
+const maxLogLineBytes = 1 << 20
+
 // parseLogsQLResponse decodes VictoriaLogs' LogsQL query response: one JSON
 // object per line (https://docs.victoriametrics.com/victorialogs/querying/#json-stream-decoding),
 // not a single JSON array/document.
 func parseLogsQLResponse(body io.Reader) ([]LogLine, error) {
 	lines := make([]LogLine, 0)
+	reader := bufio.NewReader(body)
 
-	scanner := bufio.NewScanner(body)
-	// A generous max line length: the default 64KiB bufio.Scanner token
-	// limit is fine for ordinary log lines but a single pathological line
-	// (e.g. a stack trace embedded in one structured field) must not abort
-	// the whole response.
-	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for {
+		raw, tooLong, err := readBoundedLine(reader, maxLogLineBytes)
 
-	for scanner.Scan() {
-		raw := bytes.TrimSpace(scanner.Bytes())
-		if len(raw) == 0 {
-			continue
+		if tooLong {
+			slog.Warn("runsapi: skipping oversized victorialogs response line", "limit_bytes", maxLogLineBytes)
+		} else if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 {
+			if line, ok := parseLogsQLRecord(trimmed); ok {
+				lines = append(lines, line)
+			}
 		}
 
-		var record vlRecord
-
-		if err := json.Unmarshal(raw, &record); err != nil {
-			// One malformed NDJSON record must not hide every good line in the
-			// window: skip it (logged) and keep decoding, rather than failing
-			// the whole batch — a single bad record from VictoriaLogs would
-			// otherwise blank the console during a live tail, possibly dropping
-			// the surrounding error lines an operator is watching for.
-			slog.Warn("runsapi: skipping undecodable victorialogs response line", "error", err)
-
-			continue
-		}
-
-		parsedTime, err := parseVLTime(record.Time)
 		if err != nil {
-			slog.Warn("runsapi: skipping victorialogs record with unparseable time", "time", record.Time, "error", err)
+			if errors.Is(err, io.EOF) {
+				return lines, nil
+			}
 
+			return nil, fmt.Errorf("read victorialogs response: %w", err)
+		}
+	}
+}
+
+// parseLogsQLRecord decodes one NDJSON record into a LogLine. ok is false for
+// a malformed record or one with an unparseable time: one bad record must not
+// hide every good line in the window (a single bad record would otherwise
+// blank the console during a live tail, possibly dropping the surrounding
+// error lines an operator is watching for), so the caller skips it and keeps
+// decoding.
+func parseLogsQLRecord(raw []byte) (LogLine, bool) {
+	var record vlRecord
+
+	if err := json.Unmarshal(raw, &record); err != nil {
+		slog.Warn("runsapi: skipping undecodable victorialogs response line", "error", err)
+
+		return LogLine{}, false
+	}
+
+	parsedTime, err := parseVLTime(record.Time)
+	if err != nil {
+		slog.Warn("runsapi: skipping victorialogs record with unparseable time", "time", record.Time, "error", err)
+
+		return LogLine{}, false
+	}
+
+	errText := record.Error
+	if errText == "" {
+		errText = record.ErrorLower
+	}
+
+	return LogLine{Time: parsedTime, Level: record.Level, Message: record.Msg, Error: errText}, true
+}
+
+// readBoundedLine reads one '\n'-terminated line from reader, capped at limit
+// bytes. A line longer than limit is fully consumed (through its terminating
+// newline) but returned as tooLong with a nil payload, so one pathological
+// line is skipped without aborting the scan or swallowing the lines after it.
+// err is io.EOF once the final line (which may lack a trailing newline) has
+// been returned.
+func readBoundedLine(reader *bufio.Reader, limit int) (line []byte, tooLong bool, err error) {
+	for {
+		// ReadSlice returns bufio.ErrBufferFull for a line longer than the
+		// reader's buffer, letting this loop stream through an arbitrarily
+		// long line a chunk at a time rather than buffering it whole.
+		chunk, readErr := reader.ReadSlice('\n')
+
+		if !tooLong {
+			if len(line)+len(chunk) > limit {
+				tooLong = true
+				line = nil
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+
+		if errors.Is(readErr, bufio.ErrBufferFull) {
 			continue
 		}
 
-		errText := record.Error
-		if errText == "" {
-			errText = record.ErrorLower
-		}
-
-		lines = append(lines, LogLine{Time: parsedTime, Level: record.Level, Message: record.Msg, Error: errText})
+		return line, tooLong, readErr
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read victorialogs response: %w", err)
-	}
-
-	return lines, nil
 }
