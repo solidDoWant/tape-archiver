@@ -133,7 +133,7 @@ function TapesSection({ runId, terminal }: TapesSectionProps) {
     <ul className="flex flex-col gap-2">
       {state.tapes.map((tape) => (
         <li
-          key={tape.barcode}
+          key={`${tape.tapeIndex}-${tape.copyIndex}-${tape.barcode}`}
           className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-border bg-surface p-3 text-[12px] shadow-card"
         >
           <span className="font-mono font-semibold">{tape.barcode}</span>

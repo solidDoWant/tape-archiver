@@ -167,7 +167,12 @@ function LiveDriveMetrics({ runId, pollIntervalMs }: { runId: string; pollInterv
   return (
     <div className="flex flex-col gap-3">
       {state.drives.map((drive) => (
-        <DriveMetricCard key={drive.barcode} runId={runId} drive={drive} pollIntervalMs={pollIntervalMs} />
+        <DriveMetricCard
+          key={`${drive.tapeIndex}-${drive.copyIndex}-${drive.driveIndex}-${drive.barcode}`}
+          runId={runId}
+          drive={drive}
+          pollIntervalMs={pollIntervalMs}
+        />
       ))}
     </div>
   )
@@ -300,7 +305,7 @@ function FinalDriveMetrics({ runId }: { runId: string }) {
       </p>
 
       {state.tapes.map((tape) => (
-        <FinalTapeCard key={tape.barcode} tape={tape} />
+        <FinalTapeCard key={`${tape.tapeIndex}-${tape.copyIndex}-${tape.barcode}`} tape={tape} />
       ))}
     </div>
   )
