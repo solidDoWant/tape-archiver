@@ -437,18 +437,36 @@ export function deployOwnedFields(config: RunConfig): string[] {
 // needing an unusual capacity keeps using JSON mode), an
 // empty/malformed redundancy falls back to a 10% fixed target, and so on.
 export function configToFormState(config: RunConfig): FormState {
+  // ConfigPage casts arbitrary parsed JSON to RunConfig before calling this
+  // (only its object-ness is checked), so at runtime any section — or field —
+  // may be absent. Read every section through a Partial view so a partial but
+  // valid-JSON config loads what it can into the form instead of throwing a
+  // TypeError, which ConfigPage would otherwise misreport as "not valid JSON".
+  // This is what the doc comment above means by "every field has a safe
+  // fallback, so this never throws".
+  const partial = config as Partial<RunConfig>
   const form = defaultFormState()
 
-  form.sources = config.sources.length > 0 ? config.sources.map(sourceFormStateFromSource) : form.sources
-  form.copies = config.copies
-  form.sliceSizeGiB = config.redundancy.sliceSizeBytes / bytesPerGiB
+  const sources = partial.sources ?? []
+  form.sources = sources.length > 0 ? sources.map(sourceFormStateFromSource) : form.sources
 
-  if (config.redundancy.fillToCapacity) {
-    form.redundancyMode = 'fillToCapacity'
-    form.fillFloor = config.redundancy.fillToCapacity.floor
-  } else if (typeof config.redundancy.targetPercentage === 'number') {
-    form.redundancyMode = 'fixed'
-    form.targetPercentage = config.redundancy.targetPercentage
+  if (typeof partial.copies === 'number') {
+    form.copies = partial.copies
+  }
+
+  const redundancy = partial.redundancy as Partial<Redundancy> | undefined
+  if (redundancy) {
+    if (typeof redundancy.sliceSizeBytes === 'number') {
+      form.sliceSizeGiB = redundancy.sliceSizeBytes / bytesPerGiB
+    }
+
+    if (redundancy.fillToCapacity) {
+      form.redundancyMode = 'fillToCapacity'
+      form.fillFloor = redundancy.fillToCapacity.floor
+    } else if (typeof redundancy.targetPercentage === 'number') {
+      form.redundancyMode = 'fixed'
+      form.targetPercentage = redundancy.targetPercentage
+    }
   }
 
   // library.changer/drives and delivery.webhookUrl are deploy-owned (issue
@@ -456,12 +474,22 @@ export function configToFormState(config: RunConfig): FormState {
   // config at buildConfig time, so a JSON → Form switch deliberately does not
   // map them out of the JSON into FormState — see configToFormState's doc
   // comment and ConfigPage's mode-switch notice.
-  form.blankSlots = config.library.blankSlots
-  form.tapeGeneration = (ltoGenerationForCapacity(config.library.tapeCapacityBytes) ?? defaultLtoGeneration).label
-  form.allowNonBlankTapes = config.library.allowNonBlankTapes ?? false
+  const library = partial.library as Partial<Library> | undefined
+  if (library) {
+    form.blankSlots = library.blankSlots ?? form.blankSlots
 
-  form.recipients = config.encryption.recipients.length > 0 ? config.encryption.recipients : form.recipients
-  form.identity = config.encryption.identity
+    const generation =
+      typeof library.tapeCapacityBytes === 'number' ? ltoGenerationForCapacity(library.tapeCapacityBytes) : undefined
+    form.tapeGeneration = (generation ?? defaultLtoGeneration).label
+
+    form.allowNonBlankTapes = library.allowNonBlankTapes ?? false
+  }
+
+  const encryption = partial.encryption as Partial<Encryption> | undefined
+  if (encryption) {
+    form.recipients = encryption.recipients && encryption.recipients.length > 0 ? encryption.recipients : form.recipients
+    form.identity = encryption.identity ?? form.identity
+  }
 
   // The burner drives are deploy-owned (issue #317) and sourced from deploy
   // config at buildConfig time, so — like library.changer/drives — they are not
@@ -469,11 +497,12 @@ export function configToFormState(config: RunConfig): FormState {
   // with a positive copy count; the drives no longer gate it (a Form-built
   // config carries deploy drives, and a JSON config may legitimately leave them
   // empty for the server to fill).
-  form.opticalBurnEnabled = Boolean(config.delivery.opticalBurn && config.delivery.opticalBurn.copies > 0)
+  const opticalBurn = (partial.delivery as Partial<Delivery> | undefined)?.opticalBurn
+  form.opticalBurnEnabled = Boolean(opticalBurn && opticalBurn.copies > 0)
 
-  if (config.delivery.opticalBurn) {
-    form.opticalCopies = config.delivery.opticalBurn.copies
-    form.allowNonBlankDiscs = config.delivery.opticalBurn.allowNonBlankDiscs ?? false
+  if (opticalBurn) {
+    form.opticalCopies = opticalBurn.copies
+    form.allowNonBlankDiscs = opticalBurn.allowNonBlankDiscs ?? false
   }
 
   return form
