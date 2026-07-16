@@ -131,6 +131,15 @@ type RunDetail struct {
 	// valid and useful on its own.
 	LastCompletedPhase string `json:"lastCompletedPhase"`
 
+	// lastCompletedPhaseUnknown records that the last-completed-phase query
+	// could not be answered this fetch (RPC failed / would not decode), as
+	// opposed to a successful query reporting "" (nothing completed yet). It is
+	// unexported — never serialized — and consulted only by streamRunEvents'
+	// poll loop, which carries the last known phase forward on an unknown tick
+	// rather than emitting a spurious "phase regressed to empty" update, the
+	// same transient-blip handling CurrentPauseInfo.Unknown gets below.
+	lastCompletedPhaseUnknown bool
+
 	// CurrentPause is which operator-in-the-loop pause (if any) is blocking the
 	// run right now (backup.CurrentPauseQuery), with enough context for a
 	// client to act on it via POST /api/runs/{runID}/resume or /abort without
@@ -524,10 +533,15 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 		return err
 	})
 
-	var lastCompletedPhase string
+	var (
+		lastCompletedPhase        string
+		lastCompletedPhaseUnknown bool
+	)
 
 	group.Go(func() error {
-		lastCompletedPhase = queryLastCompletedPhase(groupCtx, temporalClient, runID)
+		phase, known := queryLastCompletedPhase(groupCtx, temporalClient, runID)
+		lastCompletedPhase = phase
+		lastCompletedPhaseUnknown = !known
 
 		return nil
 	})
@@ -569,9 +583,10 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 	pauseInfo.Unknown = currentPauseUnknown
 
 	return RunDetail{
-		RunSummary:         toRunSummary(description.GetWorkflowExecutionInfo()),
-		LastCompletedPhase: lastCompletedPhase,
-		CurrentPause:       pauseInfo,
+		RunSummary:                toRunSummary(description.GetWorkflowExecutionInfo()),
+		LastCompletedPhase:        lastCompletedPhase,
+		lastCompletedPhaseUnknown: lastCompletedPhaseUnknown,
+		CurrentPause:              pauseInfo,
 	}, nil
 }
 
@@ -896,22 +911,27 @@ func (h *handler) cancelRun(w http.ResponseWriter, r *http.Request) {
 // worker currently polling) is not fatal to the request — the execution
 // status/timing already fetched via Describe is still valid — so it is
 // logged and reported as "" rather than failing GET /api/runs/{runID}.
-func queryLastCompletedPhase(ctx context.Context, temporalClient TemporalClient, runID string) string {
+// The returned known flag is false when the query could not be answered (the
+// RPC failed or its result would not decode), distinct from a successful query
+// that reports an empty phase (nothing completed yet). streamRunEvents needs
+// that distinction: a failed query must carry the last known phase forward
+// rather than look like a regression to "" — the same reason queryCurrentPause
+// surfaces CurrentPauseInfo.Unknown (see events.go's poll loop).
+func queryLastCompletedPhase(ctx context.Context, temporalClient TemporalClient, runID string) (phase string, known bool) {
 	response, err := temporalClient.QueryWorkflow(ctx, backup.WorkflowID, runID, backup.LastCompletedPhaseQuery)
 	if err != nil {
 		slog.WarnContext(ctx, "runsapi: last completed phase query failed", "run_id", runID, "error", err)
 
-		return ""
+		return "", false
 	}
 
-	var phase string
 	if err := response.Get(&phase); err != nil {
 		slog.WarnContext(ctx, "runsapi: decode last completed phase query result failed", "run_id", runID, "error", err)
 
-		return ""
+		return "", false
 	}
 
-	return phase
+	return phase, true
 }
 
 // queryCurrentPause asks the workflow which operator-in-the-loop pause (if

@@ -158,6 +158,16 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			if next.lastCompletedPhaseUnknown {
+				// LastCompletedPhaseQuery failed this tick (Describe still
+				// succeeded). Carry the last known phase forward rather than
+				// letting "" reach the delta check below, which would emit a
+				// spurious "phase regressed to empty" update that flaps back on
+				// the next successful tick — the same transient-blip handling
+				// CurrentPause.Unknown gets just below.
+				next.LastCompletedPhase = last.LastCompletedPhase
+			}
+
 			if next.CurrentPause.Unknown {
 				// CurrentPauseQuery itself failed this tick (fetchRunDetail
 				// still succeeded overall — Describe/LastCompletedPhase are
