@@ -464,17 +464,13 @@ func (h *handler) listRuns(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
 
-	response, err := h.temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
-		Query:    workflowIDQuery(),
-		PageSize: listPageSize,
-	})
+	executions, err := listAllBackupExecutions(ctx, h.temporalClient)
 	if err != nil {
 		writeError(w, statusForTemporalError(err), fmt.Errorf("list workflow executions: %w", err))
 
 		return
 	}
 
-	executions := response.GetExecutions()
 	runs := make([]RunSummary, 0, len(executions))
 
 	for _, execution := range executions {
@@ -484,6 +480,52 @@ func (h *handler) listRuns(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartTime.After(runs[j].StartTime) })
 
 	writeJSON(w, http.StatusOK, RunsResponse{Runs: runs})
+}
+
+// maxVisibilityScan caps how many executions listAllBackupExecutions will
+// accumulate across pages, a memory backstop far above any realistic backup
+// history (runs are a singleton, SPEC §4.2, so executions accrue slowly). If a
+// deployment ever exceeds it the scan stops and logs, rather than paging
+// unbounded — a bounded, logged truncation, never a silent one.
+const maxVisibilityScan = 10000
+
+// listAllBackupExecutions returns every visibility record for the singleton
+// backup workflow, following NextPageToken across pages rather than reading
+// only the first (a single ListWorkflow returns at most listPageSize, and the
+// standard SQL visibility store does not guarantee newest-first ordering
+// within a page, so reading one page could both truncate the history and drop
+// genuinely-newest runs). The caller sorts the result; this only gathers it.
+func listAllBackupExecutions(ctx context.Context, temporalClient TemporalClient) ([]*workflowpb.WorkflowExecutionInfo, error) {
+	var (
+		all   []*workflowpb.WorkflowExecutionInfo
+		token []byte
+	)
+
+	for {
+		response, err := temporalClient.ListWorkflow(ctx, &workflowservice.ListWorkflowExecutionsRequest{
+			Query:         workflowIDQuery(),
+			PageSize:      listPageSize,
+			NextPageToken: token,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		all = append(all, response.GetExecutions()...)
+
+		token = response.GetNextPageToken()
+		if len(token) == 0 {
+			break
+		}
+
+		if len(all) >= maxVisibilityScan {
+			slog.WarnContext(ctx, "runsapi: visibility scan hit its cap; older runs are omitted from this listing", "cap", maxVisibilityScan)
+
+			break
+		}
+	}
+
+	return all, nil
 }
 
 // getRun implements GET /api/runs/{runID}: detail for one execution of the

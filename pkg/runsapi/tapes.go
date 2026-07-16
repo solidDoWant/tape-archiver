@@ -19,8 +19,6 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	workflowservicepb "go.temporal.io/api/workflowservice/v1"
-
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -198,17 +196,12 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response, err := h.temporalClient.ListWorkflow(ctx, &workflowservicepb.ListWorkflowExecutionsRequest{
-		Query:    workflowIDQuery(),
-		PageSize: listPageSize,
-	})
+	executions, err := listAllBackupExecutions(ctx, h.temporalClient)
 	if err != nil {
 		writeError(w, statusForTemporalError(err), fmt.Errorf("list workflow executions: %w", err))
 
 		return
 	}
-
-	executions := response.GetExecutions()
 
 	// Newest runs first, then apply the run limit. Sorting happens here in Go
 	// for the same reason listRuns sorts client-side (runsapi.go): standard

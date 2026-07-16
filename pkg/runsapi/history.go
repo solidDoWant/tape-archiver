@@ -365,17 +365,37 @@ func populateFailingPhase(history *runHistory) {
 // (not a new catalog, SPEC §4.2) to distinguish a run that once existed from
 // one that never did (writeHistoryError).
 func runExistsInVisibility(ctx context.Context, temporalClient TemporalClient, runID string) (bool, error) {
-	response, err := temporalClient.ListWorkflow(ctx, &workflowservicepb.ListWorkflowExecutionsRequest{
-		Query:    workflowIDQuery(),
-		PageSize: listPageSize,
-	})
-	if err != nil {
-		return false, err
-	}
+	var (
+		token   []byte
+		scanned int
+	)
 
-	for _, execution := range response.GetExecutions() {
-		if execution.GetExecution().GetRunId() == runID {
-			return true, nil
+	// Page through visibility until the run is found or the pages run out:
+	// reading only the first page (before this) could miss a real run on page
+	// 2+, wrongly making writeHistoryError report an aged-out run as 404
+	// instead of 410 Gone. Early-exit on a match, and stop at maxVisibilityScan
+	// as the same memory backstop listAllBackupExecutions applies.
+	for {
+		response, err := temporalClient.ListWorkflow(ctx, &workflowservicepb.ListWorkflowExecutionsRequest{
+			Query:         workflowIDQuery(),
+			PageSize:      listPageSize,
+			NextPageToken: token,
+		})
+		if err != nil {
+			return false, err
+		}
+
+		for _, execution := range response.GetExecutions() {
+			if execution.GetExecution().GetRunId() == runID {
+				return true, nil
+			}
+		}
+
+		scanned += len(response.GetExecutions())
+
+		token = response.GetNextPageToken()
+		if len(token) == 0 || scanned >= maxVisibilityScan {
+			break
 		}
 	}
 
