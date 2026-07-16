@@ -63,7 +63,9 @@ function AuthGate() {
       // before even considering auth state, so an unauthenticated deep link
       // to "/history" still ends up bounced to "/login?redirect=%2F" rather
       // than a redirect that references a URL the app no longer serves.
-      navigate('/')
+      // replace: the redirect must not leave "/history" on the history stack,
+      // or Back would return to it and immediately bounce forward again.
+      navigate('/', { replace: true })
 
       return
     }
@@ -74,7 +76,7 @@ function AuthGate() {
         // after a successful callback that AuthGate itself triggered) —
         // move on to wherever the login attempt was headed.
         const redirect = sanitizeRedirectPath(new URLSearchParams(window.location.search).get('redirect'))
-        navigate(redirect)
+        navigate(redirect, { replace: true })
       }
 
       return
@@ -82,7 +84,7 @@ function AuthGate() {
 
     if (identityState.status === 'unauthenticated') {
       const redirect = window.location.pathname + window.location.search
-      navigate(`/login?redirect=${encodeURIComponent(redirect)}`)
+      navigate(`/login?redirect=${encodeURIComponent(redirect)}`, { replace: true })
     }
   }, [route.name, identityState.status, navigate])
 

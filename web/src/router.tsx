@@ -6,7 +6,7 @@ import {
   type AnchorHTMLAttributes,
   type ReactNode,
 } from 'react'
-import { RouterContext, parseRoute, useNavigate } from './route'
+import { RouterContext, parseRoute, useNavigate, type NavigateOptions } from './route'
 
 // router.tsx is a small hand-rolled client-side router, not a dependency
 // like react-router-dom. The app only ever has a handful of reachable views
@@ -42,7 +42,7 @@ export function RouterProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
-  const navigate = useCallback((path: string) => {
+  const navigate = useCallback((path: string, options?: NavigateOptions) => {
     if (path === window.location.pathname + window.location.search) {
       // Already there: skip both the history push (would leave a no-op
       // entry, e.g. clicking a nav link for the page you're already on)
@@ -59,7 +59,15 @@ export function RouterProvider({ children }: { children: ReactNode }) {
       return
     }
 
-    window.history.pushState({}, '', path)
+    if (options?.replace) {
+      // Redirect-only hop: overwrite the current entry so Back skips past the
+      // redirecting URL rather than returning to it and bouncing forward again
+      // (see NavigateOptions in route.ts).
+      window.history.replaceState({}, '', path)
+    } else {
+      window.history.pushState({}, '', path)
+    }
+
     setRoute(parseRoute(path))
   }, [])
 

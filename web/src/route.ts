@@ -111,9 +111,18 @@ export function submitPath(fromRunId?: string): string {
   return fromRunId ? `/submit?from=${encodeURIComponent(fromRunId)}` : '/submit'
 }
 
+// NavigateOptions tunes a navigation. replace swaps the current history entry
+// (history.replaceState) instead of pushing a new one — used for redirect-only
+// hops (App.tsx bouncing "/history" → "/", or the login gate) so the browser's
+// Back button does not land on the redirecting URL and immediately bounce
+// forward again, trapping the user.
+export interface NavigateOptions {
+  replace?: boolean
+}
+
 export interface RouterContextValue {
   route: Route
-  navigate: (path: string) => void
+  navigate: (path: string, options?: NavigateOptions) => void
 }
 
 // RouterContext is populated by router.tsx's RouterProvider; exported so
@@ -137,7 +146,8 @@ export function useRoute(): Route {
 }
 
 // useNavigate returns a stable function that navigates to path, pushing a
-// new browser history entry.
-export function useNavigate(): (path: string) => void {
+// new browser history entry (or replacing the current one with
+// { replace: true } — see NavigateOptions).
+export function useNavigate(): (path: string, options?: NavigateOptions) => void {
   return useRouterContext().navigate
 }
