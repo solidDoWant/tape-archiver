@@ -485,12 +485,21 @@ func parseLogsQLResponse(body io.Reader) ([]LogLine, error) {
 		var record vlRecord
 
 		if err := json.Unmarshal(raw, &record); err != nil {
-			return nil, fmt.Errorf("decode victorialogs response line: %w", err)
+			// One malformed NDJSON record must not hide every good line in the
+			// window: skip it (logged) and keep decoding, rather than failing
+			// the whole batch — a single bad record from VictoriaLogs would
+			// otherwise blank the console during a live tail, possibly dropping
+			// the surrounding error lines an operator is watching for.
+			slog.Warn("runsapi: skipping undecodable victorialogs response line", "error", err)
+
+			continue
 		}
 
 		parsedTime, err := parseVLTime(record.Time)
 		if err != nil {
-			return nil, fmt.Errorf("parse victorialogs record time %q: %w", record.Time, err)
+			slog.Warn("runsapi: skipping victorialogs record with unparseable time", "time", record.Time, "error", err)
+
+			continue
 		}
 
 		errText := record.Error
