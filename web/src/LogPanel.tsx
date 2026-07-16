@@ -82,6 +82,29 @@ const maxPollBackoffMs = 30_000
 // the live view — the full history remains in VictoriaLogs.
 const maxRenderedLines = 5000
 
+// sinceOverlapMs is how far before the newest seen line's timestamp the next
+// poll's `since` bound reaches back. Logs are shipped into VictoriaLogs
+// asynchronously from two workers (the control and data queues) whose clocks
+// are only loosely synced, so a line can be ingested a moment late while
+// carrying a timestamp slightly behind a line already seen. Anchoring `since`
+// exactly at the newest timestamp would step permanently past such a line and
+// drop it (possibly an error). Reaching back a few seconds re-includes it;
+// appendNewLines dedups the lines re-sent in that overlap, so the only cost is
+// re-fetching a small, already-seen window each poll.
+const sinceOverlapMs = 10_000
+
+// sinceWithOverlap shifts an RFC3339 timestamp back by sinceOverlapMs, so the
+// server's inclusive `since` window re-covers recently-ingested, slightly
+// out-of-order lines. Falls back to the raw value if it will not parse.
+function sinceWithOverlap(time: string): string {
+  const parsed = Date.parse(time)
+  if (Number.isNaN(parsed)) {
+    return time
+  }
+
+  return new Date(parsed - sinceOverlapMs).toISOString()
+}
+
 // buildLogsURL constructs the GET /api/runs/{runID}/logs request URL for
 // one poll: phase scopes the window (pkg/runsapi/logs.go), since (an
 // RFC3339 timestamp — always a prior response's own last line's "time",
@@ -264,7 +287,7 @@ function LogPanelWindow({ runId, phase }: LogPanelProps) {
       const current = stateRef.current
       const since =
         current.status === 'ready' && current.lines.length > 0
-          ? current.lines[current.lines.length - 1].time
+          ? sinceWithOverlap(current.lines[current.lines.length - 1].time)
           : undefined
 
       try {

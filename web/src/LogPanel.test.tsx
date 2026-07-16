@@ -161,7 +161,10 @@ describe('LogPanel', () => {
 
     await vi.advanceTimersByTimeAsync(3000)
 
-    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/runs/run-1/logs?since=2026-07-10T12%3A00%3A00Z', undefined)
+    // since reaches 10s (sinceOverlapMs) before the newest seen line's time, so
+    // a slightly out-of-order/late-ingested line is not permanently skipped; the
+    // re-sent overlap is deduped by appendNewLines.
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/runs/run-1/logs?since=2026-07-10T11%3A59%3A50.000Z', undefined)
     await vi.waitFor(() => expect(screen.getByText('second line')).toBeInTheDocument())
 
     // Both lines are still present — a poll appends rather than replaces.
