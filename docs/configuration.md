@@ -540,6 +540,13 @@ disabled — identical to `tapectl run --dry-run`; this dry-run redirect runs af
 deploy-owned overwrite, so a dry run always lands on the virtual library and is therefore
 exempt from the device-ownership requirement above.
 
+The dry-run redirect covers **hardware only** — it does not clear the Discord webhook. A
+dry-run's Deliver phase still posts its run report (and any failure alert) to the
+configured `DELIVERY_WEBHOOK_URL` channel, exactly as a production run would; this is
+intended, so a dry-run exercises the full delivery pipeline (notifications included)
+against whatever channel the deployment points at. Point `DELIVERY_WEBHOOK_URL` at a test
+channel if dry-run notifications should not reach the production one.
+
 On success the response is `201 Created` with `{"workflowId": "backup", "runId": "..."}`
 (a `Location: /api/runs/{runId}` header points at the new run's detail endpoint). An
 invalid config, malformed request body, a production run whose deploy-owned devices are
