@@ -860,10 +860,15 @@ func TestSubmitRun(t *testing.T) {
 		}
 	}
 
+	// ownedDevices is a deployment that owns the physical library devices,
+	// required for any production (non-dry-run) submit (requireDeviceOwnership).
+	ownedDevices := []Option{WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")}
+
 	tests := []struct {
 		name       string
 		body       []byte
 		getenv     func(string) string
+		opts       []Option
 		client     *fakeTemporalClient
 		wantStatus int
 		errAssert  require.ErrorAssertionFunc
@@ -872,8 +877,20 @@ func TestSubmitRun(t *testing.T) {
 			name:       "a valid config submits and returns the run ID",
 			body:       []byte(`{"config": ` + validSubmitConfigJSON + `}`),
 			getenv:     func(string) string { return "" },
+			opts:       ownedDevices,
 			client:     &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-xyz"}},
 			wantStatus: http.StatusCreated,
+		},
+		{
+			// A production run whose devices the deployment does not own is
+			// refused: the config alone must not aim a real run at
+			// client-supplied device nodes (CLAUDE.md Hardware and Safety).
+			name:       "a production run without deploy-owned devices is rejected",
+			body:       []byte(`{"config": ` + validSubmitConfigJSON + `}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
 		},
 		{
 			name:       "dry-run with mhvtl env set redirects devices and submits",
@@ -955,6 +972,7 @@ func TestSubmitRun(t *testing.T) {
 			name:   "a run already in progress is a 409 conflict, not a 500 or silent replace",
 			body:   []byte(`{"config": ` + validSubmitConfigJSON + `}`),
 			getenv: func(string) string { return "" },
+			opts:   ownedDevices,
 			client: &fakeTemporalClient{
 				executeErr: serviceerror.NewWorkflowExecutionAlreadyStarted("already started", "req-1", "run-existing"),
 			},
@@ -970,7 +988,7 @@ func TestSubmitRun(t *testing.T) {
 				errAssert = require.NoError
 			}
 
-			handler := newMux(newHandler(test.client, test.getenv))
+			handler := newMux(newHandler(test.client, test.getenv, test.opts...))
 
 			var response SubmitRunResponse
 

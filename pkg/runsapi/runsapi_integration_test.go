@@ -530,7 +530,10 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 		_ = temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil)
 	})
 
-	handler := runsapi.New(temporalClient)
+	// A production (non-dry-run) submit requires the deployment to own the
+	// library devices (runsapi.requireDeviceOwnership); declare them so this
+	// test's production submissions are accepted.
+	handler := runsapi.New(temporalClient, runsapi.WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, ""))
 	server := httptest.NewServer(handler)
 
 	defer server.Close()

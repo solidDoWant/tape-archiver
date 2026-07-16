@@ -528,15 +528,22 @@ drive, or webhook the deployment does not own, whether it came from the guided f
 JSON / paste mode, or a direct `POST`. The deploy-owned optical burner drives
 (`OPTICAL_BURNER_DRIVES`) are overwritten the same way, but only when the submitted run
 actually enables optical burn (carries a `delivery.opticalBurn` block) — a burn-off run
-never gains a spurious one. When `dryRun` is `true`, the library device
-targets are redirected to the `mhvtl` nodes named by
+never gains a spurious one. A **production (non-dry-run) run additionally requires the
+deployment to own the devices it will touch**: if `LIBRARY_CHANGER` or `LIBRARY_DRIVES`
+is unset (or `OPTICAL_BURNER_DRIVES` is unset for a run that enables optical burn), the
+submission is refused with `400` and a message naming the missing variable — a real run
+must never be aimed at a client-supplied device node the host has not declared it owns.
+Configure the deployment's devices, or submit as a dry-run. When `dryRun` is `true`, the
+library device targets are redirected to the `mhvtl` nodes named by
 `MHVTL_CHANGER_DEV`/`MHVTL_DRIVE0_DEV`/`MHVTL_DRIVE1_DEV` and optical burning is
 disabled — identical to `tapectl run --dry-run`; this dry-run redirect runs after the
-deploy-owned overwrite, so a dry run always lands on the virtual library.
+deploy-owned overwrite, so a dry run always lands on the virtual library and is therefore
+exempt from the device-ownership requirement above.
 
 On success the response is `201 Created` with `{"workflowId": "backup", "runId": "..."}`
 (a `Location: /api/runs/{runId}` header points at the new run's detail endpoint). An
-invalid config, malformed request body, or a dry-run with the mhvtl variables unset is
+invalid config, malformed request body, a production run whose deploy-owned devices are
+not configured, or a dry-run with the mhvtl variables unset is
 `400` before any Temporal RPC is made. Because backup runs are a singleton (SPEC §4.2,
 workflow ID always `backup`), a submission while one is already in progress is refused
 with `409 Conflict` rather than being queued or silently replacing the in-flight run —

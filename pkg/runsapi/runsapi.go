@@ -750,6 +750,22 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Enforce device ownership for production runs (CLAUDE.md Hardware and
+	// Safety; issue #304): the deployment, not the submitter, must own the
+	// physical library devices a real run touches. applyDeployConfig overrides
+	// them only where the deployment configured them, so a deployment that
+	// configured none would otherwise let a client-submitted config target
+	// arbitrary real device nodes. A dry run is exempt — ApplyDryRun below
+	// overrides every device to the mhvtl virtual library, so it can never
+	// reach real hardware regardless of what was submitted.
+	if !request.DryRun {
+		if err := h.requireDeviceOwnership(cfg); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+
+			return
+		}
+	}
+
 	// The per-run blank-slot selection (library.blankSlots) is an operator
 	// choice, but the deployment's library topology (issue #305) bounds it: a
 	// slot must be a real storage slot, not out of range and not a reserved
@@ -833,6 +849,31 @@ func (h *handler) applyDeployConfig(cfg *config.Config) bool {
 	}
 
 	return changed
+}
+
+// requireDeviceOwnership rejects a production submit whose physical library
+// devices are not owned by this deployment (issue #304, CLAUDE.md Hardware and
+// Safety). applyDeployConfig overrides the changer/drives (and, when optical
+// burn is enabled, the burner drives) only where the deployment configured
+// them; where it configured none, the submitted config's own device paths
+// survive, and a real run must not target hardware the host has not declared
+// it owns. The remedy is spelled out in each message: configure the
+// deployment's devices, or submit as a dry-run (which targets mhvtl and is
+// exempt). Callers apply this only for non-dry-run submits.
+func (h *handler) requireDeviceOwnership(cfg *config.Config) error {
+	if h.deployChanger == "" {
+		return errors.New("this deployment does not configure a library changer (set LIBRARY_CHANGER): a production run may not target a client-supplied changer — configure the deployment's devices, or submit as a dry-run")
+	}
+
+	if len(h.deployDrives) == 0 {
+		return errors.New("this deployment does not configure library drives (set LIBRARY_DRIVES): a production run may not target client-supplied drives — configure the deployment's devices, or submit as a dry-run")
+	}
+
+	if cfg.Delivery.OpticalBurn.Enabled() && len(h.deployOpticalBurnerDrives) == 0 {
+		return errors.New("this deployment does not configure optical burner drives (set OPTICAL_BURNER_DRIVES): a production run with optical burn enabled may not target client-supplied burner drives — configure the deployment's burner, disable optical burn, or submit as a dry-run")
+	}
+
+	return nil
 }
 
 // validateBlankSlotsAgainstTopology rejects a submitted config whose

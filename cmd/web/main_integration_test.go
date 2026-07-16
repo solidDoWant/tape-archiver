@@ -426,6 +426,12 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	webListenAddr := freeAddr(t)
 	setupEnv(t, webListenAddr)
 
+	// A production (non-dry-run) submit requires the deployment to own the
+	// library devices (runsapi.requireDeviceOwnership); provide them via the
+	// same env vars cmd/web reads (LIBRARY_CHANGER/LIBRARY_DRIVES).
+	t.Setenv("LIBRARY_CHANGER", "/dev/sch0")
+	t.Setenv("LIBRARY_DRIVES", "/dev/nst0,/dev/nst1")
+
 	ctx := t.Context()
 
 	temporalClient, shutdown, err := temporalclient.New(ctx, nil)
