@@ -26,7 +26,11 @@ function ConfigReview({ config, dryRun }: ConfigReviewProps) {
   const redundancy = config.redundancy
   const redundancyLabel = redundancy?.fillToCapacity
     ? `fill to capacity · floor ${redundancy.fillToCapacity.floor}%`
-    : redundancy
+    : // Guard on targetPercentage being present, not just redundancy: a
+      // JSON-mode config with a redundancy block but neither field set (the
+      // committed schema requires only sliceSizeBytes) would otherwise render
+      // "fixed undefined%".
+      typeof redundancy?.targetPercentage === 'number'
       ? `fixed ${redundancy.targetPercentage}%`
       : '—'
 
