@@ -171,6 +171,15 @@ func TestGetRunDriveMetricsHistoryHandler(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 	})
 
+	t.Run("unconfigured VictoriaMetrics is a 503 even with an unknown metric", func(t *testing.T) {
+		// The config check must run before the metric-param allowlist, so a
+		// client that keys "metrics unavailable" on 503 sees it rather than a
+		// spurious 400 for the bad param.
+		handler := newMux(newHandler(fake, emptyEnv))
+		recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/metrics/drives/GOODTAPE01/history?metric=bogus", nil)
+		assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	})
+
 	t.Run("an unknown metric name is rejected before any VictoriaMetrics call", func(t *testing.T) {
 		server := fakeVictoriaMetrics(t, vmResponse{Status: "success"}, vmResponse{Status: "success"})
 		defer server.Close()

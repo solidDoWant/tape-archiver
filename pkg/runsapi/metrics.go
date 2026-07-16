@@ -234,6 +234,19 @@ func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Checked before the metric-param allowlist below so an unset
+	// VICTORIAMETRICS_URL always yields the same stable 503 (this file's
+	// header invariant, and matching getRunDriveMetrics' order above): a
+	// client's "metrics unavailable" detection keys on 503, and must not be
+	// pre-empted by a 400 for an unknown metric when metrics are simply not
+	// configured.
+	vmURL := h.getenv(victoriaMetricsEnvVar)
+	if vmURL == "" {
+		writeError(w, http.StatusServiceUnavailable, errVMUnconfigured)
+
+		return
+	}
+
 	metricParam := r.URL.Query().Get("metric")
 	if metricParam == "" {
 		metricParam = defaultSparklineMetric
@@ -242,13 +255,6 @@ func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Reque
 	metricName, ok := sparklineMetricAllowlist[metricParam]
 	if !ok {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("unknown metric %q", metricParam))
-
-		return
-	}
-
-	vmURL := h.getenv(victoriaMetricsEnvVar)
-	if vmURL == "" {
-		writeError(w, http.StatusServiceUnavailable, errVMUnconfigured)
 
 		return
 	}
