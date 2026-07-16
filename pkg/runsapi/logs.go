@@ -79,6 +79,12 @@ const maxLogLines = 5000
 // https://docs.victoriametrics.com/victorialogs/querying/#http-api
 const victoriaLogsQueryPath = "/select/logsql/query"
 
+// vlQueryTimeout bounds a single VictoriaLogs HTTP request, well inside
+// requestTimeout so a slow or unreachable VictoriaLogs cannot itself exhaust
+// the whole request's budget before getRunLogs gets a chance to degrade to
+// 503 — mirroring metrics.go's vmQueryTimeout for the VictoriaMetrics path.
+const vlQueryTimeout = 5 * time.Second
+
 // runIDPattern matches a Temporal run ID's UUID form. getRunLogs rejects
 // anything else with 400 before runID is ever interpolated into a LogsQL
 // query string (buildLogsQLQuery) or passed to Temporal — this is stricter
@@ -388,7 +394,10 @@ func phaseActivitySpans(history runHistory, phase string) []timeSpan {
 // VictoriaLogs' HTTP query API and decodes its newline-delimited JSON
 // response into LogLines, oldest first.
 func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, limit int) ([]LogLine, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+victoriaLogsQueryPath, nil)
+	queryCtx, cancel := context.WithTimeout(ctx, vlQueryTimeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(queryCtx, http.MethodGet, baseURL+victoriaLogsQueryPath, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build victorialogs request: %w", err)
 	}
