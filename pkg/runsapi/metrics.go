@@ -483,7 +483,11 @@ func queryDriveRange(ctx context.Context, baseURL, metricName, barcode string, s
 	}
 
 	if len(results) == 0 {
-		return nil, nil
+		// A non-nil empty slice so DriveMetricHistoryResponse.Points (no
+		// omitempty) marshals to [] rather than null, matching the array shape
+		// every other list field in this package returns — a JS client can map
+		// over [] but trips on null.
+		return make([]MetricPoint, 0), nil
 	}
 
 	points := make([]MetricPoint, 0, len(results[0].Values))
