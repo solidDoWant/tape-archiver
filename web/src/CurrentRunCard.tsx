@@ -133,6 +133,35 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
       )
     }
 
+    if (pause?.unknown) {
+      // The pause query failed this tick, so we cannot tell whether the run is
+      // waiting on an operator. It must NOT fall through to the healthy
+      // progress bar below: a run genuinely stuck at an eject/write-failure
+      // pause would then look identical to one running cleanly. State the
+      // uncertainty, matching RunOverview/runStatusView's "PAUSE STATUS
+      // UNKNOWN".
+      return (
+        <div className="rounded-xl border border-border bg-surface p-5 shadow-card">
+          <div className="border-l-[3px] border-amber pl-4">
+            <div className="mb-1.5 flex flex-wrap items-center gap-2.5">
+              <span className="text-[15px]">⏸</span>
+              <span className="text-[15px] font-semibold">Pause status unknown</span>
+              <span className="rounded-full border border-amber-line bg-amber-bg px-2.5 py-0.5 font-mono text-[11px] font-semibold whitespace-nowrap text-amber">
+                PAUSE STATUS UNKNOWN
+              </span>
+              <span className="flex-1" />
+              <Link to={runPath(activeRun.runId)} className="text-[12px] font-medium text-blue hover:opacity-60">
+                Open run →
+              </Link>
+            </div>
+            <p className="text-[12.5px] text-text-dim">
+              The pause state could not be read — the run may be waiting on an operator. Open the run to check.
+            </p>
+          </div>
+        </div>
+      )
+    }
+
     const progress = phaseProgress(lastCompletedPhase)
 
     return (
