@@ -76,6 +76,19 @@ func newSPAHandler(assets fs.FS) (http.Handler, error) {
 		// directory listing instead of falling back to the SPA shell — so the
 		// fallback must also require a regular file, not just an existing path.
 		if info, err := fs.Stat(assets, name); err != nil || info.IsDir() {
+			// A miss under the build's hashed-asset directory is a stale asset
+			// (e.g. a browser requesting a previous deploy's index-OLD.js after
+			// a rollout), not a client-side route. Returning index.html for it
+			// would answer with text/html and a 200, so the browser rejects it
+			// as a wrong-MIME script/style instead of treating it as a clean
+			// cache miss — 404 is the honest answer. Only non-asset paths fall
+			// back to the SPA shell for client-side routing.
+			if strings.HasPrefix(name, "assets/") {
+				http.NotFound(w, r)
+
+				return
+			}
+
 			name = "index.html"
 		}
 
