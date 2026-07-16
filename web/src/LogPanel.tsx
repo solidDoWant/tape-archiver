@@ -72,6 +72,16 @@ const catchUpDelayMs = 5000
 // anyway, while the cap keeps recovery reasonably prompt once it is back.
 const maxPollBackoffMs = 30_000
 
+// maxRenderedLines bounds how many log lines the panel retains and renders. A
+// multi-hour run's Write phase streams thousands of lines, and every line
+// lives in React state and in the DOM (the console is not virtualized), so
+// without a cap memory and paint cost climb until the tab janks. Keeping the
+// most recent maxRenderedLines is safe for the tail: the since bound only ever
+// advances (it is the newest line's time), so trimmed older lines are never
+// re-requested and cannot reappear as duplicates. Older output is dropped from
+// the live view — the full history remains in VictoriaLogs.
+const maxRenderedLines = 5000
+
 // buildLogsURL constructs the GET /api/runs/{runID}/logs request URL for
 // one poll: phase scopes the window (pkg/runsapi/logs.go), since (an
 // RFC3339 timestamp — always a prior response's own last line's "time",
@@ -116,13 +126,20 @@ function lineKey(line: LogLine): string {
 // the whole point of the inclusive bound.
 function appendNewLines(existing: LogLine[], incoming: LogLine[]): LogLine[] {
   if (existing.length === 0) {
-    return incoming
+    return capLines(incoming)
   }
 
   const seen = new Set(existing.map(lineKey))
   const fresh = incoming.filter((line) => !seen.has(lineKey(line)))
 
-  return fresh.length === 0 ? existing : [...existing, ...fresh]
+  return fresh.length === 0 ? existing : capLines([...existing, ...fresh])
+}
+
+// capLines keeps only the most recent maxRenderedLines (see that constant),
+// returning the input untouched when it is already within bounds so an
+// unchanged batch keeps its array identity and does not force a re-render.
+function capLines(lines: LogLine[]): LogLine[] {
+  return lines.length > maxRenderedLines ? lines.slice(lines.length - maxRenderedLines) : lines
 }
 
 // levelClass maps a log line's level to the console panel's tag color, per
