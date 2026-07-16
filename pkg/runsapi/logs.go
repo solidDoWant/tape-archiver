@@ -209,8 +209,13 @@ func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 		// case, this branch is unreachable — a run always has a start
 		// time). This is a genuinely empty result, not an availability
 		// problem: LogPanel shows its own distinct "no log lines yet"
-		// empty state for Live == false, Lines == [].
-		writeJSON(w, http.StatusOK, RunLogsResponse{RunID: runID, Phase: phase, Lines: []LogLine{}, Live: false})
+		// empty state for Lines == []. Live still carries the run's own
+		// liveness (resolveLogWindow sets it from the run being open), so a
+		// phase that simply has not been reached yet on a still-running run
+		// keeps the client polling until it starts, rather than looking like
+		// a finished window the poll loop stops tailing (window.live is
+		// false only once the run itself has closed without reaching it).
+		writeJSON(w, http.StatusOK, RunLogsResponse{RunID: runID, Phase: phase, Lines: []LogLine{}, Live: window.live})
 
 		return
 	}
@@ -332,7 +337,11 @@ func (h *handler) resolveLogWindow(ctx context.Context, runID, phase string) (lo
 		}
 
 		if info.StartTime == nil {
-			return logWindow{}, false, nil
+			// The phase has no window to query yet. If the run is still
+			// running it may still reach this phase and log, so report the
+			// run's liveness so the caller keeps the client polling; only a
+			// closed run makes a never-started phase genuinely final.
+			return logWindow{live: !history.Closed}, false, nil
 		}
 
 		return logWindow{

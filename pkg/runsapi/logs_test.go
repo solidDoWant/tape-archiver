@@ -370,9 +370,39 @@ func TestGetRunLogsPhaseNotYetStartedIsEmptyNotUnavailable(t *testing.T) {
 	var body RunLogsResponse
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	assert.Equal(t, "Burn", body.Phase)
-	assert.False(t, body.Live)
+	assert.False(t, body.Live, "a closed run's never-reached phase is genuinely final")
 	assert.Empty(t, body.Lines)
 	assert.Empty(t, fake.queries, "no window means no reason to query VictoriaLogs at all")
+}
+
+func TestGetRunLogsPhaseNotYetStartedOnLiveRunStaysLive(t *testing.T) {
+	fake := newFakeVictoriaLogs(t, http.StatusOK, "")
+	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})
+
+	// A still-running run: Resolve ran, but the run has not closed and later
+	// phases have not started. A not-yet-reached phase must report Live so the
+	// log panel keeps polling until it starts, rather than looking like a
+	// finished window the poll loop stops tailing.
+	b := newEventBuilder()
+	b.started(t, testConfig)
+	resolve := b.scheduled(t, "ResolveAndCheck", backup.ResolveDataInput{Config: testConfig})
+	b.completed(t, resolve, []backup.ResolvedArchive{{SourceIndex: 0, Label: "archive-0"}})
+	// Deliberately no b.runCompleted(): the run is still running.
+	events := b.events
+
+	temporalClient := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+		return &fakeHistoryIterator{events: events}
+	}}
+	handler := newMux(newHandler(temporalClient, getenv))
+
+	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs?phase=Burn", nil)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var body RunLogsResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+	assert.Equal(t, "Burn", body.Phase)
+	assert.True(t, body.Live, "a not-yet-reached phase on a running run must stay live so the client keeps polling")
+	assert.Empty(t, body.Lines)
 }
 
 func TestGetRunLogsErrorClassificationMatchesOtherEndpoints(t *testing.T) {
