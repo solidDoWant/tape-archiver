@@ -65,6 +65,14 @@ const (
 // run's console output for an operator glancing at recent activity (this
 // is not a log search/analytics UI — see issue #274's non-goals) while
 // keeping a single response bounded in size.
+//
+// When a window holds more than this many matching lines, buildLogsQLQuery
+// keeps the NEWEST maxLogLines, not the oldest: an operator opening the
+// console on a failed run wants the tail (the error and the lines around it),
+// which lives at the end of the window — returning the oldest 5000 and
+// truncating the tail would hide exactly what they came to see. A live tail
+// still walks forward from the last line via ?since=, so this cap only ever
+// discards the far-older head of an over-long window, never recent activity.
 const maxLogLines = 5000
 
 // victoriaLogsQueryPath is VictoriaLogs' LogsQL query HTTP API.
@@ -398,9 +406,18 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string,
 // buildLogsQLQuery composes the LogsQL query string for one request:
 // streamFilter (operator config) ANDed with an exact match on RunID (never
 // client-supplied LogsQL — runID is validated as a UUID by the caller
-// before this is ever invoked) and a time-range clause, sorted oldest first
-// and capped at limit. since, when set and later than start, replaces the
-// lower bound.
+// before this is ever invoked) and a time-range clause. since, when set and
+// later than start, replaces the lower bound.
+//
+// When the match set exceeds limit, the query keeps the NEWEST limit lines,
+// then returns them oldest-first (the order the log panel renders and the
+// ?since= poll loop expects — see maxLogLines). LogsQL expresses this in one
+// server-side pass with chained sort pipes: "sort by (_time) desc | limit N"
+// selects the newest N, and a trailing "sort by (_time)" re-orders those N
+// ascending. Doing the truncation newest-first (rather than the plain
+// "sort by (_time) | limit N", which keeps the OLDEST N and drops the tail)
+// is what stops a large failed run's error lines — always at the end of the
+// window — from being truncated away.
 //
 // The lower bound is always INCLUSIVE (">="/"["), even for since — a
 // deliberate choice, not an off-by-one: a caller polling with "since = the
@@ -423,7 +440,7 @@ func buildLogsQLQuery(streamFilter, runID string, start time.Time, end *time.Tim
 		timeFilter = fmt.Sprintf("_time:>=%s", formatVLTime(lower))
 	}
 
-	return fmt.Sprintf("(%s) AND RunID:=%q AND %s | sort by (_time) | limit %d", streamFilter, runID, timeFilter, limit)
+	return fmt.Sprintf("(%s) AND RunID:=%q AND %s | sort by (_time) desc | limit %d | sort by (_time)", streamFilter, runID, timeFilter, limit)
 }
 
 // formatVLTime renders t the way LogsQL time-range literals expect

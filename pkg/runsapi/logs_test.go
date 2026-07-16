@@ -157,6 +157,11 @@ func TestGetRunLogsWholeRunHappyPath(t *testing.T) {
 	assert.Contains(t, query, "(*)")
 	assert.Contains(t, query, "sort by (_time)")
 	assert.Contains(t, query, fmt.Sprintf("limit %d", maxLogLines))
+	// The cap must keep the NEWEST lines, not the oldest: an over-long window's
+	// tail (a failure's error lines) must survive truncation. That is expressed
+	// as "sort desc | limit | sort asc" — see buildLogsQLQuery.
+	assert.Contains(t, query, "sort by (_time) desc")
+	assert.Regexp(t, `sort by \(_time\) desc \| limit \d+ \| sort by \(_time\)`, query)
 }
 
 // TestGetRunLogsSurfacesErrorField covers the whole point of LogLine.Error: a
