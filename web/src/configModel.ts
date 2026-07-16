@@ -289,7 +289,12 @@ export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
   const library: Library = {
     changer: deploy.changer.trim(),
     drives: deploy.drives.map((drive) => drive.trim()).filter((drive) => drive !== ''),
-    blankSlots: form.blankSlots,
+    // Dedup, preserving order: a slot is either blank or not, so a duplicate is
+    // meaningless — but internal/config rejects duplicate slot addresses, so a
+    // form built from a JSON/restart config that carried [1, 1, 2] (the grid
+    // itself can't produce dupes) would 400 at submit. The client schema
+    // interpreter has no uniqueItems, so collapse them here.
+    blankSlots: [...new Set(form.blankSlots)],
     tapeCapacityBytes,
     allowNonBlankTapes: form.allowNonBlankTapes,
   }
