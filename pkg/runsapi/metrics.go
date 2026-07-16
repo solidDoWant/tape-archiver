@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -517,7 +518,22 @@ func parseSampleValue(raw []json.RawMessage) (float64, error) {
 		return 0, fmt.Errorf("decode sample value: %w", err)
 	}
 
-	return strconv.ParseFloat(value, 64)
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	// strconv.ParseFloat accepts "NaN", "+Inf", "-Inf" — the exact tokens
+	// VictoriaMetrics emits for gap-filled or stale samples — but encoding/json
+	// cannot marshal a non-finite float, and writeJSON has already written a
+	// 200 header by the time Encode fails, so the client would get a truncated
+	// body. Reject it here; the caller skips the sample as it does any other
+	// malformed one.
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf("non-finite sample value %q", value)
+	}
+
+	return parsed, nil
 }
 
 // parseRangePoint decodes one [timestamp, "value"] pair from a range query's
@@ -540,6 +556,14 @@ func parseRangePoint(raw []json.RawMessage) (MetricPoint, bool) {
 
 	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
+		return MetricPoint{}, false
+	}
+
+	// Skip non-finite values (VictoriaMetrics emits "NaN"/"Inf" for gap-filled
+	// or stale range points): encoding/json cannot marshal them, and by the
+	// time Encode fails writeJSON has already sent a 200 header — see
+	// parseSampleValue.
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return MetricPoint{}, false
 	}
 
