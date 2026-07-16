@@ -489,6 +489,17 @@ func (h *handler) listRuns(w http.ResponseWriter, r *http.Request) {
 // unbounded — a bounded, logged truncation, never a silent one.
 const maxVisibilityScan = 10000
 
+// maxVisibilityPages bounds how many visibility pages a single scan follows,
+// independent of maxVisibilityScan's row cap. The row cap alone does not bound
+// the loop when Temporal returns pages that carry a NextPageToken but few or
+// no rows (the standard SQL visibility store can legitimately do this):
+// len(all)/scanned never reaches the row cap, so the loop would page on until
+// the token finally empties or the request deadline fires. This page cap is
+// the backstop for that case — comfortably above maxVisibilityScan/listPageSize
+// full pages, so it only ever trips on sparse/empty paging, not a genuinely
+// large history.
+const maxVisibilityPages = 100
+
 // listAllBackupExecutions returns every visibility record for the singleton
 // backup workflow, following NextPageToken across pages rather than reading
 // only the first (a single ListWorkflow returns at most listPageSize, and the
@@ -499,6 +510,7 @@ func listAllBackupExecutions(ctx context.Context, temporalClient TemporalClient)
 	var (
 		all   []*workflowpb.WorkflowExecutionInfo
 		token []byte
+		pages int
 	)
 
 	for {
@@ -512,14 +524,16 @@ func listAllBackupExecutions(ctx context.Context, temporalClient TemporalClient)
 		}
 
 		all = append(all, response.GetExecutions()...)
+		pages++
 
 		token = response.GetNextPageToken()
 		if len(token) == 0 {
 			break
 		}
 
-		if len(all) >= maxVisibilityScan {
-			slog.WarnContext(ctx, "runsapi: visibility scan hit its cap; older runs are omitted from this listing", "cap", maxVisibilityScan)
+		if len(all) >= maxVisibilityScan || pages >= maxVisibilityPages {
+			slog.WarnContext(ctx, "runsapi: visibility scan hit its cap; older runs are omitted from this listing",
+				"rows", len(all), "row_cap", maxVisibilityScan, "pages", pages, "page_cap", maxVisibilityPages)
 
 			break
 		}

@@ -817,6 +817,35 @@ func postJSON(t *testing.T, handler http.Handler, path string, body []byte, resp
 	return recorder
 }
 
+func TestListAllBackupExecutionsBoundsEmptyTokenedPages(t *testing.T) {
+	// A visibility store that keeps returning a NextPageToken with no rows must
+	// not page until the request deadline: maxVisibilityPages bounds it. The
+	// fake ignores the token and returns the same tokened empty page every
+	// call, so without the page cap this loops forever.
+	client := &fakeTemporalClient{listResponse: &workflowservice.ListWorkflowExecutionsResponse{
+		NextPageToken: []byte("more"),
+	}}
+
+	type result struct {
+		all []*workflowpb.WorkflowExecutionInfo
+		err error
+	}
+	done := make(chan result, 1)
+
+	go func() {
+		all, err := listAllBackupExecutions(t.Context(), client)
+		done <- result{all, err}
+	}()
+
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		assert.Empty(t, got.all)
+	case <-time.After(5 * time.Second):
+		t.Fatal("listAllBackupExecutions did not terminate — the page cap is not bounding empty tokened pages")
+	}
+}
+
 func TestSubmitRun(t *testing.T) {
 	mhvtlEnv := func(name string) string {
 		switch name {

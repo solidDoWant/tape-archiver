@@ -368,13 +368,16 @@ func runExistsInVisibility(ctx context.Context, temporalClient TemporalClient, r
 	var (
 		token   []byte
 		scanned int
+		pages   int
 	)
 
 	// Page through visibility until the run is found or the pages run out:
 	// reading only the first page (before this) could miss a real run on page
 	// 2+, wrongly making writeHistoryError report an aged-out run as 404
 	// instead of 410 Gone. Early-exit on a match, and stop at maxVisibilityScan
-	// as the same memory backstop listAllBackupExecutions applies.
+	// rows or maxVisibilityPages pages — the same backstops
+	// listAllBackupExecutions applies, the page cap covering sparse/empty
+	// tokened pages the row cap alone would not bound.
 	for {
 		response, err := temporalClient.ListWorkflow(ctx, &workflowservicepb.ListWorkflowExecutionsRequest{
 			Query:         workflowIDQuery(),
@@ -392,9 +395,10 @@ func runExistsInVisibility(ctx context.Context, temporalClient TemporalClient, r
 		}
 
 		scanned += len(response.GetExecutions())
+		pages++
 
 		token = response.GetNextPageToken()
-		if len(token) == 0 || scanned >= maxVisibilityScan {
+		if len(token) == 0 || scanned >= maxVisibilityScan || pages >= maxVisibilityPages {
 			break
 		}
 	}
