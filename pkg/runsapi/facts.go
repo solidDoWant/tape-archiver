@@ -315,7 +315,18 @@ func burnFacts(status PhaseStatus, records []activityRecord) []PhaseFact {
 		return nil
 	}
 
-	discs := len(findByName(records, "BurnDisc"))
+	// Count only completed BurnDisc activities, not every scheduled attempt:
+	// a failed-and-retried burn would otherwise inflate the disc count above
+	// the number of discs actually written, the same completed-only filter
+	// loadFacts and ejectFacts already apply.
+	discs := 0
+
+	for _, record := range findByName(records, "BurnDisc") {
+		if record.Completed {
+			discs++
+		}
+	}
+
 	if discs == 0 {
 		return nil
 	}
