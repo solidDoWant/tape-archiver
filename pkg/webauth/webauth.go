@@ -67,6 +67,18 @@ const stateCookieTTL = 10 * time.Minute
 // lifetime.
 const maxSessionDuration = 24 * time.Hour
 
+// minSessionDuration floors the session lifetime, so a provider configured
+// with short-lived ID tokens (5-60 min is common — an ID token is meant to
+// bound the token, not a UI session) does not bounce an operator back to
+// login part-way through a task. Once the encrypted session cookie is minted
+// the ID token's own expiry is no longer consulted — there is no refresh flow
+// and every request is authorized from the self-contained cookie — so the
+// session lifetime is this service's own choice, clamped to
+// [minSessionDuration, maxSessionDuration] regardless of the token's expiry.
+// A working day keeps an operator signed in across a long-running backup's
+// staging + eject-pause wait without re-auth, while staying well bounded.
+const minSessionDuration = 8 * time.Hour
+
 // discoveryTimeout bounds the OIDC discovery call New makes at startup — the
 // same defensive pattern pkg/temporalclient.New uses for its own startup
 // health check. Without it, a misconfigured or unreachable issuer would hang
@@ -431,8 +443,19 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		name = claims.PreferredUsername
 	}
 
+	// Clamp the session lifetime to [minSessionDuration, maxSessionDuration]:
+	// cap an over-long token so a session cannot outlive a reasonable working
+	// session, and floor a short-lived one so an IdP issuing 5-minute ID
+	// tokens does not bounce the operator to login mid-task (see the duration
+	// consts). The token's own expiry is only a starting hint here.
+	now := time.Now()
+
 	expiresAt := idToken.Expiry
-	if maxExpiry := time.Now().Add(maxSessionDuration); expiresAt.After(maxExpiry) {
+	if minExpiry := now.Add(minSessionDuration); expiresAt.Before(minExpiry) {
+		expiresAt = minExpiry
+	}
+
+	if maxExpiry := now.Add(maxSessionDuration); expiresAt.After(maxExpiry) {
 		expiresAt = maxExpiry
 	}
 
