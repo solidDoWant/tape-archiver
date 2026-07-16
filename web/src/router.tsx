@@ -43,13 +43,19 @@ export function RouterProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const navigate = useCallback((path: string) => {
-    if (path === window.location.pathname) {
+    if (path === window.location.pathname + window.location.search) {
       // Already there: skip both the history push (would leave a no-op
       // entry, e.g. clicking a nav link for the page you're already on)
       // and the state update — setRoute(parseRoute(path)) would otherwise
       // always re-render every context consumer even though parseRoute
       // returns a brand-new object for an identical route, since React's
       // Object.is bail-out never gets a chance to apply.
+      //
+      // The comparison includes the query string, not just the pathname:
+      // "/submit?from=B" and "/submit" are different destinations (the query
+      // preloads a restart config — route.ts's submitPath), so a navigation
+      // that only drops or changes the query — e.g. "Start new run" from a
+      // pre-filled restart form — must not be swallowed as a no-op.
       return
     }
 
