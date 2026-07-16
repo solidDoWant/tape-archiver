@@ -694,6 +694,16 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject any trailing content after the single JSON object: a body like
+	// `{...} {...}` or `{...} <garbage>` must not be silently accepted with
+	// only its first value decoded — the same fail-closed handling
+	// DisallowUnknownFields already gives an unexpected field.
+	if decoder.More() {
+		writeError(w, http.StatusBadRequest, errors.New("request body must contain a single JSON object"))
+
+		return
+	}
+
 	if len(request.Config) == 0 {
 		writeError(w, http.StatusBadRequest, errors.New("config is required"))
 

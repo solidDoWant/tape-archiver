@@ -889,6 +889,16 @@ func TestSubmitRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
+			// Trailing content after the single JSON object must be rejected,
+			// not silently accepted with only the first value decoded.
+			name:       "trailing content after the JSON object is rejected",
+			body:       []byte(`{"config": ` + validSubmitConfigJSON + `} {"config": ` + validSubmitConfigJSON + `}`),
+			getenv:     func(string) string { return "" },
+			client:     &fakeTemporalClient{},
+			wantStatus: http.StatusBadRequest,
+			errAssert:  require.Error,
+		},
+		{
 			// AC: a misspelled/unrecognized envelope key (e.g. "isDryRun"
 			// instead of "dryRun") must fail the request rather than silently
 			// defaulting dryRun to false and submitting a real run (CLAUDE.md
