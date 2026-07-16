@@ -643,7 +643,14 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               checked={form.opticalBurnEnabled}
               aria-label="Enable optical recovery discs"
               onChange={(event) =>
-                setForm((previous) => ({ ...previous, opticalBurnEnabled: event.target.checked }))
+                setForm((previous) => ({
+                  ...previous,
+                  opticalBurnEnabled: event.target.checked,
+                  // Enabling burn guarantees at least one copy: a config loaded
+                  // with copies=0 (burn off) would otherwise turn on with the
+                  // hidden 0 still in state and build a no-op burn block.
+                  opticalCopies: event.target.checked && previous.opticalCopies < 1 ? 1 : previous.opticalCopies,
+                }))
               }
               className="h-4 w-4 accent-green"
             />
@@ -659,10 +666,15 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               <input
                 id="config-optical-copies"
                 type="number"
-                min={0}
+                // min 1: this input is only shown when optical burn is enabled,
+                // and copies=0 means "disabled" server-side — so a 0 here builds
+                // an opticalBurn block that silently burns nothing yet reads
+                // back as OFF on a Form round-trip (opticalBurnEnabled is
+                // copies>0). A cleared/invalid entry coerces to 1, not 0.
+                min={1}
                 value={form.opticalCopies}
                 onChange={(event) =>
-                  setForm((previous) => ({ ...previous, opticalCopies: Number(event.target.value) || 0 }))
+                  setForm((previous) => ({ ...previous, opticalCopies: Number(event.target.value) || 1 }))
                 }
                 className={inputClass}
               />
