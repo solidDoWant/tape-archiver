@@ -116,7 +116,9 @@ function DriveGauge({
         ) : (
           <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono">
             <span className="text-[13px] font-semibold text-text">{throughputMBps!.toFixed(0)} MB/s</span>
-            {floorKnown ? <span className="text-text-faint">floor {floorMBps}</span> : null}
+            {floorKnown && floorMBps !== undefined ? (
+              <span className="text-text-faint">floor {floorMBps}</span>
+            ) : null}
             {typeof repositions === 'number' ? (
               <span className="text-text-faint">
                 {repositions} reposition{repositions === 1 ? '' : 's'}

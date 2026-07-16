@@ -50,7 +50,9 @@ function WriteRateSparkline({ status, points, floorMBps, floorKnown }: WriteRate
     <div className="min-w-0 rounded-xl border border-border bg-surface p-3">
       <div className="mb-2 flex flex-wrap items-baseline gap-x-1.5 font-mono text-[12px]">
         <span className="text-[15px] font-semibold text-text">{latest.toFixed(0)} MB/s</span>
-        {floorKnown ? <span className="text-text-faint">· floor {floorMBps}</span> : null}
+        {floorKnown && floorMBps !== undefined ? (
+          <span className="text-text-faint">· floor {floorMBps}</span>
+        ) : null}
       </div>
 
       <div

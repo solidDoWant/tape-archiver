@@ -326,7 +326,9 @@ function FinalTapeCard({ tape }: { tape: TapeOutcome }) {
       {health?.measured ? (
         <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono">
           <span className="text-[13px] font-semibold text-text">{health.throughputMBps.toFixed(0)} MB/s</span>
-          {health.floorKnown ? <span className="text-text-faint">floor {health.floorMBps}</span> : null}
+          {health.floorKnown && health.floorMBps !== undefined ? (
+            <span className="text-text-faint">floor {health.floorMBps}</span>
+          ) : null}
           {health.repositionsMeasured ? (
             <span className="text-text-faint">
               {health.repositions ?? 0} reposition{(health.repositions ?? 0) === 1 ? '' : 's'}
