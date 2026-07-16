@@ -367,6 +367,17 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		return fmt.Errorf("shutdown: %w", shutdownErr)
 	}
 
+	// Surface a serve error that raced the shutdown signal: if srv.Serve
+	// returned a real failure (not ErrServerClosed) at the same moment ctx was
+	// canceled, the select above may have taken the ctx.Done() branch, leaving
+	// the fault unreported and the process exiting 0 as if it shut down cleanly.
+	// Serve has returned by now — Shutdown waited for it, and this receive
+	// blocks until it does (also joining the serve goroutine) — so its result
+	// is available to check.
+	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve: %w", err)
+	}
+
 	// The main listener no longer accepts connections as of the line above;
 	// stop reporting ready now rather than waiting for the deferred shutdown
 	// at the end of run() — see the comment where healthShutdown is set up.
