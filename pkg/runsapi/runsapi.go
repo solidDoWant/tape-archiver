@@ -684,6 +684,19 @@ func (h *handler) submitRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The per-run blank-slot selection (library.blankSlots) is an operator
+	// choice, but the deployment's library topology (issue #305) bounds it: a
+	// slot must be a real storage slot, not out of range and not a reserved
+	// cleaning / I/O-station slot. The guided Form's grid picker enforces this
+	// client-side, but JSON / paste mode and raw POSTs bypass that, and
+	// internal/config only rejects negative/duplicate slots — so enforce the
+	// topology bound here too, the server-side analogue of the picker.
+	if err := h.validateBlankSlotsAgainstTopology(cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+
+		return
+	}
+
 	if request.DryRun {
 		// io.Discard: there is no stderr-shaped place to surface the
 		// optical-burn advisory over HTTP; the response already reports
@@ -754,6 +767,44 @@ func (h *handler) applyDeployConfig(cfg *config.Config) bool {
 	}
 
 	return changed
+}
+
+// validateBlankSlotsAgainstTopology rejects a submitted config whose
+// library.blankSlots fall outside the deployment's declared library topology
+// (issue #305): a slot must be a real storage slot in [1, deploySlotCount] and
+// not a reserved cleaning or I/O-station slot. It is the server-side analogue
+// of the guided Form's slot-grid picker, closing the JSON / paste-mode and
+// raw-POST paths the picker cannot cover.
+//
+// When the deployment declared no topology (deploySlotCount == 0 — unset or
+// unparseable LIBRARY_SLOT_COUNT), the bound is unknown, so this is a no-op and
+// only internal/config's own negative/duplicate checks apply — mirroring the
+// Form, whose picker shows "not configured" and imposes no bound in that case.
+func (h *handler) validateBlankSlotsAgainstTopology(cfg *config.Config) error {
+	if h.deploySlotCount <= 0 {
+		return nil
+	}
+
+	reserved := make(map[int]string, len(h.deployCleaningSlots)+len(h.deployIOStationSlots))
+	for _, slot := range h.deployCleaningSlots {
+		reserved[slot] = "a cleaning slot"
+	}
+
+	for _, slot := range h.deployIOStationSlots {
+		reserved[slot] = "an I/O-station slot"
+	}
+
+	for i, slot := range cfg.Library.BlankSlots {
+		if slot < 1 || slot > h.deploySlotCount {
+			return fmt.Errorf("library.blankSlots[%d]: slot %d is outside the library's storage slots (1-%d)", i, slot, h.deploySlotCount)
+		}
+
+		if kind, ok := reserved[slot]; ok {
+			return fmt.Errorf("library.blankSlots[%d]: slot %d is %s, not a storage slot", i, slot, kind)
+		}
+	}
+
+	return nil
 }
 
 // resumeRun implements POST /api/runs/{runID}/resume: send
