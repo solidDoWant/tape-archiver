@@ -7,6 +7,7 @@ import {
   configToFormState,
   defaultFormState,
   deployOwnedFields,
+  unmatchedTapeCapacity,
   unmodeledFields,
   type FormState,
   type RunConfig,
@@ -166,7 +167,8 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
           ? { ...loaded, encryption: { ...loaded.encryption, identity: '' } }
           : loaded
 
-        setForm(configToFormState(sanitized))
+        const restartForm = configToFormState(sanitized)
+        setForm(restartForm)
 
         // Carry the dry-run intent over: a restart of a dry-run should re-run as
         // a dry-run, not silently default to a production run against real tape
@@ -189,6 +191,13 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
         if (dropped.length > 0) {
           notices.push(
             `The form has no controls for ${dropped.join(', ')}, so ${dropped.length === 1 ? 'it was' : 'they were'} dropped — switch to Paste / upload mode to set ${dropped.length === 1 ? 'it' : 'them'}.`,
+          )
+        }
+
+        const unmatchedCapacity = unmatchedTapeCapacity(loaded)
+        if (unmatchedCapacity !== null) {
+          notices.push(
+            `The saved tape capacity (${unmatchedCapacity.toLocaleString()} bytes) matches no known LTO generation, so the form set it to ${restartForm.tapeGeneration} — switch to Paste / upload mode to keep the exact value.`,
           )
         }
 
@@ -249,8 +258,9 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
       }
 
       const config = parsed as RunConfig
+      const nextForm = configToFormState(config)
 
-      setForm(configToFormState(config))
+      setForm(nextForm)
 
       // Two kinds of field don't survive a JSON → Form switch, called out by
       // name up front rather than changed silently: (1) advanced fields the
@@ -276,6 +286,13 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
       if (deployOwned.length > 0) {
         notices.push(
           `Form mode sources ${deployOwned.join(', ')} from this deployment's config, replacing the ${deployOwned.length === 1 ? 'value' : 'values'} in this JSON. Where this deployment configures ${deployOwned.length === 1 ? 'it' : 'them'}, the server applies its own ${deployOwned.length === 1 ? 'value' : 'values'} to every run — JSON / paste mode included.`,
+        )
+      }
+
+      const unmatchedCapacity = unmatchedTapeCapacity(config)
+      if (unmatchedCapacity !== null) {
+        notices.push(
+          `The tape capacity in this JSON (${unmatchedCapacity.toLocaleString()} bytes) matches no known LTO generation, so Form mode set it to ${nextForm.tapeGeneration} — switch back to JSON mode to keep the exact value.`,
         )
       }
 

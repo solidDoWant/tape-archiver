@@ -218,6 +218,27 @@ describe('ConfigPage', () => {
     expect(notice).toHaveTextContent('library.ioWaitTimeoutSeconds')
   })
 
+  it('warns that a tape capacity matching no LTO generation is reset on the switch to Form', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
+
+    const config = {
+      sources: [{ zfsPath: { name: 'bulk-pool-01/custom-capacity' } }],
+      copies: 2,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 9999999999999 },
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
+      delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
+    }
+
+    fireEvent.change(screen.getByLabelText('Run config (JSON)'), { target: { value: JSON.stringify(config) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Form' }))
+
+    expect(screen.getByText(/matches no known LTO generation/i)).toBeInTheDocument()
+  })
+
   it('shows no dropped-field notice when the JSON carries only form-modeled fields', async () => {
     renderPage()
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))

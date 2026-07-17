@@ -445,6 +445,24 @@ export function deployOwnedFields(config: RunConfig): string[] {
   return overridden
 }
 
+// unmatchedTapeCapacity reports config's library.tapeCapacityBytes when it is a
+// number that matches no LTO generation in ltoGenerations, else null. Form
+// mode's capacity <select> can only choose one of that fixed table's values, so
+// a JSON → Form switch of a config carrying a custom capacity silently falls
+// back to defaultLtoGeneration. ConfigPage names this in its mode-switch notice
+// so the operator knows the value was replaced (unlike unmodeledFields, which
+// are simply dropped, this one is reset to a different value) rather than
+// discovering it only after submit.
+export function unmatchedTapeCapacity(config: RunConfig): number | null {
+  const capacity = (config.library as Partial<Library> | undefined)?.tapeCapacityBytes
+
+  if (typeof capacity !== 'number') {
+    return null
+  }
+
+  return ltoGenerationForCapacity(capacity) ? null : capacity
+}
+
 // configToFormState is buildConfig's inverse: a best-effort reconstruction
 // of Form-mode state from an arbitrary schema-shaped config (e.g. one
 // parsed from JSON-mode text), used when the operator switches from JSON
