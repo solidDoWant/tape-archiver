@@ -634,6 +634,19 @@ func sanitizeRedirectPath(path string) string {
 		return "/"
 	}
 
+	// Never redirect back to the login page itself: an authenticated user sent
+	// to /login after a successful callback would be stranded there (the SPA
+	// renders its login view for that route regardless of session, and its
+	// AuthGate redirect does not re-fire) — see web/src/route.ts's mirror.
+	pathname := path
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		pathname = path[:i]
+	}
+
+	if pathname == "/login" {
+		return "/"
+	}
+
 	return path
 }
 

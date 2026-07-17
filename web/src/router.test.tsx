@@ -91,6 +91,15 @@ describe('sanitizeRedirectPath', () => {
     expect(sanitizeRedirectPath('/\\evil.example')).toBe('/')
     expect(sanitizeRedirectPath('/runs/\\evil.example')).toBe('/')
   })
+
+  it('rejects the login page itself, which would strand an authenticated user', () => {
+    expect(sanitizeRedirectPath('/login')).toBe('/')
+    expect(sanitizeRedirectPath('/login?redirect=%2Flogin')).toBe('/')
+  })
+
+  it('preserves a path that merely starts with login', () => {
+    expect(sanitizeRedirectPath('/login-help')).toBe('/login-help')
+  })
 })
 
 // RouteProbe renders the current route name/runId as text and a couple of

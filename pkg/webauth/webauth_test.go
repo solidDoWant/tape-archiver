@@ -793,6 +793,9 @@ func TestSanitizeRedirectPath(t *testing.T) {
 		{name: "protocol-relative // is rejected", in: "//evil.example", want: "/"},
 		{name: "a backslash-prefixed path is rejected", in: "/\\evil.example", want: "/"},
 		{name: "a backslash anywhere in the path is rejected", in: "/runs/\\evil.example", want: "/"},
+		{name: "the login page itself is rejected (would strand an authed user)", in: "/login", want: "/"},
+		{name: "the login page with a query is rejected", in: "/login?redirect=%2Flogin", want: "/"},
+		{name: "a path merely starting with login is preserved", in: "/login-help", want: "/login-help"},
 	}
 
 	for _, test := range tests {

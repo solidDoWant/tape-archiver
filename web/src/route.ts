@@ -90,6 +90,15 @@ export function sanitizeRedirectPath(path: string | null | undefined): string {
     return '/'
   }
 
+  // Never redirect back to the login page itself: an authenticated user sent to
+  // /login (e.g. a crafted ?redirect=%2Flogin) would be stranded there, since
+  // App renders LoginPage for the login route regardless of auth and AuthGate's
+  // redirect effect does not re-fire (route.name and identity are unchanged).
+  const pathname = path.split(/[?#]/, 1)[0]
+  if (pathname === '/login') {
+    return '/'
+  }
+
   return path
 }
 
