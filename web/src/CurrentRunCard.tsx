@@ -4,6 +4,7 @@ import { phaseLabel } from './phaseFormat'
 import { Link } from './router'
 import { runPath } from './route'
 import PauseActions from './PauseActions'
+import { livePauseState } from './runHeader'
 import type { RunEventsState } from './runEvents'
 
 // phaseOrder mirrors workflows/backup's Phase* constants in pipeline order
@@ -111,7 +112,20 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
     const lastCompletedPhase = live.detail?.lastCompletedPhase ?? ''
     const pause = live.detail?.currentPause
 
-    if (pause && pause.kind !== '') {
+    // A run that closed (terminated/completed/canceled) while waiting at a
+    // pause still reports its last currentPause.kind, but Resume/Abort no
+    // longer apply. livePauseState collapses that to not-paused for a terminal
+    // run, so this card never shows the operator-action banner or the live
+    // Resume/Abort buttons for a finished run — the same guard RunOverview and
+    // the shell header already apply (runHeader.ts). Without it, aborting a run
+    // paused on write-failure leaves the dashboard showing "Run paused — needs
+    // you" with destructive actions for an already-closed run.
+    const terminal = Boolean(live.detail?.closeTime) || live.state === 'terminal'
+    const { isPaused, pauseUnknown } = pause
+      ? livePauseState(pause, terminal)
+      : { isPaused: false, pauseUnknown: false }
+
+    if (pause && isPaused) {
       return (
         <div className="rounded-xl border border-border bg-surface p-5 shadow-card">
           <div className="border-l-[3px] border-amber pl-4">
@@ -133,7 +147,7 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
       )
     }
 
-    if (pause?.unknown) {
+    if (pauseUnknown) {
       // The pause query failed this tick, so we cannot tell whether the run is
       // waiting on an operator. It must NOT fall through to the healthy
       // progress bar below: a run genuinely stuck at an eject/write-failure

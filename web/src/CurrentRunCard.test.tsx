@@ -131,4 +131,39 @@ describe('CurrentRunCard', () => {
     expect(screen.getByRole('button', { name: /^abort$/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /open run/i })).toHaveAttribute('href', '/runs/run-live')
   })
+
+  it('does not show the pause card for a run that closed while paused', () => {
+    // A run aborted/terminated while waiting at a pause still reports its last
+    // currentPause.kind, but Resume/Abort no longer apply — the terminal run must
+    // not read as "needs you" with destructive controls.
+    renderCard({
+      activeRun: run({ runId: 'run-live' }),
+      live: {
+        state: 'terminal',
+        detail: {
+          workflowId: 'backup',
+          runId: 'run-live',
+          status: 'Terminated',
+          startTime: '2026-07-01T00:00:00Z',
+          closeTime: '2026-07-01T01:00:00Z',
+          dryRun: false,
+          lastCompletedPhase: 'Write',
+          currentPause: {
+            kind: 'write-failure',
+            phase: 'Write',
+            affectedTapes: ['TA0001L6'],
+            reloadSlots: [101],
+            errorSummary: 'mkltfs: drive reported a hard write error',
+            canAbort: true,
+          },
+        },
+      },
+    })
+
+    expect(screen.queryByText(/run paused — needs you/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^resume$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^abort$/i })).not.toBeInTheDocument()
+    // It falls through to the normal current-run view, showing the terminal status.
+    expect(screen.getByText('Terminated')).toBeInTheDocument()
+  })
 })
