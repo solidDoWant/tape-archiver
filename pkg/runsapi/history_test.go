@@ -942,6 +942,39 @@ func TestListTapesHandler(t *testing.T) {
 		assert.Equal(t, "run-gone", body.RunErrors[0].RunID)
 	})
 
+	t.Run("masks an upstream-fault error in a per-run RunError rather than leaking raw Temporal detail", func(t *testing.T) {
+		start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+		fake := &fakeTemporalClient{
+			listResponse: &workflowservice.ListWorkflowExecutionsResponse{
+				Executions: []*workflowpb.WorkflowExecutionInfo{
+					executionInfo("run-flaky", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &start),
+				},
+			},
+			// A transient upstream fault whose raw text carries an internal
+			// endpoint — the same class writeError masks to a generic status for
+			// the whole-response case.
+			historyFunc: func(string) client.HistoryEventIterator {
+				return &fakeHistoryIterator{
+					err: serviceerror.NewUnavailable("connection error: desc = transport: dial tcp temporal-frontend.internal:7233: connect: connection refused"),
+				}
+			},
+		}
+
+		handler := newMux(newHandler(fake, emptyEnv))
+
+		recorder := doJSON(t, handler, http.MethodGet, "/api/tapes", nil)
+		require.Equal(t, http.StatusOK, recorder.Code)
+
+		var body AggregateTapesResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+
+		require.Len(t, body.RunErrors, 1)
+		assert.Equal(t, "run-flaky", body.RunErrors[0].RunID)
+		assert.Equal(t, http.StatusText(http.StatusBadGateway), body.RunErrors[0].Error, "an upstream fault must be masked, not echoed verbatim")
+		assert.NotContains(t, body.RunErrors[0].Error, "7233", "raw upstream endpoint detail must not leak to the client")
+	})
+
 	t.Run("limit bounds the reconstruction to the newest runs", func(t *testing.T) {
 		older := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		newer := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)

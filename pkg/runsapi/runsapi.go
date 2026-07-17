@@ -1285,12 +1285,27 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 // other status (4xx validation errors, this package's own 503 availability
 // messages) is the client's own actionable text and is returned as-is.
 func writeError(w http.ResponseWriter, status int, err error) {
-	message := err.Error()
-
 	if status == http.StatusBadGateway || status == http.StatusGatewayTimeout {
 		slog.Error("runsapi: upstream request failed", "status", status, "error", err)
-		message = http.StatusText(status)
 	}
 
-	writeJSON(w, status, errorResponse{Error: message})
+	writeJSON(w, status, errorResponse{Error: clientFacingMessage(status, err)})
+}
+
+// clientFacingMessage returns the message safe to return to a client for err at
+// the given status. For the two upstream-fault statuses statusForTemporalError
+// produces (502 Bad Gateway, 504 Gateway Timeout) the raw Temporal/gRPC error
+// can embed internal endpoint/host/status detail, so it is replaced with a
+// generic status text; every other status (4xx validation, this package's own
+// 503 availability messages) is the client's own actionable text and passes
+// through. The raw error is the caller's to log. Shared by writeError and the
+// per-run RunError the aggregate tape listing embeds in an otherwise-200 body,
+// so the same masking applies whether the error is the whole response's status
+// or one degraded row within it.
+func clientFacingMessage(status int, err error) string {
+	if status == http.StatusBadGateway || status == http.StatusGatewayTimeout {
+		return http.StatusText(status)
+	}
+
+	return err.Error()
 }

@@ -11,6 +11,7 @@ package runsapi
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -242,7 +243,20 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 			defer mutex.Unlock()
 
 			if err != nil {
-				errs = append(errs, RunError{RunID: runID, Error: err.Error()})
+				// Mask an upstream-fault (502/504-class) error the same way
+				// writeError does before it reaches the client: fetchRunHistory's
+				// raw Temporal/gRPC error can embed internal endpoint/host detail,
+				// and this one is embedded in a per-run RunError inside an
+				// otherwise-200 body rather than a status, so without this it would
+				// bypass the masking every other endpoint applies (the per-run
+				// getRunTapes masks it via writeHistoryError → writeError). The raw
+				// error is logged server-side for diagnosis.
+				status := statusForTemporalError(err)
+				if status == http.StatusBadGateway || status == http.StatusGatewayTimeout {
+					slog.ErrorContext(groupCtx, "runsapi: reconstruct run history for tape listing failed", "run_id", runID, "error", err)
+				}
+
+				errs = append(errs, RunError{RunID: runID, Error: clientFacingMessage(status, err)})
 
 				return nil
 			}
