@@ -254,6 +254,45 @@ describe('DriveMetricsPanel', () => {
       vi.useRealTimers()
     })
 
+    it('renders a measured tape missing throughputMBps without crashing', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          if (String(input).endsWith('/api/runs/run-1/tapes')) {
+            return jsonResponse(200, {
+              runId: 'run-1',
+              tapes: [
+                {
+                  barcode: 'TA0003L6',
+                  tapeIndex: 0,
+                  copyIndex: 0,
+                  driveIndex: 0,
+                  result: 'written',
+                  // measured, but throughputMBps is absent — a server-side
+                  // invariant violation that must degrade, not crash the render.
+                  writeHealth: {
+                    measured: true,
+                    floorKnown: false,
+                    belowFloor: false,
+                    repositionsMeasured: false,
+                    healthy: true,
+                  },
+                },
+              ],
+            })
+          }
+
+          throw new Error(`unexpected fetch to ${String(input)}`)
+        }),
+      )
+
+      render(<DriveMetricsPanel runId="run-1" terminal />)
+
+      await waitFor(() => expect(screen.getByText(/TA0003L6/)).toBeInTheDocument())
+      expect(screen.queryByText(/MB\/s/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/undefined/)).not.toBeInTheDocument()
+    })
+
     it('shows a no-tapes placeholder for a terminal run that wrote nothing', async () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { runId: 'run-1', tapes: [] })))
 
