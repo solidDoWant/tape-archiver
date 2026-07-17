@@ -204,10 +204,25 @@ func TestMetricQueryWindow(t *testing.T) {
 
 	assert.Equal(t, now, metricQueryWindow(runHistory{Closed: false, CloseTime: closeTime}, now),
 		"an open run is queried at the current time")
-	assert.Equal(t, closeTime, metricQueryWindow(runHistory{Closed: true, CloseTime: closeTime}, now),
-		"a closed run is queried at its own close time, not the wall clock")
 	assert.Equal(t, now, metricQueryWindow(runHistory{Closed: true}, now),
-		"a closed run with no recorded close time falls back to now")
+		"a closed run with no recorded close time or write activity falls back to now")
+	assert.Equal(t, closeTime, metricQueryWindow(runHistory{Closed: true, CloseTime: closeTime}, now),
+		"a closed run with no reconstructable write activity falls back to its close time")
+
+	// A closed run that has a Write-phase activity is anchored to when it stopped
+	// writing, not its close time: the write finished long before close (a slow
+	// eject/burn), so a close-time window would miss the throughput samples.
+	writeEnd := closeTime.Add(-time.Hour)
+	withWrite := runHistory{
+		Closed:    true,
+		CloseTime: closeTime,
+		Activities: []activityRecord{
+			{Name: "WriteTree", EndTime: writeEnd},
+			{Name: "Eject", EndTime: closeTime.Add(-time.Minute)}, // non-write, must be ignored
+		},
+	}
+	assert.Equal(t, writeEnd, metricQueryWindow(withWrite, now),
+		"a closed run is anchored to the end of its Write phase, not its close time")
 }
 
 func TestGetRunDriveMetricsHistoryHandler(t *testing.T) {

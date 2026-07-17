@@ -36,6 +36,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
 // victoriaMetricsEnvVar names the environment variable carrying
@@ -437,16 +439,61 @@ func barcodeRegex(barcodes []string) string {
 }
 
 // metricQueryWindow returns the time a run's drive-metric queries should target:
-// while the run is open, the current time; once it is closed, the run's own
-// close time — so a finished run's readings and sparkline reflect when it
+// while the run is open, the current time; once it is closed, the end of its
+// Write phase — so a finished run's readings and sparkline reflect when it
 // actually wrote rather than the current wall clock (which would surface another
 // run's data if the tape was since reused, or nothing at all).
+//
+// The anchor for a closed run is the end of the last Write-phase activity, NOT
+// the run's close time: the throughput/write-health gauges are emitted only
+// during the Write phase (FormatTape/WriteTree/FinalizeTape/MeasureWriteHealth),
+// and a run can then sit for a long time in Eject/Burn/Deliver on operator
+// pauses (SPEC §4.3). A window ending at close time — especially the sparkline's
+// fixed ~630s look-back off it — can then fall entirely after the last write
+// sample and show an empty chart despite the data existing. The write-phase end
+// is where the samples are, and is still <= close time, so it keeps the "never
+// read a later run's reuse of the tape" guarantee close time gave. Close time
+// (then now) is only a fallback for a closed run with no reconstructable write
+// activity.
 func metricQueryWindow(history runHistory, now time.Time) time.Time {
-	if history.Closed && !history.CloseTime.IsZero() {
+	if !history.Closed {
+		return now
+	}
+
+	if writeEnd, ok := writePhaseEnd(history); ok {
+		return writeEnd
+	}
+
+	if !history.CloseTime.IsZero() {
 		return history.CloseTime
 	}
 
 	return now
+}
+
+// writePhaseEnd returns the end time of the last Write-phase activity in
+// history, i.e. when the run stopped writing (and stopped emitting the
+// throughput/write-health gauges). ok is false when no Write-phase activity with
+// a terminal time exists yet.
+func writePhaseEnd(history runHistory) (time.Time, bool) {
+	var latest time.Time
+
+	for _, record := range history.Activities {
+		phase, ok := phaseForActivity(record.Name, record.Input)
+		if !ok || phase != backup.PhaseWrite {
+			continue
+		}
+
+		if record.EndTime.IsZero() {
+			continue
+		}
+
+		if record.EndTime.After(latest) {
+			latest = record.EndTime
+		}
+	}
+
+	return latest, !latest.IsZero()
 }
 
 // queryDriveSamples issues one instant query for all four write-health gauges
