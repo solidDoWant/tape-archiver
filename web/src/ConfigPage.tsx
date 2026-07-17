@@ -220,6 +220,9 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
 
     setJsonText(JSON.stringify(buildConfig(form, deploy), null, 2))
     setModeSwitchNotice('')
+    // Clear any Form-mode schema errors: they describe the form's fields, which
+    // are not what's on screen in JSON mode (JSON mode validates server-side).
+    setReviewIssues([])
     setMode('json')
     setStep('edit')
   }
@@ -232,6 +235,11 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
     if (mode === 'form') {
       return
     }
+
+    // Clear any prior schema errors before this switch: a stale Form-mode error
+    // block must not linger over the newly loaded form (or the JSON editor it
+    // came from).
+    setReviewIssues([])
 
     try {
       const parsed = JSON.parse(jsonText) as unknown
