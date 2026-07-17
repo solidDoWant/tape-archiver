@@ -877,6 +877,35 @@ func TestListAllBackupExecutionsBoundsEmptyTokenedPages(t *testing.T) {
 	}
 }
 
+func TestRunExistsInVisibilityBoundsEmptyTokenedPages(t *testing.T) {
+	// The 404-vs-410 path (writeHistoryError) pages visibility too and must be
+	// bounded the same way: a store that keeps returning a NextPageToken with no
+	// rows must terminate (via maxVisibilityPages), not loop until the deadline.
+	client := &fakeTemporalClient{listResponse: &workflowservice.ListWorkflowExecutionsResponse{
+		NextPageToken: []byte("more"),
+	}}
+
+	type result struct {
+		found bool
+		err   error
+	}
+
+	done := make(chan result, 1)
+
+	go func() {
+		found, err := runExistsInVisibility(t.Context(), client, "some-run-id")
+		done <- result{found, err}
+	}()
+
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		assert.False(t, got.found)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runExistsInVisibility did not terminate — the page cap is not bounding empty tokened pages")
+	}
+}
+
 func TestSubmitRun(t *testing.T) {
 	mhvtlEnv := func(name string) string {
 		switch name {
