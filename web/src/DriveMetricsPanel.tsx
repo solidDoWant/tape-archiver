@@ -129,6 +129,7 @@ function LiveDriveMetrics({ runId, pollIntervalMs }: { runId: string; pollInterv
 
   useEffect(() => {
     let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
 
     const poll = async () => {
       try {
@@ -157,15 +158,26 @@ function LiveDriveMetrics({ runId, pollIntervalMs }: { runId: string; pollInterv
         setState((previous) =>
           previous.status === 'live' || previous.status === 'no-data' ? previous : { status: 'unavailable' },
         )
+      } finally {
+        // Self-schedule the next poll only after this one settles, rather than a
+        // fixed-rate setInterval: a poll that outlasts pollIntervalMs (slow
+        // VictoriaMetrics) could otherwise overlap the next, and the two
+        // responses can resolve out of order, letting an older response's
+        // setState clobber a newer one and flicker the gauges backward to stale
+        // readings. LogPanel schedules the same way for the same reason.
+        if (!cancelled) {
+          timer = setTimeout(() => void poll(), pollIntervalMs)
+        }
       }
     }
 
     void poll()
-    const interval = setInterval(() => void poll(), pollIntervalMs)
 
     return () => {
       cancelled = true
-      clearInterval(interval)
+      if (timer) {
+        clearTimeout(timer)
+      }
     }
   }, [runId, pollIntervalMs])
 
@@ -198,6 +210,7 @@ function DriveMetricCard({ runId, drive, pollIntervalMs }: { runId: string; driv
 
   useEffect(() => {
     let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
 
     const poll = async () => {
       try {
@@ -222,15 +235,24 @@ function DriveMetricCard({ runId, drive, pollIntervalMs }: { runId: string; driv
         } else {
           setUnavailable(true)
         }
+      } finally {
+        // Self-schedule after each poll settles rather than a fixed-rate
+        // setInterval: overlapping history fetches (a poll slower than
+        // pollIntervalMs) can resolve out of order and let a stale response's
+        // setPoints overwrite a newer one, flickering the sparkline backward.
+        if (!cancelled) {
+          timer = setTimeout(() => void poll(), pollIntervalMs)
+        }
       }
     }
 
     void poll()
-    const interval = setInterval(() => void poll(), pollIntervalMs)
 
     return () => {
       cancelled = true
-      clearInterval(interval)
+      if (timer) {
+        clearTimeout(timer)
+      }
     }
   }, [runId, drive.barcode, pollIntervalMs])
 

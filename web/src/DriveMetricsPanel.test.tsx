@@ -181,6 +181,33 @@ describe('DriveMetricsPanel', () => {
     vi.useRealTimers()
   })
 
+  it('does not start an overlapping poll while one is still in flight', async () => {
+    // Regression: the panel self-schedules the next poll only after the current
+    // one settles. A fixed-rate setInterval would keep firing fetches while a
+    // slow poll is still pending, and their responses could resolve out of order
+    // and flicker the gauges backward to stale readings. With a poll that never
+    // resolves, no further fetch may be issued no matter how much time passes.
+    vi.useFakeTimers()
+
+    try {
+      const fetchMock = vi.fn().mockReturnValue(new Promise(() => {})) // never resolves
+      vi.stubGlobal('fetch', fetchMock)
+
+      render(<DriveMetricsPanel runId="run-1" pollIntervalMs={1000} />)
+
+      const callsAfterMount = fetchMock.mock.calls.length
+      expect(callsAfterMount).toBeGreaterThan(0)
+
+      await vi.advanceTimersByTimeAsync(10_000)
+
+      // No new poll while the first is still pending — the interval-driven
+      // version would have fired ~10 more by now.
+      expect(fetchMock.mock.calls.length).toBe(callsAfterMount)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   describe('terminal runs', () => {
     it('renders final write-health from the run history and never calls the VictoriaMetrics endpoints', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
