@@ -213,11 +213,14 @@ export function defaultFormState(): FormState {
 // copies, SPEC §4.3), so the selected blank slots only form whole logical-tape
 // sets when their count is a positive multiple of copies. Returns a human
 // message when the selection violates that (a leftover count that can never
-// complete another copy set), else null. The empty-selection and copies < 1
-// cases are left to the schema validator's own minItems / minimum gates, so this
-// stays a single-purpose cross-field check and does not double-report them.
+// complete another copy set), else null. The empty-selection, copies < 1, and
+// non-integer copies cases are left to the schema validator's own
+// minItems / minimum / "must be a whole number" gates, so this stays a
+// single-purpose cross-field check and does not double-report them — and never
+// emits a nonsensical "not a multiple of 2.5 copies" message for a fractional
+// copies value a JSON/paste-mode config might carry.
 export function blankSlotsCopiesIssue(copies: number, blankSlotCount: number): string | null {
-  if (copies < 1 || blankSlotCount === 0 || blankSlotCount % copies === 0) {
+  if (copies < 1 || !Number.isInteger(copies) || blankSlotCount === 0 || blankSlotCount % copies === 0) {
     return null
   }
 

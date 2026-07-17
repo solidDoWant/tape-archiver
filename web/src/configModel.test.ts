@@ -417,4 +417,12 @@ describe('blankSlotsCopiesIssue', () => {
     expect(blankSlotsCopiesIssue(2, 0)).toBeNull()
     expect(blankSlotsCopiesIssue(0, 3)).toBeNull()
   })
+
+  it('defers a non-integer copies to the schema validator instead of a nonsensical fractional message', () => {
+    // A JSON/paste-mode config could carry copies: 2.5; the "must be a whole
+    // number" gate is the schema's, so this must not emit "not a multiple of
+    // 2.5 copies" (which the raw modulo would produce for count 6).
+    expect(blankSlotsCopiesIssue(2.5, 6)).toBeNull()
+    expect(blankSlotsCopiesIssue(2.5, 5)).toBeNull()
+  })
 })
