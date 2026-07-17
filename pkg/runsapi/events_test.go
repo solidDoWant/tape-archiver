@@ -47,6 +47,15 @@ func setEventPollInterval(t *testing.T, interval time.Duration) {
 	t.Cleanup(func() { eventPollInterval = original })
 }
 
+func setSSEHeartbeatInterval(t *testing.T, interval time.Duration) {
+	t.Helper()
+
+	original := sseHeartbeatInterval
+	sseHeartbeatInterval = interval
+
+	t.Cleanup(func() { sseHeartbeatInterval = original })
+}
+
 // dynamicTemporalClient is a TemporalClient fake whose DescribeWorkflowExecution
 // and QueryWorkflow answers reflect a status/phase that a test can change at
 // will (setState) while a stream is connected — standing in for a run whose
@@ -273,6 +282,58 @@ func TestCurrentPauseEqual(t *testing.T) {
 		differentKind.Kind = "burn"
 		assert.False(t, currentPauseEqual(base, differentKind))
 	})
+}
+
+// TestStreamRunEventsHeartbeatKeepsIdleStreamAlive proves a run that stays
+// RUNNING with no state change still emits periodic SSE comment lines, so an
+// idle-timeout intermediary does not silently drop the stream (events.go's
+// sseHeartbeatInterval). A comment frame is not an event, so this reads the raw
+// stream rather than readSSEFrames.
+func TestStreamRunEventsHeartbeatKeepsIdleStreamAlive(t *testing.T) {
+	setEventPollInterval(t, time.Hour) // no state-change frames during the test
+	setSSEHeartbeatInterval(t, 15*time.Millisecond)
+
+	client := &dynamicTemporalClient{}
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "")
+
+	server := httptest.NewServer(New(client))
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	lines := make(chan string, 64)
+
+	go func() {
+		reader := bufio.NewReader(resp.Body)
+
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				lines <- line
+			}
+
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	deadline := time.After(2 * time.Second)
+
+	for {
+		select {
+		case line := <-lines:
+			if strings.HasPrefix(line, ":") {
+				return // a keepalive comment arrived on the idle stream
+			}
+		case <-deadline:
+			t.Fatal("no SSE heartbeat comment arrived on an idle running stream")
+		}
+	}
 }
 
 func TestStreamRunEventsInitialError(t *testing.T) {

@@ -45,6 +45,21 @@ var eventPollInterval = 2 * time.Second
 // stalled write fails after this window and unwinds the goroutine.
 const sseWriteTimeout = 15 * time.Second
 
+// sseHeartbeatInterval bounds how long a quiescent (running but unchanging) run
+// stream can go without sending any bytes. streamRunEvents only writes on an
+// actual state delta, so a long-idle run would otherwise send nothing at all —
+// and an intermediary (load balancer / reverse proxy) with an idle-connection
+// timeout shorter than the run's next state change would silently drop the
+// stream. A periodic SSE comment (":\n\n" — ignored by EventSource, never
+// surfaced as an event) keeps the connection demonstrably alive. Chosen well
+// under common 60s proxy idle timeouts; a dropped stream is recoverable
+// (EventSource reconnects), so this is belt-and-suspenders, not correctness.
+//
+// A var, not a const, for the same reason as eventPollInterval: the package's
+// tests override it (setSSEHeartbeatInterval) to exercise the keepalive in
+// milliseconds instead of the real production interval.
+var sseHeartbeatInterval = 25 * time.Second
+
 // runningStatus is the string form of WORKFLOW_EXECUTION_STATUS_RUNNING, as
 // stored in RunSummary.Status (toRunSummary uses execution.GetStatus().String()).
 // Any other status is terminal for the purposes of this stream: the run will
@@ -156,10 +171,20 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 	sub := h.broker.subscribe(runID)
 	defer h.broker.unsubscribe(sub)
 
+	// Emit a periodic comment so a run that stays RUNNING without any state
+	// change still sends bytes, keeping idle-timeout intermediaries from dropping
+	// the stream (see sseHeartbeatInterval).
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
+	defer heartbeat.Stop()
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			if !writeSSEComment(w, responseController) {
+				return
+			}
 		case <-h.drain.Done():
 			// The hosting server has begun graceful shutdown
 			// (WithDrainContext). Close the stream now so
@@ -456,4 +481,19 @@ func writeSSEEvent(w http.ResponseWriter, responseController *http.ResponseContr
 	}
 
 	return true
+}
+
+// writeSSEComment writes an SSE comment line (a line beginning with ":", which
+// EventSource ignores) and flushes it, as a keepalive on an otherwise-idle
+// stream (see sseHeartbeatInterval). Like writeSSEEvent it bounds the write with
+// a fresh deadline and reports whether it succeeded; a failure means the client
+// is gone and streamRunEvents should stop.
+func writeSSEComment(w http.ResponseWriter, responseController *http.ResponseController) bool {
+	_ = responseController.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+
+	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+		return false
+	}
+
+	return responseController.Flush() == nil
 }
