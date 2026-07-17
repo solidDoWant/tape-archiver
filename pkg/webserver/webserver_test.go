@@ -126,3 +126,23 @@ func TestAPIDelegation(t *testing.T) {
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), "tape-archiver shell")
 }
+
+func TestSecurityHeaders(t *testing.T) {
+	var served bool
+
+	handler := SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		served = true
+
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	request := httptest.NewRequest(http.MethodGet, "/anything", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	require.True(t, served, "the wrapped handler must still be reached")
+	assert.Equal(t, "DENY", recorder.Header().Get("X-Frame-Options"))
+	assert.Equal(t, "frame-ancestors 'none'", recorder.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "nosniff", recorder.Header().Get("X-Content-Type-Options"))
+	assert.Equal(t, "same-origin", recorder.Header().Get("Referrer-Policy"))
+}

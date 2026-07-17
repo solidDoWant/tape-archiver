@@ -309,6 +309,11 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	// doc comment for the full route/gating contract.
 	handler = authenticator.Wrap(handler)
 
+	// Outermost: hardening response headers (framing/clickjacking, MIME-sniffing,
+	// referrer) on every response — the SPA, /api/*, and the /auth/* routes
+	// authenticator.Wrap adds. See webserver.SecurityHeaders.
+	handler = webserver.SecurityHeaders(handler)
+
 	addr := listenAddr(getenv)
 
 	listener, err := net.Listen("tcp", addr)

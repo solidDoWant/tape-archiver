@@ -58,6 +58,33 @@ func NewHandler(assets fs.FS, api http.Handler) (http.Handler, error) {
 	return mux, nil
 }
 
+// SecurityHeaders wraps next with a small set of hardening response headers
+// applied to every response cmd/web serves — the SPA, /api/*, and /auth/*.
+// cmd/web mounts it outermost (around authenticator.Wrap) so nothing escapes it.
+//
+//   - X-Frame-Options: DENY and Content-Security-Policy: frame-ancestors 'none'
+//     forbid framing the UI, blocking clickjacking. This also closes a bypass of
+//     pkg/webauth's CSRF guard: a click inside a framed same-origin page reports
+//     Sec-Fetch-Site: same-origin, which that guard trusts — so if the page
+//     could be framed, a clickjack could drive a mutating POST despite the
+//     guard. Both headers are set: CSP frame-ancestors is the modern control,
+//     X-Frame-Options the fallback for anything that does not honour it.
+//   - X-Content-Type-Options: nosniff stops a browser from MIME-sniffing a
+//     response into a type it was not sent as.
+//   - Referrer-Policy: same-origin keeps full request URLs (which can carry a
+//     run ID) from leaking to a third-party site via the Referer header.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("X-Frame-Options", "DENY")
+		header.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		header.Set("X-Content-Type-Options", "nosniff")
+		header.Set("Referrer-Policy", "same-origin")
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // newSPAHandler returns a handler serving assets as a single-page app: real
 // files are served as themselves, and any other path falls back to
 // index.html. It errors up front if assets has no index.html, so a

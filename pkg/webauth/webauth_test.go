@@ -377,8 +377,11 @@ func TestFullLoginFlow(t *testing.T) {
 	require.NoError(t, err)
 
 	body, _ = io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	// The identity response is per-operator and session-gated: it must not be
+	// stored by any shared/intermediary cache.
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	_ = resp.Body.Close()
 
 	var identity Identity
 	require.NoError(t, json.Unmarshal(body, &identity))

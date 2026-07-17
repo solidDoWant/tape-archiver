@@ -571,6 +571,10 @@ func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// The identity response carries the operator's subject/email/name and is
+	// gated on a session cookie: never let a shared/intermediary cache store it
+	// and hand one operator's identity to another.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 
 	if err := json.NewEncoder(w).Encode(identity); err != nil {
