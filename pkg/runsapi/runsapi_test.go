@@ -767,6 +767,36 @@ func TestCancelRun(t *testing.T) {
 	}
 }
 
+func TestWriteErrorSanitizesUpstreamFaults(t *testing.T) {
+	t.Run("a 502 does not leak the raw upstream error text", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+
+		writeError(recorder, http.StatusBadGateway, errors.New("dial tcp 10.0.0.5:7233: connection refused"))
+
+		require.Equal(t, http.StatusBadGateway, recorder.Code)
+		body := decodeAPIError(t, recorder)
+		assert.NotContains(t, body.Error(), "10.0.0.5")
+		assert.NotContains(t, body.Error(), "connection refused")
+	})
+
+	t.Run("a 504 does not leak the raw upstream error text", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+
+		writeError(recorder, http.StatusGatewayTimeout, errors.New("context deadline exceeded: temporal-frontend.internal:7233"))
+
+		require.Equal(t, http.StatusGatewayTimeout, recorder.Code)
+		assert.NotContains(t, decodeAPIError(t, recorder).Error(), "temporal-frontend.internal")
+	})
+
+	t.Run("a 4xx keeps its actionable message", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+
+		writeError(recorder, http.StatusBadRequest, errors.New("runID is required"))
+
+		assert.Contains(t, decodeAPIError(t, recorder).Error(), "runID is required")
+	})
+}
+
 // decodeAPIError decodes a non-2xx response's JSON error body into an error,
 // so table-driven tests can assert on it with a require.ErrorAssertionFunc
 // like any other error-returning call, per this repo's testing style.

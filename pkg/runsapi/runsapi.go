@@ -1257,6 +1257,20 @@ func writeJSON(w http.ResponseWriter, status int, body interface{}) {
 }
 
 // writeError writes err as a JSON error response with the given status code.
+//
+// For the two upstream-fault statuses statusForTemporalError produces (502 Bad
+// Gateway, 504 Gateway Timeout), err is the raw Temporal/gRPC error, which can
+// embed internal endpoint/host/status detail — that is logged server-side but
+// not returned to the client; the client gets a generic status message. Every
+// other status (4xx validation errors, this package's own 503 availability
+// messages) is the client's own actionable text and is returned as-is.
 func writeError(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, errorResponse{Error: err.Error()})
+	message := err.Error()
+
+	if status == http.StatusBadGateway || status == http.StatusGatewayTimeout {
+		slog.Error("runsapi: upstream request failed", "status", status, "error", err)
+		message = http.StatusText(status)
+	}
+
+	writeJSON(w, status, errorResponse{Error: message})
 }
