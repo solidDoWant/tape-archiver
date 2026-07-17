@@ -22,6 +22,15 @@ export interface LabeledSource {
 // config Review step's dense inline summary omits it to keep each entry to a
 // bare name/selector so the comma-joined line stays compact.
 export function sourceLabel(source: LabeledSource, opts?: { detail?: boolean }): string {
+  // A JSON / paste-mode config can carry a malformed sources array whose elements
+  // are null or non-objects (the mode does not validate shape — the server does,
+  // on submit). Render such an element as the same "(unlabeled)" fallback a
+  // fieldless source gets, rather than dereferencing it and crashing the caller's
+  // render (ConfigReview) or summary.
+  if (typeof source !== 'object' || source === null) {
+    return '(unlabeled)'
+  }
+
   if (source.label) {
     return source.label
   }

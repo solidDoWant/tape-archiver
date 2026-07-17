@@ -49,6 +49,29 @@ describe('ConfigReview', () => {
     expect(screen.getByText('1 · (unlabeled)')).toBeInTheDocument()
   })
 
+  it('renders defensively without crashing when JSON-mode sources is not an array', () => {
+    // JSON / paste mode hands ConfigReview whatever parsed from the pasted text
+    // (no shape validation — that is the server's job on submit), so a wrong-typed
+    // `sources` must render an empty summary rather than throwing during render
+    // (which, with no error boundary above the page, white-screens the SPA).
+    for (const badSources of [5, {}, 'x', null]) {
+      const config = { sources: badSources } as unknown as RunConfig
+
+      const { unmount } = render(<ConfigReview config={config} dryRun={false} />)
+
+      expect(screen.getByText(/^0 · —$/)).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('renders a null element in the sources array as "(unlabeled)" rather than crashing', () => {
+    const config = { sources: [null, { zfsPath: { name: 'pool/data' } }] } as unknown as RunConfig
+
+    render(<ConfigReview config={config} dryRun={false} />)
+
+    expect(screen.getByText('2 · (unlabeled), pool/data')).toBeInTheDocument()
+  })
+
   it('shows Production mode and recovery-disc copies when set', () => {
     const form = defaultFormState()
     form.opticalBurnEnabled = true

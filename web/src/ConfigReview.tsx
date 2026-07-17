@@ -35,7 +35,16 @@ function ConfigReview({ config, dryRun }: ConfigReviewProps) {
         ? `fixed ${redundancy.targetPercentage}%`
         : '—'
 
-  const sources = config.sources ?? []
+  // Guard the type, not just presence: JSON / paste mode feeds this whatever
+  // parsed from the pasted text (ConfigPage.handleReviewJson does not re-validate
+  // the shape), so config.sources can be a non-array (`5`, `{}`, `"x"`) or an
+  // array with null/non-object elements. A bare `?? []` only defends the
+  // missing-key case and would let a non-array through to `.map` below, throwing
+  // during render — and with no error boundary above the page that white-screens
+  // the whole SPA. Coerce to an array here, and sourceLabel tolerates a
+  // null/non-object element, so an unusual-but-parseable config renders defensively
+  // rather than crashing (matching this component's documented contract above).
+  const sources = Array.isArray(config.sources) ? config.sources : []
   const opticalBurn = config.delivery?.opticalBurn
 
   return (
