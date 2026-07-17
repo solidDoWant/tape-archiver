@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -158,6 +159,55 @@ func TestGetRunDriveMetricsHandler(t *testing.T) {
 		assert.False(t, failed.HasData, "a tape that never reached MeasureWriteHealth must report no data, not a zero reading")
 		assert.Nil(t, failed.ThroughputMBps)
 	})
+
+	t.Run("picks the freshest series when a worker restart left two for one barcode", func(t *testing.T) {
+		fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
+		}}
+
+		// A data-worker restart mid-run leaves two throughput series for the same
+		// barcode (distinct instance labels). The newer sample is listed FIRST, so
+		// a last-writer-wins merge would wrongly keep the older; freshest-by-time
+		// must keep the newer.
+		instant := vmResponse{Status: "success", Data: vmData{ResultType: "vector", Result: []vmResult{
+			{Metric: map[string]string{"__name__": metricThroughput, "barcode": "GOODTAPE01", "instance": "worker-new"}, Value: rawPair(t, 1700000600, "142.5")},
+			{Metric: map[string]string{"__name__": metricThroughput, "barcode": "GOODTAPE01", "instance": "worker-old"}, Value: rawPair(t, 1700000000, "9.9")},
+		}}}
+
+		server := fakeVictoriaMetrics(t, instant, vmResponse{Status: "success"})
+		defer server.Close()
+
+		handler := newMux(newHandler(fake, envFor(server.URL)))
+
+		recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/metrics/drives", nil)
+		require.Equal(t, http.StatusOK, recorder.Code)
+
+		var body DriveMetricsResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+
+		var good DriveMetric
+
+		for _, drive := range body.Drives {
+			if drive.Barcode == "GOODTAPE01" {
+				good = drive
+			}
+		}
+
+		require.NotNil(t, good.ThroughputMBps)
+		assert.InDelta(t, 142.5, *good.ThroughputMBps, 0.001, "the newer instance's reading must win, regardless of result order")
+	})
+}
+
+func TestMetricQueryWindow(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	closeTime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	assert.Equal(t, now, metricQueryWindow(runHistory{Closed: false, CloseTime: closeTime}, now),
+		"an open run is queried at the current time")
+	assert.Equal(t, closeTime, metricQueryWindow(runHistory{Closed: true, CloseTime: closeTime}, now),
+		"a closed run is queried at its own close time, not the wall clock")
+	assert.Equal(t, now, metricQueryWindow(runHistory{Closed: true}, now),
+		"a closed run with no recorded close time falls back to now")
 }
 
 func TestGetRunDriveMetricsHistoryHandler(t *testing.T) {
@@ -224,6 +274,37 @@ func TestGetRunDriveMetricsHistoryHandler(t *testing.T) {
 		require.Len(t, body.Points, 2)
 		assert.InDelta(t, 100, body.Points[0].Value, 0.001)
 		assert.InDelta(t, 120, body.Points[1].Value, 0.001)
+	})
+
+	t.Run("merges the sparkline across two series left by a mid-run worker restart", func(t *testing.T) {
+		// A restart splits the barcode's samples across two series (distinct
+		// instance labels), each covering part of the window. Taking only the
+		// first series would drop half the sparkline; the points must be merged.
+		rangeResp := vmResponse{Status: "success", Data: vmData{ResultType: "matrix", Result: []vmResult{
+			{
+				Metric: map[string]string{"barcode": "GOODTAPE01", "instance": "worker-old"},
+				Values: [][]json.RawMessage{rawPair(t, 1700000000, "100")},
+			},
+			{
+				Metric: map[string]string{"barcode": "GOODTAPE01", "instance": "worker-new"},
+				Values: [][]json.RawMessage{rawPair(t, 1700000090, "120"), rawPair(t, 1700000180, "130")},
+			},
+		}}}
+
+		server := fakeVictoriaMetrics(t, vmResponse{Status: "success"}, rangeResp)
+		defer server.Close()
+
+		handler := newMux(newHandler(fake, envFor(server.URL)))
+		recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/metrics/drives/GOODTAPE01/history", nil)
+		require.Equal(t, http.StatusOK, recorder.Code)
+
+		var body DriveMetricHistoryResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+
+		require.Len(t, body.Points, 3, "points from both series must be merged, not just the first series")
+		assert.InDelta(t, 100, body.Points[0].Value, 0.001)
+		assert.InDelta(t, 120, body.Points[1].Value, 0.001)
+		assert.InDelta(t, 130, body.Points[2].Value, 0.001)
 	})
 
 	t.Run("VictoriaMetrics reporting no series for the barcode yet is an empty, not an error", func(t *testing.T) {

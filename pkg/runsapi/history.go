@@ -115,6 +115,10 @@ type runHistory struct {
 	// a terminal Temporal status).
 	Closed    bool
 	Succeeded bool
+	// CloseTime is when the workflow reached its terminal event, zero while the
+	// run is still open. It bounds drive-metric queries (metrics.go) to when the
+	// run actually wrote, rather than the current wall clock.
+	CloseTime time.Time
 
 	// FailureMessage is the terminal failure's rendered text, when Closed &&
 	// !Succeeded. Used only as populateFailingPhase's fallback signal.
@@ -224,21 +228,26 @@ func applyHistoryEvent(history *runHistory, indexByScheduled map[int64]int, even
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED:
 		history.Closed = true
 		history.Succeeded = true
+		history.CloseTime = eventTime
 
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED:
 		history.Closed = true
+		history.CloseTime = eventTime
 		history.FailureMessage = event.GetWorkflowExecutionFailedEventAttributes().GetFailure().GetMessage()
 
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT:
 		history.Closed = true
+		history.CloseTime = eventTime
 		history.FailureMessage = "workflow execution timed out"
 
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TERMINATED:
 		history.Closed = true
+		history.CloseTime = eventTime
 		history.FailureMessage = "workflow execution terminated"
 
 	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CANCELED:
 		history.Closed = true
+		history.CloseTime = eventTime
 		history.FailureMessage = "workflow execution canceled"
 	}
 }

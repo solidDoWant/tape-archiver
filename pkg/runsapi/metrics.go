@@ -194,7 +194,11 @@ func (h *handler) getRunDriveMetrics(w http.ResponseWriter, r *http.Request) {
 		barcodes = append(barcodes, outcome.Barcode)
 	}
 
-	samples, err := queryDriveSamples(ctx, vmURL, barcodes)
+	// Anchor the instant read to the run's own window: while running, "now";
+	// once closed, the run's close time — so a finished run reports its final
+	// readings, not whatever the same tape shows now if it was since reused in a
+	// later run.
+	samples, err := queryDriveSamples(ctx, vmURL, barcodes, metricQueryWindow(history, time.Now()))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("query VictoriaMetrics: %w", err))
 
@@ -272,7 +276,11 @@ func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	end := time.Now()
+	// End the sparkline window at the run's own close time once it is closed,
+	// not the current wall clock — otherwise a finished run's sparkline queries
+	// an unrelated recent window (showing another run's data if the tape was
+	// reused, or nothing at all) instead of when this run actually wrote.
+	end := metricQueryWindow(history, time.Now())
 	start := end.Add(-sparklineStep * (sparklinePoints - 1))
 
 	points, err := queryDriveRange(ctx, vmURL, metricName, barcode, start, end, sparklineStep)
@@ -428,39 +436,97 @@ func barcodeRegex(barcodes []string) string {
 	return strings.Join(quoted, "|")
 }
 
-// queryDriveSamples issues one instant query for all four write-health
-// gauges across every given barcode in a single VictoriaMetrics round trip.
-func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string) (map[string]driveSample, error) {
+// metricQueryWindow returns the time a run's drive-metric queries should target:
+// while the run is open, the current time; once it is closed, the run's own
+// close time — so a finished run's readings and sparkline reflect when it
+// actually wrote rather than the current wall clock (which would surface another
+// run's data if the tape was since reused, or nothing at all).
+func metricQueryWindow(history runHistory, now time.Time) time.Time {
+	if history.Closed && !history.CloseTime.IsZero() {
+		return history.CloseTime
+	}
+
+	return now
+}
+
+// queryDriveSamples issues one instant query for all four write-health gauges
+// across every given barcode in a single VictoriaMetrics round trip, evaluated
+// at `at` (the run's window anchor).
+func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string, at time.Time) (map[string]driveSample, error) {
 	promql := fmt.Sprintf(`{__name__=~%q,barcode=~%q}`, metricNameAlternation, barcodeRegex(barcodes))
 
-	results, err := vmDo(ctx, baseURL, "/api/v1/query", url.Values{"query": {promql}})
+	values := url.Values{"query": {promql}}
+	if !at.IsZero() {
+		// Evaluate at the run's window anchor rather than the server's current
+		// time, so a closed run does not read a later run's reuse of the barcode.
+		values.Set("time", strconv.FormatInt(at.Unix(), 10))
+	}
+
+	results, err := vmDo(ctx, baseURL, "/api/v1/query", values)
 	if err != nil {
 		return nil, err
 	}
 
-	samples := make(map[string]driveSample, len(barcodes))
+	// A data-worker restart mid-run can leave two series for the same
+	// barcode+metric — Prometheus adds instance/job labels the gauges themselves
+	// do not carry. Prefer the freshest by sample timestamp rather than whichever
+	// the backend returned last. Note this only disambiguates when the series
+	// carry different timestamps (e.g. the stale instance has already aged out of
+	// part of the lookback); an instant query evaluates every returned series at
+	// the same `at`, so two still-live series tie — the real scoping against a
+	// stale/other-run reading is the query-time anchor above (a closed run reads
+	// at its close time) plus VictoriaMetrics' staleness horizon. The range
+	// endpoint, which carries real per-sample timestamps, is where the merge
+	// genuinely reunites a split series.
+	type tsValue struct {
+		timestamp float64
+		value     float64
+	}
+
+	best := make(map[string]map[string]tsValue, len(barcodes))
 
 	for _, result := range results {
 		barcode := result.Metric["barcode"]
+		name := result.Metric["__name__"]
 
-		value, err := parseSampleValue(result.Value)
+		timestamp, value, err := parseSampleWithTime(result.Value)
 		if err != nil {
 			continue
 		}
 
-		sample := samples[barcode]
+		metrics := best[barcode]
+		if metrics == nil {
+			metrics = make(map[string]tsValue, 4)
+			best[barcode] = metrics
+		}
 
-		switch result.Metric["__name__"] {
-		case metricThroughput:
+		if current, ok := metrics[name]; !ok || timestamp >= current.timestamp {
+			metrics[name] = tsValue{timestamp: timestamp, value: value}
+		}
+	}
+
+	samples := make(map[string]driveSample, len(best))
+
+	for barcode, metrics := range best {
+		var sample driveSample
+
+		if entry, ok := metrics[metricThroughput]; ok {
+			value := entry.value
 			sample.throughput = &value
-		case metricRepositions:
-			repositions := int64(value)
+		}
+
+		if entry, ok := metrics[metricRepositions]; ok {
+			repositions := int64(entry.value)
 			sample.repositions = &repositions
-		case metricTapeAlerts:
-			count := int(value)
+		}
+
+		if entry, ok := metrics[metricTapeAlerts]; ok {
+			count := int(entry.value)
 			sample.tapeAlerts = &count
-		case metricBelowFloor:
-			belowFloor := value != 0
+		}
+
+		if entry, ok := metrics[metricBelowFloor]; ok {
+			belowFloor := entry.value != 0
 			sample.belowFloor = &belowFloor
 		}
 
@@ -489,57 +555,77 @@ func queryDriveRange(ctx context.Context, baseURL, metricName, barcode string, s
 		return nil, err
 	}
 
-	if len(results) == 0 {
-		// A non-nil empty slice so DriveMetricHistoryResponse.Points (no
-		// omitempty) marshals to [] rather than null, matching the array shape
-		// every other list field in this package returns — a JS client can map
-		// over [] but trips on null.
-		return make([]MetricPoint, 0), nil
+	// Merge points across every returned series. A data-worker restart mid-run
+	// splits a barcode's samples into two series (different instance/job labels),
+	// each covering part of the window; taking only results[0] would drop half
+	// the sparkline and might show the stale instance. The series cover disjoint
+	// times in practice, so keying by timestamp dedupes cleanly. An empty result
+	// yields a non-nil empty slice so Points (no omitempty) marshals to [] not
+	// null — a JS client maps over [] but trips on null.
+	byTime := make(map[int64]MetricPoint)
+
+	for _, result := range results {
+		for _, pair := range result.Values {
+			point, ok := parseRangePoint(pair)
+			if !ok {
+				continue
+			}
+
+			byTime[point.Time.Unix()] = point
+		}
 	}
 
-	points := make([]MetricPoint, 0, len(results[0].Values))
-
-	for _, pair := range results[0].Values {
-		point, ok := parseRangePoint(pair)
-		if !ok {
-			continue
-		}
-
+	points := make([]MetricPoint, 0, len(byTime))
+	for _, point := range byTime {
 		points = append(points, point)
 	}
+
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].Time.Before(points[j].Time)
+	})
 
 	return points, nil
 }
 
-// parseSampleValue decodes a Prometheus/VictoriaMetrics instant-query
-// [timestamp, "value"] pair, returning just the value (the timestamp is not
-// needed for an instant reading).
-func parseSampleValue(raw []json.RawMessage) (float64, error) {
+// parseSampleWithTime decodes a Prometheus/VictoriaMetrics [timestamp, "value"]
+// pair into its unix timestamp and value. The timestamp lets queryDriveSamples
+// pick the freshest of several series for one barcode (a mid-run worker
+// restart). Non-finite values ("NaN"/"Inf" for gap-filled or stale samples) are
+// rejected: encoding/json cannot marshal them, and by the time Encode fails
+// writeJSON has already sent a 200 header, so the client would get a truncated
+// body — the caller skips such a sample as it does any other malformed one.
+func parseSampleWithTime(raw []json.RawMessage) (timestamp float64, value float64, err error) {
 	if len(raw) != 2 {
-		return 0, fmt.Errorf("malformed sample: expected 2 elements, got %d", len(raw))
+		return 0, 0, fmt.Errorf("malformed sample: expected 2 elements, got %d", len(raw))
 	}
 
-	var value string
-	if err := json.Unmarshal(raw[1], &value); err != nil {
-		return 0, fmt.Errorf("decode sample value: %w", err)
+	if err := json.Unmarshal(raw[0], &timestamp); err != nil {
+		return 0, 0, fmt.Errorf("decode sample timestamp: %w", err)
 	}
 
-	parsed, err := strconv.ParseFloat(value, 64)
+	var text string
+	if err := json.Unmarshal(raw[1], &text); err != nil {
+		return 0, 0, fmt.Errorf("decode sample value: %w", err)
+	}
+
+	parsed, err := strconv.ParseFloat(text, 64)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
-	// strconv.ParseFloat accepts "NaN", "+Inf", "-Inf" — the exact tokens
-	// VictoriaMetrics emits for gap-filled or stale samples — but encoding/json
-	// cannot marshal a non-finite float, and writeJSON has already written a
-	// 200 header by the time Encode fails, so the client would get a truncated
-	// body. Reject it here; the caller skips the sample as it does any other
-	// malformed one.
 	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
-		return 0, fmt.Errorf("non-finite sample value %q", value)
+		return 0, 0, fmt.Errorf("non-finite sample value %q", text)
 	}
 
-	return parsed, nil
+	return timestamp, parsed, nil
+}
+
+// parseSampleValue decodes an instant-query [timestamp, "value"] pair, returning
+// just the value (the timestamp is not needed for a single-series instant read).
+func parseSampleValue(raw []json.RawMessage) (float64, error) {
+	_, value, err := parseSampleWithTime(raw)
+
+	return value, err
 }
 
 // parseRangePoint decodes one [timestamp, "value"] pair from a range query's
