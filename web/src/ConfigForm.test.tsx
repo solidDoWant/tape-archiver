@@ -40,12 +40,14 @@ function Wrapper({
   onForm,
   deploy = testDeploy,
   deployStatus = 'loaded',
+  initialForm,
 }: {
   onForm?: (form: FormState) => void
   deploy?: DeployConfig
   deployStatus?: UiConfigState['status']
+  initialForm?: FormState
 }) {
-  const [form, setForm] = useState(defaultFormState)
+  const [form, setForm] = useState<FormState>(initialForm ?? defaultFormState)
   onForm?.(form)
 
   return (
@@ -148,6 +150,20 @@ describe('ConfigForm', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Slot 3' }))
     expect(latest?.blankSlots).toEqual([])
     expect(screen.getByText('0 blank slot(s) selected')).toBeInTheDocument()
+  })
+
+  it('dedups repeated blank slots in the selected count so it matches buildConfig', () => {
+    // A JSON/restart load can leave duplicate slot numbers in blankSlots; the
+    // grid can only render each slot once, and buildConfig dedups before
+    // submit, so the inline count must dedup too or it double-counts.
+    render(<Wrapper initialForm={{ ...defaultFormState(), blankSlots: [1, 1, 2] }} />)
+
+    expect(screen.getByText('2 blank slot(s) selected')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Slot 1' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Slot 2' })).toHaveAttribute('aria-pressed', 'true')
+    // Default copies is 2; a deduped count of 2 is a whole multiple, so the
+    // copies-multiple warning that a raw count of 3 would trigger is absent.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('warns inline when the selected blank-slot count is not a multiple of copies, and clears the warning once it is', () => {

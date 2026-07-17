@@ -179,12 +179,17 @@ function SlotGridEditor({
     }
   }
 
-  // Only real storage slots are selectable, so the "selected" count reflects
-  // the blanks the operator actually chose, not any stale out-of-range or
-  // reserved value that a JSON-mode edit might have left in blankSlots.
-  const selectableCount = selected.filter(
-    (slot) => slot >= 1 && slot <= slotCount && !cleaning.has(slot) && !ioStation.has(slot),
-  ).length
+  // Only real storage slots are selectable, and duplicates are collapsed, so
+  // this count matches what buildConfig actually submits — it dedups and
+  // topology-filters blankSlots (configModel.ts). Counting the raw length
+  // instead double-counts a slot that a JSON-mode edit repeated (e.g. [1,1,2]),
+  // producing an inline count and copies-multiple warning that disagree with
+  // the deduped config the Review step and server both see.
+  const selectableCount = new Set(
+    selected.filter(
+      (slot) => slot >= 1 && slot <= slotCount && !cleaning.has(slot) && !ioStation.has(slot),
+    ),
+  ).size
 
   // Warn inline when the chosen blanks can't form whole logical-tape copy sets
   // (count not a positive multiple of copies) — the same cross-field gate the
