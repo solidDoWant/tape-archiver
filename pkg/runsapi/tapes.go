@@ -306,7 +306,17 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 			return tapes[i].TapeIndex < tapes[j].TapeIndex
 		}
 
-		return tapes[i].CopyIndex < tapes[j].CopyIndex
+		if tapes[i].CopyIndex != tapes[j].CopyIndex {
+			return tapes[i].CopyIndex < tapes[j].CopyIndex
+		}
+
+		// Barcode is the final, total tiebreak: a Load/Write-failure retry loads a
+		// fresh blank onto the same slot (deriveTapeOutcomes' doc), producing two
+		// outcomes with identical (TapeIndex, CopyIndex) but different barcodes and
+		// results (one failed, one written). Without a tiebreak sort.Slice is not
+		// stable, so those two would render in an order that flips between requests;
+		// barcode makes the ordering deterministic.
+		return tapes[i].Barcode < tapes[j].Barcode
 	})
 	sort.Slice(errs, func(i, j int) bool { return errs[i].RunID < errs[j].RunID })
 
@@ -371,7 +381,15 @@ func deriveTapeOutcomes(activities []activityRecord) []TapeOutcome {
 			return outcomes[i].TapeIndex < outcomes[j].TapeIndex
 		}
 
-		return outcomes[i].CopyIndex < outcomes[j].CopyIndex
+		if outcomes[i].CopyIndex != outcomes[j].CopyIndex {
+			return outcomes[i].CopyIndex < outcomes[j].CopyIndex
+		}
+
+		// Barcode is the final, total tiebreak so a Load/Write-failure retry (a
+		// fresh blank on the same slot — same TapeIndex/CopyIndex, different
+		// barcode and result) renders in a deterministic order rather than one
+		// sort.Slice picks arbitrarily and can flip between requests.
+		return outcomes[i].Barcode < outcomes[j].Barcode
 	})
 
 	return outcomes

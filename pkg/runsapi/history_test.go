@@ -766,6 +766,15 @@ func TestDeriveTapeOutcomes(t *testing.T) {
 	outcomes := deriveTapeOutcomes(history.Activities)
 	require.Len(t, outcomes, 2)
 
+	// The failed attempt and its same-slot retry share (TapeIndex, CopyIndex),
+	// so their relative order is decided entirely by the barcode tiebreak — a
+	// deterministic order across requests, not one a non-stable sort picks
+	// arbitrarily.
+	require.Equal(t, outcomes[0].TapeIndex, outcomes[1].TapeIndex, "the retry reused the same logical tape index")
+	require.Equal(t, outcomes[0].CopyIndex, outcomes[1].CopyIndex, "the retry reused the same copy index")
+	assert.Equal(t, "FAILTAPE01", outcomes[0].Barcode, "barcode tiebreak orders tied outcomes deterministically")
+	assert.Equal(t, "GOODTAPE01", outcomes[1].Barcode)
+
 	byBarcode := make(map[string]TapeOutcome, len(outcomes))
 	for _, outcome := range outcomes {
 		byBarcode[outcome.Barcode] = outcome
