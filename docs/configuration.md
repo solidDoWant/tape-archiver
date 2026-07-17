@@ -519,7 +519,12 @@ Submits a backup run — the browser's front door to the same submission path
 `tapectl run [--dry-run]` uses (`pkg/runsubmit`, shared by both so they can never
 drift). The request body is `{"config": <run-config JSON>, "dryRun": <bool>}`; `config`
 is validated with the same `internal/config` rules `tapectl` applies (unknown fields
-rejected, all cross-field invariants checked) before Temporal is ever contacted. Any
+rejected, all cross-field invariants checked) before Temporal is ever contacted. Like
+every mutating `/api/*` route, a state-changing request a browser labels cross-site
+(`Sec-Fetch-Site: cross-site`, or an `Origin` whose host does not match the request's) is
+refused with `403` — defence in depth behind the session cookie's `SameSite=Lax`;
+same-origin browser requests and non-browser API clients (which send neither header) are
+unaffected. Any
 deploy-owned library device or Discord webhook the host configured
 (`LIBRARY_CHANGER`/`LIBRARY_DRIVES`/`DELIVERY_WEBHOOK_URL`, see
 [Web UI environment variables](#web-ui-environment-variables-cmdweb) above) is then

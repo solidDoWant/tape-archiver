@@ -494,6 +494,96 @@ func TestExpiredSessionCookie_isRejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
+// TestCrossSiteMutation_isRejected covers the CSRF defence-in-depth check on
+// the mutating API: a state-changing /api/* request a browser labels cross-site
+// (via Sec-Fetch-Site or a mismatched Origin) is refused with 403, while
+// same-origin requests and non-browser clients (no such headers) pass, and safe
+// methods are never blocked.
+func TestCrossSiteMutation_isRejected(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	authenticator, err := New(t.Context(), testConfig(t, idp))
+	require.NoError(t, err)
+
+	server := newGatedServer(t, authenticator)
+
+	session, err := authenticator.encrypt(sessionPurpose, sessionClaims{
+		Subject:   "user-1",
+		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		method     string
+		headers    map[string]string
+		wantStatus int
+	}{
+		{
+			name:       "same-origin POST via Sec-Fetch-Site is allowed",
+			method:     http.MethodPost,
+			headers:    map[string]string{"Sec-Fetch-Site": "same-origin"},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "cross-site POST via Sec-Fetch-Site is forbidden",
+			method:     http.MethodPost,
+			headers:    map[string]string{"Sec-Fetch-Site": "cross-site"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			// A sibling subdomain on the same registrable domain reports
+			// same-site and carries its own (mismatched) Origin — the forgery
+			// vector the guard names. It must NOT be trusted on same-site alone.
+			name:       "same-site POST from a sibling subdomain (mismatched Origin) is forbidden",
+			method:     http.MethodPost,
+			headers:    map[string]string{"Sec-Fetch-Site": "same-site", "Origin": "https://evil.example.com"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "cross-origin POST via mismatched Origin is forbidden",
+			method:     http.MethodPost,
+			headers:    map[string]string{"Origin": "https://evil.example.com"},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "same-origin POST via matching Origin is allowed",
+			method:     http.MethodPost,
+			headers:    map[string]string{"Origin": server.URL},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "POST with no browser headers (non-browser client) is allowed",
+			method:     http.MethodPost,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "cross-site GET (safe method) is unaffected",
+			method:     http.MethodGet,
+			headers:    map[string]string{"Sec-Fetch-Site": "cross-site"},
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(test.method, server.URL+"/api/runs", nil)
+			require.NoError(t, err)
+			req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: session})
+
+			for key, value := range test.headers {
+				req.Header.Set(key, value)
+			}
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+
+			defer func() { _ = resp.Body.Close() }()
+
+			assert.Equal(t, test.wantStatus, resp.StatusCode)
+		})
+	}
+}
+
 // TestCallback_stateMismatch_isRejected covers CSRF protection: a callback
 // whose "state" query parameter does not match the value recorded in the
 // state cookie must be rejected — redirected to the login page with an
@@ -794,7 +884,9 @@ func TestSanitizeRedirectPath(t *testing.T) {
 		{name: "a backslash-prefixed path is rejected", in: "/\\evil.example", want: "/"},
 		{name: "a backslash anywhere in the path is rejected", in: "/runs/\\evil.example", want: "/"},
 		{name: "the login page itself is rejected (would strand an authed user)", in: "/login", want: "/"},
+		{name: "the login page with a trailing slash is rejected (parseRoute treats it as login too)", in: "/login/", want: "/"},
 		{name: "the login page with a query is rejected", in: "/login?redirect=%2Flogin", want: "/"},
+		{name: "the login page with a trailing slash and a query is rejected", in: "/login/?redirect=%2Flogin", want: "/"},
 		{name: "a path merely starting with login is preserved", in: "/login-help", want: "/login-help"},
 	}
 

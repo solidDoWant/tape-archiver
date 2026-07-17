@@ -294,6 +294,18 @@ func (a *Authenticator) Wrap(next http.Handler) http.Handler {
 // doc comment.
 func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// CSRF defence in depth for the mutating API (POST /api/runs and its
+		// resume/abort/cancel/keygen siblings): reject a state-changing /api/*
+		// request a browser has told us is cross-site, regardless of session.
+		// The session cookie is SameSite=Lax, which already blocks the classic
+		// cross-origin case; this adds an explicit Fetch-Metadata / Origin check
+		// so a same-site (sibling-subdomain / XSS) forgery cannot drive a run.
+		if strings.HasPrefix(r.URL.Path, "/api/") && isCrossSiteMutation(r) {
+			writeJSONError(w, http.StatusForbidden, "cross-site request forbidden")
+
+			return
+		}
+
 		identity, ok := a.identityFromSessionCookie(r)
 		if !ok {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -309,6 +321,52 @@ func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
 	})
+}
+
+// isCrossSiteMutation reports whether r is a state-changing request that a
+// browser has told us (or strongly implies) came from a cross-site context —
+// the CSRF signal. It is deliberately conservative: it blocks only when a
+// header positively indicates cross-site, so a non-browser API client (which
+// sends neither Sec-Fetch-Site nor Origin) is never affected, while a browser's
+// forged cross-site fetch/form POST is refused.
+func isCrossSiteMutation(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		// Safe methods do not change state; per HTTP semantics they must not,
+		// and the mutating API uses POST exclusively.
+		return false
+	}
+
+	// Fetch Metadata (modern browsers): the request's relationship to the site.
+	// Only "same-origin" (our own SPA) and "none" (a user-initiated top-level
+	// action — typed URL, bookmark, not a cross-document forgery) are trusted
+	// outright. "same-site" is NOT: a sibling subdomain on the same registrable
+	// domain (evil.example.com → app.example.com) — the XSS/forgery vector this
+	// guard names — reports "same-site", so it falls through to the Origin check
+	// below, which admits it only when the Origin host matches the request's own.
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return false
+	case "cross-site":
+		return true
+	}
+
+	// No decisive Fetch-Metadata verdict ("same-site", or no header at all — an
+	// older browser or a non-browser client): fall back to the Origin header. A
+	// present Origin whose host differs from the request's own is cross-origin;
+	// an absent Origin is treated as same-origin, since non-browser clients omit
+	// it and browsers send it on every unsafe cross-origin request.
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return true
+	}
+
+	return !strings.EqualFold(parsed.Host, r.Host)
 }
 
 // handleLogin starts the OIDC authorization-code flow: it mints CSRF
