@@ -235,6 +235,31 @@ describe('configToFormState', () => {
     expect(() => configToFormState(config)).not.toThrow()
     expect(configToFormState(config).opticalBurnEnabled).toBe(false)
   })
+
+  it('never throws on wrong-typed fields from a schema-invalid JSON document', () => {
+    // A syntactically valid but schema-invalid document whose fields carry the
+    // wrong runtime type (blankSlots a number, recipients a string, floor/copies
+    // wrong-typed). configToFormState must degrade to safe values, and the built
+    // config must not crash the page later (new Set(5) / "x".trim()).
+    const bad = {
+      sources: 'nope',
+      copies: 'two',
+      library: { blankSlots: 5, tapeCapacityBytes: 'big' },
+      redundancy: { fillToCapacity: { floor: '3' }, sliceSizeBytes: 'x' },
+      encryption: { recipients: 'age1abc', identity: 42 },
+      delivery: { opticalBurn: { drives: [], copies: 'many' } },
+    } as unknown as RunConfig
+
+    let form!: ReturnType<typeof configToFormState>
+    expect(() => {
+      form = configToFormState(bad)
+    }).not.toThrow()
+
+    expect(Array.isArray(form.blankSlots)).toBe(true)
+    expect(Array.isArray(form.recipients)).toBe(true)
+    expect(form.opticalBurnEnabled).toBe(false)
+    expect(() => buildConfig(form, testDeploy)).not.toThrow()
+  })
 })
 
 describe('unmodeledFields', () => {

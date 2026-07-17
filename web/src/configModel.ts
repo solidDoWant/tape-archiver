@@ -334,13 +334,19 @@ export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
 // switching into Form mode never crashes on an unusual-but-schema-legal
 // document; the operator sees an empty/incomplete row to fill in instead.
 function sourceFormStateFromSource(source: Source): SourceFormState {
+  // asText coerces a possibly-wrong-typed leaf (a JSON-mode document can carry
+  // e.g. zfsPath.name as a number) to the string the form fields and
+  // buildConfig's `.trim()` require, so an unusual-but-parseable document
+  // populates a row rather than crashing later — see configToFormState.
+  const asText = (value: unknown): string => (typeof value === 'string' ? value : value == null ? '' : String(value))
+
   const base = newSourceFormState()
-  base.label = source.label ?? ''
+  base.label = asText(source.label)
   base.compression = source.compression ?? true
 
   if (source.zfsPath) {
     base.type = 'zfs'
-    base.zfsName = source.zfsPath.name
+    base.zfsName = asText(source.zfsPath.name)
 
     return base
   }
@@ -348,14 +354,14 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
   if (source.k8s) {
     base.type = 'k8s'
     base.k8sKind = source.k8s.kind === 'VolumeGroupSnapshot' ? 'VolumeGroupSnapshot' : 'VolumeSnapshot'
-    base.k8sNamespace = source.k8s.namespace ?? ''
+    base.k8sNamespace = asText(source.k8s.namespace)
 
     if (source.k8s.labelSelector) {
       base.k8sSelection = 'labelSelector'
-      base.k8sLabelSelector = source.k8s.labelSelector
+      base.k8sLabelSelector = asText(source.k8s.labelSelector)
     } else {
       base.k8sSelection = 'name'
-      base.k8sName = source.k8s.name ?? ''
+      base.k8sName = asText(source.k8s.name)
     }
   }
 
@@ -452,7 +458,15 @@ export function configToFormState(config: RunConfig): FormState {
   const partial = config as Partial<RunConfig>
   const form = defaultFormState()
 
-  const sources = partial.sources ?? []
+  // Every field below is read through a runtime type check, not just an
+  // optional-chaining `?.`: ConfigPage casts arbitrary parsed JSON to
+  // RunConfig (only its object-ness is checked), so a schema-invalid but
+  // syntactically valid document can carry a field of the wrong type
+  // (blankSlots: 5, recipients: "x", floor: "3", ...). A `?? fallback` still
+  // lets a wrong-typed value through, which then crashes later at render
+  // (`new Set(5)`) or in buildConfig (`"x".trim()`); guarding the type here is
+  // what makes the doc comment's "this never throws" actually hold.
+  const sources = Array.isArray(partial.sources) ? partial.sources : []
   form.sources = sources.length > 0 ? sources.map(sourceFormStateFromSource) : form.sources
 
   if (typeof partial.copies === 'number') {
@@ -467,7 +481,9 @@ export function configToFormState(config: RunConfig): FormState {
 
     if (redundancy.fillToCapacity) {
       form.redundancyMode = 'fillToCapacity'
-      form.fillFloor = redundancy.fillToCapacity.floor
+      if (typeof redundancy.fillToCapacity.floor === 'number') {
+        form.fillFloor = redundancy.fillToCapacity.floor
+      }
     } else if (typeof redundancy.targetPercentage === 'number') {
       form.redundancyMode = 'fixed'
       form.targetPercentage = redundancy.targetPercentage
@@ -481,7 +497,9 @@ export function configToFormState(config: RunConfig): FormState {
   // comment and ConfigPage's mode-switch notice.
   const library = partial.library as Partial<Library> | undefined
   if (library) {
-    form.blankSlots = library.blankSlots ?? form.blankSlots
+    form.blankSlots = Array.isArray(library.blankSlots)
+      ? library.blankSlots.filter((slot): slot is number => typeof slot === 'number')
+      : form.blankSlots
 
     const generation =
       typeof library.tapeCapacityBytes === 'number' ? ltoGenerationForCapacity(library.tapeCapacityBytes) : undefined
@@ -492,8 +510,11 @@ export function configToFormState(config: RunConfig): FormState {
 
   const encryption = partial.encryption as Partial<Encryption> | undefined
   if (encryption) {
-    form.recipients = encryption.recipients && encryption.recipients.length > 0 ? encryption.recipients : form.recipients
-    form.identity = encryption.identity ?? form.identity
+    form.recipients =
+      Array.isArray(encryption.recipients) && encryption.recipients.length > 0
+        ? encryption.recipients.map((recipient) => String(recipient))
+        : form.recipients
+    form.identity = typeof encryption.identity === 'string' ? encryption.identity : form.identity
   }
 
   // The burner drives are deploy-owned (issue #317) and sourced from deploy
@@ -503,10 +524,12 @@ export function configToFormState(config: RunConfig): FormState {
   // config carries deploy drives, and a JSON config may legitimately leave them
   // empty for the server to fill).
   const opticalBurn = (partial.delivery as Partial<Delivery> | undefined)?.opticalBurn
-  form.opticalBurnEnabled = Boolean(opticalBurn && opticalBurn.copies > 0)
+  form.opticalBurnEnabled = Boolean(opticalBurn && typeof opticalBurn.copies === 'number' && opticalBurn.copies > 0)
 
   if (opticalBurn) {
-    form.opticalCopies = opticalBurn.copies
+    if (typeof opticalBurn.copies === 'number') {
+      form.opticalCopies = opticalBurn.copies
+    }
     form.allowNonBlankDiscs = opticalBurn.allowNonBlankDiscs ?? false
   }
 
