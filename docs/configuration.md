@@ -529,11 +529,14 @@ JSON / paste mode, or a direct `POST`. The deploy-owned optical burner drives
 (`OPTICAL_BURNER_DRIVES`) are overwritten the same way, but only when the submitted run
 actually enables optical burn (carries a `delivery.opticalBurn` block) — a burn-off run
 never gains a spurious one. A **production (non-dry-run) run additionally requires the
-deployment to own the devices it will touch**: if `LIBRARY_CHANGER` or `LIBRARY_DRIVES`
-is unset (or `OPTICAL_BURNER_DRIVES` is unset for a run that enables optical burn), the
-submission is refused with `400` and a message naming the missing variable — a real run
-must never be aimed at a client-supplied device node the host has not declared it owns.
-Configure the deployment's devices, or submit as a dry-run. When `dryRun` is `true`, the
+deployment to own the devices it will touch — and the delivery webhook**: if
+`LIBRARY_CHANGER` or `LIBRARY_DRIVES` is unset (or `OPTICAL_BURNER_DRIVES` is unset for a
+run that enables optical burn, or `DELIVERY_WEBHOOK_URL` is unset for a run that submits a
+`delivery.webhookUrl`), the submission is refused with `400` and a message naming the
+missing variable — a real run must never be aimed at a client-supplied device node the
+host has not declared it owns, nor deliver its report (which embeds the age escrow private
+key, SPEC §7) to a client-supplied webhook. Configure the deployment's devices/webhook, or
+submit as a dry-run. When `dryRun` is `true`, the
 library device targets are redirected to the `mhvtl` nodes named by
 `MHVTL_CHANGER_DEV`/`MHVTL_DRIVE0_DEV`/`MHVTL_DRIVE1_DEV` and optical burning is
 disabled — identical to `tapectl run --dry-run`; this dry-run redirect runs after the

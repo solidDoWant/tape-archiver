@@ -825,8 +825,7 @@ const validSubmitConfigJSON = `{
   "copies": 2,
   "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
   "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
-  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
-  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
+  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"}
 }`
 
 // postJSON issues method/path with body as the raw request body, decoding a
@@ -1141,23 +1140,51 @@ func TestSubmitRun(t *testing.T) {
 		assert.False(t, fake.executeCaptured)
 	})
 
-	// Only the fields the deployment configured are overridden; an unset one is
-	// left to the client. A production run requires deploy-owned devices, so the
-	// passthrough exercised here is the webhook: changer+drives are deploy-owned,
-	// the webhook is not, so the client's webhook stands.
-	t.Run("an unset deploy field (the webhook) is left to the client", func(t *testing.T) {
-		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-partial"}}
+	// The delivery webhook is deploy-owned too (issue #304): the report it
+	// receives embeds the escrow private key, so a production run may not deliver
+	// it to a client-supplied webhook. With the deployment owning the devices but
+	// no webhook configured, a submitted delivery.webhookUrl is refused before
+	// Temporal rather than silently honored.
+	t.Run("a client-supplied webhook on a production run without a deploy webhook is rejected", func(t *testing.T) {
+		configWithWebhook := `{
+		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+		  "copies": 2,
+		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/rogue/rogue"}
+		}`
+
+		fake := &fakeTemporalClient{}
 		handler := newMux(newHandler(fake, func(string) string { return "" },
 			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")))
 
-		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+configWithWebhook+`}`), nil)
+
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.False(t, fake.executeCaptured)
+	})
+
+	// The same client-supplied webhook is fine as a dry-run: dry runs are exempt
+	// from deploy-ownership (they target mhvtl and never deliver a production
+	// report), the same way the physical-device checks exempt them.
+	t.Run("a client-supplied webhook is allowed on a dry-run submit", func(t *testing.T) {
+		configWithWebhook := `{
+		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+		  "copies": 2,
+		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
+		}`
+
+		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-dry-webhook"}}
+		handler := newMux(newHandler(fake, mhvtlEnv,
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+configWithWebhook+`, "dryRun": true}`), nil)
 
 		require.Equal(t, http.StatusCreated, recorder.Code)
-		require.NotNil(t, fake.executeConfig)
-		assert.Equal(t, "/dev/sch0", fake.executeConfig.Library.Changer)
-		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, fake.executeConfig.Library.Drives)
-		// webhook was not deploy-configured, so the client's stands.
-		assert.Equal(t, "https://discord.com/api/webhooks/123/abc", fake.executeConfig.Delivery.WebhookURL)
 	})
 
 	// A deployment that misconfigures its devices (here duplicate drive paths)
@@ -1185,7 +1212,7 @@ func TestSubmitRun(t *testing.T) {
 		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
 		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
 		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
-		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc", "opticalBurn": {"drives": ["/dev/rogue-burner"], "copies": 2}}
+		  "delivery": {"opticalBurn": {"drives": ["/dev/rogue-burner"], "copies": 2}}
 		}`
 
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-burn"}}

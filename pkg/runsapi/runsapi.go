@@ -852,14 +852,15 @@ func (h *handler) applyDeployConfig(cfg *config.Config) bool {
 }
 
 // requireDeviceOwnership rejects a production submit whose physical library
-// devices are not owned by this deployment (issue #304, CLAUDE.md Hardware and
-// Safety). applyDeployConfig overrides the changer/drives (and, when optical
-// burn is enabled, the burner drives) only where the deployment configured
-// them; where it configured none, the submitted config's own device paths
-// survive, and a real run must not target hardware the host has not declared
-// it owns. The remedy is spelled out in each message: configure the
-// deployment's devices, or submit as a dry-run (which targets mhvtl and is
-// exempt). Callers apply this only for non-dry-run submits.
+// devices — or delivery webhook — are not owned by this deployment (issue #304,
+// CLAUDE.md Hardware and Safety). applyDeployConfig overrides the changer/drives
+// (and, when optical burn is enabled, the burner drives) and the webhook only
+// where the deployment configured them; where it configured none, the submitted
+// config's own values survive, and a real run must not target hardware the host
+// has not declared it owns nor deliver its escrow-key-bearing report to a
+// client-supplied webhook. The remedy is spelled out in each message: configure
+// the deployment's devices/webhook, or submit as a dry-run (which targets mhvtl
+// and is exempt). Callers apply this only for non-dry-run submits.
 func (h *handler) requireDeviceOwnership(cfg *config.Config) error {
 	if h.deployChanger == "" {
 		return errors.New("this deployment does not configure a library changer (set LIBRARY_CHANGER): a production run may not target a client-supplied changer — configure the deployment's devices, or submit as a dry-run")
@@ -871,6 +872,16 @@ func (h *handler) requireDeviceOwnership(cfg *config.Config) error {
 
 	if cfg.Delivery.OpticalBurn.Enabled() && len(h.deployOpticalBurnerDrives) == 0 {
 		return errors.New("this deployment does not configure optical burner drives (set OPTICAL_BURNER_DRIVES): a production run with optical burn enabled may not target client-supplied burner drives — configure the deployment's burner, disable optical burn, or submit as a dry-run")
+	}
+
+	// The Discord delivery webhook is deploy-owned too (issue #304): the run's
+	// report embeds the age escrow private identity (pkg/report, SPEC §7), so a
+	// production run must not deliver it to a client-supplied webhook. When the
+	// deployment configured one, applyDeployConfig already replaced the client's
+	// value with it (so this branch does not fire); when it did not, a
+	// client-supplied webhook cannot be verified as owned and is refused.
+	if h.deployWebhookURL == "" && cfg.Delivery.WebhookURL != "" {
+		return errors.New("this deployment does not configure a delivery webhook (set DELIVERY_WEBHOOK_URL): a production run may not deliver its report — which embeds the escrow private key — to a client-supplied webhook — configure the deployment's webhook, remove delivery.webhookUrl, or submit as a dry-run")
 	}
 
 	return nil
