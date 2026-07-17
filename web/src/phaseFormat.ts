@@ -39,5 +39,19 @@ export function formatDuration(startTime?: string, endTime?: string): string {
     return '—'
   }
 
-  return formatClosedDuration(startTime, endTime ?? new Date().toISOString())
+  if (endTime !== undefined) {
+    return formatClosedDuration(startTime, endTime)
+  }
+
+  // Active phase: elapsed until now. Under modest client/server clock skew a
+  // just-started phase can carry a start a hair in the future, which would make
+  // api.ts's formatDuration render its negative-elapsed em dash — blanking the
+  // live elapsed for a second or two until the clocks cross. Clamp the end to no
+  // earlier than the start so it reads "0s" instead. A normal past start is
+  // unaffected (now is already the later of the two).
+  const startMillis = Date.parse(startTime)
+  const nowMillis = Date.now()
+  const endMillis = Number.isNaN(startMillis) ? nowMillis : Math.max(startMillis, nowMillis)
+
+  return formatClosedDuration(startTime, new Date(endMillis).toISOString())
 }
