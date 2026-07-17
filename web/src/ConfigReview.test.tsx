@@ -87,4 +87,22 @@ describe('ConfigReview', () => {
     expect(screen.getByText(/PAR2 —/)).toBeInTheDocument()
     expect(screen.queryByText(/floor undefined/)).not.toBeInTheDocument()
   })
+
+  it('renders "on" without a copy count for an optical-burn block missing copies', () => {
+    // A JSON-mode config whose opticalBurn block omits copies must not render
+    // "on · undefined copies".
+    const config = {
+      sources: [{ zfsPath: { name: 'pool/data' } }],
+      copies: 2,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1024 },
+      encryption: { recipients: ['age1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
+      delivery: { webhookUrl: '', opticalBurn: { drives: ['/dev/sr0'] } },
+    } as unknown as RunConfig
+
+    render(<ConfigReview config={config} dryRun={false} />)
+
+    expect(screen.getByText('on')).toBeInTheDocument()
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument()
+  })
 })

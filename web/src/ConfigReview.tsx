@@ -77,7 +77,11 @@ function ConfigReview({ config, dryRun }: ConfigReviewProps) {
             <dt className="text-[12.5px] text-text-dim">Recovery discs</dt>
             <dd className="font-mono text-[12px] text-text">
               {opticalBurn
-                ? `on · ${opticalBurn.copies} cop${opticalBurn.copies === 1 ? 'y' : 'ies'}`
+                ? `on${
+                    typeof opticalBurn.copies === 'number'
+                      ? ` · ${opticalBurn.copies} cop${opticalBurn.copies === 1 ? 'y' : 'ies'}`
+                      : ''
+                  }`
                 : 'off'}
             </dd>
           </div>
