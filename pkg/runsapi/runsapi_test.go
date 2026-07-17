@@ -860,6 +860,7 @@ func TestListAllBackupExecutionsBoundsEmptyTokenedPages(t *testing.T) {
 		all []*workflowpb.WorkflowExecutionInfo
 		err error
 	}
+
 	done := make(chan result, 1)
 
 	go func() {
