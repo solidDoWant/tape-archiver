@@ -113,6 +113,48 @@ describe('TapesPage', () => {
     expect(runLink).toHaveAttribute('href', '/runs/run-1')
   })
 
+  it('does not crash on a measured tape whose throughput/floor fields are missing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            {
+              barcode: 'TA0002L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 2,
+              result: 'written',
+              runId: 'run-2',
+              runStartTime: '2026-07-01T00:00:00Z',
+              runStatus: 'Completed',
+              // measured, but the numeric fields the type marks required are
+              // absent on the wire (a server-side invariant violation) — the
+              // cell must not throw on throughputMBps.toFixed nor render a blank
+              // "floor ".
+              writeHealth: {
+                measured: true,
+                floorKnown: true,
+                belowFloor: false,
+                repositions: 0,
+                repositionsMeasured: true,
+                healthy: true,
+              },
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    await waitFor(() => expect(screen.getByRole('table')).toBeInTheDocument())
+
+    expect(screen.getByText('TA0002L6')).toBeInTheDocument()
+    expect(screen.queryByText(/undefined|NaN/)).not.toBeInTheDocument()
+  })
+
   it('shows a below-floor warning and a TapeAlert warning on their respective tapes', async () => {
     vi.stubGlobal(
       'fetch',

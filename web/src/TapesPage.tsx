@@ -112,8 +112,10 @@ function WriteHealthCell({ health }: { health?: WriteHealthInfo }) {
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      <span className="font-mono text-text">{health.throughputMBps.toFixed(0)} MB/s</span>
-      {health.floorKnown ? (
+      {typeof health.throughputMBps === 'number' ? (
+        <span className="font-mono text-text">{health.throughputMBps.toFixed(0)} MB/s</span>
+      ) : null}
+      {health.floorKnown && typeof health.floorMBps === 'number' ? (
         <span className="font-mono text-[11px] text-text-faint">floor {health.floorMBps}</span>
       ) : null}
       {hasTapeAlert ? (
