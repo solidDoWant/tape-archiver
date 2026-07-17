@@ -119,6 +119,31 @@ describe('ConfigForm', () => {
     expect(screen.queryByLabelText('target %')).not.toBeInTheDocument()
   })
 
+  it('lets a numeric field be cleared and a decimal typed without snapping to a default', () => {
+    let latest: FormState | undefined
+    render(<Wrapper onForm={(form) => (latest = form)} />)
+
+    // Clearing an integer field leaves it empty rather than coercing to a
+    // default on the first delete keystroke.
+    const copies = screen.getByLabelText('copies') as HTMLInputElement
+    fireEvent.change(copies, { target: { value: '' } })
+    expect(copies.value).toBe('')
+
+    // A fractional value is preserved exactly as typed and committed to state,
+    // rather than being destroyed mid-decimal.
+    const slice = screen.getByLabelText('slice size (GiB)') as HTMLInputElement
+    fireEvent.change(slice, { target: { value: '0.5' } })
+    expect(slice.value).toBe('0.5')
+    expect(latest?.sliceSizeGiB).toBe(0.5)
+
+    // Blurring an emptied field restores the committed value so display and
+    // state never disagree once focus moves on.
+    fireEvent.change(copies, { target: { value: '3' } })
+    fireEvent.change(copies, { target: { value: '' } })
+    fireEvent.blur(copies)
+    expect(copies.value).toBe('3')
+  })
+
   it('renders a slot grid bounded to the deploy topology, excluding cleaning and I/O-station slots (issue #305)', () => {
     render(<Wrapper />)
 

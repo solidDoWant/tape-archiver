@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import AgeKeygenPanel, { type AgeKeypair } from './AgeKeygenPanel'
 import {
   blankSlotsCopiesIssue,
@@ -247,6 +248,66 @@ function SlotGridEditor({
   )
 }
 
+// NumberField is an uncontrolled numeric input so a value can actually be
+// cleared and retyped (and a decimal typed through). Binding a number straight
+// to the input and coercing every keystroke with `Number(value) || fallback`
+// snapped the field back to the fallback the moment it was emptied, and
+// destroyed a partial decimal like "0.". Leaving the input uncontrolled lets the
+// browser hold the in-progress text; onValue commits only a complete, parseable
+// number, so an empty or mid-edit entry leaves the last committed value in place.
+// Decimal fields use a text input (type=number reports an empty string for
+// "0.", which would lose the fraction). The field is remounted (a fresh
+// defaultValue) whenever it needs to reflect an externally-set value — a restart
+// preload remounts the whole form, and the redundancy/optical toggles mount a
+// fresh input — so it never needs to be controlled to stay in sync.
+function NumberField({
+  id,
+  value,
+  onValue,
+  decimal = false,
+  min,
+  max,
+  className,
+}: {
+  id: string
+  value: number
+  onValue: (value: number) => void
+  decimal?: boolean
+  min?: number
+  max?: number
+  className?: string
+}) {
+  return (
+    <input
+      id={id}
+      type={decimal ? 'text' : 'number'}
+      inputMode={decimal ? 'decimal' : 'numeric'}
+      min={min}
+      max={max}
+      step={decimal ? '0.1' : undefined}
+      defaultValue={String(value)}
+      onChange={(event) => {
+        const raw = event.target.value
+
+        const parsed = Number(raw)
+        if (raw.trim() !== '' && !Number.isNaN(parsed)) {
+          onValue(parsed)
+        }
+      }}
+      // On blur, snap an emptied or half-typed field's display back to the last
+      // committed value so it never lingers out of sync with the state behind
+      // it. The input is uncontrolled, so this writes the DOM value directly.
+      onBlur={(event) => {
+        const raw = event.target.value
+        if (raw.trim() === '' || Number.isNaN(Number(raw))) {
+          event.target.value = String(value)
+        }
+      }}
+      className={className}
+    />
+  )
+}
+
 // ConfigForm is the config page's guided Form mode (DESIGN_ANALYSIS.md §2
 // "D. Config"): sources, copies & redundancy, library, encryption, and
 // delivery sections that together build a FormState, converted to a
@@ -454,14 +515,11 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
             <label className={fieldLabelClass} htmlFor="config-copies">
               copies
             </label>
-            <input
+            <NumberField
               id="config-copies"
-              type="number"
               min={1}
               value={form.copies}
-              onChange={(event) =>
-                setForm((previous) => ({ ...previous, copies: Number(event.target.value) || 1 }))
-              }
+              onValue={(copies) => setForm((previous) => ({ ...previous, copies }))}
               className={inputClass}
             />
           </div>
@@ -469,15 +527,12 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
             <label className={fieldLabelClass} htmlFor="config-slice-size">
               slice size (GiB)
             </label>
-            <input
+            <NumberField
               id="config-slice-size"
-              type="number"
+              decimal
               min={0}
-              step="0.1"
               value={form.sliceSizeGiB}
-              onChange={(event) =>
-                setForm((previous) => ({ ...previous, sliceSizeGiB: Number(event.target.value) || 0 }))
-              }
+              onValue={(sliceSizeGiB) => setForm((previous) => ({ ...previous, sliceSizeGiB }))}
               className={inputClass}
             />
           </div>
@@ -507,15 +562,12 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               <label className={fieldLabelClass} htmlFor="config-target-percentage">
                 target %
               </label>
-              <input
+              <NumberField
                 id="config-target-percentage"
-                type="number"
                 min={1}
                 max={100}
                 value={form.targetPercentage}
-                onChange={(event) =>
-                  setForm((previous) => ({ ...previous, targetPercentage: Number(event.target.value) || 1 }))
-                }
+                onValue={(targetPercentage) => setForm((previous) => ({ ...previous, targetPercentage }))}
                 className={inputClass}
               />
             </div>
@@ -524,15 +576,12 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               <label className={fieldLabelClass} htmlFor="config-fill-floor">
                 floor %
               </label>
-              <input
+              <NumberField
                 id="config-fill-floor"
-                type="number"
                 min={1}
                 max={100}
                 value={form.fillFloor}
-                onChange={(event) =>
-                  setForm((previous) => ({ ...previous, fillFloor: Number(event.target.value) || 1 }))
-                }
+                onValue={(fillFloor) => setForm((previous) => ({ ...previous, fillFloor }))}
                 className={inputClass}
               />
             </div>
@@ -668,19 +717,17 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               <label className={fieldLabelClass} htmlFor="config-optical-copies">
                 copies per run
               </label>
-              <input
+              <NumberField
                 id="config-optical-copies"
-                type="number"
                 // min 1: this input is only shown when optical burn is enabled,
                 // and copies=0 means "disabled" server-side — so a 0 here builds
                 // an opticalBurn block that silently burns nothing yet reads
                 // back as OFF on a Form round-trip (opticalBurnEnabled is
-                // copies>0). A cleared/invalid entry coerces to 1, not 0.
+                // copies>0). Clearing the field commits nothing (the last value
+                // stands); the min attribute nudges toward a positive count.
                 min={1}
                 value={form.opticalCopies}
-                onChange={(event) =>
-                  setForm((previous) => ({ ...previous, opticalCopies: Number(event.target.value) || 1 }))
-                }
+                onValue={(opticalCopies) => setForm((previous) => ({ ...previous, opticalCopies }))}
                 className={inputClass}
               />
             </div>
