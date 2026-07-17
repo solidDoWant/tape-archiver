@@ -217,7 +217,13 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		mutex sync.Mutex
-		tapes []AggregateTapeOutcome
+		// Initialized (not a nil slice) so an empty result serializes as
+		// "tapes": [] rather than "tapes": null — a fresh deployment with no
+		// runs, or a limit window in which every run's history has aged out,
+		// otherwise emits null and crashes a web client that maps over it. This
+		// matches the per-run endpoint, whose deriveTapeOutcomes always returns
+		// a non-nil slice.
+		tapes = []AggregateTapeOutcome{}
 		errs  []RunError
 	)
 

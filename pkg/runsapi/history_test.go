@@ -961,6 +961,20 @@ func TestListTapesHandler(t *testing.T) {
 			assert.Equal(t, http.StatusBadRequest, recorder.Code, "limit=%s", raw)
 		}
 	})
+
+	t.Run("no runs yet serializes tapes as [] not null", func(t *testing.T) {
+		// A fresh deployment (no executions) must send "tapes":[] — a web client
+		// maps over the array and would crash on null. json.Unmarshal collapses
+		// [] and null to the same zero-length slice, so this asserts on the raw
+		// body rather than a decoded value.
+		fake := &fakeTemporalClient{listResponse: &workflowservice.ListWorkflowExecutionsResponse{}}
+		handler := newMux(newHandler(fake, emptyEnv))
+
+		recorder := doJSON(t, handler, http.MethodGet, "/api/tapes", nil)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), `"tapes":[]`)
+		assert.NotContains(t, recorder.Body.String(), `"tapes":null`)
+	})
 }
 
 // emptyEnv is a getenv func for tests whose handler never reads the
