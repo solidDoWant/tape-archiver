@@ -318,6 +318,12 @@ function NumberField({
 // config can never carry both halves of a schema "exactly one of" pair —
 // see configModel.ts's buildConfig doc comment.
 function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
+  // The recipient produced by the most recent in-session keygen, so a second
+  // "Generate new age keypair" replaces it rather than leaving it behind as a
+  // recipient nobody holds a private key for (only the newest identity is
+  // escrowed). Manually-entered recipients are untouched.
+  const lastGeneratedRecipient = useRef<string | null>(null)
+
   const updateSource = (id: string, patch: Partial<SourceFormState>) => {
     setForm((previous) => ({
       ...previous,
@@ -672,13 +678,24 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
 
         <div className="mt-3">
           <AgeKeygenPanel
-            onGenerated={(keypair: AgeKeypair) =>
+            onGenerated={(keypair: AgeKeypair) => {
+              const previousGenerated = lastGeneratedRecipient.current
+              lastGeneratedRecipient.current = keypair.recipient
+
               setForm((previous) => ({
                 ...previous,
-                recipients: [...previous.recipients.filter((recipient) => recipient.trim() !== ''), keypair.recipient],
+                // Drop empties and the previously-generated recipient (now
+                // orphaned — its identity is being replaced), keep everything
+                // else, then add the new recipient.
+                recipients: [
+                  ...previous.recipients.filter(
+                    (recipient) => recipient.trim() !== '' && recipient !== previousGenerated,
+                  ),
+                  keypair.recipient,
+                ],
                 identity: keypair.identity,
               }))
-            }
+            }}
           />
         </div>
       </div>

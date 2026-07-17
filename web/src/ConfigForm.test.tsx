@@ -144,6 +144,39 @@ describe('ConfigForm', () => {
     expect(copies.value).toBe('3')
   })
 
+  it('a second age keygen replaces the first generated recipient rather than orphaning it', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ recipient: 'age1pq1first', identity: 'AGE-SECRET-KEY-PQ-1first' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ recipient: 'age1pq1second', identity: 'AGE-SECRET-KEY-PQ-1second' }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    let latest: FormState | undefined
+    render(<Wrapper onForm={(form) => (latest = form)} />)
+
+    const generate = screen.getByRole('button', { name: /generate new age keypair/i })
+
+    fireEvent.click(generate)
+    await waitFor(() => expect(latest?.identity).toBe('AGE-SECRET-KEY-PQ-1first'))
+    expect(latest?.recipients).toContain('age1pq1first')
+
+    fireEvent.click(generate)
+    await waitFor(() => expect(latest?.identity).toBe('AGE-SECRET-KEY-PQ-1second'))
+
+    // Only the newest keypair's identity is escrowed, so the first generated
+    // recipient must be gone — not left behind as a recipient with no held key.
+    expect(latest?.recipients).toContain('age1pq1second')
+    expect(latest?.recipients).not.toContain('age1pq1first')
+  })
+
   it('renders a slot grid bounded to the deploy topology, excluding cleaning and I/O-station slots (issue #305)', () => {
     render(<Wrapper />)
 
