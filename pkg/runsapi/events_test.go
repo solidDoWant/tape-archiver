@@ -589,3 +589,94 @@ func TestStreamRunEventsClosesOnDrain(t *testing.T) {
 		t.Fatal("stream did not close after the drain context was cancelled")
 	}
 }
+
+// TestStreamRunEventsBroadcastsToMultipleConnections proves the shared poll loop
+// fans a single run's updates out to every connection watching it: two
+// concurrent streams over the same run both see the initial snapshot and a
+// mid-stream change (issue #250 review — one poller, many subscribers).
+func TestStreamRunEventsBroadcastsToMultipleConnections(t *testing.T) {
+	setEventPollInterval(t, 15*time.Millisecond)
+
+	client := &dynamicTemporalClient{}
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
+
+	server := httptest.NewServer(New(client))
+	t.Cleanup(server.Close)
+
+	respA, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = respA.Body.Close() })
+
+	respB, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = respB.Body.Close() })
+
+	framesA := readSSEFrames(respA.Body)
+	framesB := readSSEFrames(respB.Body)
+
+	// Both connections receive the initial snapshot; waiting for both here also
+	// guarantees both are subscribed before the state change below.
+	assertFrame(t, waitForFrame(t, framesA, 2*time.Second), sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
+	assertFrame(t, waitForFrame(t, framesB, 2*time.Second), sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
+
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
+
+	assertFrame(t, waitForFrame(t, framesA, 2*time.Second), sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
+	assertFrame(t, waitForFrame(t, framesB, 2*time.Second), sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
+}
+
+// TestRunBrokerCoalescesPollersPerRun is a white-box check that the SSE broker
+// runs one shared poll loop per run no matter how many connections watch it, and
+// tears a run's poller down once its last subscriber leaves — the mechanism that
+// makes N browser tabs cost one interval of Temporal load, not N.
+func TestRunBrokerCoalescesPollersPerRun(t *testing.T) {
+	broker := newRunBroker(func(context.Context, string) (RunDetail, error) {
+		return RunDetail{RunSummary: RunSummary{Status: runningStatus}}, nil
+	}, context.Background())
+
+	subscriberCount := func(runID string) (int, bool) {
+		broker.mu.Lock()
+		defer broker.mu.Unlock()
+
+		poll, ok := broker.polls[runID]
+		if !ok {
+			return 0, false
+		}
+
+		return len(poll.subscribers), true
+	}
+
+	pollCount := func() int {
+		broker.mu.Lock()
+		defer broker.mu.Unlock()
+
+		return len(broker.polls)
+	}
+
+	subA := broker.subscribe("run-1")
+	subB := broker.subscribe("run-1")
+
+	if count, ok := subscriberCount("run-1"); assert.True(t, ok) {
+		assert.Equal(t, 2, count, "both connections to the same run share one poll loop")
+	}
+
+	assert.Equal(t, 1, pollCount(), "a second connection to the same run starts no second poller")
+
+	subC := broker.subscribe("run-2")
+
+	assert.Equal(t, 2, pollCount(), "a different run gets its own poller")
+
+	broker.unsubscribe(subA)
+
+	if count, ok := subscriberCount("run-1"); assert.True(t, ok) {
+		assert.Equal(t, 1, count, "one connection leaving keeps the shared poller for the rest")
+	}
+
+	broker.unsubscribe(subB)
+
+	_, ok := subscriberCount("run-1")
+	assert.False(t, ok, "the last connection leaving tears the run's poller down")
+
+	broker.unsubscribe(subC)
+	assert.Equal(t, 0, pollCount(), "no pollers remain once every connection has left")
+}

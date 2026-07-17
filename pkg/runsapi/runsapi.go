@@ -364,6 +364,11 @@ func newHandler(temporalClient TemporalClient, getenv func(string) string, opts 
 		opt(h)
 	}
 
+	// Built after options so it captures the final drain context
+	// (WithDrainContext). The broker coalesces every SSE connection watching a
+	// given run onto one shared Temporal poll loop — see events.go.
+	h.broker = newRunBroker(h.fetchRunDetailUntilDrain, h.drain)
+
 	return h
 }
 
@@ -415,6 +420,10 @@ type handler struct {
 	// drain is done when the hosting server has begun graceful shutdown —
 	// see WithDrainContext. Defaults to context.Background() (never done).
 	drain context.Context
+	// broker coalesces every SSE connection watching the same run onto one
+	// shared Temporal poll loop (events.go), rather than one poller per
+	// connection. Built by newHandler after options are applied.
+	broker *runBroker
 	// temporalUIBaseURL is the browsable Temporal Web UI base URL (cmd/web's
 	// TEMPORAL_UI_URL); empty when unconfigured, in which case GET
 	// /api/config/ui reports it empty and the SPA omits the run overview's

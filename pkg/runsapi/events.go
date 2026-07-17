@@ -3,7 +3,9 @@
 // as the server polls Temporal rather than left to client-side polling
 // (docs/web-ui-design.md §3's "no client polling storms" — the polling still
 // happens, but here, server-side, at one interval, regardless of how many
-// browser tabs are watching).
+// browser tabs are watching). That last property is delivered by runBroker
+// (below): every connection watching a given run shares one poll loop, so the
+// Temporal load is one interval per run, not one per open tab.
 package runsapi
 
 import (
@@ -13,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"sync"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -76,9 +79,11 @@ const (
 // message surfaced to the page.
 //
 // Once a run is confirmed to exist, the response becomes text/event-stream
-// and streamRunEvents polls fetchRunDetail every eventPollInterval, writing
-// an "update" event only when the polled status, phase, or current pause
-// state differs from what was last sent — the last is what makes an
+// and streamRunEvents subscribes to the run's shared poll loop (runBroker),
+// which fetches run detail every eventPollInterval on behalf of every
+// connection watching that run. This connection writes an "update" event only
+// when the polled status, phase, or current pause state differs from what IT
+// last sent — the last is what makes an
 // operator-in-the-loop pause (workflows/backup.CurrentPauseQuery) starting or
 // clearing show up live, even though neither Status nor LastCompletedPhase
 // necessarily changes at the moment a pause begins or a resume/abort clears
@@ -141,8 +146,15 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 
 	last := detail
 
-	ticker := time.NewTicker(eventPollInterval)
-	defer ticker.Stop()
+	// Subscribe to the run's shared poll loop rather than polling Temporal from
+	// this connection: every browser tab watching the same run rides one
+	// server-side poller, so N tabs cost one interval of Temporal load, not N
+	// (issue #250 review — this is what actually makes the polling "one interval
+	// regardless of how many tabs"). Each subscriber still runs its own delta
+	// detection against what IT last sent, so connections that joined at
+	// different points stay individually correct.
+	sub := h.broker.subscribe(runID)
+	defer h.broker.unsubscribe(sub)
 
 	for {
 		select {
@@ -157,41 +169,27 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 			// like any other drop and reconnects — to this pod's successor,
 			// in a rolling deploy.
 			return
-		case <-ticker.C:
-			next, err := h.fetchRunDetailUntilDrain(r.Context(), runID)
-			if err != nil {
-				// A mid-stream poll failure (e.g. a transient Temporal blip)
-				// is logged and retried on the next tick rather than tearing
-				// down an otherwise-healthy stream over one bad RPC — the
-				// same "log, do not fail the caller" reasoning
-				// queryLastCompletedPhase already applies to a failed phase
-				// query within a single request.
-				slog.WarnContext(r.Context(), "runsapi: poll for run event stream failed", "run_id", runID, "error", err)
-
-				continue
-			}
-
+		case next := <-sub.updates:
 			if next.lastCompletedPhaseUnknown {
-				// LastCompletedPhaseQuery failed this tick (Describe still
-				// succeeded). Carry the last known phase forward rather than
-				// letting "" reach the delta check below, which would emit a
-				// spurious "phase regressed to empty" update that flaps back on
-				// the next successful tick — the same transient-blip handling
-				// CurrentPause.Unknown gets just below.
+				// LastCompletedPhaseQuery failed on the poll that produced this
+				// update (Describe still succeeded). Carry the last known phase
+				// forward rather than letting "" reach the delta check below,
+				// which would emit a spurious "phase regressed to empty" update
+				// that flaps back on the next successful poll — the same
+				// transient-blip handling CurrentPause.Unknown gets just below.
 				next.LastCompletedPhase = last.LastCompletedPhase
 			}
 
 			if next.CurrentPause.Unknown {
-				// CurrentPauseQuery itself failed this tick (fetchRunDetail
+				// CurrentPauseQuery itself failed on that poll (fetchRunDetail
 				// still succeeded overall — Describe/LastCompletedPhase are
 				// independently valid). Carry the last known pause state
-				// forward rather than comparing against it: an unknown
-				// result must never look like "the pause cleared" to the
-				// delta check below, or a run genuinely still awaiting an
-				// operator would flash Resume/Abort away on a transient
-				// blip. If Status or LastCompletedPhase did change, the
-				// event below still fires — just with the last known
-				// (not fabricated-healthy) pause state attached.
+				// forward rather than comparing against it: an unknown result
+				// must never look like "the pause cleared" to the delta check
+				// below, or a run genuinely still awaiting an operator would
+				// flash Resume/Abort away on a transient blip. If Status or
+				// LastCompletedPhase did change, the event below still fires —
+				// just with the last known (not fabricated-healthy) pause state.
 				next.CurrentPause = last.CurrentPause
 			}
 
@@ -232,6 +230,175 @@ func (h *handler) fetchRunDetailUntilDrain(ctx context.Context, runID string) (R
 	defer stop()
 
 	return fetchRunDetail(fetchCtx, h.temporalClient, runID)
+}
+
+// --- shared per-run poller ---
+//
+// runBroker coalesces every SSE connection watching the same run onto one
+// server-side poll loop, so N browser tabs cost one interval of Temporal load,
+// not N (issue #250 review). streamRunEvents subscribes; the broker starts a
+// poll goroutine on the first subscriber for a run and stops it when the last
+// one leaves. Each poll's RunDetail is broadcast to every current subscriber,
+// which does its own delta detection — the poller itself keeps no per-connection
+// "last sent" state.
+
+type runBroker struct {
+	fetch func(ctx context.Context, runID string) (RunDetail, error)
+	drain context.Context
+
+	// mu guards polls and every field of the runPolls within it. A single lock
+	// keeps subscribe, unsubscribe, and broadcast free of any lock-ordering
+	// hazard; broadcast holds it only briefly, once per poll interval.
+	mu    sync.Mutex
+	polls map[string]*runPoll
+}
+
+// runPoll is the shared poll loop and subscriber set for one run.
+type runPoll struct {
+	runID       string
+	stop        context.CancelFunc
+	subscribers map[*subscriber]struct{}
+	// terminal holds the final RunDetail once the run reaches a terminal status,
+	// so a connection that subscribes after the poller has already stopped (a
+	// rare Describe-lag race) still receives a done frame instead of hanging.
+	terminal *RunDetail
+}
+
+// subscriber is one SSE connection's view of a run's shared poller: a size-1,
+// latest-wins channel of RunDetail updates. A slow consumer coalesces to the
+// newest state rather than backing the broadcaster up.
+type subscriber struct {
+	poll    *runPoll
+	updates chan RunDetail
+}
+
+func newRunBroker(fetch func(context.Context, string) (RunDetail, error), drain context.Context) *runBroker {
+	return &runBroker{fetch: fetch, drain: drain, polls: make(map[string]*runPoll)}
+}
+
+// subscribe registers a new SSE connection for runID, starting the shared poll
+// loop if this is the first subscriber for that run.
+func (b *runBroker) subscribe(runID string) *subscriber {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	poll := b.polls[runID]
+	if poll == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		poll = &runPoll{
+			runID:       runID,
+			stop:        cancel,
+			subscribers: make(map[*subscriber]struct{}),
+		}
+		b.polls[runID] = poll
+
+		go b.run(ctx, poll)
+	}
+
+	sub := &subscriber{poll: poll, updates: make(chan RunDetail, 1)}
+	poll.subscribers[sub] = struct{}{}
+
+	if poll.terminal != nil {
+		// The channel is freshly made and empty, so this never blocks.
+		sub.updates <- *poll.terminal
+	}
+
+	return sub
+}
+
+// unsubscribe removes a connection; when a run's last subscriber leaves, its
+// poll loop is stopped and the run forgotten.
+func (b *runBroker) unsubscribe(sub *subscriber) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	poll := sub.poll
+	delete(poll.subscribers, sub)
+
+	if len(poll.subscribers) > 0 {
+		return
+	}
+
+	poll.stop()
+
+	// Only forget this exact poll — never a fresh one a concurrent subscribe may
+	// have installed for the same run under the same lock.
+	if b.polls[poll.runID] == poll {
+		delete(b.polls, poll.runID)
+	}
+}
+
+// run is one run's shared poll loop: fetch the run detail every
+// eventPollInterval and broadcast it to every current subscriber, until the run
+// reaches a terminal status, the hosting server drains, or the last subscriber
+// leaves (ctx cancelled by unsubscribe).
+func (b *runBroker) run(ctx context.Context, poll *runPoll) {
+	ticker := time.NewTicker(eventPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-b.drain.Done():
+			return
+		case <-ticker.C:
+			detail, err := b.fetch(ctx, poll.runID)
+			if err != nil {
+				// A transient Temporal blip: log and retry next tick rather than
+				// tearing down an otherwise-healthy shared stream over one RPC.
+				slog.WarnContext(ctx, "runsapi: poll for run event stream failed", "run_id", poll.runID, "error", err)
+
+				continue
+			}
+
+			terminal := detail.Status != runningStatus
+			b.broadcast(poll, detail, terminal)
+
+			if terminal {
+				// Stop polling a finished run. The poll entry lingers (with the
+				// terminal detail cached) until its subscribers disconnect, so a
+				// late subscriber still gets a done frame.
+				return
+			}
+		}
+	}
+}
+
+// broadcast delivers detail to every current subscriber of poll, caching it as
+// the terminal detail when the run has finished.
+func (b *runBroker) broadcast(poll *runPoll, detail RunDetail, terminal bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if terminal {
+		final := detail
+		poll.terminal = &final
+	}
+
+	for sub := range poll.subscribers {
+		sendLatest(sub.updates, detail)
+	}
+}
+
+// sendLatest delivers detail on a size-1, latest-wins channel without ever
+// blocking: if a prior update is still pending (a slow consumer), it is dropped
+// in favour of this newer one. Only the broker (under b.mu) ever sends, so the
+// drain-then-send is race-free.
+func sendLatest(ch chan RunDetail, detail RunDetail) {
+	select {
+	case ch <- detail:
+	default:
+		select {
+		case <-ch:
+		default:
+		}
+
+		select {
+		case ch <- detail:
+		default:
+		}
+	}
 }
 
 // writeSSEEvent writes one Server-Sent Event named event with body
