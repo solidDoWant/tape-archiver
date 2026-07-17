@@ -1097,36 +1097,36 @@ func TestSubmitRun(t *testing.T) {
 		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, fake.executeConfig.Library.Drives)
 	})
 
-	// A deployment that configures nothing leaves the submitted config's
-	// devices/webhook exactly as the client sent them (today's behavior).
-	t.Run("no deploy config leaves the client's devices and webhook untouched", func(t *testing.T) {
-		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-plain"}}
+	// A production run may not fall back to client-supplied device paths: with
+	// no deploy-owned devices the submission is rejected before Temporal
+	// (requireDeviceOwnership), rather than aiming a real run at whatever the
+	// client sent.
+	t.Run("a production run with no deploy-owned devices is rejected before Temporal", func(t *testing.T) {
+		fake := &fakeTemporalClient{}
 		handler := newMux(newHandler(fake, func(string) string { return "" }))
 
 		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
 
-		require.Equal(t, http.StatusCreated, recorder.Code)
-		require.NotNil(t, fake.executeConfig)
-		assert.Equal(t, "/dev/sch0", fake.executeConfig.Library.Changer)
-		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, fake.executeConfig.Library.Drives)
-		assert.Equal(t, "https://discord.com/api/webhooks/123/abc", fake.executeConfig.Delivery.WebhookURL)
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.False(t, fake.executeCaptured)
 	})
 
-	// Only the fields the deployment configured are overridden; the rest are
-	// left to the client, mirroring the per-field "not configured" the Form mode
-	// shows. Here only the changer is deploy-owned.
-	t.Run("only the configured deploy fields are overridden", func(t *testing.T) {
+	// Only the fields the deployment configured are overridden; an unset one is
+	// left to the client. A production run requires deploy-owned devices, so the
+	// passthrough exercised here is the webhook: changer+drives are deploy-owned,
+	// the webhook is not, so the client's webhook stands.
+	t.Run("an unset deploy field (the webhook) is left to the client", func(t *testing.T) {
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-partial"}}
 		handler := newMux(newHandler(fake, func(string) string { return "" },
-			WithDeployConfig("/dev/sch0", nil, "")))
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")))
 
 		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
 
 		require.Equal(t, http.StatusCreated, recorder.Code)
 		require.NotNil(t, fake.executeConfig)
 		assert.Equal(t, "/dev/sch0", fake.executeConfig.Library.Changer)
-		// drives and webhook were not deploy-configured, so the client's stand.
 		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, fake.executeConfig.Library.Drives)
+		// webhook was not deploy-configured, so the client's stands.
 		assert.Equal(t, "https://discord.com/api/webhooks/123/abc", fake.executeConfig.Delivery.WebhookURL)
 	})
 
@@ -1160,6 +1160,7 @@ func TestSubmitRun(t *testing.T) {
 
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-burn"}}
 		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, ""),
 			WithOpticalBurnerDrives([]string{"/dev/sr0", "/dev/sr1"})))
 
 		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+burnConfig+`}`), nil)
@@ -1176,6 +1177,7 @@ func TestSubmitRun(t *testing.T) {
 	t.Run("deploy burner drives add no opticalBurn block to a burn-off run", func(t *testing.T) {
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-noburn"}}
 		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, ""),
 			WithOpticalBurnerDrives([]string{"/dev/sr0", "/dev/sr1"})))
 
 		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+validSubmitConfigJSON+`}`), nil)
