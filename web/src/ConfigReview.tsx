@@ -24,15 +24,16 @@ export interface ConfigReviewProps {
 // be submitted.
 function ConfigReview({ config, dryRun }: ConfigReviewProps) {
   const redundancy = config.redundancy
-  const redundancyLabel = redundancy?.fillToCapacity
-    ? `fill to capacity · floor ${redundancy.fillToCapacity.floor}%`
-    : // Guard on targetPercentage being present, not just redundancy: a
-      // JSON-mode config with a redundancy block but neither field set (the
-      // committed schema requires only sliceSizeBytes) would otherwise render
-      // "fixed undefined%".
-      typeof redundancy?.targetPercentage === 'number'
-      ? `fixed ${redundancy.targetPercentage}%`
-      : '—'
+  // Guard on each field being a present number, not just its block: a JSON-mode
+  // config with a redundancy block but a missing/non-numeric field (the
+  // committed schema requires only sliceSizeBytes) would otherwise render
+  // "floor undefined%" / "fixed undefined%".
+  const redundancyLabel =
+    redundancy?.fillToCapacity && typeof redundancy.fillToCapacity.floor === 'number'
+      ? `fill to capacity · floor ${redundancy.fillToCapacity.floor}%`
+      : typeof redundancy?.targetPercentage === 'number'
+        ? `fixed ${redundancy.targetPercentage}%`
+        : '—'
 
   const sources = config.sources ?? []
   const opticalBurn = config.delivery?.opticalBurn

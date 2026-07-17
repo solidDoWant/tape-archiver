@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import ConfigReview from './ConfigReview'
-import { buildConfig, defaultFormState, type DeployConfig } from './configModel'
+import { buildConfig, defaultFormState, type DeployConfig, type RunConfig } from './configModel'
 
 // testDeploy supplies the deploy-owned library devices + webhook (issue #304)
 // buildConfig fills into the config under review.
@@ -68,5 +68,23 @@ describe('ConfigReview', () => {
     render(<ConfigReview config={buildConfig(form, testDeploy)} dryRun={false} />)
 
     expect(screen.getByText(/fill to capacity · floor 5%/)).toBeInTheDocument()
+  })
+
+  it('renders an em dash, not "floor undefined%", for a fill-to-capacity block missing its floor', () => {
+    // A JSON-mode config whose redundancy block omits the floor (the committed
+    // schema requires only sliceSizeBytes).
+    const config = {
+      sources: [{ zfsPath: { name: 'pool/data' } }],
+      copies: 2,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
+      redundancy: { fillToCapacity: {}, sliceSizeBytes: 1024 },
+      encryption: { recipients: ['age1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
+      delivery: { webhookUrl: '' },
+    } as unknown as RunConfig
+
+    render(<ConfigReview config={config} dryRun={false} />)
+
+    expect(screen.getByText(/PAR2 —/)).toBeInTheDocument()
+    expect(screen.queryByText(/floor undefined/)).not.toBeInTheDocument()
   })
 })
