@@ -79,6 +79,10 @@ func TestGenerateAgeKeypairFailure(t *testing.T) {
 	recorder := postJSON(t, newMux(h), "/api/age/keygen", nil, nil)
 	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 	require.Error(t, decodeAPIError(t, recorder))
+	// The raw tool error (which can carry a binary path / invocation detail) is
+	// logged server-side, never returned in the response body.
+	assert.NotContains(t, recorder.Body.String(), "executable file not found")
+	assert.NotContains(t, recorder.Body.String(), "age-keygen")
 }
 
 // TestGenerateAgeKeypairNeverLogsPrivateKey checks that the identity

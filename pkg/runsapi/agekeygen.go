@@ -10,7 +10,7 @@ package runsapi
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -45,7 +45,14 @@ func (h *handler) generateAgeKeypair(w http.ResponseWriter, r *http.Request) {
 		// only returns a non-empty identity on success, so there is never key
 		// material in this branch to accidentally log.
 		slog.ErrorContext(ctx, "runsapi: age keypair generation failed", "error", err)
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("generate age keypair: %w", err))
+		// The detailed tool error is logged above but not returned to the
+		// client: age-keygen's own failure text can carry internal invocation
+		// detail (binary path, flags), and this package masks upstream error
+		// bodies elsewhere (502/504 in writeError) for the same reason. There is
+		// no key material in this branch to withhold — GenerateIdentity only
+		// returns an identity on success — this is purely about not leaking
+		// server internals.
+		writeError(w, http.StatusInternalServerError, errors.New("could not generate an age keypair"))
 
 		return
 	}
