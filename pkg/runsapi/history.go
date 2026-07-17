@@ -335,6 +335,19 @@ func populateFailingPhase(history *runHistory) {
 			continue
 		}
 
+		// A NotifyFailure from an older workflow version predating FailureInput's
+		// Phase field decodes cleanly with an empty Phase. Accepting that as the
+		// (blank) failing phase and returning here would skip the terminal-
+		// message fallback below — the very path meant to handle old-version
+		// history — leaving FailingPhase unset. Instead keep the structured
+		// ErrorSummary (if any) and fall through so the phase is recovered from
+		// the failure message.
+		if input.Phase == "" {
+			history.FailingSummary = input.ErrorSummary
+
+			break
+		}
+
 		history.FailingPhase = normalizeFailingPhase(input.Phase)
 		history.FailingSummary = input.ErrorSummary
 
@@ -356,7 +369,13 @@ func populateFailingPhase(history *runHistory) {
 	}
 
 	history.FailingPhase = normalizeFailingPhase(strings.TrimSpace(name))
-	history.FailingSummary = history.FailureMessage
+
+	// Preserve a structured ErrorSummary recovered from an old-version
+	// NotifyFailure above; only fall back to the raw terminal message when we
+	// have nothing better.
+	if history.FailingSummary == "" {
+		history.FailingSummary = history.FailureMessage
+	}
 }
 
 // runExistsInVisibility reports whether runID appears in Temporal visibility

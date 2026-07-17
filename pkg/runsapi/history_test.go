@@ -544,6 +544,33 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		assert.Equal(t, backup.PhaseVerify, history.FailingPhase)
 	})
 
+	t.Run("an older NotifyFailure with no Phase still recovers the phase from the terminal message", func(t *testing.T) {
+		b := newEventBuilder()
+		b.started(t, testConfig)
+
+		verify := b.scheduled(t, "Verify", backup.VerifyInput{})
+		b.failed(verify, "checksum mismatch")
+
+		// Older workflow version: NotifyFailure ran, but its FailureInput
+		// predates the Phase field, so Phase decodes empty. The phase must still
+		// be recovered from the terminal message rather than left blank, which
+		// would drop the run out of timelineFrontier's failing-phase branch.
+		notify := b.scheduled(t, "NotifyFailure", backup.FailureInput{
+			RunID: "run-7", ErrorSummary: "phase Verify: checksum mismatch",
+		})
+		b.completed(t, notify, nil)
+
+		b.runFailed("phase Verify: checksum mismatch")
+
+		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: b.events}
+		}}, "run-7")
+		require.NoError(t, err)
+
+		assert.Equal(t, backup.PhaseVerify, history.FailingPhase)
+		assert.Equal(t, "phase Verify: checksum mismatch", history.FailingSummary)
+	})
+
 	t.Run("a second drive-set's Write failure is failed even though set 1's Eject already ran", func(t *testing.T) {
 		// The interleaved tape path (SPEC §4.3 phases 6-8): drive-set 1
 		// completes Load → Write → Eject in full, then drive-set 2's WriteTree
