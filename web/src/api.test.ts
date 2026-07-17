@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiFetch, onSessionExpired } from './api'
+import { ApiError, apiFetch, formatTimestamp, onSessionExpired } from './api'
 
 // jsonResponse builds a minimal fetch Response stand-in, matching the shape
 // apiFetch reads (ok/status/json()).
@@ -9,6 +9,22 @@ function jsonResponse(status: number, body: unknown) {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('formatTimestamp', () => {
+  it('renders an em dash for an absent value', () => {
+    expect(formatTimestamp(undefined)).toBe('—')
+    expect(formatTimestamp('')).toBe('—')
+  })
+
+  it('renders an em dash for a present-but-unparseable value, not "Invalid Date"', () => {
+    expect(formatTimestamp('not-a-timestamp')).toBe('—')
+  })
+
+  it('renders a parseable ISO timestamp', () => {
+    expect(formatTimestamp('2026-07-10T12:00:00Z')).not.toBe('—')
+    expect(formatTimestamp('2026-07-10T12:00:00Z')).not.toContain('Invalid')
+  })
 })
 
 describe('apiFetch', () => {

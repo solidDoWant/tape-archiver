@@ -102,7 +102,19 @@ export function describeNetworkError(error: unknown): string {
 // responses carry start/close times) in the operator's local timezone, or an
 // em dash when absent (e.g. a run that has not closed yet).
 export function formatTimestamp(value?: string): string {
-  return value ? new Date(value).toLocaleString() : '—'
+  if (!value) {
+    return '—'
+  }
+
+  // A present-but-unparseable value (schema drift, a truncated timestamp) must
+  // not render the literal string "Invalid Date": fall back to the same em dash
+  // as the absent case, matching formatDuration's own NaN guard.
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return '—'
+  }
+
+  return date.toLocaleString()
 }
 
 // formatDuration renders the elapsed time between two ISO timestamps as a
