@@ -54,15 +54,30 @@ export interface RunEventsState {
 // no connection and returns the initial "connecting"/null state forever,
 // until called again with a real ID.
 //
-// Callers that render the same logical run across a changing ID (RunDetail
-// keys itself on runId instead, see its doc comment) should be aware this
-// hook does not reset detail to null when runId changes — the previously
-// displayed status/phase intentionally stays on screen until the new
-// connection's first event replaces it, rather than snapping back to
-// "connecting" with nothing shown.
+// When runId changes, the hook resets to "connecting"/null before the new
+// connection's first event arrives, so a caller that swaps the watched run in
+// place — Dashboard's CurrentRunCard, when the active run flips from a just-
+// finished run to a fresh one (activeRun.ts) — never renders the new run
+// carrying the previous run's terminal status/phase/pause. (RunDetail avoids
+// this a different way: App.tsx keys it on runId, remounting a fresh hook per
+// run, so its runId never changes within one mount.) The reset happens during
+// render via the previous-value ref below, not in an effect, so there is no
+// intermediate commit showing the stale run's state.
 export function useRunEvents(runId: string | null | undefined): RunEventsState {
   const [state, setState] = useState<RunConnectionState>('connecting')
   const [detail, setDetail] = useState<RunEventDetail | null>(null)
+
+  // Reset display state the instant runId changes, in render, so the stale
+  // previous run's status/detail is never committed to the screen under the new
+  // run's ID. This is React's supported "adjusting state when a prop changes"
+  // pattern (previous value tracked in state, compared during render): it
+  // re-renders immediately without painting the stale values.
+  const [previousRunId, setPreviousRunId] = useState(runId)
+  if (previousRunId !== runId) {
+    setPreviousRunId(runId)
+    setState('connecting')
+    setDetail(null)
+  }
 
   useEffect(() => {
     if (!runId) {

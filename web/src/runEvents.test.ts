@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { onSessionExpired } from './api'
 import { useRunEvents } from './runEvents'
@@ -29,6 +29,10 @@ class FakeEventSource {
 
   emitError() {
     this.listeners.error?.forEach((listener) => listener({ data: '' } as MessageEvent<string>))
+  }
+
+  emit(type: string, data: string) {
+    this.listeners[type]?.forEach((listener) => listener({ data } as MessageEvent<string>))
   }
 }
 
@@ -149,5 +153,28 @@ describe('useRunEvents SSE error handling (issue #285)', () => {
     })
 
     unsubscribe()
+  })
+})
+
+describe('useRunEvents run switching', () => {
+  it('resets state and detail when runId changes so the new run does not inherit the old terminal state', () => {
+    const { result, rerender } = renderHook(({ id }) => useRunEvents(id), { initialProps: { id: 'run-A' } })
+
+    // Run A finishes: its terminal "done" frame lands, so state is 'terminal'
+    // and detail carries run A.
+    act(() => {
+      FakeEventSource.instances[0].emit('done', JSON.stringify({ runId: 'run-A', status: 'Completed' }))
+    })
+
+    expect(result.current.state).toBe('terminal')
+    expect(result.current.detail?.runId).toBe('run-A')
+
+    // The watched run flips to a fresh run B (e.g. Dashboard's active-run swap).
+    // Before B's first frame, the hook must not still report run A's terminal
+    // state under run B — it resets to connecting/null.
+    rerender({ id: 'run-B' })
+
+    expect(result.current.state).toBe('connecting')
+    expect(result.current.detail).toBeNull()
   })
 })
