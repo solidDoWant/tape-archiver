@@ -156,6 +156,26 @@ describe('useRunEvents SSE error handling (issue #285)', () => {
   })
 })
 
+describe('useRunEvents terminal handling', () => {
+  it('does not probe /api/me on a connection drop that follows the terminal done event', () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderHook(() => useRunEvents('run-1'))
+
+    const source = FakeEventSource.instances[0]
+    act(() => {
+      source.emit('done', JSON.stringify({ runId: 'run-1', status: 'Completed' }))
+    })
+
+    // The server closes the stream on purpose after "done"; a resulting error
+    // event is expected and carries no session signal, so no probe must fire.
+    source.emitError()
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
 describe('useRunEvents run switching', () => {
   it('resets state and detail when runId changes so the new run does not inherit the old terminal state', () => {
     const { result, rerender } = renderHook(({ id }) => useRunEvents(id), { initialProps: { id: 'run-A' } })

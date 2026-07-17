@@ -106,12 +106,19 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
       setState('live')
     }
 
+    // terminalReached records that the server sent its final "done" event and
+    // the stream was closed on purpose, so handleError below can tell an
+    // expected post-terminal drop from a real mid-stream one and skip both the
+    // 'error' state and the /api/me probe for it.
+    let terminalReached = false
+
     const handleDone = (event: MessageEvent<string>) => {
       const parsed = parseDetail(event)
       if (parsed) {
         setDetail(parsed)
       }
       setState('terminal')
+      terminalReached = true
       source.close()
     }
 
@@ -140,7 +147,11 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
       // unreachable) is left alone: EventSource's own automatic
       // reconnection handles recovering from those without this hook doing
       // anything further.
-      if (cancelled || sessionProbeInFlight) {
+      //
+      // Skip the probe entirely once terminal: the server closes the stream on
+      // purpose after "done", so that drop is expected and carries no session
+      // signal — probing on it would be a wasted authenticated request.
+      if (cancelled || terminalReached || sessionProbeInFlight) {
         return
       }
 
