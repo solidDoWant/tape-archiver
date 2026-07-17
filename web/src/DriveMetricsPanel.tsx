@@ -140,14 +140,23 @@ function LiveDriveMetrics({ runId, pollIntervalMs }: { runId: string; pollInterv
 
         setState(response.drives.length > 0 ? { status: 'live', drives: response.drives } : { status: 'no-data' })
       } catch {
-        // Both a stable 503 (unconfigured/unreachable VictoriaMetrics) and
-        // any other transient failure (network blip) degrade to the same
-        // styled "unavailable" state — this panel is best-effort
-        // observability layered on top of the run detail page, and must
-        // never make the page itself look broken.
-        if (!cancelled) {
-          setState({ status: 'unavailable' })
+        // A failure on the FIRST poll (nothing shown yet) degrades to the
+        // styled "unavailable" state — a stable 503 (unconfigured/unreachable
+        // VictoriaMetrics) and a network blip look the same here, and this
+        // panel is best-effort observability that must never make the page
+        // look broken. But once gauges are already showing (live/no-data), a
+        // single transient blip must NOT tear them down: doing so unmounts
+        // every DriveMetricCard and discards its sparkline history, flickering
+        // the whole panel on one bad tick. Keep the last-good state instead
+        // and let the next successful poll refresh it — the same "log and
+        // continue on a mid-stream blip" handling LogPanel/events.go use.
+        if (cancelled) {
+          return
         }
+
+        setState((previous) =>
+          previous.status === 'live' || previous.status === 'no-data' ? previous : { status: 'unavailable' },
+        )
       }
     }
 

@@ -86,6 +86,65 @@ describe('DriveMetricsPanel', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/metrics/drives/TA0001L6/history'), undefined))
   })
 
+  it('keeps the live gauges when a later drives poll fails transiently', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    let drivesCalls = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+
+      if (url.includes('/metrics/drives/TA0001L6/history')) {
+        return jsonResponse(200, {
+          runId: 'run-1',
+          barcode: 'TA0001L6',
+          metric: 'throughput',
+          points: [{ time: '2026-07-10T00:00:00Z', value: 40 }],
+        })
+      }
+
+      drivesCalls += 1
+      if (drivesCalls === 1) {
+        return jsonResponse(200, {
+          runId: 'run-1',
+          drives: [
+            {
+              barcode: 'TA0001L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              result: 'loaded',
+              hasData: true,
+              throughputMBps: 38,
+              repositions: 1,
+              tapeAlertFlagCount: 0,
+              belowFloor: false,
+              floorMBps: 50,
+              floorKnown: true,
+            },
+          ],
+        })
+      }
+
+      // Every later poll fails (transient blip / VictoriaMetrics hiccup).
+      return jsonResponse(503, { error: 'VictoriaMetrics blip' })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<DriveMetricsPanel runId="run-1" pollIntervalMs={1000} />)
+
+    await vi.waitFor(() => expect(screen.getByText('38 MB/s')).toBeInTheDocument())
+
+    // A later poll fails; the gauges must stay (not collapse to "unavailable"),
+    // preserving each card's sparkline history.
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(drivesCalls).toBeGreaterThanOrEqual(2))
+
+    expect(screen.getByText('38 MB/s')).toBeInTheDocument()
+    expect(screen.queryByText(/metrics unavailable/i)).not.toBeInTheDocument()
+
+    vi.useRealTimers()
+  })
+
   it('polls the drives endpoint again after the interval elapses', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
 
