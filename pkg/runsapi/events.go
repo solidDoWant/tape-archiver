@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -195,7 +195,7 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 
 			if next.Status == last.Status &&
 				next.LastCompletedPhase == last.LastCompletedPhase &&
-				reflect.DeepEqual(next.CurrentPause, last.CurrentPause) {
+				currentPauseEqual(next.CurrentPause, last.CurrentPause) {
 				continue
 			}
 
@@ -212,6 +212,27 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// currentPauseEqual reports whether two CurrentPauseInfo values are the same
+// pause state, for streamRunEvents' delta check. It replaces reflect.DeepEqual,
+// which treats a nil slice and an empty non-nil slice as different:
+// backup.CurrentPauseQuery can return either for the same logical "no affected
+// tapes / reload slots / devices" state across polls, and DeepEqual would then
+// report a change and emit a spurious "update" frame on a tick where nothing
+// actually changed — defeating the "never on a no-op tick" guarantee. Scalars
+// compare directly; slices use slices.Equal, which is length-then-elementwise
+// so nil and empty (both length zero) are equal.
+func currentPauseEqual(a, b CurrentPauseInfo) bool {
+	return a.Kind == b.Kind &&
+		a.Phase == b.Phase &&
+		a.AwaitingExport == b.AwaitingExport &&
+		a.ErrorSummary == b.ErrorSummary &&
+		a.CanAbort == b.CanAbort &&
+		a.Unknown == b.Unknown &&
+		slices.Equal(a.AffectedTapes, b.AffectedTapes) &&
+		slices.Equal(a.ReloadSlots, b.ReloadSlots) &&
+		slices.Equal(a.Devices, b.Devices)
 }
 
 // fetchRunDetailUntilDrain is streamRunEvents' fetchRunDetail wrapper: the

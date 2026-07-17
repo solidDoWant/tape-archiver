@@ -238,6 +238,43 @@ func assertFrame(t *testing.T, frame sseFrame, wantEvent string, wantStatus enum
 // statusForTemporalError classification getRun uses, on a plain
 // "application/json" response — never a 200 text/event-stream that then
 // fails inside the stream body.
+func TestCurrentPauseEqual(t *testing.T) {
+	base := CurrentPauseInfo{
+		Kind:          "write-failure",
+		Phase:         "Write",
+		AffectedTapes: []string{"TA0001L6"},
+		ReloadSlots:   []int{1},
+	}
+
+	t.Run("nil and empty slices are the same state (no spurious update)", func(t *testing.T) {
+		// backup.CurrentPauseQuery can return either a nil or an empty slice for
+		// the same "nothing affected" state across polls; the delta check must not
+		// treat that as a change (reflect.DeepEqual did).
+		withNil := CurrentPauseInfo{Kind: "eject"}
+		withEmpty := CurrentPauseInfo{Kind: "eject", AffectedTapes: []string{}, ReloadSlots: []int{}, Devices: []string{}}
+
+		assert.True(t, currentPauseEqual(withNil, withEmpty))
+		assert.True(t, currentPauseEqual(withEmpty, withNil))
+	})
+
+	t.Run("a real slice difference is a change", func(t *testing.T) {
+		other := base
+		other.AffectedTapes = []string{"TA0002L6"}
+
+		assert.False(t, currentPauseEqual(base, other))
+	})
+
+	t.Run("a scalar difference is a change", func(t *testing.T) {
+		unknown := base
+		unknown.Unknown = true
+		assert.False(t, currentPauseEqual(base, unknown))
+
+		differentKind := base
+		differentKind.Kind = "burn"
+		assert.False(t, currentPauseEqual(base, differentKind))
+	})
+}
+
 func TestStreamRunEventsInitialError(t *testing.T) {
 	tests := []struct {
 		name       string
