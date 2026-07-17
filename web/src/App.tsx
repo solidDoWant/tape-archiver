@@ -6,6 +6,7 @@ import TapesPage from './TapesPage'
 import NotFoundPage from './NotFoundPage'
 import LoginPage from './LoginPage'
 import Sidebar from './Sidebar'
+import ErrorBoundary from './ErrorBoundary'
 import { RouterProvider } from './router'
 import { runPath, sanitizeRedirectPath, useNavigate, useRoute, type Route } from './route'
 import { useTheme, type ThemePreference } from './theme'
@@ -205,11 +206,35 @@ function Shell({ identity, preference, onPreferenceChange }: ShellProps) {
         <main className="flex min-w-0 flex-1 flex-col">
           <ShellHeader route={route} />
 
-          <div className="flex flex-1 flex-col overflow-auto">{renderRoute(route, navigate)}</div>
+          {/*
+            One error boundary per route, keyed on the route identity: a page
+            that throws during render (e.g. a wrong-typed JSON-mode config
+            reaching ConfigReview) degrades to an in-shell message with the
+            sidebar/nav intact, rather than white-screening the whole SPA — and
+            navigating to another route remounts a fresh boundary, clearing the
+            error without a manual reload.
+          */}
+          <div className="flex flex-1 flex-col overflow-auto">
+            <ErrorBoundary key={routeKey(route)}>{renderRoute(route, navigate)}</ErrorBoundary>
+          </div>
         </main>
       </div>
     </RunHeaderProvider>
   )
+}
+
+// routeKey is a stable per-route identity for the content error boundary's
+// `key`: distinct across runs (route.runId) and not-found paths (route.path) so
+// navigating between them remounts the boundary and clears any prior error.
+function routeKey(route: Route): string {
+  switch (route.name) {
+    case 'run':
+      return `run:${route.runId}`
+    case 'not-found':
+      return `not-found:${route.path}`
+    default:
+      return route.name
+  }
 }
 
 function renderRoute(route: Route, navigate: (path: string) => void) {
