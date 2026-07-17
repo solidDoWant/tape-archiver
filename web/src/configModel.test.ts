@@ -152,6 +152,25 @@ describe('buildConfig', () => {
     expect(config.library.drives).toEqual(['/dev/nst0'])
   })
 
+  it('drops blank slots outside the deployment topology so an out-of-range slot is never submitted', () => {
+    const form = defaultFormState()
+    // 45 is a cleaning slot, 46/47 the I/O-station, 99 out of range, and a dup 2.
+    form.blankSlots = [1, 2, 45, 46, 47, 99, 2]
+
+    const config = buildConfig(form, testDeploy)
+
+    expect(config.library.blankSlots).toEqual([1, 2])
+  })
+
+  it('only dedups blank slots when the topology is unknown', () => {
+    const form = defaultFormState()
+    form.blankSlots = [1, 99, 1]
+
+    const config = buildConfig(form, { ...testDeploy, slotCount: 0, cleaningSlots: [], ioStationSlots: [] })
+
+    expect(config.library.blankSlots).toEqual([1, 99])
+  })
+
   it('leaves the library changer empty and drives empty when the deployment is unconfigured', () => {
     // An unconfigured deployment yields empty deploy values; buildConfig stays
     // total (never throws) and the empty changer/drives then fail the schema

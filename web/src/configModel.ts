@@ -286,15 +286,29 @@ export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
       ? { targetPercentage: form.targetPercentage, sliceSizeBytes: Math.round(form.sliceSizeGiB * bytesPerGiB) }
       : { fillToCapacity: { floor: form.fillFloor }, sliceSizeBytes: Math.round(form.sliceSizeGiB * bytesPerGiB) }
 
+  // Dedup, preserving order (a slot is either blank or not, so a duplicate is
+  // meaningless — but internal/config rejects duplicate slot addresses, so a
+  // form built from a JSON/restart config that carried [1, 1, 2] would 400 at
+  // submit; the client schema interpreter has no uniqueItems), then drop any
+  // slot outside the deployment's real storage topology. The grid picker can
+  // only produce in-range, non-reserved slots, but a JSON/restart load can
+  // leave out-of-range or reserved ones in form.blankSlots that the grid never
+  // renders (so the operator cannot deselect them) — the same filter the
+  // inline slot count applies (ConfigForm's selectableCount) and the server
+  // enforces (validateBlankSlotsAgainstTopology), applied here so the built
+  // config, the Review-step count, and the inline count all agree and an
+  // out-of-range slot is never submitted. When the topology is unknown
+  // (slotCount <= 0 — deploy config missing), only dedup, matching the
+  // server's own no-op in that case.
+  const reservedSlots = new Set([...deploy.cleaningSlots, ...deploy.ioStationSlots])
+  const blankSlots = [...new Set(form.blankSlots)].filter(
+    (slot) => deploy.slotCount <= 0 || (slot >= 1 && slot <= deploy.slotCount && !reservedSlots.has(slot)),
+  )
+
   const library: Library = {
     changer: deploy.changer.trim(),
     drives: deploy.drives.map((drive) => drive.trim()).filter((drive) => drive !== ''),
-    // Dedup, preserving order: a slot is either blank or not, so a duplicate is
-    // meaningless — but internal/config rejects duplicate slot addresses, so a
-    // form built from a JSON/restart config that carried [1, 1, 2] (the grid
-    // itself can't produce dupes) would 400 at submit. The client schema
-    // interpreter has no uniqueItems, so collapse them here.
-    blankSlots: [...new Set(form.blankSlots)],
+    blankSlots,
     tapeCapacityBytes,
     allowNonBlankTapes: form.allowNonBlankTapes,
   }
