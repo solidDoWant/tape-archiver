@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -1034,6 +1035,36 @@ func TestListTapesHandler(t *testing.T) {
 		require.Equal(t, http.StatusOK, recorder.Code)
 		assert.Contains(t, recorder.Body.String(), `"tapes":[]`)
 		assert.NotContains(t, recorder.Body.String(), `"tapes":null`)
+	})
+
+	t.Run("a canceled request surfaces a real status, not a degraded 200 of context errors", func(t *testing.T) {
+		start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+		fake := &fakeTemporalClient{
+			listResponse: &workflowservice.ListWorkflowExecutionsResponse{
+				Executions: []*workflowpb.WorkflowExecutionInfo{
+					executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &start),
+				},
+			},
+			historyFunc: func(string) client.HistoryEventIterator {
+				return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
+			},
+		}
+
+		handler := newMux(newHandler(fake, emptyEnv))
+
+		// A request whose context is already canceled stands in for the client
+		// disconnecting (or the request timing out) mid-listing: the handler must
+		// not report that as a 200 degraded listing.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		request := httptest.NewRequest(http.MethodGet, "/api/tapes", nil).WithContext(ctx)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+
+		assert.Equal(t, statusClientClosedRequest, recorder.Code, "a global cancel must not be reported as a successful listing")
+		assert.NotContains(t, recorder.Body.String(), `"tapes"`, "the degraded-listing body must not be emitted for a global failure")
 	})
 }
 

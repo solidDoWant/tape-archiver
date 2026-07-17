@@ -281,6 +281,22 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 	// #273's explicit degrade-per-run requirement).
 	_ = group.Wait()
 
+	// A done request context means the whole request timed out (requestTimeout)
+	// or the client disconnected mid-flight — one infra failure, not N
+	// independent per-run failures. Every in-flight history fetch then returned a
+	// context error that was recorded as a per-run RunError above, so without
+	// this check the handler would emit 200 with a pile of "context deadline
+	// exceeded" rows and a possibly-empty tapes list, misreporting a gateway
+	// timeout as a successful-but-degraded listing. Surface it as the status
+	// statusForTemporalError maps it to (504 for the deadline, 499 for a client
+	// disconnect), the same classification writeError gives a whole-response
+	// Temporal failure.
+	if err := ctx.Err(); err != nil {
+		writeError(w, statusForTemporalError(err), fmt.Errorf("list tapes: %w", err))
+
+		return
+	}
+
 	sort.Slice(tapes, func(i, j int) bool {
 		if !tapes[i].RunStartTime.Equal(tapes[j].RunStartTime) {
 			return tapes[i].RunStartTime.After(tapes[j].RunStartTime)
