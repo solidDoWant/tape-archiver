@@ -348,6 +348,14 @@ export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
 // switching into Form mode never crashes on an unusual-but-schema-legal
 // document; the operator sees an empty/incomplete row to fill in instead.
 function sourceFormStateFromSource(source: Source): SourceFormState {
+  // A JSON / paste-mode document can carry a null or non-object element in the
+  // sources array (`{"sources": [null]}` — valid JSON, invalid shape). Treat it
+  // as an empty source so it loads a blank row rather than dereferencing null
+  // below and throwing a TypeError — configToFormState's doc promises it "never
+  // throws", and ConfigPage would otherwise catch the throw and misreport it as
+  // "not a config object".
+  const safe: Partial<Source> = typeof source === 'object' && source !== null ? source : {}
+
   // asText coerces a possibly-wrong-typed leaf (a JSON-mode document can carry
   // e.g. zfsPath.name as a number) to the string the form fields and
   // buildConfig's `.trim()` require, so an unusual-but-parseable document
@@ -355,27 +363,27 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
   const asText = (value: unknown): string => (typeof value === 'string' ? value : value == null ? '' : String(value))
 
   const base = newSourceFormState()
-  base.label = asText(source.label)
-  base.compression = source.compression ?? true
+  base.label = asText(safe.label)
+  base.compression = safe.compression ?? true
 
-  if (source.zfsPath) {
+  if (safe.zfsPath) {
     base.type = 'zfs'
-    base.zfsName = asText(source.zfsPath.name)
+    base.zfsName = asText(safe.zfsPath.name)
 
     return base
   }
 
-  if (source.k8s) {
+  if (safe.k8s) {
     base.type = 'k8s'
-    base.k8sKind = source.k8s.kind === 'VolumeGroupSnapshot' ? 'VolumeGroupSnapshot' : 'VolumeSnapshot'
-    base.k8sNamespace = asText(source.k8s.namespace)
+    base.k8sKind = safe.k8s.kind === 'VolumeGroupSnapshot' ? 'VolumeGroupSnapshot' : 'VolumeSnapshot'
+    base.k8sNamespace = asText(safe.k8s.namespace)
 
-    if (source.k8s.labelSelector) {
+    if (safe.k8s.labelSelector) {
       base.k8sSelection = 'labelSelector'
-      base.k8sLabelSelector = asText(source.k8s.labelSelector)
+      base.k8sLabelSelector = asText(safe.k8s.labelSelector)
     } else {
       base.k8sSelection = 'name'
-      base.k8sName = asText(source.k8s.name)
+      base.k8sName = asText(safe.k8s.name)
     }
   }
 

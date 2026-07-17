@@ -279,6 +279,22 @@ describe('configToFormState', () => {
     expect(form.opticalBurnEnabled).toBe(false)
     expect(() => buildConfig(form, testDeploy)).not.toThrow()
   })
+
+  it('never throws on a null or non-object element in the sources array', () => {
+    // `{"sources": [null]}` is valid JSON but invalid shape; the switch-to-Form
+    // path must load a blank row for it rather than dereferencing null and
+    // throwing (which ConfigPage misreports as "not a config object").
+    const bad = { sources: [null, 5, { zfsPath: { name: 'pool/data' } }] } as unknown as RunConfig
+
+    let form!: ReturnType<typeof configToFormState>
+    expect(() => {
+      form = configToFormState(bad)
+    }).not.toThrow()
+
+    expect(form.sources).toHaveLength(3)
+    expect(form.sources[0].label).toBe('')
+    expect(form.sources[2].zfsName).toBe('pool/data')
+  })
 })
 
 describe('unmodeledFields', () => {
