@@ -210,6 +210,14 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
   }, [restartFromRunId])
 
   const switchToJson = () => {
+    // Clicking the already-active tab must be a no-op: re-serializing
+    // buildConfig(form) over jsonText here would overwrite the operator's own
+    // JSON edits (the form has not changed while they were editing JSON), the
+    // mirror image of switchToForm's guard below.
+    if (mode === 'json') {
+      return
+    }
+
     setJsonText(JSON.stringify(buildConfig(form, deploy), null, 2))
     setModeSwitchNotice('')
     setMode('json')
@@ -217,6 +225,14 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
   }
 
   const switchToForm = () => {
+    // Clicking the already-active Form tab must be a no-op: re-parsing the
+    // stale jsonText (only refreshed by switchToJson) over the form would
+    // discard every edit made since the last Form -> JSON switch, and on a
+    // fresh session (jsonText === '') would spuriously report "not valid JSON".
+    if (mode === 'form') {
+      return
+    }
+
     try {
       const parsed = JSON.parse(jsonText) as unknown
 

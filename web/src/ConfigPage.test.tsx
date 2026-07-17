@@ -164,6 +164,26 @@ describe('ConfigPage', () => {
     expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('bulk-pool-01/from-json')
   })
 
+  it('does not revert form edits when the already-active Form tab is clicked again', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    // Serialize the form to JSON and come back to Form mode, so jsonText now
+    // holds the pre-edit config.
+    fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Form' }))
+
+    fireEvent.change(screen.getByPlaceholderText('bulk-pool-01/dataset'), {
+      target: { value: 'bulk-pool-01/edited' },
+    })
+
+    // Clicking the already-active Form tab must be a no-op, not a re-parse of
+    // the now-stale jsonText that discards the edit.
+    fireEvent.click(screen.getByRole('button', { name: 'Form' }))
+
+    expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('bulk-pool-01/edited')
+  })
+
   it('names the fields Form mode would drop when switching JSON with advanced-only fields to Form mode', async () => {
     renderPage()
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
