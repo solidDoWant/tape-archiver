@@ -95,7 +95,10 @@ export function sanitizeRedirectPath(path: string | null | undefined): string {
   // App renders LoginPage for the login route regardless of auth and AuthGate's
   // redirect effect does not re-fire (route.name and identity are unchanged).
   const pathname = path.split(/[?#]/, 1)[0]
-  if (pathname === '/login') {
+  // parseRoute resolves both "/login" and "/login/" to the login route, so the
+  // trailing-slash variant must be rejected here too — otherwise "/login/"
+  // slips through and strands the user on the login page.
+  if (pathname === '/login' || pathname === '/login/') {
     return '/'
   }
 

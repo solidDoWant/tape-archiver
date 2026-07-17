@@ -643,7 +643,10 @@ func sanitizeRedirectPath(path string) string {
 		pathname = path[:i]
 	}
 
-	if pathname == "/login" {
+	// Trim a single trailing slash before comparing: the SPA's parseRoute
+	// resolves both "/login" and "/login/" to the login route, so "/login/"
+	// must be rejected here too or it slips through to strand the user.
+	if pathname == "/login" || pathname == "/login/" {
 		return "/"
 	}
 

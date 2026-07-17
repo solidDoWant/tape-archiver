@@ -95,6 +95,10 @@ describe('sanitizeRedirectPath', () => {
   it('rejects the login page itself, which would strand an authenticated user', () => {
     expect(sanitizeRedirectPath('/login')).toBe('/')
     expect(sanitizeRedirectPath('/login?redirect=%2Flogin')).toBe('/')
+    // parseRoute resolves "/login/" to the login route too, so it must be
+    // rejected as well or it slips through and strands the user.
+    expect(sanitizeRedirectPath('/login/')).toBe('/')
+    expect(sanitizeRedirectPath('/login/?redirect=%2Flogin')).toBe('/')
   })
 
   it('preserves a path that merely starts with login', () => {
