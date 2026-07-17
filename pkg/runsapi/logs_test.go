@@ -379,6 +379,53 @@ func TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries(t *testing.T) {
 	}
 }
 
+// TestGetRunLogsPhaseQueryRestrictsLimitToSpans proves the phase-scoped LogsQL
+// ANDs the phase's activity spans into its time filter as a disjunction, so the
+// server-side "keep newest limit" pass counts only in-span lines. Without it the
+// limit truncates the whole [start, end] envelope: on the interleaved layout
+// below, a high-volume Write between two Load attempts would dominate the newest
+// limit envelope lines and then be filtered out, starving the Load panel.
+func TestGetRunLogsPhaseQueryRestrictsLimitToSpans(t *testing.T) {
+	builder := newEventBuilder()
+	builder.started(t, testConfig)
+
+	loadOne := builder.scheduled(t, "Load", nil)
+	builder.completed(t, loadOne, nil)
+
+	writeOne := builder.scheduled(t, "WriteTree", nil)
+	builder.failed(writeOne, "drive 0: write tree: medium error")
+
+	loadTwo := builder.scheduled(t, "Load", nil)
+	builder.completed(t, loadTwo, nil)
+
+	writeTwo := builder.scheduled(t, "WriteTree", nil)
+	builder.completed(t, writeTwo, nil)
+
+	builder.runCompleted()
+
+	fake := newFakeVictoriaLogs(t, http.StatusOK, "")
+	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})
+
+	temporalClient := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+		return &fakeHistoryIterator{events: builder.events}
+	}}
+	handler := newMux(newHandler(temporalClient, getenv))
+
+	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs?phase=Load", nil)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	require.Len(t, fake.queries, 1)
+	query, err := url.QueryUnescape(fake.queries[0])
+	require.NoError(t, err)
+
+	// Load has two disjoint spans, so the time filter carries a disjunction...
+	assert.Regexp(t, `\(_time:\[[^()]*\] OR _time:\[[^()]*\]\)`, query,
+		"a phase with disjoint activity spans must AND a _time disjunction into the query")
+	// ...and the newest-limit truncation pipe comes after it, so limit applies to
+	// the span-restricted set rather than the whole envelope.
+	assert.Regexp(t, `OR _time:\[[^()]*\]\).*\| sort by \(_time\) desc \| limit \d+`, query)
+}
+
 func TestGetRunLogsPhaseNotYetStartedIsEmptyNotUnavailable(t *testing.T) {
 	fake := newFakeVictoriaLogs(t, http.StatusOK, "")
 	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})

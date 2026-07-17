@@ -231,7 +231,7 @@ func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 		streamFilter = defaultVictoriaLogsStreamFilter
 	}
 
-	lines, err := queryVictoriaLogs(ctx, victoriaLogsURL, streamFilter, runID, window.start, window.end, since, maxLogLines)
+	lines, err := queryVictoriaLogs(ctx, victoriaLogsURL, streamFilter, runID, window.start, window.end, since, window.spans, maxLogLines)
 	if err != nil {
 		// Any failure to reach or parse VictoriaLogs' response, now that
 		// VICTORIALOGS_URL is confirmed set, is reported exactly like an
@@ -393,7 +393,7 @@ func phaseActivitySpans(history runHistory, phase string) []timeSpan {
 // queryVictoriaLogs issues one LogsQL query (buildLogsQLQuery) against
 // VictoriaLogs' HTTP query API and decodes its newline-delimited JSON
 // response into LogLines, oldest first.
-func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, limit int) ([]LogLine, error) {
+func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) ([]LogLine, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, vlQueryTimeout)
 	defer cancel()
 
@@ -403,7 +403,7 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string,
 	}
 
 	query := request.URL.Query()
-	query.Set("query", buildLogsQLQuery(streamFilter, runID, start, end, since, limit))
+	query.Set("query", buildLogsQLQuery(streamFilter, runID, start, end, since, spans, limit))
 	request.URL.RawQuery = query.Encode()
 
 	response, err := http.DefaultClient.Do(request)
@@ -445,7 +445,19 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string,
 // the boundary lines instead and letting the client deduplicate (LogPanel
 // dedups by time+message identity) means a split same-timestamp batch is
 // eventually complete rather than silently truncated.
-func buildLogsQLQuery(streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, limit int) string {
+//
+// spans, when non-empty (a phase-scoped request — see logWindow.spans), is the
+// phase's own disjoint per-activity ranges within [start, end]. They are ANDed
+// into the time filter as a disjunction so the server-side "keep newest limit"
+// pass counts only lines that fall inside the phase's own activity, NOT the
+// whole [start, end] envelope. Without this the limit truncates the envelope:
+// on an interleaved tape-path run (a Load envelope stretching across a
+// high-volume Write between two Load attempts), the newest limit envelope lines
+// are dominated by the intervening phase and then filtered out by
+// filterLinesToSpans, so a phase that logged far more than limit lines could
+// return almost nothing. The client-side filterLinesToSpans still runs as an
+// inclusive-boundary safety net.
+func buildLogsQLQuery(streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) string {
 	lower := start
 	if since != nil && since.After(start) {
 		lower = *since
@@ -458,7 +470,38 @@ func buildLogsQLQuery(streamFilter, runID string, start time.Time, end *time.Tim
 		timeFilter = fmt.Sprintf("_time:>=%s", formatVLTime(lower))
 	}
 
+	if spanFilter := spansTimeFilter(spans); spanFilter != "" {
+		timeFilter = fmt.Sprintf("%s AND %s", timeFilter, spanFilter)
+	}
+
 	return fmt.Sprintf("(%s) AND RunID:=%q AND %s | sort by (_time) desc | limit %d | sort by (_time)", streamFilter, runID, timeFilter, limit)
+}
+
+// spansTimeFilter renders a phase's activity spans as a LogsQL disjunction —
+// "(_time:[a, b] OR _time:[c, d] OR _time:>=e)" — for ANDing into a phase-scoped
+// query's time filter, so the newest-limit truncation counts only in-span lines.
+// A span with a zero end is still open (its activity has not terminated) and
+// becomes an open lower-bound clause. Returns "" for no spans (the whole-run
+// query, which has no spans and needs no disjunction). The overall since/end
+// bounds are applied by the caller's outer time filter, so spans are emitted
+// raw here and their intersection with that window is what the AND selects.
+func spansTimeFilter(spans []timeSpan) string {
+	if len(spans) == 0 {
+		return ""
+	}
+
+	clauses := make([]string, 0, len(spans))
+	for _, span := range spans {
+		if span.end.IsZero() {
+			clauses = append(clauses, fmt.Sprintf("_time:>=%s", formatVLTime(span.start)))
+
+			continue
+		}
+
+		clauses = append(clauses, fmt.Sprintf("_time:[%s, %s]", formatVLTime(span.start), formatVLTime(span.end)))
+	}
+
+	return "(" + strings.Join(clauses, " OR ") + ")"
 }
 
 // formatVLTime renders t the way LogsQL time-range literals expect
