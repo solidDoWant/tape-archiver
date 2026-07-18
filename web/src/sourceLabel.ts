@@ -42,9 +42,18 @@ export function sourceLabel(source: LabeledSource, opts?: { detail?: boolean }):
   const k8sName = source.k8s?.name || source.k8s?.labelSelector || ''
 
   if (opts?.detail && source.k8s) {
-    const namespace = source.k8s.namespace ? ` (${source.k8s.namespace})` : ''
+    const kind = source.k8s.kind || ''
+    // A half-filled k8s ref (no name and no labelSelector) must not render a
+    // dangling "Kind/" (or a bare "/" when the kind is empty too); fall back to
+    // the kind alone, or the same "(unlabeled)" the non-detail branch gives.
+    if (!kind && !k8sName) {
+      return '(unlabeled)'
+    }
 
-    return `k8s · ${source.k8s.kind}/${k8sName}${namespace}`
+    const namespace = source.k8s.namespace ? ` (${source.k8s.namespace})` : ''
+    const name = k8sName ? `/${k8sName}` : ''
+
+    return `k8s · ${kind}${name}${namespace}`
   }
 
   return k8sName || '(unlabeled)'
