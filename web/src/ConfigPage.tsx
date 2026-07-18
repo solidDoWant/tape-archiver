@@ -9,6 +9,7 @@ import {
   deployOwnedFields,
   unmatchedTapeCapacity,
   unmodeledFields,
+  unrepresentableK8sSources,
   type FormState,
   type RunConfig,
 } from './configModel'
@@ -201,6 +202,13 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
           )
         }
 
+        const unrepresentableK8s = unrepresentableK8sSources(loaded)
+        if (unrepresentableK8s.length > 0) {
+          notices.push(
+            `Form mode only offers the standard VolumeSnapshot / VolumeGroupSnapshot kinds, so it changed ${unrepresentableK8s.join(', ')} to a supported value — switch to Paste / upload mode to keep the original.`,
+          )
+        }
+
         setModeSwitchNotice(notices.join(' '))
         setRestart({ status: 'idle' })
       })
@@ -293,6 +301,13 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
       if (unmatchedCapacity !== null) {
         notices.push(
           `The tape capacity in this JSON (${unmatchedCapacity.toLocaleString()} bytes) matches no known LTO generation, so Form mode set it to ${nextForm.tapeGeneration} — switch back to JSON mode to keep the exact value.`,
+        )
+      }
+
+      const unrepresentableK8s = unrepresentableK8sSources(config)
+      if (unrepresentableK8s.length > 0) {
+        notices.push(
+          `Form mode only offers the standard VolumeSnapshot / VolumeGroupSnapshot kinds, so it will change ${unrepresentableK8s.join(', ')} to a supported value — switch back to JSON mode to keep the original.`,
         )
       }
 

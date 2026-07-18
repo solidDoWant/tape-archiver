@@ -7,6 +7,7 @@ import {
   deployOwnedFields,
   newSourceFormState,
   unmodeledFields,
+  unrepresentableK8sSources,
   type DeployConfig,
   type RunConfig,
 } from './configModel'
@@ -395,6 +396,47 @@ describe('deployOwnedFields', () => {
     }
 
     expect(deployOwnedFields(config)).toEqual([])
+  })
+})
+
+describe('unrepresentableK8sSources', () => {
+  function withSources(sources: RunConfig['sources']): RunConfig {
+    return {
+      sources,
+      copies: 1,
+      library: { changer: '', drives: [], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
+      redundancy: { sliceSizeBytes: 1 },
+      encryption: { recipients: [], identity: '' },
+      delivery: { webhookUrl: '' },
+    }
+  }
+
+  it('flags a k8s source whose kind the form cannot express', () => {
+    const config = withSources([
+      { zfsPath: { name: 'pool/a' } },
+      { k8s: { apiVersion: 'groupsnapshot.storage.k8s.io/v1alpha1', kind: 'VolumeGroupSnapshotContent', name: 'x' } },
+    ])
+
+    expect(unrepresentableK8sSources(config)).toEqual(['sources[1].k8s.kind'])
+  })
+
+  it('flags a non-standard apiVersion for a known kind', () => {
+    const config = withSources([
+      { k8s: { apiVersion: 'snapshot.storage.k8s.io/v1beta1', kind: 'VolumeSnapshot', name: 'x' } },
+    ])
+
+    expect(unrepresentableK8sSources(config)).toEqual(['sources[0].k8s.apiVersion'])
+  })
+
+  it('does not flag a standard kind/apiVersion, nor an omitted apiVersion the form fills', () => {
+    const config = withSources([
+      { k8s: { apiVersion: 'snapshot.storage.k8s.io/v1', kind: 'VolumeSnapshot', name: 'x' } },
+      // apiVersion omitted: Form mode fills the canonical one — not a loss.
+      { k8s: { apiVersion: '', kind: 'VolumeGroupSnapshot', labelSelector: 'app=db' } },
+      { zfsPath: { name: 'pool/b' } },
+    ])
+
+    expect(unrepresentableK8sSources(config)).toEqual([])
   })
 })
 

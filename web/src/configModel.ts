@@ -467,6 +467,47 @@ export function deployOwnedFields(config: RunConfig): string[] {
   return overridden
 }
 
+// unrepresentableK8sSources lists (as dotted paths) the k8s source fields a
+// JSON → Form switch cannot round-trip faithfully: Form mode's source editor
+// only offers the two standard kinds (VolumeSnapshot / VolumeGroupSnapshot),
+// each with the fixed apiVersion k8sApiVersions maps, so configToFormState
+// coerces any other kind to VolumeSnapshot and buildSource re-derives the
+// apiVersion — silently changing a value JSON mode can carry but the form
+// cannot. ConfigPage names these in its mode-switch/restart notice (like
+// unmodeledFields and unmatchedTapeCapacity) so the change is not silent; the
+// values survive only in the JSON text. Only a *present* custom kind or a
+// *present* mismatched apiVersion is flagged — an omitted apiVersion the form
+// fills with the standard one is not a loss and is not reported.
+export function unrepresentableK8sSources(config: RunConfig): string[] {
+  const paths: string[] = []
+  const sources = Array.isArray(config.sources) ? config.sources : []
+
+  sources.forEach((source, index) => {
+    const k8s = (source as Partial<Source> | null | undefined)?.k8s
+    if (!k8s || typeof k8s !== 'object') {
+      return
+    }
+
+    const { kind, apiVersion } = k8s as Partial<K8sRef>
+
+    if (typeof kind !== 'string' || !(kind in k8sApiVersions)) {
+      // A custom or unknown kind (VolumeGroupSnapshotContent, a CRD, …) is
+      // coerced to VolumeSnapshot by configToFormState.
+      paths.push(`sources[${index}].k8s.kind`)
+
+      return
+    }
+
+    if (typeof apiVersion === 'string' && apiVersion !== '' && apiVersion !== k8sApiVersions[kind]) {
+      // A non-standard apiVersion for a known kind (e.g. a beta channel) is
+      // rewritten to the canonical one by buildSource.
+      paths.push(`sources[${index}].k8s.apiVersion`)
+    }
+  })
+
+  return paths
+}
+
 // unmatchedTapeCapacity reports config's library.tapeCapacityBytes when it is a
 // number that matches no LTO generation in ltoGenerations, else null. Form
 // mode's capacity <select> can only choose one of that fixed table's values, so
