@@ -58,6 +58,24 @@ function ConfirmModal({
     return () => previouslyFocused?.focus()
   }, [])
 
+  // Recover focus into the dialog whenever it has escaped while the controls are
+  // live. Clicking the confirm button disables both buttons during `sending`;
+  // disabling the focused button drops focus to <body>, and after a *failed*
+  // confirm the modal stays open with the buttons re-enabled but focus still on
+  // <body>. Because the Escape/Tab handler is bound to the dialog (handleKeyDown
+  // below), keystrokes from <body> never reach it, so Escape/Tab would be dead
+  // until a mouse click. Pulling focus back to the dismiss button restores both.
+  useEffect(() => {
+    if (sending) {
+      return
+    }
+
+    const dialog = dialogRef.current
+    if (dialog && !dialog.contains(document.activeElement)) {
+      dismissRef.current?.focus()
+    }
+  }, [sending])
+
   // Lock background scroll while the modal is open.
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
