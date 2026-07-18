@@ -277,7 +277,11 @@ Switch back to JSON mode to keep them. The same notice also names any deploy-own
 device/webhook fields (`library.changer`, `library.drives`, `delivery.webhookUrl`)
 the JSON sets: Form mode sources those from deploy config, so a value typed into JSON
 is **replaced by** the deployment's own config on the switch — keep it by staying in
-JSON mode.
+JSON mode. It likewise names any k8s source whose `kind`/`apiVersion` the guided
+form cannot express — the form offers only the standard `VolumeSnapshot` /
+`VolumeGroupSnapshot` kinds with their fixed `apiVersion`, so a custom kind or a
+non-standard `apiVersion` is changed to a supported value on the switch; keep the
+original by staying in JSON mode.
 
 ### Dry-run and submission
 
