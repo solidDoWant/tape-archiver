@@ -378,7 +378,11 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
 
   const base = newSourceFormState()
   base.label = asText(safe.label)
-  base.compression = safe.compression ?? true
+  // typeof guard, not `?? true`: a JSON / paste-mode document can carry a
+  // wrong-typed compression (0, "yes", {}), which `??` would pass straight into
+  // this boolean field — the exact pattern configToFormState's doc comment says
+  // every field is guarded against. A non-boolean defaults to true.
+  base.compression = typeof safe.compression === 'boolean' ? safe.compression : true
 
   if (safe.zfsPath) {
     base.type = 'zfs'
