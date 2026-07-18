@@ -293,7 +293,7 @@ function TapesPage() {
                 <tbody>
                   {state.tapes.map((tape) => (
                     <tr
-                      key={`${tape.runId}-${tape.barcode}`}
+                      key={`${tape.runId}-${tape.tapeIndex}-${tape.copyIndex}-${tape.barcode}`}
                       className="border-b border-border last:border-0"
                     >
                       <td className="px-4 py-3 font-mono font-semibold text-text">{tape.barcode}</td>
