@@ -49,6 +49,36 @@ describe('TapesSection', () => {
     expect(screen.getByText(/tapealert/i)).toBeInTheDocument()
   })
 
+  it('flags a tape that overwrote a non-blank tape', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          runId: 'run-1',
+          tapes: [
+            {
+              barcode: 'TA0043L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 3,
+              result: 'written',
+              overwroteNonBlank: true,
+            },
+          ],
+        }),
+      ),
+    )
+
+    render(<TapesSection runId="run-1" terminal={false} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('TA0043L6')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/overwrote non-blank/i)).toBeInTheDocument()
+    expect(screen.getByText('written')).toBeInTheDocument()
+  })
+
   it('shows a no-tapes-yet message when the run has loaded nothing', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { runId: 'run-1', tapes: [] })))
 

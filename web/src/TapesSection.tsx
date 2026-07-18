@@ -21,6 +21,11 @@ interface TapeOutcome {
   slot: number
   result: string
   error?: string
+  // overwroteNonBlank is true when this tape was found non-blank at load and
+  // written over anyway because the run set library.allowNonBlankTapes (SPEC
+  // §4.3 step 6) — surfaced as its own badge, since a deliberate overwrite is a
+  // notable action, not a plain "written".
+  overwroteNonBlank?: boolean
   writeHealth?: WriteHealth
 }
 
@@ -158,6 +163,13 @@ function TapesSection({ runId, terminal }: TapesSectionProps) {
             <span className="inline-flex items-center gap-1 rounded-full border border-red-line bg-red-bg px-2 py-0.5 text-[11px] font-medium text-red">
               <IconWarning className="h-3 w-3" />
               TapeAlert
+            </span>
+          ) : null}
+
+          {tape.overwroteNonBlank ? (
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-line bg-amber-bg px-2 py-0.5 text-[11px] font-medium text-amber">
+              <IconWarning className="h-3 w-3" />
+              overwrote non-blank
             </span>
           ) : null}
 

@@ -220,6 +220,50 @@ describe('TapesPage', () => {
     expect(screen.getByText('drive reported a hard write error')).toBeInTheDocument()
   })
 
+  it('flags a tape that overwrote a non-blank tape, alongside its written outcome', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            {
+              barcode: 'TA0008L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              overwroteNonBlank: true,
+              runId: 'run-7',
+              runStartTime: '2026-07-07T00:00:00Z',
+              runStatus: 'Completed',
+              writeHealth: {
+                measured: true,
+                throughputMBps: 140,
+                floorMBps: 50,
+                floorKnown: true,
+                belowFloor: false,
+                repositions: 0,
+                repositionsMeasured: true,
+                healthy: true,
+              },
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/overwrote non-blank/i)).toBeInTheDocument()
+    })
+
+    // The safety flag sits alongside the ordinary "written" outcome, never
+    // replacing it — the operator sees both.
+    expect(screen.getByText('written')).toBeInTheDocument()
+  })
+
   it('shows a repositions warning when a tape recorded repositions, alongside any other warning', async () => {
     vi.stubGlobal(
       'fetch',

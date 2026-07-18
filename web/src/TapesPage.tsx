@@ -317,6 +317,20 @@ function TapesPage() {
                         >
                           {tape.result}
                         </span>
+                        {tape.overwroteNonBlank ? (
+                          // A non-blank tape written over because the run set
+                          // library.allowNonBlankTapes (SPEC §4.3 step 6) — a
+                          // deliberate but notable action the operator should
+                          // see when browsing what a run wrote, not a silent
+                          // green "written". Its own badge, like the write-health
+                          // warnings, so it can appear alongside them.
+                          <div className="mt-1">
+                            <span className="inline-flex items-center gap-1 rounded-full border border-amber-line bg-amber-bg px-2 py-0.5 text-[11px] font-medium text-amber">
+                              <IconWarning className="h-3 w-3" />
+                              overwrote non-blank
+                            </span>
+                          </div>
+                        ) : null}
                         {tape.result === 'failed' && tape.error ? (
                           // The failure reason is real information an
                           // operator acts on (which tape to pull, what went

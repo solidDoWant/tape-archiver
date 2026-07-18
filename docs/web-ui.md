@@ -454,7 +454,9 @@ is named in the same notice, exactly as a JSON → Form switch reports it.
 The **Tapes** page (`/tapes`) lists every physical tape written by a run still inside
 Temporal's history window — barcode, a link to the run that wrote it, its logical-tape
 and copy index, its write outcome (loaded/written/failed, with a failed tape's reason
-shown under the badge), and a summary of its measured write health (throughput, whether
+shown under the badge, and an **overwrote non-blank** flag when the run reused a
+non-blank tape via `library.allowNonBlankTapes` — SPEC §4.3 step 6), and a
+summary of its measured write health (throughput, whether
 it stayed above the speed-matching floor, the reposition count — or an explicit note
 when repositions could not be measured — and any TapeAlert flags — SPEC §14). Each of
 those warning signals gets its own badge, and any combination can appear together.
