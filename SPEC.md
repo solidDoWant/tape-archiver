@@ -658,7 +658,11 @@ refinement as issues are implemented.
   releases its hold, posts the failure/cancellation alert, and closes as
   `Canceled` — never `TerminateWorkflow`, which would skip that cleanup), and `GET
   /api/events/runs/{runID}` (Server-Sent Events live view over the same state,
-  including pause changes). Every page and
+  including pause changes). The same API is self-described by an OpenAPI 3.1
+  document (`GET /api/openapi.json`/`.yaml`) with a browsable reference page (`GET
+  /api/docs`) — generated from the handlers' own Go request/response types via
+  `huma` as a description-only layer that leaves how each endpoint is served
+  unchanged (`pkg/runsapi`'s `openapi.go`). Every page and
   `/api/*` route is gated behind OIDC authorization-code-flow authentication
   (`pkg/webauth`; provider-agnostic via standard OIDC discovery) — `cmd/web` refuses
   to start without a complete OIDC configuration. `/healthz` + `/readyz`

@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
+	github.com/danielgtaylor/huma/v2 v2.38.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-pdf/fpdf v0.9.0
 	github.com/invopop/jsonschema v0.14.0

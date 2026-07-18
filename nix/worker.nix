@@ -60,7 +60,7 @@ buildGoModule {
   # (this one is unchanged from before the split because cmd/web and cmd/tapectl
   # add no external imports beyond what the shared pkg/internal packages —
   # e.g. pkg/webauth, internal/testutil — already pull in).
-  vendorHash = "sha256-0M0WKVBYzY2W1lnWG6w0AWNi8bZKlRwyoxpKxv1gxjA=";
+  vendorHash = "sha256-nmDaoCSPUOlM13ayEB3EDsQzzXzgNzkUAKkkqtMUzdo=";
 
   subPackages = [ "cmd/worker" ];
 

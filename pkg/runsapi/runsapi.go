@@ -410,6 +410,20 @@ func newMux(h *handler) http.Handler {
 	// uiconfig.go.
 	mux.HandleFunc("GET /api/config/ui", h.getUIConfig)
 
+	// OpenAPI 3.1 description of this API plus a browsable docs page
+	// (openapi.go). These delegate to a dedicated Huma-built mux that only ever
+	// serves the spec/docs; the data routes above keep serving the real
+	// traffic. Mounting only these specific paths (not the whole docs mux)
+	// keeps Huma's inert stub operation routes off the served surface — see
+	// openapi.go's doc comment.
+	docs := newDocsHandler()
+	mux.Handle("GET /api/docs", docs)
+	mux.Handle("GET /api/openapi.json", docs)
+	mux.Handle("GET /api/openapi.yaml", docs)
+	mux.Handle("GET /api/openapi-3.0.json", docs)
+	mux.Handle("GET /api/openapi-3.0.yaml", docs)
+	mux.Handle("GET /api/schemas/{schema}", docs)
+
 	return mux
 }
 

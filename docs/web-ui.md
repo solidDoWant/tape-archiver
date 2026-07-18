@@ -485,6 +485,32 @@ empty-state message instead of an empty table.
 | --- | --- |
 | ![Tapes page, light mode](images/web-ui-tapes-light.png) | ![Tapes page, dark mode](images/web-ui-tapes-dark.png) |
 
+## API documentation (OpenAPI / Swagger)
+
+The same JSON API the SPA calls is described by a machine-readable OpenAPI 3.1
+document, served by `cmd/web` alongside the API itself:
+
+- `GET /api/openapi.json` and `GET /api/openapi.yaml` — the OpenAPI 3.1 document
+  (a downgraded OpenAPI 3.0 variant is also served at `GET /api/openapi-3.0.json`
+  / `.yaml` for tooling that cannot yet read 3.1). Point any OpenAPI-aware tool —
+  an editor, a client generator, `curl` — at these to inspect or consume the API.
+- `GET /api/docs` — a browsable, interactive reference (Stoplight Elements) for
+  reading the endpoints and trying them from the browser. Its "try it" requests
+  reuse your logged-in session cookie, so they run as you.
+
+Like every other `/api/*` route, all three are gated behind an OIDC session — you
+must be signed in to reach them. The interactive `/api/docs` page loads its
+renderer (JS/CSS) from a public CDN (`unpkg.com`), so that page needs outbound
+internet from the browser; the `/api/openapi.json` / `.yaml` documents themselves
+are served entirely by `cmd/web` and need no network.
+
+The document is generated from the Go request/response types the handlers already
+use (via [`huma`](https://github.com/danielgtaylor/huma)), as a description-only
+layer that does not change how any endpoint is served — so the documented response
+shapes and the `{"error": "..."}` error envelope match what the API actually
+returns. It is built in memory at startup; there is no committed spec file to keep
+in sync.
+
 ## Local development
 
 Everything above assumes a real deployment (a real Temporal cluster, a real identity
