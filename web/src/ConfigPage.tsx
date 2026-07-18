@@ -293,7 +293,7 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
 
       if (deployOwned.length > 0) {
         notices.push(
-          `Form mode sources ${deployOwned.join(', ')} from this deployment's config, replacing the ${deployOwned.length === 1 ? 'value' : 'values'} in this JSON. Where this deployment configures ${deployOwned.length === 1 ? 'it' : 'them'}, the server applies its own ${deployOwned.length === 1 ? 'value' : 'values'} to every run — JSON / paste mode included.`,
+          `Form mode sources ${deployOwned.join(', ')} from this deployment's config, replacing the ${deployOwned.length === 1 ? 'value' : 'values'} in this JSON. Where this deployment configures ${deployOwned.length === 1 ? 'it' : 'them'}, the server applies its own ${deployOwned.length === 1 ? 'value' : 'values'} to every run — JSON / paste mode included. Where it has not, Form mode has no control to supply ${deployOwned.length === 1 ? 'it' : 'them'}, so keep your value by staying in JSON / paste mode.`,
         )
       }
 
