@@ -135,6 +135,12 @@ describe('App shell (authenticated)', () => {
     expect(screen.getByRole('link', { name: /start new run/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /tapes/i })).toBeInTheDocument()
 
+    // API docs link points at the server-served OpenAPI reference page
+    // (/api/docs), opening in a new tab.
+    const docsLink = screen.getByRole('link', { name: /api docs/i })
+    expect(docsLink).toHaveAttribute('href', '/api/docs')
+    expect(docsLink).toHaveAttribute('target', '_blank')
+
     // Signed-in operator's name and email (from /api/me) in the sidebar.
     expect(screen.getByText('Test Operator')).toBeInTheDocument()
     expect(screen.getByText('operator@example.com')).toBeInTheDocument()

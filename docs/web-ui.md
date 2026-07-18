@@ -496,7 +496,9 @@ document, served by `cmd/web` alongside the API itself:
   an editor, a client generator, `curl` — at these to inspect or consume the API.
 - `GET /api/docs` — a browsable, interactive reference (Stoplight Elements) for
   reading the endpoints and trying them from the browser. Its "try it" requests
-  reuse your logged-in session cookie, so they run as you.
+  reuse your logged-in session cookie, so they run as you. The signed-in app
+  shell links to this page from an "API docs" link in the sidebar footer (it
+  opens in a new tab).
 
 Like every other `/api/*` route, all three are gated behind an OIDC session — you
 must be signed in to reach them. The interactive `/api/docs` page loads its

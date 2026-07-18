@@ -4,7 +4,7 @@ import { useActiveRun } from './activeRun'
 import type { Identity } from './identity'
 import type { ThemePreference } from './theme'
 import Footer from './Footer'
-import { IconAuto, IconDashboard, IconLock, IconMoon, IconPlus, IconSun, IconTapes } from './icons'
+import { IconAuto, IconBook, IconDashboard, IconLock, IconMoon, IconPlus, IconSun, IconTapes } from './icons'
 
 interface SidebarProps {
   identity: Identity
@@ -149,6 +149,24 @@ function Sidebar({ identity, preference, onPreferenceChange }: SidebarProps) {
             )}
           </div>
         </div>
+
+        {/*
+          API docs link. /api/docs is a server route (the Stoplight Elements
+          reference page served by cmd/web — see docs/web-ui.md), not an SPA
+          route, so it is a plain anchor rather than a router <Link>, and opens
+          in a new tab to keep the app shell in place. Like the app itself it is
+          gated behind the OIDC session, so it only appears in the signed-in
+          shell.
+        */}
+        <a
+          href="/api/docs"
+          target="_blank"
+          rel="noreferrer"
+          className="mt-3 flex items-center gap-2 rounded-lg px-0.5 py-1 text-[11.5px] text-text-faint transition-colors hover:text-text"
+        >
+          <IconBook className="h-3.5 w-3.5" />
+          API docs
+        </a>
 
         <Footer className="mt-3" />
       </div>

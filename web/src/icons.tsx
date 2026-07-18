@@ -150,3 +150,21 @@ export function IconLock({ className }: IconProps) {
     </svg>
   )
 }
+
+export function IconBook({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M8 3.5C6.8 2.7 5.3 2.3 3.5 2.3a1 1 0 0 0-1 1v8.4a1 1 0 0 0 1 1c1.8 0 3.3.4 4.5 1.2 1.2-.8 2.7-1.2 4.5-1.2a1 1 0 0 0 1-1V3.3a1 1 0 0 0-1-1c-1.8 0-3.3.4-4.5 1.2Z" />
+      <path d="M8 3.5v10" />
+    </svg>
+  )
+}
