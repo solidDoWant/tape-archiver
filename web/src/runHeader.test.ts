@@ -69,4 +69,10 @@ describe('headerRuntime', () => {
   it('is empty when there is no start time to measure from', () => {
     expect(headerRuntime(undefined, undefined, false, false)).toBe('')
   })
+
+  it('is empty for a terminal run whose close time has not populated yet, rather than a runtime that counts up', () => {
+    // A closed run with a start but no closeTime must not fall through to the
+    // live "elapsed until now" branch and show an ever-growing "ran …".
+    expect(headerRuntime(start, undefined, false, true)).toBe('')
+  })
 })

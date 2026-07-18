@@ -126,6 +126,15 @@ export function headerRuntime(
   paused: boolean,
   terminal: boolean,
 ): string {
+  // A closed run with no recorded close time yet (a brief window where the
+  // status is terminal but the projected CloseTime has not populated) must not
+  // show a runtime that counts up as if still running: formatDuration(start,
+  // undefined) is the live "elapsed until now" branch, so "ran 2h 1m" would tick
+  // upward for a run that has already ended. Wait for closeTime instead.
+  if (terminal && !closeTime) {
+    return ''
+  }
+
   const elapsed = formatDuration(startTime, closeTime)
   if (elapsed === '—') {
     return ''
