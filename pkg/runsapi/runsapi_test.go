@@ -1228,6 +1228,31 @@ func TestSubmitRun(t *testing.T) {
 		assert.Equal(t, []string{"/dev/sr0", "/dev/sr1"}, fake.executeConfig.Delivery.OpticalBurn.Drives)
 	})
 
+	// A disabled optical-burn block (copies:0 — never burns) that still carries
+	// client-supplied burner drives must be refused on a deployment that owns no
+	// burner: OpticalBurn.Enabled() is false for copies:0, so applyDeployConfig
+	// never overrides the drives and the client device path would otherwise
+	// survive into a production config targeting a device the host does not own.
+	t.Run("client-supplied burner drives on a disabled burn block are rejected without a deploy burner", func(t *testing.T) {
+		disabledBurnConfig := `{
+		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+		  "copies": 2,
+		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+		  "delivery": {"opticalBurn": {"drives": ["/dev/rogue-burner"], "copies": 0}}
+		}`
+
+		fake := &fakeTemporalClient{}
+		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+disabledBurnConfig+`}`), nil)
+
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.False(t, fake.executeCaptured)
+	})
+
 	// A run that does not enable optical burn (no opticalBurn block) must never
 	// gain a spurious one just because the deployment configured burner drives —
 	// the override only replaces drives on an already-present block.

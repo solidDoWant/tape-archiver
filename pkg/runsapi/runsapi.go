@@ -893,8 +893,16 @@ func (h *handler) requireDeviceOwnership(cfg *config.Config) error {
 		return errors.New("this deployment does not configure library drives (set LIBRARY_DRIVES): a production run may not target client-supplied drives — configure the deployment's devices, or submit as a dry-run")
 	}
 
-	if cfg.Delivery.OpticalBurn.Enabled() && len(h.deployOpticalBurnerDrives) == 0 {
-		return errors.New("this deployment does not configure optical burner drives (set OPTICAL_BURNER_DRIVES): a production run with optical burn enabled may not target client-supplied burner drives — configure the deployment's burner, disable optical burn, or submit as a dry-run")
+	// Reject any client-supplied burner drives when the deployment owns none —
+	// not only an *enabled* burn. OpticalBurn.Enabled() is false for a copies:0
+	// block, so a disabled block carrying client drives (e.g. {"copies": 0,
+	// "drives": ["/dev/sr9"]}) would otherwise slip through with the client
+	// device path intact (applyDeployConfig only overrides when the deployment
+	// configures burner drives), leaving a production config targeting a device
+	// the host does not own. An enabled burn always has drives, so it stays
+	// covered.
+	if len(h.deployOpticalBurnerDrives) == 0 && cfg.Delivery.OpticalBurn != nil && len(cfg.Delivery.OpticalBurn.Drives) > 0 {
+		return errors.New("this deployment does not configure optical burner drives (set OPTICAL_BURNER_DRIVES): a production run may not target client-supplied burner drives — configure the deployment's burner, remove delivery.opticalBurn.drives, or submit as a dry-run")
 	}
 
 	// The Discord delivery webhook is deploy-owned too (issue #304): the run's
