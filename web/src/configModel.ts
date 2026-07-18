@@ -450,21 +450,29 @@ export function unmodeledFields(config: RunConfig): string[] {
 export function deployOwnedFields(config: RunConfig): string[] {
   const overridden: string[] = []
 
-  if (config.library?.changer) {
+  // Type-guarded, not just truthiness: a JSON / paste-mode document can carry a
+  // wrong-typed value (library.drives: "abc", library.changer: a number), and a
+  // bare `.length`/truthiness would name a field that isn't actually the array/
+  // string it claims to be — a misleading notice. Only a real non-empty string /
+  // non-empty array counts as "the JSON set a deploy-owned value".
+  const changer = config.library?.changer
+  if (typeof changer === 'string' && changer.trim() !== '') {
     overridden.push('library.changer')
   }
 
-  if (config.library?.drives?.length) {
+  if (Array.isArray(config.library?.drives) && config.library.drives.length > 0) {
     overridden.push('library.drives')
   }
 
-  if (config.delivery?.webhookUrl) {
+  const webhookUrl = config.delivery?.webhookUrl
+  if (typeof webhookUrl === 'string' && webhookUrl !== '') {
     overridden.push('delivery.webhookUrl')
   }
 
   // Burner drives are deploy-owned too (issue #317): a JSON → Form switch
   // replaces any drives typed in JSON mode with the deployment's own list.
-  if (config.delivery?.opticalBurn?.drives?.length) {
+  const burnerDrives = config.delivery?.opticalBurn?.drives
+  if (Array.isArray(burnerDrives) && burnerDrives.length > 0) {
     overridden.push('delivery.opticalBurn.drives')
   }
 
