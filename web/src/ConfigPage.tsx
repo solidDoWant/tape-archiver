@@ -416,6 +416,18 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
       return
     }
 
+    // A run config is always a JSON object. A bare scalar/array/null still
+    // parses, but advancing it to Review renders nothing (the review card is
+    // guarded on a truthy config) and its Submit is a no-op — a dead end. Block
+    // it here with a clear message rather than the server rejecting an empty
+    // Review the operator can't act on. Field-level validation still stays
+    // server-side (JSON mode's escape-hatch role).
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+      setSubmitState({ status: 'error', error: 'The run config must be a JSON object.' })
+
+      return
+    }
+
     setSubmitState({ status: 'idle' })
     setReviewConfig(config as RunConfig)
     setStep('review')

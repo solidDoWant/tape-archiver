@@ -129,6 +129,21 @@ describe('ConfigPage', () => {
     expect(screen.getByText('Sources')).toBeInTheDocument()
   })
 
+  it('blocks a bare non-object JSON document at Review instead of a dead review step', async () => {
+    renderPage()
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Paste / upload' }))
+    fireEvent.change(screen.getByLabelText('Run config (JSON)'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review →' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/must be a JSON object/i)
+    })
+    // It must NOT advance to a blank Review step with a no-op Submit.
+    expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
+  })
+
   it('serializes the current form into JSON text when switching to JSON mode', async () => {
     renderPage()
     await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
