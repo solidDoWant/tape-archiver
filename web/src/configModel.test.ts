@@ -227,6 +227,25 @@ describe('configToFormState', () => {
     expect(roundTripped.tapeGeneration).toBe('LTO-6')
   })
 
+  it('does not let a wrong-typed allow-non-blank flag become truthy in the form', () => {
+    // A JSON / paste document can carry the truthy string "false"; a `?? false`
+    // read would pass it straight into the boolean field and check the
+    // safety-relevant "allow non-blank overwrite" box. The typeof guard rejects it.
+    const config = {
+      sources: [],
+      copies: 1,
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000, allowNonBlankTapes: 'false' },
+      redundancy: { sliceSizeBytes: 1024 },
+      encryption: { recipients: [], identity: '' },
+      delivery: { webhookUrl: '', opticalBurn: { drives: ['/dev/sr0'], copies: 1, allowNonBlankDiscs: 'yes' } },
+    } as unknown as RunConfig
+
+    const form = configToFormState(config)
+
+    expect(form.allowNonBlankTapes).toBe(false)
+    expect(form.allowNonBlankDiscs).toBe(false)
+  })
+
   it('falls back to the default LTO generation for a capacity with no exact match in the table', () => {
     const config: RunConfig = {
       sources: [],

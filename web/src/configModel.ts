@@ -612,7 +612,11 @@ export function configToFormState(config: RunConfig): FormState {
       typeof library.tapeCapacityBytes === 'number' ? ltoGenerationForCapacity(library.tapeCapacityBytes) : undefined
     form.tapeGeneration = (generation ?? defaultLtoGeneration).label
 
-    form.allowNonBlankTapes = library.allowNonBlankTapes ?? false
+    // typeof guard, not `?? false`: a wrong-typed JSON value (e.g. the truthy
+    // string "false") would otherwise flow into this boolean and, worse than the
+    // compression case, check the safety-relevant "allow non-blank overwrite"
+    // box and reach the submitted library.allowNonBlankTapes.
+    form.allowNonBlankTapes = typeof library.allowNonBlankTapes === 'boolean' ? library.allowNonBlankTapes : false
   }
 
   const encryption = partial.encryption as Partial<Encryption> | undefined
@@ -637,7 +641,8 @@ export function configToFormState(config: RunConfig): FormState {
     if (typeof opticalBurn.copies === 'number') {
       form.opticalCopies = opticalBurn.copies
     }
-    form.allowNonBlankDiscs = opticalBurn.allowNonBlankDiscs ?? false
+    // Same typeof guard as allowNonBlankTapes above, not `?? false`.
+    form.allowNonBlankDiscs = typeof opticalBurn.allowNonBlankDiscs === 'boolean' ? opticalBurn.allowNonBlankDiscs : false
   }
 
   return form
