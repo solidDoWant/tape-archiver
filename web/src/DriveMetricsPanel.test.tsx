@@ -145,6 +145,71 @@ describe('DriveMetricsPanel', () => {
     vi.useRealTimers()
   })
 
+  it('keeps the last-good sparkline when a later history poll fails transiently', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    let historyCalls = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+
+      if (url.includes('/metrics/drives/TA0001L6/history')) {
+        historyCalls += 1
+        if (historyCalls === 1) {
+          return jsonResponse(200, {
+            runId: 'run-1',
+            barcode: 'TA0001L6',
+            metric: 'throughput',
+            points: [
+              { time: '2026-07-10T00:00:00Z', value: 40 },
+              { time: '2026-07-10T00:01:00Z', value: 42 },
+            ],
+          })
+        }
+
+        // Every later history poll fails transiently.
+        return jsonResponse(503, { error: 'VictoriaMetrics blip' })
+      }
+
+      // The drives endpoint stays live so the card is never unmounted.
+      return jsonResponse(200, {
+        runId: 'run-1',
+        drives: [
+          {
+            barcode: 'TA0001L6',
+            tapeIndex: 0,
+            copyIndex: 0,
+            driveIndex: 0,
+            result: 'loaded',
+            hasData: true,
+            throughputMBps: 38,
+            repositions: 0,
+            tapeAlertFlagCount: 0,
+            belowFloor: false,
+            floorMBps: 50,
+            floorKnown: true,
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<DriveMetricsPanel runId="run-1" pollIntervalMs={1000} />)
+
+    // The sparkline populates from the first successful history poll.
+    await vi.waitFor(() => expect(screen.getByRole('img', { name: /write rate over the last/i })).toBeInTheDocument())
+
+    // A later history poll 503s; the sparkline must keep its last-good data
+    // rather than flipping to the "unavailable" placeholder (mirroring how the
+    // parent keeps the gauge live through the same blip).
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(historyCalls).toBeGreaterThanOrEqual(2))
+
+    expect(screen.getByRole('img', { name: /write rate over the last/i })).toBeInTheDocument()
+    expect(screen.queryByText(/write-rate history unavailable/i)).not.toBeInTheDocument()
+
+    vi.useRealTimers()
+  })
+
   it('polls the drives endpoint again after the interval elapses', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
 

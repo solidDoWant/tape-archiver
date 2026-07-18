@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiFetch, ApiError } from './api'
 import DriveGauge from './DriveGauge'
 import WriteRateSparkline, { type MetricPoint, type SparklineStatus } from './WriteRateSparkline'
@@ -207,10 +207,18 @@ function LiveDriveMetrics({ runId, pollIntervalMs }: { runId: string; pollInterv
 function DriveMetricCard({ runId, drive, pollIntervalMs }: { runId: string; drive: DriveMetric; pollIntervalMs: number }) {
   const [points, setPoints] = useState<MetricPoint[] | null>(null)
   const [unavailable, setUnavailable] = useState(false)
+  // Whether any poll has ever resolved (real points or a 404 "no data"). Once it
+  // has, a transient non-404 blip keeps the last-good sparkline rather than
+  // tearing it down — the same last-good stance the parent LiveDriveMetrics
+  // takes for its gauges, so the two never disagree on one bad tick. A ref (not
+  // state) because the async poll closure needs the current value without
+  // re-subscribing.
+  const resolvedRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | undefined
+    resolvedRef.current = false
 
     const poll = async () => {
       try {
@@ -221,18 +229,23 @@ function DriveMetricCard({ runId, drive, pollIntervalMs }: { runId: string; driv
         if (!cancelled) {
           setPoints(response.points)
           setUnavailable(false)
+          resolvedRef.current = true
         }
       } catch (error) {
         if (cancelled) {
           return
         }
 
-        // A 404 (barcode not yet known to a stale-cached run view) is
-        // treated the same as "no data yet", not an error banner — only a
-        // real fetch/5xx failure is surfaced as unavailable.
+        // A 404 (barcode not yet known to a stale-cached run view) is a
+        // resolved "no data yet" state, not an error banner — clear any prior
+        // unavailable so a 404 arriving after a 5xx no longer reads as broken.
         if (error instanceof ApiError && error.status === 404) {
           setPoints([])
-        } else {
+          setUnavailable(false)
+          resolvedRef.current = true
+        } else if (!resolvedRef.current) {
+          // Only surface unavailable before anything has shown; once a poll has
+          // resolved, keep the last-good sparkline through a transient blip.
           setUnavailable(true)
         }
       } finally {
