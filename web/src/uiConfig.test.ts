@@ -9,7 +9,7 @@ function uiConfig(overrides: Partial<UiConfig>): UiConfig {
     temporalUiBaseUrl: '',
     temporalNamespace: '',
     library: { changer: '', drives: [], slotCount: 0, cleaningSlots: [], ioStationSlots: [] },
-    delivery: { webhookUrl: '', opticalBurnDrives: [] },
+    delivery: { webhookConfigured: false, opticalBurnDrives: [] },
     ...overrides,
   }
 }
@@ -60,14 +60,13 @@ describe('deployConfigFrom', () => {
           cleaningSlots: [45],
           ioStationSlots: [46, 47],
         },
-        delivery: { webhookUrl: 'https://discord.example/webhook', opticalBurnDrives: ['/dev/sr0', '/dev/sr1'] },
+        delivery: { webhookConfigured: true, opticalBurnDrives: ['/dev/sr0', '/dev/sr1'] },
       }),
     }
 
     expect(deployConfigFrom(state)).toEqual({
       changer: '/dev/sch0',
       drives: ['/dev/nst0', '/dev/nst1'],
-      webhookUrl: 'https://discord.example/webhook',
       opticalBurnDrives: ['/dev/sr0', '/dev/sr1'],
       slotCount: 47,
       cleaningSlots: [45],
@@ -79,7 +78,6 @@ describe('deployConfigFrom', () => {
     expect(deployConfigFrom({ status: 'loading' })).toEqual({
       changer: '',
       drives: [],
-      webhookUrl: '',
       opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
@@ -91,7 +89,6 @@ describe('deployConfigFrom', () => {
     expect(deployConfigFrom({ status: 'error' })).toEqual({
       changer: '',
       drives: [],
-      webhookUrl: '',
       opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],

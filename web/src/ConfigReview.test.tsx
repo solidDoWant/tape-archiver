@@ -3,12 +3,11 @@ import { render, screen } from '@testing-library/react'
 import ConfigReview from './ConfigReview'
 import { buildConfig, defaultFormState, type DeployConfig, type RunConfig } from './configModel'
 
-// testDeploy supplies the deploy-owned library devices + webhook (issue #304)
-// buildConfig fills into the config under review.
+// testDeploy supplies the deploy-owned library devices (issue #304) buildConfig
+// fills into the config under review.
 const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0'],
-  webhookUrl: '',
   opticalBurnDrives: [],
   slotCount: 0,
   cleaningSlots: [],

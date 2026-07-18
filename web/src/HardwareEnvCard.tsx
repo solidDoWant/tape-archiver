@@ -71,7 +71,7 @@ function HardwareEnvFacts({ config }: { config: UiConfig }) {
       {library.changer ? <Row label="Changer" value={library.changer} /> : null}
       {drives ? <Row label="Drives" value={drives} /> : null}
       {burnerDrives ? <Row label="Burner drives" value={burnerDrives} /> : null}
-      <Row label="Delivery webhook" value={delivery.webhookUrl ? 'Configured' : 'Not configured'} />
+      <Row label="Delivery webhook" value={delivery.webhookConfigured ? 'Configured' : 'Not configured'} />
       {library.slotCount > 0 ? <Row label="Storage slots" value={String(library.slotCount)} /> : null}
       {cleaningSlots ? <Row label="Cleaning slots" value={cleaningSlots} /> : null}
       {ioStationSlots ? <Row label="I/O-station slots" value={ioStationSlots} /> : null}

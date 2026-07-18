@@ -26,11 +26,14 @@ export interface UiConfig {
     cleaningSlots: number[]
     ioStationSlots: number[]
   }
-  // delivery carries the deploy-owned Discord webhook URL (issue #304) and the
-  // optical burner device paths (issue #317) the guided config form sources
-  // read-only. opticalBurnDrives is [] (never null) when the deployment did not
-  // configure any burner drives.
-  delivery: { webhookUrl: string; opticalBurnDrives: string[] }
+  // delivery carries whether a Discord webhook is configured (issue #304) and
+  // the optical burner device paths (issue #317) the guided config form sources
+  // read-only. webhookConfigured is only the boolean state, never the URL: a
+  // Discord webhook URL is a credential (it embeds a posting token), so the
+  // server never sends it to the browser — cmd/web re-applies the deployment's
+  // own webhook to every submitted run server-side. opticalBurnDrives is []
+  // (never null) when the deployment did not configure any burner drives.
+  delivery: { webhookConfigured: boolean; opticalBurnDrives: string[] }
 }
 
 export type UiConfigState =
@@ -67,20 +70,22 @@ export function useUiConfig(): UiConfigState {
   return state
 }
 
-// deployConfigFrom extracts the deploy-owned library devices and Discord
-// webhook (issue #304), plus the physical library topology (issue #305), that
-// the guided config form needs, from the GET /api/config/ui fetch state. Until
-// the fetch has loaded (or if it failed), it yields empty values — the guided
-// form then shows a loading/unavailable state for the read-only device/webhook
-// fields and the slot picker, and its Review step surfaces the run-config
+// deployConfigFrom extracts the deploy-owned library devices (issue #304), the
+// optical burner drives (issue #317), and the physical library topology (issue
+// #305) that the guided config form needs, from the GET /api/config/ui fetch
+// state. Until the fetch has loaded (or if it failed), it yields empty values —
+// the guided form then shows a loading/unavailable state for the read-only
+// device fields and the slot picker, and its Review step surfaces the run-config
 // schema's own "changer must not be empty" / "at least one drive is required"
-// validation rather than the SPA inventing a default.
+// validation rather than the SPA inventing a default. The Discord webhook is
+// deliberately not part of this: its URL is a credential the server never sends
+// (see UiConfig.delivery) and re-applies to every run itself, so buildConfig
+// leaves delivery.webhookUrl empty rather than sourcing it here.
 export function deployConfigFrom(state: UiConfigState): DeployConfig {
   if (state.status === 'loaded') {
     return {
       changer: state.config.library.changer,
       drives: state.config.library.drives,
-      webhookUrl: state.config.delivery.webhookUrl,
       opticalBurnDrives: state.config.delivery.opticalBurnDrives,
       slotCount: state.config.library.slotCount,
       cleaningSlots: state.config.library.cleaningSlots,
@@ -91,7 +96,6 @@ export function deployConfigFrom(state: UiConfigState): DeployConfig {
   return {
     changer: '',
     drives: [],
-    webhookUrl: '',
     opticalBurnDrives: [],
     slotCount: 0,
     cleaningSlots: [],

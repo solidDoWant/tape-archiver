@@ -26,7 +26,7 @@ function uiConfig(overrides: Record<string, unknown> = {}) {
       cleaningSlots: [23, 24],
       ioStationSlots: [1],
     },
-    delivery: { webhookUrl: 'https://discord.example/webhook/secret', opticalBurnDrives: ['/dev/sr0'] },
+    delivery: { webhookConfigured: true, opticalBurnDrives: ['/dev/sr0'] },
     ...overrides,
   }
 }
@@ -85,7 +85,7 @@ describe('HardwareEnvCard', () => {
         temporalUiBaseUrl: '',
         temporalNamespace: '',
         library: { changer: '', drives: [], slotCount: 0, cleaningSlots: [], ioStationSlots: [] },
-        delivery: { webhookUrl: '', opticalBurnDrives: [] },
+        delivery: { webhookConfigured: false, opticalBurnDrives: [] },
       }),
     )
 

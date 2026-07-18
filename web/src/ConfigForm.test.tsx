@@ -11,7 +11,6 @@ import type { UiConfigState } from './uiConfig'
 const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0', '/dev/nst1'],
-  webhookUrl: 'https://discord.com/api/webhooks/1/a',
   // The deploy-owned optical burner drives: enforced server-side and never
   // rendered in the form (like the changer/drives).
   opticalBurnDrives: ['/dev/sr0', '/dev/sr1'],
@@ -29,7 +28,6 @@ const testDeploy: DeployConfig = {
 const emptyDeploy: DeployConfig = {
   changer: '',
   drives: [],
-  webhookUrl: '',
   opticalBurnDrives: [],
   slotCount: 0,
   cleaningSlots: [],

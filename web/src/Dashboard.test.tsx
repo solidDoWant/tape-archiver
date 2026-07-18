@@ -46,7 +46,7 @@ function stubApi(routes: Record<string, { status: number; body: unknown }>) {
         temporalUiBaseUrl: '',
         temporalNamespace: '',
         library: { changer: '/dev/sch0', drives: [], slotCount: 0, cleaningSlots: [], ioStationSlots: [] },
-        delivery: { webhookUrl: '', opticalBurnDrives: [] },
+        delivery: { webhookConfigured: false, opticalBurnDrives: [] },
       },
     },
     ...routes,

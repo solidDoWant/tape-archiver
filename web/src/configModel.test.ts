@@ -12,13 +12,13 @@ import {
 } from './configModel'
 
 // testDeploy is the deploy-owned config (issue #304) buildConfig fills into the
-// submitted run config: the library changer/drive devices and Discord webhook
-// the guided form no longer edits per run. Tests pass this explicitly so the
-// injection is exercised rather than assumed.
+// submitted run config: the library changer/drive devices the guided form no
+// longer edits per run. Tests pass this explicitly so the injection is exercised
+// rather than assumed. The Discord webhook is not here — it is a credential the
+// SPA never holds and cmd/web applies server-side (see DeployConfig).
 const testDeploy: DeployConfig = {
   changer: '/dev/sch0',
   drives: ['/dev/nst0', '/dev/nst1'],
-  webhookUrl: 'https://discord.com/api/webhooks/1/a',
   opticalBurnDrives: ['/dev/sr0'],
   slotCount: 47,
   cleaningSlots: [45],
@@ -35,12 +35,14 @@ describe('buildConfig', () => {
     expect(config.delivery.opticalBurn).toBeUndefined()
   })
 
-  it('fills the deploy-owned library devices and webhook from deploy config, not the form', () => {
+  it('fills the deploy-owned library devices from deploy config, leaving the server-owned webhook empty', () => {
     const config = buildConfig(defaultFormState(), testDeploy)
 
     expect(config.library.changer).toBe('/dev/sch0')
     expect(config.library.drives).toEqual(['/dev/nst0', '/dev/nst1'])
-    expect(config.delivery.webhookUrl).toBe('https://discord.com/api/webhooks/1/a')
+    // The webhook URL is a credential the SPA never holds; cmd/web applies the
+    // deployment's own webhook server-side, so buildConfig leaves it empty.
+    expect(config.delivery.webhookUrl).toBe('')
   })
 
   it('builds exactly one of zfsPath/k8s per source, never both', () => {
@@ -142,7 +144,6 @@ describe('buildConfig', () => {
     const config = buildConfig(defaultFormState(), {
       changer: '/dev/sch0',
       drives: ['/dev/nst0', '', '  '],
-      webhookUrl: '',
       opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
@@ -178,7 +179,6 @@ describe('buildConfig', () => {
     const config = buildConfig(defaultFormState(), {
       changer: '',
       drives: [],
-      webhookUrl: '',
       opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
@@ -334,13 +334,14 @@ describe('unmodeledFields', () => {
     // The invariant the ConfigPage notice relies on: for a config with none of
     // the unmodeled fields, JSON -> Form -> JSON round-trips losslessly (modulo
     // defaulted booleans buildConfig always emits explicitly) — provided the
-    // deploy config supplies the same deploy-owned device/webhook values the
-    // JSON carried (issue #304), since Form mode now sources those from deploy
-    // config rather than the JSON.
+    // deploy config supplies the same deploy-owned device values the JSON
+    // carried (issue #304), since Form mode now sources those from deploy config
+    // rather than the JSON. The webhook is the exception: it is server-owned and
+    // never round-trips through the SPA, so buildConfig blanks it (asserted
+    // below) regardless of what the JSON carried.
     const deploy: DeployConfig = {
       changer: baseConfig.library.changer,
       drives: baseConfig.library.drives,
-      webhookUrl: baseConfig.delivery.webhookUrl,
       opticalBurnDrives: [],
       slotCount: 0,
       cleaningSlots: [],
@@ -356,7 +357,8 @@ describe('unmodeledFields', () => {
     expect(roundTripped.library.changer).toBe(baseConfig.library.changer)
     expect(roundTripped.library.drives).toEqual(baseConfig.library.drives)
     expect(roundTripped.encryption).toEqual(baseConfig.encryption)
-    expect(roundTripped.delivery.webhookUrl).toBe(baseConfig.delivery.webhookUrl)
+    // Server-owned: buildConfig blanks the webhook rather than round-tripping it.
+    expect(roundTripped.delivery.webhookUrl).toBe('')
   })
 })
 

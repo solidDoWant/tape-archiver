@@ -136,17 +136,24 @@ export function newSourceFormState(): SourceFormState {
 
 // DeployConfig is the deploy-owned subset of a run config the guided Form mode
 // does NOT let the operator edit per run (issues #304 and #317): the library
-// changer/drive device paths, the Discord webhook URL, and the optical burner
-// device paths are properties of the deployment/host supplied by GET
-// /api/config/ui (uiConfig.ts's deployConfigFrom), not typed into the form.
-// buildConfig fills these into the submitted config so it still carries them
-// (SPEC §4.2 — the run config stays the single source of truth); they are simply
-// not FormState fields. This is also enforced server-side: where a deployment
-// configures one of these, cmd/web overwrites it onto every submitted config
-// regardless of mode (pkg/runsapi applyDeployConfig), so JSON / paste mode cannot
-// override a deploy-owned device/webhook either — only a field the deployment
-// left unset can be supplied per run. (The burner drives are applied server-side
-// only when the run actually enables optical burn.)
+// changer/drive device paths and the optical burner device paths are properties
+// of the deployment/host supplied by GET /api/config/ui (uiConfig.ts's
+// deployConfigFrom), not typed into the form. buildConfig fills these into the
+// submitted config so it still carries them (SPEC §4.2 — the run config stays the
+// single source of truth); they are simply not FormState fields. This is also
+// enforced server-side: where a deployment configures one of these, cmd/web
+// overwrites it onto every submitted config regardless of mode (pkg/runsapi
+// applyDeployConfig), so JSON / paste mode cannot override a deploy-owned device
+// either — only a field the deployment left unset can be supplied per run. (The
+// burner drives are applied server-side only when the run actually enables
+// optical burn.)
+//
+// The Discord webhook URL is deploy-owned too, but it is deliberately NOT a
+// DeployConfig field: its URL is a credential the server never sends to the
+// browser (uiConfig.ts's UiConfig.delivery carries only whether one is
+// configured), and cmd/web re-applies the deployment's own webhook to every
+// submitted run itself, so buildConfig leaves delivery.webhookUrl empty rather
+// than filling a value the SPA does not (and must not) hold.
 //
 // slotCount/cleaningSlots/ioStationSlots are the physical library topology
 // (issue #305): the storage slot count and the reserved cleaning / I/O-station
@@ -157,7 +164,6 @@ export function newSourceFormState(): SourceFormState {
 export interface DeployConfig {
   changer: string
   drives: string[]
-  webhookUrl: string
   // opticalBurnDrives is the deploy-owned optical burner device paths (issue
   // #317), the delivery analogue of drives above: the operator toggles optical
   // burn on/off and sets the copy count per run, but the burner devices come
@@ -271,9 +277,11 @@ function buildSource(source: SourceFormState): Source {
 
 // buildConfig assembles a schema-shaped RunConfig from the guided Form
 // mode's current state and the deploy-owned config (issue #304): the library
-// changer/drive device paths and the Discord webhook URL come from deploy
-// (GET /api/config/ui), not FormState, since they are deployment/host
-// properties the operator does not re-type per run — see DeployConfig. It is
+// changer/drive device paths come from deploy (GET /api/config/ui), not
+// FormState, since they are deployment/host properties the operator does not
+// re-type per run — see DeployConfig. The Discord webhook is left empty here
+// (delivery.webhookUrl: '') and applied by cmd/web server-side, since its URL is
+// a credential the SPA never holds (see DeployConfig). It is
 // deliberately a pure, total function — it never throws and never drops data,
 // even for a still-incomplete form (e.g. a blank ZFS dataset name) or an
 // unconfigured deployment (empty deploy values) — so it can back both the live
@@ -316,7 +324,10 @@ export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
     allowNonBlankTapes: form.allowNonBlankTapes,
   }
 
-  const delivery: Delivery = { webhookUrl: deploy.webhookUrl.trim() }
+  // Left empty deliberately: the Discord webhook URL is a credential the SPA
+  // never holds (see DeployConfig), and cmd/web re-applies the deployment's own
+  // webhook to every submitted run server-side (applyDeployConfig).
+  const delivery: Delivery = { webhookUrl: '' }
 
   if (form.opticalBurnEnabled) {
     // The burner drives are deploy-owned (issue #317): sourced from deploy

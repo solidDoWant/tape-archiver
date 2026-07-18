@@ -33,7 +33,7 @@ function stubApi(overrides: Record<string, { status: number; body: unknown }> = 
         temporalUiBaseUrl: '',
         temporalNamespace: '',
         library: { changer: '/dev/sch0', drives: ['/dev/nst0'], slotCount: 8, cleaningSlots: [], ioStationSlots: [] },
-        delivery: { webhookUrl: 'https://discord.com/api/webhooks/deploy/xyz', opticalBurnDrives: [] },
+        delivery: { webhookConfigured: true, opticalBurnDrives: [] },
       },
     },
     ...overrides,
