@@ -100,9 +100,13 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
 
     const handleUpdate = (event: MessageEvent<string>) => {
       const parsed = parseDetail(event)
-      if (parsed) {
-        setDetail(parsed)
+      if (!parsed) {
+        // A malformed frame carries no state to show; leave the current state
+        // (e.g. 'connecting' on the very first frame) rather than advancing to
+        // 'live' with a null detail. The next well-formed frame moves us on.
+        return
       }
+      setDetail(parsed)
       setState('live')
     }
 

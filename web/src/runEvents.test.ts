@@ -176,6 +176,27 @@ describe('useRunEvents terminal handling', () => {
   })
 })
 
+describe('useRunEvents malformed frames', () => {
+  it('stays connecting on a malformed first update frame rather than going live with a null detail', () => {
+    const { result } = renderHook(() => useRunEvents('run-1'))
+
+    act(() => {
+      FakeEventSource.instances[0].emit('update', 'not json{')
+    })
+
+    expect(result.current.state).toBe('connecting')
+    expect(result.current.detail).toBeNull()
+
+    // A subsequent well-formed frame still moves the hook to live.
+    act(() => {
+      FakeEventSource.instances[0].emit('update', JSON.stringify({ runId: 'run-1', status: 'Running' }))
+    })
+
+    expect(result.current.state).toBe('live')
+    expect(result.current.detail?.runId).toBe('run-1')
+  })
+})
+
 describe('useRunEvents run switching', () => {
   it('resets state and detail when runId changes so the new run does not inherit the old terminal state', () => {
     const { result, rerender } = renderHook(({ id }) => useRunEvents(id), { initialProps: { id: 'run-A' } })
