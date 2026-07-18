@@ -154,12 +154,25 @@ function lineKey(line: LogLine): string {
 // ingested when the previous poll ran are new, kept, and appended, which is
 // the whole point of the inclusive bound.
 function appendNewLines(existing: LogLine[], incoming: LogLine[]): LogLine[] {
-  if (existing.length === 0) {
-    return capLines(incoming)
+  // Dedup against what's already shown AND within this batch itself: a single
+  // response could carry two lines sharing time+level+message+error, and the
+  // render keys on lineKey (see the map below), so an intra-batch duplicate must
+  // not survive as a colliding React key. `seen` grows as we go, so the first of
+  // any duplicate pair is kept and the rest dropped.
+  const seen = new Set(existing.map(lineKey))
+  const fresh: LogLine[] = []
+  for (const line of incoming) {
+    const key = lineKey(line)
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    fresh.push(line)
   }
 
-  const seen = new Set(existing.map(lineKey))
-  const fresh = incoming.filter((line) => !seen.has(lineKey(line)))
+  if (existing.length === 0) {
+    return capLines(fresh)
+  }
 
   return fresh.length === 0 ? existing : capLines([...existing, ...fresh])
 }
