@@ -32,6 +32,12 @@ export interface LogPanelProps {
   // phase; this issue's own RunDetail.tsx wiring uses whole-run mode only,
   // since RunDetail has no phase rail yet.
   phase?: string
+  // terminal marks a run that has reached a terminal status. Polling normally
+  // stops on the server's live:false, but a phase left "active" on an
+  // abnormally-closed run (or a server-side quirk) could keep reporting
+  // live:true; a terminal run has no more lines coming, so this caps the loop
+  // at the one catch-up poll regardless of the live flag.
+  terminal?: boolean
 }
 
 type PanelState =
@@ -223,7 +229,7 @@ function levelClass(level: string | undefined): string {
 // maxPollBackoffMs, reset on the next success) so a long-lived tab does not
 // hammer a server that is down; only the very first fetch's failure
 // surfaces as "error"/"unavailable".
-function LogPanel({ runId, phase }: LogPanelProps) {
+function LogPanel({ runId, phase, terminal }: LogPanelProps) {
   // Keyed on runId/phase: the standard React way to reset a component's
   // whole internal state when an identity-defining prop changes (here,
   // "which window am I polling") is to remount it, not to reach into an
@@ -233,12 +239,20 @@ function LogPanel({ runId, phase }: LogPanelProps) {
   // reset lands). Remounting also means LogPanelWindow's own effect below
   // never needs to distinguish "first run" from "runId/phase changed
   // under me" — every mount is unambiguously a fresh window.
-  return <LogPanelWindow key={`${runId}::${phase ?? ''}`} runId={runId} phase={phase} />
+  return <LogPanelWindow key={`${runId}::${phase ?? ''}`} runId={runId} phase={phase} terminal={terminal} />
 }
 
-function LogPanelWindow({ runId, phase }: LogPanelProps) {
+function LogPanelWindow({ runId, phase, terminal }: LogPanelProps) {
   const [state, setState] = useState<PanelState>({ status: 'loading' })
   const stateRef = useRef(state)
+
+  // Mirrored into a ref so the long-lived poll closure below reads the latest
+  // value (a run can finish while this panel is open) without restarting the
+  // loop, matching how stateRef is threaded in.
+  const terminalRef = useRef(terminal)
+  useEffect(() => {
+    terminalRef.current = terminal
+  }, [terminal])
 
   // Autoscroll the console to the newest line as lines arrive, but only while
   // the operator is already pinned to the bottom: if they have scrolled up to
@@ -298,24 +312,30 @@ function LogPanelWindow({ runId, phase }: LogPanelProps) {
 
         consecutiveFailures = 0
 
+        // A terminal run has no more lines coming, so treat it as not-live
+        // regardless of what the response reports: schedule the single catch-up
+        // (to collect any lines still in flight) and then stop, rather than
+        // polling a closed run forever on a stuck live:true.
+        const live = response.live && !terminalRef.current
+
         setState((previous) => {
           const previousLines = previous.status === 'ready' ? previous.lines : []
 
           return {
             status: 'ready',
             lines: appendNewLines(previousLines, response.lines),
-            live: response.live,
+            live,
           }
         })
 
-        if (response.live) {
+        if (live) {
           catchUpDone = false
           scheduleNext(logPollIntervalMs)
         } else if (!catchUpDone) {
           catchUpDone = true
           scheduleNext(catchUpDelayMs)
         }
-        // live:false with the catch-up already done: stop for good.
+        // not live with the catch-up already done: stop for good.
       } catch (error) {
         if (cancelled) {
           return

@@ -90,11 +90,11 @@ function PhaseDetail({ runId, index, phase, terminal }: PhaseDetailProps) {
 
           {isWrite ? (
             <div className="flex flex-col gap-4">
-              <LogPanel runId={runId} phase={phase.name} />
+              <LogPanel runId={runId} phase={phase.name} terminal={terminal} />
               <DriveMetricsPanel runId={runId} terminal={terminal} />
             </div>
           ) : (
-            <LogPanel runId={runId} phase={phase.name} />
+            <LogPanel runId={runId} phase={phase.name} terminal={terminal} />
           )}
         </>
       )}

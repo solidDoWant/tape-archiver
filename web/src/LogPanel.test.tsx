@@ -181,6 +181,36 @@ describe('LogPanel', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
+  it('stops polling a terminal run even if the server keeps reporting live:true', async () => {
+    vi.useFakeTimers()
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(200, {
+          runId: 'run-1',
+          live: true,
+          lines: [line('2026-07-10T12:00:00Z', 'INFO', 'a line')],
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<LogPanel runId="run-1" phase="Write" terminal />)
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    // A terminal run has no more lines coming: it runs the single catch-up poll
+    // (5s later) and then stops, despite the response's stuck live:true — rather
+    // than polling a closed run forever.
+    await vi.advanceTimersByTimeAsync(5000)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    await vi.advanceTimersByTimeAsync(120000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    vi.useRealTimers()
+  })
+
   it('appends late lines found by the single post-live catch-up poll', async () => {
     vi.useFakeTimers()
 
