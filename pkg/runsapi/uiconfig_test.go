@@ -19,17 +19,17 @@ func TestGetUIConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name                     string
-		opts                     []Option
-		expectedBaseURL          string
-		expectedNamespace        string
+		name                      string
+		opts                      []Option
+		expectedBaseURL           string
+		expectedNamespace         string
 		expectedChanger           string
 		expectedDrives            []string
 		expectedWebhookConfigured bool
 		expectedOpticalBurnDrive  []string
-		expectedSlotCount        int
-		expectedCleaningSlots    []int
-		expectedIOStationSlots   []int
+		expectedSlotCount         int
+		expectedCleaningSlots     []int
+		expectedIOStationSlots    []int
 	}{
 		{
 			name: "configured",
@@ -39,15 +39,15 @@ func TestGetUIConfig(t *testing.T) {
 				WithOpticalBurnerDrives([]string{"/dev/sr0", "/dev/sr1"}),
 				WithLibraryTopology(47, []int{45}, []int{46, 47}),
 			},
-			expectedBaseURL:          "https://temporal.example.com",
-			expectedNamespace:        "prod",
+			expectedBaseURL:           "https://temporal.example.com",
+			expectedNamespace:         "prod",
 			expectedChanger:           "/dev/sch0",
 			expectedDrives:            []string{"/dev/nst0", "/dev/nst1"},
 			expectedWebhookConfigured: true,
 			expectedOpticalBurnDrive:  []string{"/dev/sr0", "/dev/sr1"},
-			expectedSlotCount:        47,
-			expectedCleaningSlots:    []int{45},
-			expectedIOStationSlots:   []int{46, 47},
+			expectedSlotCount:         47,
+			expectedCleaningSlots:     []int{45},
+			expectedIOStationSlots:    []int{46, 47},
 		},
 		{
 			name:              "unconfigured reports empty so the SPA omits the link and surfaces validation",
