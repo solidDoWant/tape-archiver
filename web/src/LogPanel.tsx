@@ -395,8 +395,13 @@ function LogPanelWindow({ runId, phase }: LogPanelProps) {
                 {state.live ? 'No log lines yet.' : 'No log lines for this window.'}
               </p>
             ) : (
-              state.lines.map((line, index) => (
-                <div key={`${line.time}-${index}`} className="whitespace-pre-wrap break-words">
+              state.lines.map((line) => (
+                // Keyed on the line's own content identity (lineKey), not its
+                // array index: capLines trims from the front, so an index-based
+                // key shifts for every surviving line and remounts the whole
+                // (unchanged) list. appendNewLines already guarantees lineKey is
+                // unique across the rendered set.
+                <div key={lineKey(line)} className="whitespace-pre-wrap break-words">
                   <span className="text-console-dim">{formatTimestamp(line.time)}</span>{' '}
                   {line.level ? <span className={levelClass(line.level)}>[{line.level}]</span> : null}{' '}
                   <span>{line.message}</span>
