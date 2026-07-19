@@ -497,6 +497,55 @@ func TestExpiredSessionCookie_isRejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
+// TestIdentityFromRequest covers the request-level identity accessor the
+// access-log middleware relies on (cmd/web): a valid session cookie yields the
+// identity, and no cookie / an expired cookie both report ok == false so a
+// caller never distinguishes them.
+func TestIdentityFromRequest(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	authenticator, err := New(t.Context(), testConfig(t, idp))
+	require.NoError(t, err)
+
+	cookieFor := func(t *testing.T, claims sessionClaims) *http.Cookie {
+		t.Helper()
+
+		value, err := authenticator.encrypt(sessionPurpose, claims)
+		require.NoError(t, err)
+
+		return &http.Cookie{Name: sessionCookieName, Value: value}
+	}
+
+	t.Run("valid session yields the identity", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(cookieFor(t, sessionClaims{
+			Subject:   "user-1",
+			Email:     "op@example.com",
+			Name:      "Op Erator",
+			ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		}))
+
+		identity, ok := authenticator.IdentityFromRequest(req)
+		require.True(t, ok)
+		assert.Equal(t, Identity{Subject: "user-1", Email: "op@example.com", Name: "Op Erator"}, identity)
+	})
+
+	t.Run("no cookie reports not authenticated", func(t *testing.T) {
+		_, ok := authenticator.IdentityFromRequest(httptest.NewRequest(http.MethodGet, "/", nil))
+		assert.False(t, ok)
+	})
+
+	t.Run("expired session reports not authenticated", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(cookieFor(t, sessionClaims{
+			Subject:   "user-1",
+			ExpiresAt: time.Now().Add(-time.Minute).Unix(),
+		}))
+
+		_, ok := authenticator.IdentityFromRequest(req)
+		assert.False(t, ok)
+	})
+}
+
 // TestCrossSiteMutation_isRejected covers the CSRF defence-in-depth check on
 // the mutating API: a state-changing /api/* request a browser labels cross-site
 // (via Sec-Fetch-Site or a mismatched Origin) is refused with 403, while

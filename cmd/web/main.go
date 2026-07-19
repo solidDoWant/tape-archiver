@@ -309,10 +309,25 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	// doc comment for the full route/gating contract.
 	handler = authenticator.Wrap(handler)
 
-	// Outermost: hardening response headers (framing/clickjacking, MIME-sniffing,
+	// Hardening response headers (framing/clickjacking, MIME-sniffing,
 	// referrer) on every response — the SPA, /api/*, and the /auth/* routes
 	// authenticator.Wrap adds. See webserver.SecurityHeaders.
 	handler = webserver.SecurityHeaders(handler)
+
+	// Outermost: one structured access-log record per completed request, so
+	// every response the server sends is attributable — method/path/status/
+	// latency/client, plus the authenticated user's OIDC subject when the
+	// request carried a valid session (webauth.Authenticator.IdentityFromRequest
+	// reads it straight from the cookie, since the identity Wrap attaches to the
+	// downstream context is not visible out here). See webserver.AccessLog for
+	// what is deliberately kept out of the record (query strings, bodies).
+	handler = webserver.AccessLog(slog.Default(), func(r *http.Request) string {
+		if identity, ok := authenticator.IdentityFromRequest(r); ok {
+			return identity.Subject
+		}
+
+		return ""
+	}, handler)
 
 	addr := listenAddr(getenv)
 

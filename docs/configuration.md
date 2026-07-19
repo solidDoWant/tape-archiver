@@ -459,6 +459,24 @@ not optional.
 `/readyz` subsequently reflects Temporal connectivity going forward, e.g. if Temporal
 becomes unreachable after startup.
 
+#### Access log
+
+`cmd/web` emits one structured (`slog` JSON, to stderr) access-log record per completed
+HTTP request — the SPA, its assets, `/api/*`, and the `/auth/*` routes alike — with
+`msg` `web: request`. Each record carries the request `method`, the URL `path`, the
+response `status` and `bytes`, the elapsed `duration_ms`, the client `remote` address,
+and — when the request carried a valid session cookie — the authenticated operator's
+OIDC `subject` as `user`. The record's level tracks the status so failures stay visible
+even at a raised `LOG_LEVEL`: `5xx` logs at `error`, `4xx` at `warn`, everything else at
+`info` (so `LOG_LEVEL=warn` keeps only failed requests). Two things are deliberately
+excluded: the **query string** is never logged (only `path`), so the OIDC authorization
+`code`/`state` on `/auth/callback` never reach the log — run IDs, which live in the path
+(`/api/runs/{runID}`), are logged, as an access log is meant to record which resource was
+touched; and no request/response **body, headers, or cookies** are logged. `remote` is
+the first `X-Forwarded-For` entry when present (the original client behind the
+TLS-terminating proxy, trusted on the same basis as `X-Forwarded-Proto` for the `Secure`
+cookie flag), falling back to the direct peer address otherwise.
+
 #### `GET /api/runs` and `GET /api/runs/{runID}`
 
 Both are read-only views over Temporal visibility and the backup workflow's own query

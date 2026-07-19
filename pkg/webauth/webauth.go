@@ -631,6 +631,19 @@ func (a *Authenticator) identityFromSessionCookie(r *http.Request) (Identity, bo
 	return Identity{Subject: claims.Subject, Email: claims.Email, Name: claims.Name}, true
 }
 
+// IdentityFromRequest returns the authenticated Identity carried by r's
+// session cookie, if that cookie is present, valid, and unexpired. It is the
+// request-level counterpart to IdentityFromContext, for a caller that sits
+// *outside* Wrap's gated routes — an access-log middleware wrapping the whole
+// server (see cmd/web) runs before Wrap has attached the identity to the
+// downstream request context, so it cannot use IdentityFromContext and reads
+// the cookie directly instead. Like the gating path, every failure mode — no
+// cookie, tampered value, expired session — is reported the same way
+// (ok == false); a caller must not distinguish them.
+func (a *Authenticator) IdentityFromRequest(r *http.Request) (Identity, bool) {
+	return a.identityFromSessionCookie(r)
+}
+
 // loginPath is the SPA route the styled login page (web/src/LoginPage.tsx)
 // is served at.
 const loginPath = "/login"
