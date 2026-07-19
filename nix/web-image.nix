@@ -3,8 +3,10 @@
 # cmd/web is a standalone, stateless HTTP server (SPA + JSON API, gated behind
 # OIDC — pkg/webauth) that talks only to the Temporal frontend and the OIDC
 # identity provider; it never touches tape hardware or bulk data. So, like
-# nix/control-worker-image.nix, this image is deliberately minimal: just the
-# `web` binary and the TLS roots it needs to reach Temporal/the IdP.
+# nix/control-worker-image.nix, this image is deliberately minimal: the `web`
+# binary, the TLS roots it needs to reach Temporal/the IdP, and `age` — the one
+# external tool cmd/web itself shells out to, for the config builder's
+# server-side age-keygen endpoint (see the `age` param doc below).
 #
 # Unlike `worker`, `web` ships no `healthcheck` self-probe subcommand (adding
 # one is out of scope for the Helm-chart/image packaging issue that introduced
@@ -22,6 +24,14 @@
   cacert,
   # Minimal curl build, used only for the container HEALTHCHECK (see above).
   curlMinimal,
+  # age (>= 1.3.1, native post-quantum recipients — the same package the
+  # data-worker image bundles, SPEC §7). Needed at runtime by the config
+  # builder's server-side age keygen endpoint (POST /api/age/keygen, issue
+  # #279), which shells out to `age-keygen -pq` (pkg/agewrap.GenerateIdentity):
+  # without it on PATH the endpoint fails with "could not generate an age
+  # keypair" and the guided Form-mode keypair generation is dead in every
+  # deployment.
+  age,
   # Short nixpkgs revision, used as the deterministic image tag.
   nixpkgsRev,
 }:
@@ -36,6 +46,7 @@ dockerTools.streamLayeredImage {
     web
     cacert # TLS roots for the Temporal frontend and the OIDC identity provider
     curlMinimal # HEALTHCHECK only — see file doc comment
+    age # age-keygen for POST /api/age/keygen (issue #279) — see param doc above
   ];
 
   config = {
