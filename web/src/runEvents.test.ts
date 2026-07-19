@@ -28,11 +28,19 @@ class FakeEventSource {
   }
 
   emitError() {
-    this.listeners.error?.forEach((listener) => listener({ data: '' } as MessageEvent<string>))
+    // Dispatch inside act() so hook state updates flush without "not wrapped
+    // in act(...)" warnings. Callers that already wrap an emit in act() nest
+    // harmlessly — the inner synchronous act flushes and the outer sees
+    // nothing pending.
+    act(() => {
+      this.listeners.error?.forEach((listener) => listener({ data: '' } as MessageEvent<string>))
+    })
   }
 
   emit(type: string, data: string) {
-    this.listeners[type]?.forEach((listener) => listener({ data } as MessageEvent<string>))
+    act(() => {
+      this.listeners[type]?.forEach((listener) => listener({ data } as MessageEvent<string>))
+    })
   }
 }
 

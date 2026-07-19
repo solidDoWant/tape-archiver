@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import RestartRunButton from './RestartRunButton'
 import { RouterProvider } from './router'
 
@@ -34,7 +34,7 @@ describe('RestartRunButton', () => {
     const button = await screen.findByRole('button', { name: /restart run/i })
     await waitFor(() => expect(button).not.toBeDisabled())
 
-    button.click()
+    fireEvent.click(button)
 
     // submitPath percent-encodes the run ID into the query.
     expect(window.location.pathname + window.location.search).toBe('/submit?from=run%201')
@@ -50,7 +50,7 @@ describe('RestartRunButton', () => {
 
     expect(screen.getByText(/a run is already in progress/i)).toBeInTheDocument()
 
-    button.click()
+    fireEvent.click(button)
     expect(window.location.pathname).toBe('/')
   })
 

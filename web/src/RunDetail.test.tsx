@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import RunDetail from './RunDetail'
 import { RouterProvider } from './router'
 
@@ -29,11 +29,19 @@ class FakeEventSource {
 
   emit(type: 'update' | 'done', body: unknown) {
     const event = { data: JSON.stringify(body) } as MessageEvent<string>
-    this.listeners[type]?.forEach((listener) => listener(event))
+    // Dispatch inside act() so the React state updates the listeners trigger
+    // are flushed the way the browser would, without "not wrapped in act(...)"
+    // warnings. The listeners are synchronous, so the returned thenable
+    // resolves immediately and needs no await.
+    act(() => {
+      this.listeners[type]?.forEach((listener) => listener(event))
+    })
   }
 
   emitError() {
-    this.listeners.error?.forEach((listener) => listener({ data: '' } as MessageEvent<string>))
+    act(() => {
+      this.listeners.error?.forEach((listener) => listener({ data: '' } as MessageEvent<string>))
+    })
   }
 }
 
@@ -166,6 +174,11 @@ describe('RunDetail', () => {
     // (App.tsx) is the single "Run {runId}" header. App.test.tsx covers that the
     // shell shows the run name for a run route.
     expect(screen.queryByRole('heading', { name: /run run-abc/i })).not.toBeInTheDocument()
+
+    // This assertion is synchronous, but RunDetail still fetches its config /
+    // phases / detail on mount; flush those inside act() so their settle does
+    // not land after the test as a "not wrapped in act(...)" warning.
+    await act(async () => {})
   })
 
   it('renders the phase rail with all 11 phases, in pipeline order, once loaded', async () => {
@@ -191,14 +204,14 @@ describe('RunDetail', () => {
     await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
 
     // Pack (index 2, completed) is not the active phase (PAR2, index 3).
-    screen.getByRole('button', { name: /^pack/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /^pack/i }))
 
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Pack' })).toBeInTheDocument()
     })
     expect(screen.getByRole('log')).toBeInTheDocument()
 
-    screen.getByRole('button', { name: /^par2/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /^par2/i }))
 
     await waitFor(() => {
       expect(screen.getByText('Recovery sets')).toBeInTheDocument()
@@ -211,7 +224,7 @@ describe('RunDetail', () => {
       '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } },
     })
 
-    screen.getByRole('button', { name: /^par2/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /^par2/i }))
 
     // The rail's button says "PAR2" (display label), but the log window must
     // be scoped by the phase's stable workflow name — VictoriaLogs records
@@ -273,7 +286,7 @@ describe('RunDetail', () => {
   it('shows a pending placeholder for a phase that has not started', async () => {
     await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
 
-    screen.getByRole('button', { name: /^deliver/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /^deliver/i }))
 
     await waitFor(() => {
       expect(screen.getByText(/not started/i)).toBeInTheDocument()
@@ -289,7 +302,7 @@ describe('RunDetail', () => {
       },
     })
 
-    screen.getByRole('button', { name: /^write/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /^write/i }))
 
     await waitFor(() => {
       expect(screen.getByText(/140 MB\/s/)).toBeInTheDocument()
@@ -353,7 +366,7 @@ describe('RunDetail', () => {
       '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: writePhases('completed') } },
     })
 
-    screen.getByRole('button', { name: /^write/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /^write/i }))
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-abc/metrics/drives', undefined)

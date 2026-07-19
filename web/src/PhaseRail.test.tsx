@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import PhaseRail from './PhaseRail'
 import { formatDuration, phaseLabel } from './phaseFormat'
 import type { PhaseInfo } from './RunDetail'
@@ -70,7 +70,7 @@ describe('PhaseRail', () => {
     const onSelect = vi.fn()
     render(<PhaseRail phases={phases} selected="overview" onSelect={onSelect} />)
 
-    screen.getByRole('button', { name: /^write/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /^write/i }))
 
     expect(onSelect).toHaveBeenCalledWith('Write')
   })
@@ -79,7 +79,7 @@ describe('PhaseRail', () => {
     const onSelect = vi.fn()
     render(<PhaseRail phases={phases} selected="Write" onSelect={onSelect} />)
 
-    screen.getByRole('button', { name: /run overview/i }).click()
+    fireEvent.click(screen.getByRole('button', { name: /run overview/i }))
 
     expect(onSelect).toHaveBeenCalledWith('overview')
   })

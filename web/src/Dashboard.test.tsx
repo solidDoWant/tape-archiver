@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import Dashboard from './Dashboard'
 import { RouterProvider } from './router'
 
@@ -27,7 +27,11 @@ class FakeEventSource {
 
   emit(type: 'update' | 'done', body: unknown) {
     const event = { data: JSON.stringify(body) } as MessageEvent<string>
-    this.listeners[type]?.forEach((listener) => listener(event))
+    // Dispatch inside act() so the state updates the listeners trigger flush
+    // the way the browser would, without "not wrapped in act(...)" warnings.
+    act(() => {
+      this.listeners[type]?.forEach((listener) => listener(event))
+    })
   }
 }
 

@@ -1,10 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import ConfigPage from './ConfigPage'
 import { RouterProvider } from './router'
 import { onSessionExpired } from './api'
 import { resetConfigSchemaCache } from './configSchema'
 import { testRunConfigSchema } from './testSchemaFixture'
+
+// settle flushes state updates still pending from the page's fetch-on-mount
+// inside act(), so they do not land after the test body returns as a "not wrapped
+// in act(...)" warning. Awaiting one async act() tick drains the resolved-promise
+// microtask chain those fetches sit on.
+async function settle() {
+  await act(async () => {})
+}
 
 function jsonResponse(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body }
@@ -116,6 +124,8 @@ describe('ConfigPage', () => {
 
     const link = screen.getByRole('link', { name: /open current run/i })
     expect(link).toHaveAttribute('href', '/runs/run-live')
+
+    await settle()
   })
 
   it('renders the Form-mode editor by default when no run is active', async () => {
@@ -127,6 +137,8 @@ describe('ConfigPage', () => {
 
     expect(screen.getByText('STEP 1 · BUILD')).toBeInTheDocument()
     expect(screen.getByText('Sources')).toBeInTheDocument()
+
+    await settle()
   })
 
   it('blocks a bare non-object JSON document at Review instead of a dead review step', async () => {
@@ -142,6 +154,8 @@ describe('ConfigPage', () => {
     })
     // It must NOT advance to a blank Review step with a no-op Submit.
     expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('serializes the current form into JSON text when switching to JSON mode', async () => {
@@ -156,6 +170,8 @@ describe('ConfigPage', () => {
 
     const textarea = screen.getByLabelText('Run config (JSON)') as HTMLTextAreaElement
     expect(textarea.value).toContain('bulk-pool-01/switch-test')
+
+    await settle()
   })
 
   it('loads valid JSON text into the form when switching from JSON to Form mode', async () => {
@@ -177,6 +193,8 @@ describe('ConfigPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Form' }))
 
     expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('bulk-pool-01/from-json')
+
+    await settle()
   })
 
   it('does not revert form edits when the already-active Form tab is clicked again', async () => {
@@ -197,6 +215,8 @@ describe('ConfigPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Form' }))
 
     expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('bulk-pool-01/edited')
+
+    await settle()
   })
 
   it('names the fields Form mode would drop when switching JSON with advanced-only fields to Form mode', async () => {
@@ -231,6 +251,8 @@ describe('ConfigPage', () => {
     const notice = screen.getByText(/the form has no controls for/i)
     expect(notice).toHaveTextContent('feasibilityOverhead')
     expect(notice).toHaveTextContent('library.ioWaitTimeoutSeconds')
+
+    await settle()
   })
 
   it('warns that a tape capacity matching no LTO generation is reset on the switch to Form', async () => {
@@ -252,6 +274,8 @@ describe('ConfigPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Form' }))
 
     expect(screen.getByText(/matches no known LTO generation/i)).toBeInTheDocument()
+
+    await settle()
   })
 
   it('shows no dropped-field notice when the JSON carries only form-modeled fields', async () => {
@@ -273,6 +297,8 @@ describe('ConfigPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Form' }))
 
     expect(screen.queryByText(/the form has no controls for/i)).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('warns that Form mode replaces the JSON device/webhook values with deploy config on a JSON → Form switch (issue #304)', async () => {
@@ -301,6 +327,8 @@ describe('ConfigPage', () => {
     expect(notice).toHaveTextContent('library.changer')
     expect(notice).toHaveTextContent('library.drives')
     expect(notice).toHaveTextContent('delivery.webhookUrl')
+
+    await settle()
   })
 
   it('keeps the form unchanged and shows a notice when switching from malformed JSON to Form mode', async () => {
@@ -314,6 +342,8 @@ describe('ConfigPage', () => {
     expect(screen.getByText(/could not be loaded into the form/i)).toBeInTheDocument()
     // Falls back to the default (unmodified) form state.
     expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('')
+
+    await settle()
   })
 
   it('blocks Review with a field-named error when a critical field is left empty (issue #321)', async () => {
@@ -337,6 +367,8 @@ describe('ConfigPage', () => {
     })
     expect(screen.getByText(/library\.blankSlots: must have at least one item/i)).toBeInTheDocument()
     expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('blocks Review when the blank-slot count is not a multiple of copies', async () => {
@@ -365,6 +397,8 @@ describe('ConfigPage', () => {
     // message text.
     expect(screen.getByText(/library\.blankSlots:.*not a multiple of 2 copies/i)).toBeInTheDocument()
     expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('advances Form mode to Review only once the config validates, then submits and redirects to the run page', async () => {
@@ -400,6 +434,8 @@ describe('ConfigPage', () => {
         body: expect.stringContaining('"dryRun":false'),
       }),
     )
+
+    await settle()
   })
 
   it('blocks the Review transition and shows the schema issue when the config does not validate', async () => {
@@ -434,6 +470,8 @@ describe('ConfigPage', () => {
     // Never advanced to Review.
     expect(screen.getByText('STEP 1 · BUILD')).toBeInTheDocument()
     expect(screen.queryByText('Review before submitting')).not.toBeInTheDocument()
+
+    await settle()
   })
 
   // issue #285 (PR #297 review): the Review step's schema fetch is
@@ -459,6 +497,8 @@ describe('ConfigPage', () => {
     })
 
     unsubscribe()
+
+    await settle()
   })
 
   it('routes JSON mode through the Review step before submitting, then redirects to the run page', async () => {
@@ -493,6 +533,8 @@ describe('ConfigPage', () => {
       expect(onViewRun).toHaveBeenCalledWith('run-json-1')
     })
     expect(fetchMock).toHaveBeenCalledWith('/api/runs', expect.objectContaining({ method: 'POST' }))
+
+    await settle()
   })
 
   it('reports a JSON parse error at the Review step without contacting the server', async () => {
@@ -515,6 +557,8 @@ describe('ConfigPage', () => {
     // It stayed on the editor — the invalid config never reached Review or the server.
     expect(screen.queryByText(/review before submitting/i)).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+
+    await settle()
   })
 
   it('toggles dry-run and includes it in the submission body', async () => {
@@ -551,6 +595,8 @@ describe('ConfigPage', () => {
       '/api/runs',
       expect.objectContaining({ body: expect.stringContaining('"dryRun":true') }),
     )
+
+    await settle()
   })
 
   it('falls back to an inline confirmation with the run ID when rendered without a navigation callback', async () => {
@@ -579,6 +625,8 @@ describe('ConfigPage', () => {
     expect(screen.getByText('run-view-1')).toBeInTheDocument()
     // Without a navigation callback there is no "View run" affordance.
     expect(screen.queryByRole('button', { name: /view run/i })).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('preloads a prior run’s config for a restart, blanking the redacted age identity', async () => {
@@ -614,6 +662,8 @@ describe('ConfigPage', () => {
 
     // A restart of a production run leaves Dry-run off (its default).
     expect(screen.getByLabelText(/dry-run/i)).not.toBeChecked()
+
+    await settle()
   })
 
   it('carries the dry-run flag over when restarting a dry-run', async () => {
@@ -641,6 +691,8 @@ describe('ConfigPage', () => {
 
     // ...and the notice says so.
     expect(screen.getByText(/this run was a dry-run/i)).toBeInTheDocument()
+
+    await settle()
   })
 
   it('surfaces an error but still lets the operator build a run when the restart config can’t be loaded', async () => {
@@ -655,5 +707,7 @@ describe('ConfigPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not load run gone.s configuration/i)
     // The form is still usable — the restart failure is non-fatal.
     expect(screen.getByRole('button', { name: /review/i })).toBeInTheDocument()
+
+    await settle()
   })
 })

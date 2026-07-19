@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
 
 // MinimalEventSource stands in for the browser's real EventSource (not
@@ -127,6 +127,14 @@ async function renderAuthenticated(overrides: Record<string, { status: number; b
   return fetchMock
 }
 
+// settle flushes state updates still pending from the pages/cards' fetch-on-mount
+// inside act(), so they do not land after the test body returns as a "not wrapped
+// in act(...)" warning. Awaiting one async act() tick drains the resolved-promise
+// microtask chain those fetches sit on.
+async function settle() {
+  await act(async () => {})
+}
+
 describe('App shell (authenticated)', () => {
   it('renders the sidebar nav items, the operator identity, and the dashboard at the root path', async () => {
     await renderAuthenticated()
@@ -151,6 +159,8 @@ describe('App shell (authenticated)', () => {
     await waitFor(() => {
       expect(screen.getByText('No runs yet')).toBeInTheDocument()
     })
+
+    await settle()
   })
 
   it('renders the config page at "/submit"', async () => {
@@ -164,6 +174,8 @@ describe('App shell (authenticated)', () => {
     await waitFor(() => {
       expect(screen.getByRole('group', { name: /config input mode/i })).toBeInTheDocument()
     })
+
+    await settle()
   })
 
   it('shows the Light/Dark/Auto theme control and applies an explicit Dark choice', async () => {
@@ -186,6 +198,8 @@ describe('App shell (authenticated)', () => {
     expect(window.localStorage.getItem('tape-archiver:theme')).toBe('auto')
     // setupTests' matchMedia stub reports light, so Auto resolves to light.
     expect(document.documentElement.classList.contains('dark')).toBe(false)
+
+    await settle()
   })
 
   it('disables "Start new run" with an explanation while a run is active', async () => {
@@ -221,6 +235,8 @@ describe('App shell (authenticated)', () => {
     expect(tooltip).toHaveTextContent(/already in progress/i)
     expect(tooltip.id).not.toBe('')
     expect(disabledItem).toHaveAttribute('aria-describedby', tooltip.id)
+
+    await settle()
   })
 
   it('navigates back to the dashboard (with the embedded runs table) via the sidebar', async () => {
@@ -249,6 +265,8 @@ describe('App shell (authenticated)', () => {
       expect(screen.getByRole('link', { name: 'run-1' })).toBeInTheDocument()
     })
     expect(window.location.pathname).toBe('/')
+
+    await settle()
   })
 
   it('renders the run detail view directly when the URL already points at a run', async () => {
@@ -260,6 +278,8 @@ describe('App shell (authenticated)', () => {
     // RunDetail no longer renders its own duplicate title bar).
     expect(screen.getByText('Run run-xyz')).toBeInTheDocument()
     expect(screen.queryByRole('form', { name: /submit backup run/i })).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('surfaces the run status and runtime in the shell header (design mockup)', async () => {
@@ -284,6 +304,8 @@ describe('App shell (authenticated)', () => {
     // run's detail loads — the status pill and runtime line the design mockup shows.
     expect(await screen.findByText('COMPLETE')).toBeInTheDocument()
     expect(screen.getByText('ran 5h 14m')).toBeInTheDocument()
+
+    await settle()
   })
 
   it('navigates from a history row straight to that run detail view', async () => {
@@ -313,6 +335,8 @@ describe('App shell (authenticated)', () => {
 
     expect(screen.getByText('Run run-1')).toBeInTheDocument()
     expect(window.location.pathname).toBe('/runs/run-1')
+
+    await settle()
   })
 
   it('returns to the previous view via the browser back button', async () => {
@@ -329,6 +353,8 @@ describe('App shell (authenticated)', () => {
     await waitFor(() => {
       expect(screen.getByText('No runs yet')).toBeInTheDocument()
     })
+
+    await settle()
   })
 
   it('shows the Tapes placeholder page via the sidebar', async () => {
@@ -338,6 +364,8 @@ describe('App shell (authenticated)', () => {
 
     expect(screen.getByRole('heading', { name: /tapes/i })).toBeInTheDocument()
     expect(window.location.pathname).toBe('/tapes')
+
+    await settle()
   })
 
   it('shows the 404 page, with the sidebar still present, for an unknown path', async () => {
@@ -353,6 +381,8 @@ describe('App shell (authenticated)', () => {
 
     fireEvent.click(screen.getByRole('link', { name: /back to dashboard/i }))
     expect(window.location.pathname).toBe('/')
+
+    await settle()
   })
 
   it('redirects "/history" to "/", the dashboard now embedding what used to be the standalone history page', async () => {
@@ -366,6 +396,8 @@ describe('App shell (authenticated)', () => {
     await waitFor(() => {
       expect(screen.getByText('No runs yet')).toBeInTheDocument()
     })
+
+    await settle()
   })
 
   it('redirects a bookmarked /login back into the app when already signed in', async () => {
@@ -377,6 +409,8 @@ describe('App shell (authenticated)', () => {
     await waitFor(() => {
       expect(window.location.pathname).toBe('/tapes')
     })
+
+    await settle()
   })
 })
 
@@ -397,6 +431,8 @@ describe('App auth gating (unauthenticated)', () => {
 
     // Nothing gated leaked out.
     expect(screen.queryByRole('navigation', { name: 'Main' })).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('keeps tracking live OS theme changes on the login page under Auto', async () => {
@@ -415,16 +451,18 @@ describe('App auth gating (unauthenticated)', () => {
     // The OS flips to dark mid-session; the login page (rendered WITHOUT
     // the authenticated shell, whose sidebar used to be the only thing
     // mounting the theme hook) must follow it live.
-    fireChange(true)
+    act(() => fireChange(true))
     await waitFor(() => {
       expect(document.documentElement.classList.contains('dark')).toBe(true)
     })
 
     // ... and back.
-    fireChange(false)
+    act(() => fireChange(false))
     await waitFor(() => {
       expect(document.documentElement.classList.contains('dark')).toBe(false)
     })
+
+    await settle()
   })
 })
 
@@ -473,6 +511,8 @@ describe('App auth gating (mid-session 401)', () => {
     // TapesPage might otherwise have rendered in place — is gone.
     expect(screen.queryByRole('navigation', { name: 'Main' })).not.toBeInTheDocument()
     expect(screen.queryByText(/unauthorized/i)).not.toBeInTheDocument()
+
+    await settle()
   })
 
   it('does not treat a non-401 failure (e.g. a flaky proxy hop) as session loss', async () => {
@@ -504,6 +544,8 @@ describe('App auth gating (mid-session 401)', () => {
     expect(window.location.pathname).toBe('/tapes')
     expect(screen.queryByRole('button', { name: /continue with sso/i })).not.toBeInTheDocument()
     expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument()
+
+    await settle()
   })
 
   it('lands the operator back on the page they were on once they sign back in', async () => {
@@ -523,5 +565,7 @@ describe('App auth gating (mid-session 401)', () => {
     })
     expect(window.location.pathname).toBe('/tapes')
     expect(screen.queryByRole('button', { name: /continue with sso/i })).not.toBeInTheDocument()
+
+    await settle()
   })
 })

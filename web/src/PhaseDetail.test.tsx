@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import PhaseDetail from './PhaseDetail'
 import type { PhaseInfo } from './RunDetail'
 
@@ -24,6 +24,14 @@ function stubPanels() {
       return Promise.resolve(jsonResponse(503, { error: 'unavailable' }))
     }),
   )
+}
+
+// settle flushes state updates still pending from PhaseDetail's (and its embedded
+// panels') fetch-on-mount inside act(), so they do not land after the test body
+// returns as a "not wrapped in act(...)" warning. Awaiting one async act() tick
+// drains the resolved-promise microtask chain those fetches sit on.
+async function settle() {
+  await act(async () => {})
 }
 
 afterEach(() => {
@@ -52,6 +60,8 @@ describe('PhaseDetail', () => {
     await waitFor(() => {
       expect(screen.getByRole('log')).toBeInTheDocument()
     })
+
+    await settle()
   })
 
   it('renders a pending placeholder without a log panel', () => {
@@ -80,9 +90,11 @@ describe('PhaseDetail', () => {
 
     expect(screen.getByText('checksum mismatch for archive 004')).toBeInTheDocument()
     expect(screen.getByText('FAILED')).toBeInTheDocument()
+
+    await settle()
   })
 
-  it('embeds DriveMetricsPanel alongside the log for the Write phase only', () => {
+  it('embeds DriveMetricsPanel alongside the log for the Write phase only', async () => {
     stubPanels()
 
     const write: PhaseInfo = { name: 'Write', status: 'active', startTime: '2026-07-09T12:00:00Z', facts: [] }
@@ -94,5 +106,7 @@ describe('PhaseDetail', () => {
     rerender(<PhaseDetail runId="run-1" index={5} phase={verify} terminal={false} />)
 
     expect(screen.queryByText(/drive 0/i)).not.toBeInTheDocument()
+
+    await settle()
   })
 })

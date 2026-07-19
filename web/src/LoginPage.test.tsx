@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import LoginPage from './LoginPage'
+
+// settle flushes state updates still pending from a component's fetch-on-mount
+// (e.g. the footer version fetch) inside act(), so they do not land after the
+// test body returns as a "not wrapped in act(...)" warning. Awaiting one async
+// act() tick drains the resolved-promise microtask chain those fetches sit on.
+async function settle() {
+  await act(async () => {})
+}
 
 // jsonResponse builds a minimal fetch Response stand-in, matching the shape
 // api.ts reads (ok/status/json()) — here only the Footer's
@@ -58,7 +66,7 @@ afterEach(() => {
 })
 
 describe('LoginPage', () => {
-  it('default state: brand mark, an enabled sign-in control, no heading, no error banner', () => {
+  it('default state: brand mark, an enabled sign-in control, no heading, no error banner', async () => {
     render(<LoginPage />)
 
     expect(screen.getByText('tape-archiver')).toBeInTheDocument()
@@ -70,9 +78,10 @@ describe('LoginPage', () => {
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByRole('heading')).not.toBeInTheDocument()
+    await settle()
   })
 
-  it('starts the OIDC flow (a real navigation to /auth/login) when the control is activated', () => {
+  it('starts the OIDC flow (a real navigation to /auth/login) when the control is activated', async () => {
     window.history.pushState({}, '', '/login?redirect=%2Fruns%2Fabc')
 
     render(<LoginPage />)
@@ -80,9 +89,10 @@ describe('LoginPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /continue with sso/i }))
 
     expect(location.assign).toHaveBeenCalledWith('/auth/login?redirect=%2Fruns%2Fabc')
+    await settle()
   })
 
-  it('redirecting state: shows a redirecting heading and disables the control from re-triggering', () => {
+  it('redirecting state: shows a redirecting heading and disables the control from re-triggering', async () => {
     render(<LoginPage />)
 
     fireEvent.click(screen.getByRole('button', { name: /continue with sso/i }))
@@ -94,9 +104,10 @@ describe('LoginPage', () => {
 
     fireEvent.click(button)
     expect(location.assign).toHaveBeenCalledTimes(1)
+    await settle()
   })
 
-  it('error-denied state: shows the access-denied banner and a way to retry sign-in', () => {
+  it('error-denied state: shows the access-denied banner and a way to retry sign-in', async () => {
     window.history.pushState({}, '', '/login?error=denied')
 
     render(<LoginPage />)
@@ -110,9 +121,10 @@ describe('LoginPage', () => {
     const retry = screen.getByRole('button', { name: /^sign in$/i })
     fireEvent.click(retry)
     expect(location.assign).toHaveBeenCalledWith('/auth/login?redirect=%2F')
+    await settle()
   })
 
-  it('error-expired state: shows the session-expired banner and a way to retry sign-in', () => {
+  it('error-expired state: shows the session-expired banner and a way to retry sign-in', async () => {
     window.history.pushState({}, '', '/login?error=expired&redirect=%2Ftapes')
 
     render(<LoginPage />)
@@ -122,18 +134,20 @@ describe('LoginPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }))
     expect(location.assign).toHaveBeenCalledWith('/auth/login?redirect=%2Ftapes')
+    await settle()
   })
 
-  it('offers "Try a different account" on error states, triggering the same sign-in flow', () => {
+  it('offers "Try a different account" on error states, triggering the same sign-in flow', async () => {
     window.history.pushState({}, '', '/login?error=denied')
 
     render(<LoginPage />)
 
     fireEvent.click(screen.getByRole('button', { name: /try a different account/i }))
     expect(location.assign).toHaveBeenCalledWith('/auth/login?redirect=%2F')
+    await settle()
   })
 
-  it('sanitizes a malicious redirect parameter instead of passing it to the auth flow', () => {
+  it('sanitizes a malicious redirect parameter instead of passing it to the auth flow', async () => {
     window.history.pushState({}, '', '/login?redirect=' + encodeURIComponent('//evil.example'))
 
     render(<LoginPage />)
@@ -141,6 +155,7 @@ describe('LoginPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /continue with sso/i }))
 
     expect(location.assign).toHaveBeenCalledWith('/auth/login?redirect=%2F')
+    await settle()
   })
 
   it('renders the footer version line, including the configured host label', async () => {

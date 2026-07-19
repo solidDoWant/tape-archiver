@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import LogPanel from './LogPanel'
 
 // jsonResponse builds a fetch Response stand-in, mirroring RunHistory.test.tsx's
@@ -10,6 +10,19 @@ function jsonResponse(status: number, body: unknown) {
 
 function line(time: string, level: string, message: string) {
   return { time, level, message }
+}
+
+// advance drives the fake clock forward inside act() so the poll fetches that
+// fire on each tick — and the state updates their responses trigger — are
+// flushed the way React expects. vi.advanceTimersByTimeAsync / vi.waitFor do
+// not wrap updates in act() (unlike RTL's waitFor), so a bare timer advance
+// leaves LogPanel's setState landing outside act, which React reports as "not
+// wrapped in act(...)". advance(0) after render flushes the mount fetch's
+// resolved-promise chain the same way, without moving the clock.
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms)
+  })
 }
 
 afterEach(() => {
@@ -156,10 +169,11 @@ describe('LogPanel', () => {
 
     render(<LogPanel runId="run-1" />)
 
+    await advance(0)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
     await vi.waitFor(() => expect(screen.getByText('first line')).toBeInTheDocument())
 
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
 
     // since reaches 10s (sinceOverlapMs) before the newest seen line's time, so
     // a slightly out-of-order/late-ingested line is not permanently skipped; the
@@ -172,12 +186,12 @@ describe('LogPanel', () => {
 
     // live:false does not stop polling on the spot: log shipping is
     // asynchronous, so exactly one delayed catch-up poll runs first...
-    await vi.advanceTimersByTimeAsync(5000)
+    await advance(5000)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
 
     // ...and once that catch-up also reports live:false, polling stops for
     // good.
-    await vi.advanceTimersByTimeAsync(120000)
+    await advance(120000)
     expect(fetchMock).toHaveBeenCalledTimes(3)
   })
 
@@ -197,15 +211,16 @@ describe('LogPanel', () => {
 
     render(<LogPanel runId="run-1" phase="Write" terminal />)
 
+    await advance(0)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
 
     // A terminal run has no more lines coming: it runs the single catch-up poll
     // (5s later) and then stops, despite the response's stuck live:true — rather
     // than polling a closed run forever.
-    await vi.advanceTimersByTimeAsync(5000)
+    await advance(5000)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
-    await vi.advanceTimersByTimeAsync(120000)
+    await advance(120000)
     expect(fetchMock).toHaveBeenCalledTimes(2)
 
     vi.useRealTimers()
@@ -234,17 +249,18 @@ describe('LogPanel', () => {
 
     render(<LogPanel runId="run-1" />)
 
+    await advance(0)
     await vi.waitFor(() => expect(screen.getByText('body line')).toBeInTheDocument())
 
     // The trailing lines a batched shipper had not delivered yet when the
     // live:false response was served — often the run's final summary or
     // error, the most operator-relevant lines — arrive via the catch-up.
-    await vi.advanceTimersByTimeAsync(5000)
+    await advance(5000)
     await vi.waitFor(() => expect(screen.getByText('final error summary')).toBeInTheDocument())
     expect(screen.getByText('body line')).toBeInTheDocument()
 
     // Exactly one catch-up; the panel then stops for good.
-    await vi.advanceTimersByTimeAsync(120000)
+    await advance(120000)
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
@@ -276,9 +292,10 @@ describe('LogPanel', () => {
 
     render(<LogPanel runId="run-1" />)
 
+    await advance(0)
     await vi.waitFor(() => expect(screen.getByText('twin one')).toBeInTheDocument())
 
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
     await vi.waitFor(() => expect(screen.getByText('twin two')).toBeInTheDocument())
 
     // getAllByText, not getByText: the whole point is asserting the re-sent
@@ -304,24 +321,25 @@ describe('LogPanel', () => {
 
     render(<LogPanel runId="run-1" />)
 
+    await advance(0)
     await vi.waitFor(() => expect(screen.getByText('still here')).toBeInTheDocument())
 
     // The regular poll at +3s is the first failure; its retry keeps the
     // base 3s delay (backoff starts doubling from the second consecutive
     // failure).
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
 
     // After the second failure the retry is backed off to 6s: nothing at
     // +3s...
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
     expect(fetchMock).toHaveBeenCalledTimes(3)
 
     // ...but it fires by +6s, and the lines already shown were never lost.
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4))
     expect(screen.getByText('still here')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
@@ -346,9 +364,10 @@ describe('LogPanel', () => {
 
     render(<LogPanel runId="run-1" />)
 
+    await advance(0)
     await vi.waitFor(() => expect(screen.getByText('ok so far')).toBeInTheDocument())
 
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     // The failed poll must not blow away what's already shown, nor show an
@@ -357,7 +376,7 @@ describe('LogPanel', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(screen.queryByText(/logs unavailable/i)).not.toBeInTheDocument()
 
-    await vi.advanceTimersByTimeAsync(3000)
+    await advance(3000)
     await vi.waitFor(() => expect(screen.getByText('recovered')).toBeInTheDocument())
   })
 
@@ -372,5 +391,10 @@ describe('LogPanel', () => {
 
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/runs/run-2/logs', undefined)
+
+    // Real timers here (no fake clock): flush the run-2 fetch's resolved-line
+    // render inside act() so it does not land after the test as a "not wrapped
+    // in act(...)" warning.
+    await act(async () => {})
   })
 })

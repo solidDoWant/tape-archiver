@@ -1,9 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import DriveMetricsPanel from './DriveMetricsPanel'
 
 function jsonResponse(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body }
+}
+
+// advance drives the fake clock forward inside act() so the poll fetches each
+// tick issues — and the state updates their responses trigger — are flushed
+// the way React expects. vi.advanceTimersByTimeAsync / vi.waitFor do not wrap
+// updates in act() (unlike RTL's waitFor), so a bare advance leaves the
+// panel's setState landing outside act, which React reports as "not wrapped in
+// act(...)". advance(0) after render flushes the mount fetch's resolved-promise
+// chain the same way, without moving the clock.
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms)
+  })
 }
 
 afterEach(() => {
@@ -132,11 +145,12 @@ describe('DriveMetricsPanel', () => {
 
     render(<DriveMetricsPanel runId="run-1" pollIntervalMs={1000} />)
 
+    await advance(0)
     await vi.waitFor(() => expect(screen.getByText('38 MB/s')).toBeInTheDocument())
 
     // A later poll fails; the gauges must stay (not collapse to "unavailable"),
     // preserving each card's sparkline history.
-    await vi.advanceTimersByTimeAsync(1000)
+    await advance(1000)
     await vi.waitFor(() => expect(drivesCalls).toBeGreaterThanOrEqual(2))
 
     expect(screen.getByText('38 MB/s')).toBeInTheDocument()
@@ -196,12 +210,13 @@ describe('DriveMetricsPanel', () => {
     render(<DriveMetricsPanel runId="run-1" pollIntervalMs={1000} />)
 
     // The sparkline populates from the first successful history poll.
+    await advance(0)
     await vi.waitFor(() => expect(screen.getByRole('img', { name: /write rate over the last/i })).toBeInTheDocument())
 
     // A later history poll 503s; the sparkline must keep its last-good data
     // rather than flipping to the "unavailable" placeholder (mirroring how the
     // parent keeps the gauge live through the same blip).
-    await vi.advanceTimersByTimeAsync(1000)
+    await advance(1000)
     await vi.waitFor(() => expect(historyCalls).toBeGreaterThanOrEqual(2))
 
     expect(screen.getByRole('img', { name: /write rate over the last/i })).toBeInTheDocument()
@@ -218,9 +233,10 @@ describe('DriveMetricsPanel', () => {
 
     render(<DriveMetricsPanel runId="run-1" pollIntervalMs={1000} />)
 
+    await advance(0)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
 
-    await vi.advanceTimersByTimeAsync(1000)
+    await advance(1000)
     await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2))
 
     vi.useRealTimers()
@@ -234,12 +250,13 @@ describe('DriveMetricsPanel', () => {
 
     const { unmount } = render(<DriveMetricsPanel runId="run-1" pollIntervalMs={1000} />)
 
+    await advance(0)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
 
     unmount()
     const callsAtUnmount = fetchMock.mock.calls.length
 
-    await vi.advanceTimersByTimeAsync(5000)
+    await advance(5000)
 
     expect(fetchMock.mock.calls.length).toBe(callsAtUnmount)
 
@@ -263,7 +280,7 @@ describe('DriveMetricsPanel', () => {
       const callsAfterMount = fetchMock.mock.calls.length
       expect(callsAfterMount).toBeGreaterThan(0)
 
-      await vi.advanceTimersByTimeAsync(10_000)
+      await advance(10_000)
 
       // No new poll while the first is still pending — the interval-driven
       // version would have fired ~10 more by now.
@@ -329,6 +346,7 @@ describe('DriveMetricsPanel', () => {
 
       render(<DriveMetricsPanel runId="run-1" terminal pollIntervalMs={1000} />)
 
+      await advance(0)
       await vi.waitFor(() => expect(screen.getByText('140 MB/s')).toBeInTheDocument())
       expect(screen.getByText(/measured once, after each tape completes/i)).toBeInTheDocument()
       expect(screen.getByText(/TA0001L6/)).toBeInTheDocument()
@@ -340,7 +358,7 @@ describe('DriveMetricsPanel', () => {
       expect(calls.every((url) => url.endsWith('/api/runs/run-1/tapes'))).toBe(true)
 
       // And it is a single fetch, not a poll.
-      await vi.advanceTimersByTimeAsync(5000)
+      await advance(5000)
       expect(fetchMock).toHaveBeenCalledTimes(1)
 
       vi.useRealTimers()

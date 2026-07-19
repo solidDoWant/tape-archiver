@@ -1,7 +1,15 @@
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiFetch } from './api'
 import { useIdentity } from './identity'
+
+// settle flushes state updates still pending from the hook's async work inside
+// act(), so they do not land after the test body returns as a "not wrapped in
+// act(...)" warning. Awaiting one async act() tick drains the resolved-promise
+// microtask chain.
+async function settle() {
+  await act(async () => {})
+}
 
 // jsonResponse builds a minimal fetch Response stand-in, matching the shape
 // apiFetch reads (ok/status/json()).
@@ -24,6 +32,8 @@ describe('useIdentity', () => {
     await waitFor(() => {
       expect(result.current).toEqual({ status: 'authenticated', identity: testIdentity })
     })
+
+    await settle()
   })
 
   // issue #285: a mid-session 401 — an in-app fetch made well after mount,
@@ -46,11 +56,15 @@ describe('useIdentity', () => {
     // caller), long after useIdentity's own mount-time check already
     // resolved.
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized' })))
-    await expect(apiFetch('/api/runs')).rejects.toMatchObject({ status: 401 })
+    await act(async () => {
+      await expect(apiFetch('/api/runs')).rejects.toMatchObject({ status: 401 })
+    })
 
     await waitFor(() => {
       expect(result.current).toEqual({ status: 'unauthenticated' })
     })
+
+    await settle()
   })
 
   it('resolves to unauthenticated when the mount-time /api/me itself 401s', async () => {
@@ -61,6 +75,8 @@ describe('useIdentity', () => {
     await waitFor(() => {
       expect(result.current).toEqual({ status: 'unauthenticated' })
     })
+
+    await settle()
   })
 
   it('unsubscribes from session-expiry notifications on unmount', async () => {
@@ -79,5 +95,7 @@ describe('useIdentity', () => {
     // Library detaches it); this only needs to prove the notify call does
     // not throw (e.g. from calling setState on an unmounted component).
     await expect(apiFetch('/api/runs')).rejects.toMatchObject({ status: 401 })
+
+    await settle()
   })
 })

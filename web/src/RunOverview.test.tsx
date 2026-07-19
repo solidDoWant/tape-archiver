@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import RunOverview from './RunOverview'
 import { RouterProvider } from './router'
 import type { PhaseInfo, RunEventDetail } from './RunDetail'
@@ -27,6 +27,22 @@ function stubPanels() {
     'fetch',
     vi.fn(() => Promise.resolve(jsonResponse(503, { error: 'unavailable' }))),
   )
+}
+
+// settlePanels flushes the fetch-on-mount state updates of RunOverview's
+// embedded panels (ConfigSummary, TapesSection, LiveDriveMetrics, Footer,
+// RestartRunButton's active-run check) inside act(). Every test here renders
+// those panels, which each resolve a fetch after a test's synchronous
+// assertions have run; without awaiting this flush React reports their late
+// setState as "not wrapped in act(...)". Awaiting async act() ticks drains the
+// resolved-promise microtask chains those single-shot fetches sit on — twice,
+// so a panel that chains a second request off its first (LiveDriveMetrics'
+// per-drive history poll) also settles. Called explicitly at the end of each
+// test (an afterEach runs after RTL's auto-cleanup has already unmounted, too
+// late to capture the settles in act).
+async function settlePanels() {
+  await act(async () => {})
+  await act(async () => {})
 }
 
 afterEach(() => {
@@ -58,7 +74,7 @@ const runningDetail: RunEventDetail = {
 }
 
 describe('RunOverview', () => {
-  it('shows a running hero and the "no action needed" placeholder when not paused', () => {
+  it('shows a running hero and the "no action needed" placeholder when not paused', async () => {
     stubPanels()
 
     renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
@@ -66,17 +82,21 @@ describe('RunOverview', () => {
     expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument()
     expect(screen.getByText(/no operator action needed/i)).toBeInTheDocument()
     expect(screen.getByText('2 of 11 phases complete')).toBeInTheDocument()
+
+    await settlePanels()
   })
 
-  it('offers a Cancel run button while the run is still in progress', () => {
+  it('offers a Cancel run button while the run is still in progress', async () => {
     stubPanels()
 
     renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     expect(screen.getByRole('button', { name: /cancel run/i })).toBeInTheDocument()
+
+    await settlePanels()
   })
 
-  it('does not offer a Cancel run button for a terminal run (nothing left to stop)', () => {
+  it('does not offer a Cancel run button for a terminal run (nothing left to stop)', async () => {
     stubPanels()
 
     renderOverview(
@@ -91,9 +111,11 @@ describe('RunOverview', () => {
     // Terminal runs swap the Cancel control for Restart in the same hero slot.
     expect(screen.queryByRole('button', { name: /cancel run/i })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /restart run/i })).toBeInTheDocument()
+
+    await settlePanels()
   })
 
-  it('shows the pause zone instead of the placeholder when paused', () => {
+  it('shows the pause zone instead of the placeholder when paused', async () => {
     stubPanels()
 
     render(
@@ -108,9 +130,11 @@ describe('RunOverview', () => {
     expect(screen.getByRole('heading', { name: /backup paused/i })).toBeInTheDocument()
     expect(screen.getByText(/Load\/Write failure/)).toBeInTheDocument()
     expect(screen.queryByText(/no operator action needed/i)).not.toBeInTheDocument()
+
+    await settlePanels()
   })
 
-  it('does not show the operator-action card for a run terminated while paused', () => {
+  it('does not show the operator-action card for a run terminated while paused', async () => {
     stubPanels()
 
     // A run terminated (or completed) while waiting at a pause still reports its
@@ -134,9 +158,11 @@ describe('RunOverview', () => {
     expect(screen.queryByRole('heading', { name: /backup paused/i })).not.toBeInTheDocument()
     expect(screen.queryByText(/operator action required/i)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /resume/i })).not.toBeInTheDocument()
+
+    await settlePanels()
   })
 
-  it('shows an uncertainty hero — not PAUSED — when the pause status is unknown', () => {
+  it('shows an uncertainty hero — not PAUSED — when the pause status is unknown', async () => {
     stubPanels()
 
     render(
@@ -154,9 +180,11 @@ describe('RunOverview', () => {
     expect(screen.getByText('PAUSE STATUS UNKNOWN')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: /backup paused/i })).not.toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(/pause status unavailable/i)
+
+    await settlePanels()
   })
 
-  it('shows a failed-run error console for the failing phase', () => {
+  it('shows a failed-run error console for the failing phase', async () => {
     stubPanels()
 
     const failedPhases: PhaseInfo[] = phases.map((phase) =>
@@ -175,6 +203,8 @@ describe('RunOverview', () => {
     expect(screen.getByRole('heading', { name: /backup failed/i })).toBeInTheDocument()
     expect(screen.getByText('drive reported a hard write error')).toBeInTheDocument()
     expect(screen.getByText(/write phase · workflow failed/i)).toBeInTheDocument()
+
+    await settlePanels()
   })
 
   it('passes the Pack phase’s observed logical-tape/copy facts down to the config summary', async () => {
@@ -196,6 +226,8 @@ describe('RunOverview', () => {
     await waitFor(() => {
       expect(screen.getByText('6')).toBeInTheDocument() // 3 logical tapes × 2 copies.
     })
+
+    await settlePanels()
   })
 
   it('links to the Temporal workflow history when a UI base URL is configured', async () => {
@@ -217,6 +249,8 @@ describe('RunOverview', () => {
     const link = await screen.findByRole('link', { name: /temporal workflow/i })
     expect(link).toHaveAttribute('href', 'https://temporal.example.com/namespaces/prod/workflows/backup/run-1/history')
     expect(link).toHaveAttribute('target', '_blank')
+
+    await settlePanels()
   })
 
   it('shows no Temporal workflow link when no UI base URL is configured', async () => {
@@ -239,6 +273,8 @@ describe('RunOverview', () => {
     // fetch to resolve, then confirm the link never appears.
     await waitFor(() => expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /temporal workflow/i })).not.toBeInTheDocument()
+
+    await settlePanels()
   })
 
   it('links to the Discord report message when the run delivered one', async () => {
@@ -260,6 +296,8 @@ describe('RunOverview', () => {
     const link = await screen.findByRole('link', { name: /discord report/i })
     expect(link).toHaveAttribute('href', 'https://discord.com/channels/g1/c1/m1')
     expect(link).toHaveAttribute('target', '_blank')
+
+    await settlePanels()
   })
 
   it('shows no Discord report link when the run delivered none', async () => {
@@ -280,6 +318,8 @@ describe('RunOverview', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { name: /backup completed/i })).toBeInTheDocument())
     expect(screen.queryByRole('link', { name: /discord report/i })).not.toBeInTheDocument()
+
+    await settlePanels()
   })
 
   // writingPhases advances the running fixture to the Write phase, so the
@@ -344,6 +384,8 @@ describe('RunOverview', () => {
     expect(await screen.findByText('142 MB/s')).toBeInTheDocument()
     expect(screen.getByText('floor 50')).toBeInTheDocument()
     expect(screen.getByText(/0 repositions/)).toBeInTheDocument()
+
+    await settlePanels()
   })
 
   it('degrades the gauges to the unavailable state when VictoriaMetrics is unset, keeping the overview intact (AC2)', async () => {
@@ -358,9 +400,11 @@ describe('RunOverview', () => {
     expect(await screen.findByText(/metrics unavailable/i)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: /backup in progress/i })).toBeInTheDocument()
     expect(screen.getByText('6 of 11 phases complete')).toBeInTheDocument()
+
+    await settlePanels()
   })
 
-  it('omits the live drive-health section before the Write phase begins', () => {
+  it('omits the live drive-health section before the Write phase begins', async () => {
     stubPanels()
 
     // phases has Write still pending — the section must not render an empty
@@ -368,9 +412,11 @@ describe('RunOverview', () => {
     renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={phases} terminal={false} />)
 
     expect(screen.queryByText('Drive write health')).not.toBeInTheDocument()
+
+    await settlePanels()
   })
 
-  it('omits the live drive-health section for a terminal run (TapesSection already reports final health)', () => {
+  it('omits the live drive-health section for a terminal run (TapesSection already reports final health)', async () => {
     stubPanels()
 
     const doneWrite: PhaseInfo[] = writingPhases.map((phase) => (phase.name === 'Write' ? { ...phase, status: 'completed' } : phase))
@@ -385,5 +431,7 @@ describe('RunOverview', () => {
     )
 
     expect(screen.queryByText('Drive write health')).not.toBeInTheDocument()
+
+    await settlePanels()
   })
 })

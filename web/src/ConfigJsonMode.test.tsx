@@ -1,9 +1,17 @@
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ConfigJsonMode from './ConfigJsonMode'
 import { resetConfigSchemaCache } from './configSchema'
 import { testRunConfigSchema } from './testSchemaFixture'
+
+// settle flushes state updates still pending from the component's fetch-on-mount
+// inside act(), so they do not land after the test body returns as a "not wrapped
+// in act(...)" warning. Awaiting one async act() tick drains the resolved-promise
+// microtask chain those fetches sit on.
+async function settle() {
+  await act(async () => {})
+}
 
 const validConfigJSON = JSON.stringify({
   sources: [{ zfsPath: { name: 'bulk-pool-01/archive@snap' } }],
@@ -41,18 +49,20 @@ afterEach(() => {
 })
 
 describe('ConfigJsonMode', () => {
-  it('shows "no config yet" for an empty textarea', () => {
+  it('shows "no config yet" for an empty textarea', async () => {
     stubSchemaFetch()
     render(<Wrapper initial="" />)
 
     expect(screen.getByText(/no config yet/i)).toBeInTheDocument()
+    await settle()
   })
 
-  it('shows a parse-error indicator for invalid JSON', () => {
+  it('shows a parse-error indicator for invalid JSON', async () => {
     stubSchemaFetch()
     render(<Wrapper initial="not json" />)
 
     expect(screen.getByRole('alert')).toHaveTextContent(/invalid json/i)
+    await settle()
   })
 
   it('shows a schema-invalid indicator once the schema loads, for well-formed but incomplete JSON', async () => {
@@ -62,6 +72,7 @@ describe('ConfigJsonMode', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent(/invalid/i)
     })
+    await settle()
   })
 
   it('shows a valid indicator with source/copy counts for a schema-valid config', async () => {
@@ -71,6 +82,7 @@ describe('ConfigJsonMode', () => {
     await waitFor(() => {
       expect(screen.getByText(/valid · 1 source\(s\) · 2 copies/i)).toBeInTheDocument()
     })
+    await settle()
   })
 
   it('loads a file selected via the upload control into the textarea', async () => {
@@ -89,5 +101,6 @@ describe('ConfigJsonMode', () => {
     await waitFor(() => {
       expect(handleChange).toHaveBeenCalledWith(validConfigJSON)
     })
+    await settle()
   })
 })
