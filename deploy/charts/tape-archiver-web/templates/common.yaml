@@ -27,6 +27,18 @@
    and is re-resolved post-merge so a user override wins. */}}
 {{- $defaultImageRepository := "ghcr.io/soliddowant/tape-archiver/web" -}}
 
+{{/* Default global.nameOverride to the release name up front (upstream bjw-s
+   app-template does this so the auto-created ServiceAccount name and the pod's SA
+   reference agree for arbitrary release names). Done here, before any name is
+   computed, so the chart-generated session-key Secret below resolves the same bjw-s
+   fullname the Deployment/Service/ServiceAccount use. */}}
+{{/* index/set rather than dig: at this point .Values is still the raw chartutil.Values
+   type, which dig cannot traverse (it wants a plain map[string]interface{}). */}}
+{{- $existingGlobal := index .Values "global" | default dict -}}
+{{- if not (index $existingGlobal "nameOverride") -}}
+  {{- $_ := set .Values "global" (mustMergeOverwrite (dict "nameOverride" .Release.Name) $existingGlobal) -}}
+{{- end -}}
+
 {{/* ============================================================ */}}
 {{/* Temporal connection values                                    */}}
 {{/* ============================================================ */}}
@@ -56,13 +68,15 @@
 {{/* OIDC + session key validation                                */}}
 {{/* ============================================================ */}}
 {{/* cmd/web refuses to start without a complete OIDC configuration
-   (docs/configuration.md "OIDC authentication (cmd/web)"), so these are required,
-   not optional — the chart fails render rather than shipping a Deployment that
-   crash-loops on every pod start. Unlike config.temporal.apiKey above (and the
-   control-worker chart's discordFailureWebhookUrl), clientSecret and sessionKey
-   carry no plaintext `value` fallback: they are exactly the credentials the issue
-   this chart was added for (#255) requires to always come from an existing Secret,
-   never rendered in plaintext. */}}
+   (docs/configuration.md "OIDC authentication (cmd/web)"), so issuerUrl/clientId/
+   redirectUrl are required, not optional — the chart fails render rather than
+   shipping a Deployment that crash-loops on every pod start. The OIDC client secret
+   carries no plaintext `value` fallback either: it is shared with the identity
+   provider (the chart cannot invent it) and so must come from an existing Secret —
+   the #255 posture, never rendered by the chart. The session key is handled
+   separately below: it is internal to cmd/web (losing it just re-logs-in operators),
+   so the chart generates one by default and only sources an existing Secret when the
+   operator explicitly overrides it. */}}
 {{- $oidcIssuerURL   := .Values.config.web.oidc.issuerUrl   | default "" -}}
 {{- $oidcClientID    := .Values.config.web.oidc.clientId    | default "" -}}
 {{- $oidcRedirectURL := .Values.config.web.oidc.redirectUrl | default "" -}}
@@ -82,10 +96,23 @@
   {{- fail "config.web.oidc.clientSecret.secretKeyRef.name and .key are both required — the OIDC client secret must be sourced from an existing Secret, never set in values.yaml" -}}
 {{- end -}}
 
+{{/* Session key (WEB_SESSION_KEY). Two paths:
+   - secretKeyRef.name+key set → source it from that operator-managed Secret (both
+     required together — a half-set ref is a typo, not a valid state). This is the
+     strict #255 posture: nothing session-key-related is rendered by the chart.
+   - neither set → the chart generates a random 32-byte key into its own Secret and
+     reuses it across upgrades (rendered near the loader include). $sessionKeySecretName
+     and $sessionKeySecretKey are pointed at that Secret so the WEB_SESSION_KEY env ref
+     below is identical for both paths. */}}
 {{- $sessionKeySecretName := .Values.config.web.sessionKey.secretKeyRef.name | default "" -}}
 {{- $sessionKeySecretKey  := .Values.config.web.sessionKey.secretKeyRef.key  | default "" -}}
-{{- if not (and $sessionKeySecretName $sessionKeySecretKey) -}}
-  {{- fail "config.web.sessionKey.secretKeyRef.name and .key are both required — WEB_SESSION_KEY must be sourced from an existing Secret, never set in values.yaml" -}}
+{{- if or (and $sessionKeySecretName (not $sessionKeySecretKey)) (and $sessionKeySecretKey (not $sessionKeySecretName)) -}}
+  {{- fail "config.web.sessionKey.secretKeyRef.name and .key must both be set to override the chart-generated session key with an existing Secret" -}}
+{{- end -}}
+{{- $sessionKeyGenerated := not $sessionKeySecretName -}}
+{{- if $sessionKeyGenerated -}}
+  {{- $sessionKeySecretName = printf "%s-session-key" (include "bjw-s.common.lib.chart.names.fullname" $) -}}
+  {{- $sessionKeySecretKey = "session-key" -}}
 {{- end -}}
 
 {{/* ============================================================ */}}
@@ -189,7 +216,10 @@ resolution (deploy/charts/tape-archiver-control-worker/templates/common.yaml).
 {{- $_ := set $env "OIDC_CLIENT_ID" $oidcClientID -}}
 {{- $_ := set $env "OIDC_REDIRECT_URL" $oidcRedirectURL -}}
 
-{{/* OIDC_CLIENT_SECRET / WEB_SESSION_KEY: always Secret-sourced — validated above. */}}
+{{/* OIDC_CLIENT_SECRET / WEB_SESSION_KEY: both sourced from a Secret via secretKeyRef.
+   OIDC_CLIENT_SECRET is always the operator's existing Secret; WEB_SESSION_KEY points
+   at either the operator's Secret (secretKeyRef set) or the chart-generated one
+   (resolved above, rendered near the loader include). */}}
 {{- $_ := set $env "OIDC_CLIENT_SECRET" (dict "valueFrom" (dict "secretKeyRef" (dict "name" $oidcClientSecretName "key" $oidcClientSecretKey))) -}}
 {{- $_ := set $env "WEB_SESSION_KEY" (dict "valueFrom" (dict "secretKeyRef" (dict "name" $sessionKeySecretName "key" $sessionKeySecretKey))) -}}
 
@@ -476,12 +506,34 @@ resolution (deploy/charts/tape-archiver-control-worker/templates/common.yaml).
 {{- $mergedValues = mustMergeOverwrite $mergedValues $mergedResources -}}
 {{- $_ := set . "Values" $mergedValues -}}
 
-{{/* Default global.nameOverride to the release name, matching upstream bjw-s
-   app-template so the auto-created ServiceAccount name and the pod's SA reference
-   agree for arbitrary release names. */}}
-{{- if not (dig "global" "nameOverride" "" .Values) -}}
-  {{- $existingGlobal := index .Values "global" | default dict -}}
-  {{- $_ := set .Values "global" (mustMergeOverwrite (dict "nameOverride" .Release.Name) $existingGlobal) -}}
-{{- end -}}
-
+{{/* ============================================================ */}}
+{{/* Chart-generated session-key Secret (when not operator-supplied) */}}
+{{/* ============================================================ */}}
+{{/* randBytes 32 returns the base64 of 32 cryptographically-random bytes — exactly
+   WEB_SESSION_KEY's format (the `openssl rand -base64 32` that webauth.ParseSessionKey
+   base64-decodes to 32 AES-256 bytes) — and b64enc double-encodes it for Secret.data.
+   On upgrade the live value is reused verbatim so a reconcile never rotates the key
+   (rotating it signs every operator out). Under a client-side render with no cluster
+   (helm template, `make chart-lint`, ArgoCD's default templating) lookup returns empty
+   and a throwaway key is emitted — harmless, since that manifest is never the applied
+   Secret; helm install/upgrade and Flux's helm-controller all resolve lookup against
+   the live cluster. */}}
+{{/* No leading `---`: the file's top-of-template separator delimits this document, and
+   the trailing `---` below (emitted only when the Secret is) separates it from the
+   bjw-s loader output — so the override path renders no stray empty document. */}}
+{{- if $sessionKeyGenerated }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $sessionKeySecretName }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $sessionKeySecretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+type: Opaque
+data:
+  {{ $sessionKeySecretKey }}: {{ if $existing }}{{ index $existing.data $sessionKeySecretKey }}{{ else }}{{ randBytes 32 | b64enc }}{{ end }}
+---
+{{- end }}
 {{- include "bjw-s.common.loader.all" . }}

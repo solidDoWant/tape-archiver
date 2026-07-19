@@ -113,12 +113,18 @@ config:
           name: ""
           key: ""
 
-    # sessionKey must reference an existing k8s Secret holding a base64-encoded
-    # 32-byte AES-256 key (e.g. `openssl rand -base64 32`), surfaced as
+    # sessionKey is the base64-encoded 32-byte AES-256 key surfaced as
     # WEB_SESSION_KEY (AES-256-GCM session/login-state cookie encryption — cmd/web
-    # holds no server-side session store, docs/web-ui-design.md §3). As with
-    # oidc.clientSecret, there is no plaintext `value` fallback; secretKeyRef (name
-    # and key both required) is mandatory — helm template fails otherwise.
+    # holds no server-side session store, docs/web-ui-design.md §3). Unlike
+    # oidc.clientSecret (which is shared with the identity provider and must be
+    # supplied), the session key is internal to cmd/web, so by default the chart
+    # generates a random one into its own "<release>-session-key" Secret and reuses
+    # it across upgrades — no operator setup required. To manage the key yourself
+    # (e.g. to share it across releases, or to keep it out of the Helm release like
+    # oidc.clientSecret), set secretKeyRef.name and .key to an existing Secret
+    # holding `openssl rand -base64 32`; the chart then generates nothing and sources
+    # WEB_SESSION_KEY from that Secret. Set both fields together or neither — a
+    # half-set ref fails render.
     sessionKey:
       secretKeyRef:
         name: ""

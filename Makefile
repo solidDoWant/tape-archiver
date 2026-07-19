@@ -257,13 +257,18 @@ WEB_CHART := deploy/charts/tape-archiver-web
 # Placeholder values only used to satisfy chart-lint's render/lint checks; none of
 # these are baked into any release artifact. secretKeyRef references point at
 # Secret names that need not actually exist for `helm template`/`helm lint`.
+# sessionKey is deliberately left unset here so the default lint/render exercises the
+# chart's generate-the-key path; WEB_CHART_LINT_SESSIONKEY_ARGS overrides it below to
+# also render the operator-supplied-Secret path.
 WEB_CHART_LINT_ARGS := --set config.temporal.address=$(CHART_LINT_ADDRESS) \
 	--set config.web.oidc.issuerUrl=https://idp.example.com \
 	--set config.web.oidc.clientId=tape-archiver-web \
 	--set config.web.oidc.redirectUrl=https://tape-archiver.example.com/auth/callback \
 	--set config.web.oidc.clientSecret.secretKeyRef.name=chart-lint-placeholder \
-	--set config.web.oidc.clientSecret.secretKeyRef.key=clientSecret \
-	--set config.web.sessionKey.secretKeyRef.name=chart-lint-placeholder \
+	--set config.web.oidc.clientSecret.secretKeyRef.key=clientSecret
+
+# Renders the alternative session-key path: an operator-supplied Secret via secretKeyRef.
+WEB_CHART_LINT_SESSIONKEY_ARGS := --set config.web.sessionKey.secretKeyRef.name=chart-lint-placeholder \
 	--set config.web.sessionKey.secretKeyRef.key=sessionKey
 
 # Render args for the web chart's optional Ingress shape.
@@ -311,11 +316,17 @@ chart-lint: ## Fetch chart deps, lint, and render the control-worker chart shape
 	    || { echo "chart-lint: Deployment not rendered by the web chart"; exit 1; }; \
 	  grep -q '^kind: Service' "$$tmpfile" \
 	    || { echo "chart-lint: Service not rendered by the web chart"; exit 1; }; \
+	  grep -q '^kind: Secret' "$$tmpfile" \
+	    || { echo "chart-lint: generated session-key Secret not rendered when sessionKey.secretKeyRef is unset"; exit 1; }; \
 	  grep -q '^kind: Ingress' "$$tmpfile" \
 	    && { echo "chart-lint: Ingress rendered by the web chart despite being disabled by default"; exit 1; } || true; \
 	  grep -q '^kind: ScaledJob' "$$tmpfile" \
 	    && { echo "chart-lint: ScaledJob rendered by the web chart — it is a Deployment-only chart"; exit 1; } || true; \
 	}
+	# Operator-supplied session-key Secret path: setting sessionKey.secretKeyRef must
+	# render NO Secret (the strict #255 posture — nothing session-key-related emitted).
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_SESSIONKEY_ARGS) \
+		| grep -q '^kind: Secret' && { echo "chart-lint: web chart rendered a Secret despite sessionKey.secretKeyRef being set"; exit 1; } || true
 	# Opt-in Ingress shape: must render an Ingress alongside the Deployment + Service.
 	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS) \
 		| grep -q '^kind: Ingress' || { echo "chart-lint: Ingress not rendered by the web chart when enabled"; exit 1; }
