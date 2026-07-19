@@ -78,6 +78,19 @@ const (
 	// singleton `backup` workflow (SPEC §4.2, playwright.config.ts's
 	// workers: 1), so their tapes must not collide.
 	webFormBlankSlot = 31
+
+	// webLibrarySlotCount is the storage-slot count the deployed cmd/web
+	// advertises via GET /api/config/ui, so the Form-mode config builder can
+	// draw its topology-bounded blank-slot grid (issue #305/#310's
+	// SlotGridEditor — the picker numbers storage slots 1..slotCount and only
+	// lets an operator select real ones). It mirrors the mhvtl library's 47
+	// storage slots (scripts/mhvtl-up.sh), which is what makes webFormBlankSlot
+	// (31) a selectable slot in config-form-and-tapes.spec.ts. Without a
+	// declared topology the grid renders "not configured" and the Form-mode
+	// spec has no slot to click. The mhvtl I/O-station MAPs are separate SCSI
+	// element addresses, not storage-slot numbers 1..47, so no storage slot is
+	// reserved here (cleaning/ioStation left empty).
+	webLibrarySlotCount = 47
 )
 
 // webE2EPrereqReason returns a skip reason when a prerequisite specific to
@@ -257,6 +270,13 @@ func TestWebUIEndToEnd(t *testing.T) {
 		// (pkg/runsubmit.ApplyDryRun), so these need only be non-empty/valid.
 		"--set", "config.web.library.changer="+testutil.ChangerDev(t),
 		"--set", "config.web.library.drives={"+testutil.Drive0Dev(t)+","+testutil.Drive1Dev(t)+"}",
+		// Library topology (issue #305/#310): advertise the mhvtl storage-slot
+		// count so the Form-mode config builder draws its blank-slot grid with
+		// webFormBlankSlot selectable (config-form-and-tapes.spec.ts). Without
+		// this the grid renders "topology not configured" and there is no slot
+		// to click. Cleaning/I/O-station slots are left at their empty defaults
+		// (no storage slot 1..47 is reserved in the mhvtl library).
+		"--set", "config.web.library.topology.slotCount=" + strconv.Itoa(webLibrarySlotCount),
 		"--set-string", imagePath+".repository="+webRepo,
 		"--set-string", imagePath+".tag="+imageVersion,
 		"--set", imagePath+".pullPolicy=Never",

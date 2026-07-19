@@ -53,19 +53,31 @@ test('submit a dry-run via the Form-mode config builder, then find its tapes on 
   // them via the web chart's config.web.library.*, see e2e/web_test.go), so
   // there is nothing to type here; the Dry-run toggle below overrides them
   // server-side with real mhvtl paths regardless (pkg/runsubmit.ApplyDryRun).
-  // This test only needs to add a blank slot.
-  await page.getByLabel('New blank slot number').fill(blankSlotRaw)
-  await page.getByRole('button', { name: '+ Add slot' }).click()
-  // SlotListEditor's counter reads "{slots.length} blank slot(s) configured" —
-  // a COUNT of configured slots, not the slot number just typed (this test
-  // only ever adds one, so the count is always "1").
-  await expect(page.getByText('1 blank slot(s) configured')).toBeVisible()
+  // This test only needs to select a blank slot.
+  //
+  // Blank slots are picked from the topology-bounded slot grid (issue
+  // #305/#310's SlotGridEditor — the free-text "add a slot number" control was
+  // removed): the deploy advertises its storage-slot count via GET
+  // /api/config/ui (config.web.library.topology.slotCount in e2e/web_test.go),
+  // and each real storage slot renders as a "Slot N" toggle button. Clicking
+  // blankSlotRaw's toggle adds it to library.blankSlots; exact:true so "Slot 3"
+  // never matches "Slot 31", etc.
+  await page.getByRole('button', { name: `Slot ${blankSlotRaw}`, exact: true }).click()
+  // SlotGridEditor's counter reads "{selectableCount} blank slot(s) selected" —
+  // a COUNT of selected slots, not the slot number just clicked (this test only
+  // ever selects one, so the count is always "1").
+  await expect(page.getByText('1 blank slot(s) selected')).toBeVisible()
 
   // Encryption: exercise the real server-side age keygen endpoint
   // (POST /api/age/keygen, issue #279) rather than a hardcoded key — this
   // is itself part of the Form-mode surface AC4 asks this test to cover.
   await page.getByRole('button', { name: 'Generate new age keypair' }).click()
-  await expect(page.getByText(/store the identity now/i)).toBeVisible({ timeout: 30_000 })
+  // A successful keygen reveals the identity/recipient pair exactly once, marked
+  // by the "NEW KEYPAIR GENERATED" status box (AgeKeygenPanel.tsx). The panel
+  // deliberately carries no "store this now or lose it forever" warning
+  // (AgeKeygenPanel.tsx's doc comment), so wait on that generated-state marker
+  // rather than the old wording.
+  await expect(page.getByText(/new keypair generated/i)).toBeVisible({ timeout: 30_000 })
 
   await page.getByLabel(/^Dry-run/).check()
   await page.getByRole('button', { name: /Review/ }).click()
