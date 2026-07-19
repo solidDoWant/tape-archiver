@@ -29,7 +29,10 @@ import (
 // A var, not a const: pkg/runsapi's tests override it (see
 // setEventPollInterval in events_test.go) to exercise the poll loop's
 // change-detection and terminal-close behavior in milliseconds instead of
-// tying every test run to the real production interval.
+// tying every test run to the real production interval. Each broker captures
+// its value once at construction (runBroker.pollInterval) so the poll
+// goroutine never reads this global directly — keeping the tests' override
+// and t.Cleanup restore off the goroutine's read path.
 var eventPollInterval = 2 * time.Second
 
 // sseWriteTimeout bounds a single SSE write+flush. The server-wide
@@ -57,7 +60,9 @@ const sseWriteTimeout = 15 * time.Second
 //
 // A var, not a const, for the same reason as eventPollInterval: the package's
 // tests override it (setSSEHeartbeatInterval) to exercise the keepalive in
-// milliseconds instead of the real production interval.
+// milliseconds instead of the real production interval. Each handler captures
+// its value once at construction (handler.heartbeatInterval) so
+// streamRunEvents' request goroutines never read this global directly.
 var sseHeartbeatInterval = 25 * time.Second
 
 // runningStatus is the string form of WORKFLOW_EXECUTION_STATUS_RUNNING, as
@@ -174,7 +179,7 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 	// Emit a periodic comment so a run that stays RUNNING without any state
 	// change still sends bytes, keeping idle-timeout intermediaries from dropping
 	// the stream (see sseHeartbeatInterval).
-	heartbeat := time.NewTicker(sseHeartbeatInterval)
+	heartbeat := time.NewTicker(h.heartbeatInterval)
 	defer heartbeat.Stop()
 
 	for {
@@ -292,6 +297,16 @@ type runBroker struct {
 	fetch func(ctx context.Context, runID string) (RunDetail, error)
 	drain context.Context
 
+	// pollInterval is captured from eventPollInterval when the broker is
+	// constructed (newHandler / newRunBroker, both synchronous on the
+	// constructing goroutine) rather than read from the package global inside
+	// the poll goroutine. Tests override eventPollInterval and restore it via
+	// t.Cleanup at test end; a poll goroutine reading the global directly would
+	// race that restore with no happens-before edge (there is no join between
+	// the broker's goroutines and the test). Capturing the value at
+	// construction keeps every read of the global on one goroutine.
+	pollInterval time.Duration
+
 	// mu guards polls and every field of the runPolls within it. A single lock
 	// keeps subscribe, unsubscribe, and broadcast free of any lock-ordering
 	// hazard; broadcast holds it only briefly, once per poll interval.
@@ -319,7 +334,12 @@ type subscriber struct {
 }
 
 func newRunBroker(fetch func(context.Context, string) (RunDetail, error), drain context.Context) *runBroker {
-	return &runBroker{fetch: fetch, drain: drain, polls: make(map[string]*runPoll)}
+	return &runBroker{
+		fetch:        fetch,
+		drain:        drain,
+		pollInterval: eventPollInterval,
+		polls:        make(map[string]*runPoll),
+	}
 }
 
 // subscribe registers a new SSE connection for runID, starting the shared poll
@@ -379,7 +399,7 @@ func (b *runBroker) unsubscribe(sub *subscriber) {
 // reaches a terminal status, the hosting server drains, or the last subscriber
 // leaves (ctx cancelled by unsubscribe).
 func (b *runBroker) run(ctx context.Context, poll *runPoll) {
-	ticker := time.NewTicker(eventPollInterval)
+	ticker := time.NewTicker(b.pollInterval)
 	defer ticker.Stop()
 
 	for {

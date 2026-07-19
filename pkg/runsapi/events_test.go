@@ -32,12 +32,13 @@ import (
 // change" and "close on terminal" behavior fast (milliseconds) rather than
 // tied to the real 2-second production interval.
 //
-// This is race-safe with -race despite mutating a package-level var: it must
-// be called (and the interval set) strictly before the HTTP server under
-// test starts (httptest.NewServer/http.Server.Serve both begin with a "go"
-// statement), so the write happens-before every goroutine the server spawns
-// to handle a connection — the same happens-before rule the race detector
-// already relies on for any "go f()" call.
+// Call it before constructing the handler under test (New/newHandler/
+// newRunBroker): each broker captures eventPollInterval into
+// runBroker.pollInterval at construction and the poll goroutine reads only
+// that field, never this global. That capture — and the t.Cleanup restore
+// below — both run on the test goroutine, so no server-spawned goroutine ever
+// races the global, which -race would otherwise flag (the cleanup restore has
+// no happens-before edge to a still-terminating poll goroutine).
 func setEventPollInterval(t *testing.T, interval time.Duration) {
 	t.Helper()
 

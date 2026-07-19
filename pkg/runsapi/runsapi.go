@@ -358,6 +358,9 @@ func newHandler(temporalClient TemporalClient, getenv func(string) string, opts 
 		// streaming handlers' selects simply never fires unless the host
 		// opted in via WithDrainContext.
 		drain: context.Background(),
+		// Captured once here (synchronous with any test's setSSEHeartbeatInterval
+		// override) so streamRunEvents' request goroutines never read the global.
+		heartbeatInterval: sseHeartbeatInterval,
 	}
 
 	for _, opt := range opts {
@@ -438,6 +441,12 @@ type handler struct {
 	// shared Temporal poll loop (events.go), rather than one poller per
 	// connection. Built by newHandler after options are applied.
 	broker *runBroker
+	// heartbeatInterval is captured from sseHeartbeatInterval at construction
+	// so streamRunEvents (which runs on server-spawned request goroutines)
+	// never reads the package global directly. Tests override the global and
+	// restore it via t.Cleanup; reading it from a request goroutine would race
+	// that restore. See runBroker.pollInterval for the same reasoning.
+	heartbeatInterval time.Duration
 	// temporalUIBaseURL is the browsable Temporal Web UI base URL (cmd/web's
 	// TEMPORAL_UI_URL); empty when unconfigured, in which case GET
 	// /api/config/ui reports it empty and the SPA omits the run overview's
