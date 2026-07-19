@@ -146,10 +146,16 @@ Foundation lands first, then parallel feature work:
 - Unauthenticated page requests are served the SPA (which renders a styled login page
   at `/login`) instead of `pkg/webauth` 302-ing straight to the IdP; the OIDC callback
   surfaces failures to that page via `/login?error=denied|expired` (denied = the IdP's
-  own `error` param; expired = every other validation failure). `/api/*` 401 JSON
-  behavior is unchanged, and all state/nonce/PKCE/redirect-sanitization properties are
-  preserved (the SPA mirrors `sanitizeRedirectPath` client-side; the server still
-  re-validates).
+  own `error` param; expired = every other validation failure). On a denial the IdP's
+  own `error_description` is carried through as `/login?...&error_description=` and shown
+  on the login page, attributed to the identity provider, so a provider-side refusal is
+  not opaque. That value is attacker-controllable (the callback URL, and `/login`
+  itself, can be crafted), so it is sanitized on both sides — `sanitizeIdPErrorDescription`
+  server-side and `sanitizeErrorDescription` client-side (strip control/bidi runes,
+  collapse whitespace, length-cap) — and rendered only as attributed, escaped text.
+  `/api/*` 401 JSON behavior is unchanged, and all state/nonce/PKCE/redirect-sanitization
+  properties are preserved (the SPA mirrors `sanitizeRedirectPath` client-side; the
+  server still re-validates).
 - The login button reads "Continue with SSO". A per-provider display name (the
   design's `providerName` prop, default "Authentik") would need a new config knob
   (e.g. `OIDC_PROVIDER_LABEL`) that the current scope doesn't call for; deferred until

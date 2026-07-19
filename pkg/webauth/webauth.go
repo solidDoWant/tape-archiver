@@ -47,6 +47,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -471,9 +472,19 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// app applies no authorization of its own), so log them: an "access_denied"
 		// with "user not assigned to this application" is a provider-side role
 		// assignment, not anything to change in tape-archiver.
-		rejectCallback(w, r, loginErrorDenied, state.RedirectPath, "identity provider returned an error",
+		description := query.Get("error_description")
+
+		webserver.Annotate(r.Context(),
+			slog.String("auth_error", "identity provider returned an error"),
 			slog.String("idp_error", errParam),
-			slog.String("idp_error_description", query.Get("error_description")))
+			slog.String("idp_error_description", description))
+
+		// Carry the provider's own description (sanitized) through to the login
+		// page so a provider-side denial is not a dead end for the operator —
+		// see loginErrorRedirect's detail parameter. This branch does its own
+		// annotate + redirect rather than going through rejectCallback because,
+		// unlike every other rejection, it has a user-facing detail to surface.
+		loginErrorRedirect(w, r, loginErrorDenied, state.RedirectPath, sanitizeIdPErrorDescription(description))
 
 		return
 	}
@@ -705,16 +716,26 @@ const (
 // for this request (webserver.Annotate) and then redirects to the SPA login
 // page via loginErrorRedirect. The failure is served as a 302, so without this
 // annotation an operator would see only an opaque redirect and the SPA's
-// generic "not authorized" message — reason (and, where available, the IdP
-// error or the underlying Go error) is the diagnostic that was previously
-// thrown away. extra carries case-specific fields (the IdP error/description,
-// an exchange/verification error); reason is a short stable classification.
+// generic "not authorized" message — reason (and, where available, the
+// underlying Go error) is the diagnostic that was previously thrown away. extra
+// carries case-specific fields; reason is a short stable classification. It
+// passes no user-facing detail (only the identity-provider-error branch has
+// one — see handleCallback).
 func rejectCallback(w http.ResponseWriter, r *http.Request, code, redirectPath, reason string, extra ...slog.Attr) {
 	webserver.Annotate(r.Context(), append([]slog.Attr{slog.String("auth_error", reason)}, extra...)...)
-	loginErrorRedirect(w, r, code, redirectPath)
+	loginErrorRedirect(w, r, code, redirectPath, "")
 }
 
-func loginErrorRedirect(w http.ResponseWriter, r *http.Request, code string, redirectPath string) {
+// loginErrorRedirect sends the browser to the SPA login page with the app's own
+// coarse error code (loginErrorDenied/loginErrorExpired) and, where known, the
+// original redirect destination. detail is the identity provider's own
+// error_description, already reduced to a bounded, printable string by
+// sanitizeIdPErrorDescription; when non-empty it is passed on as
+// error_description so the login page can show the operator why the provider
+// refused the sign-in. It is still untrusted at the SPA (that /login URL can be
+// crafted directly, bypassing this handler), so the SPA sanitizes it again and
+// attributes it to the provider rather than presenting it as first-party copy.
+func loginErrorRedirect(w http.ResponseWriter, r *http.Request, code, redirectPath, detail string) {
 	target := url.URL{Path: loginPath}
 
 	query := url.Values{}
@@ -724,9 +745,52 @@ func loginErrorRedirect(w http.ResponseWriter, r *http.Request, code string, red
 		query.Set("redirect", redirectPath)
 	}
 
+	if detail != "" {
+		query.Set("error_description", detail)
+	}
+
 	target.RawQuery = query.Encode()
 
 	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+// idpErrorDescriptionMaxLen bounds, in runes, how much of an identity
+// provider's error_description is carried back to the login page: long enough
+// for a genuine provider message, short enough that a hand-crafted callback URL
+// (the param is attacker-controllable — anyone can request /auth/callback with
+// any query) cannot bloat the redirect Location header or let the reflected
+// text dominate the login UI.
+const idpErrorDescriptionMaxLen = 300
+
+// sanitizeIdPErrorDescription reduces an OIDC error_description to a bounded,
+// single-line, printable string safe to reflect onto the login page: whitespace
+// runs collapse to single spaces (strings.Fields), non-printable runes (control
+// characters, and the bidi/format runes that could reorder displayed text) are
+// dropped, and the result is capped at idpErrorDescriptionMaxLen runes. The
+// value arrives on /auth/callback and is never trusted; this is the server-side
+// half of the defence, with the SPA sanitizing and attributing it again.
+// Returns "" when nothing printable remains.
+func sanitizeIdPErrorDescription(description string) string {
+	collapsed := strings.Join(strings.Fields(description), " ")
+
+	var builder strings.Builder
+
+	count := 0
+
+	for _, r := range collapsed {
+		if !unicode.IsPrint(r) {
+			continue
+		}
+
+		builder.WriteRune(r)
+
+		count++
+		if count >= idpErrorDescriptionMaxLen {
+			break
+		}
+	}
+
+	return builder.String()
 }
 
 // buildInfoResponse is GET /api/build-info's JSON body.

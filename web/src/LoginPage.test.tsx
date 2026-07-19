@@ -124,6 +124,54 @@ describe('LoginPage', () => {
     await settle()
   })
 
+  it('error-denied state: shows the identity provider description when one is passed', async () => {
+    window.history.pushState(
+      {},
+      '',
+      '/login?error=denied&error_description=' + encodeURIComponent('The request is otherwise malformed'),
+    )
+
+    render(<LoginPage />)
+
+    const banner = screen.getByRole('alert')
+    expect(banner).toHaveTextContent(/identity provider:/i)
+    expect(banner).toHaveTextContent(/the request is otherwise malformed/i)
+    await settle()
+  })
+
+  it('error-denied state: sanitizes a crafted description (control/bidi chars stripped)', async () => {
+    // A NUL (U+0000) and a right-to-left override (U+202E) embedded in the
+    // description — the kind of payload a hand-crafted /login URL could carry.
+    const crafted = 'bad\u0000\u202Emsg'
+    window.history.pushState({}, '', '/login?error=denied&error_description=' + encodeURIComponent(crafted))
+
+    render(<LoginPage />)
+
+    const banner = screen.getByRole('alert')
+    // The visible text is the cleaned form; the raw control/format runes never
+    // reach the DOM.
+    expect(banner).toHaveTextContent(/bad msg/i)
+    expect(banner.textContent).not.toContain('\u0000')
+    expect(banner.textContent).not.toContain('\u202E')
+    await settle()
+  })
+
+  it('error-expired state: never shows a provider description even if one is present', async () => {
+    window.history.pushState(
+      {},
+      '',
+      '/login?error=expired&error_description=' + encodeURIComponent('should not be shown'),
+    )
+
+    render(<LoginPage />)
+
+    const banner = screen.getByRole('alert')
+    expect(banner).toHaveTextContent(/session expired/i)
+    expect(banner).not.toHaveTextContent(/identity provider:/i)
+    expect(banner).not.toHaveTextContent(/should not be shown/i)
+    await settle()
+  })
+
   it('error-expired state: shows the session-expired banner and a way to retry sign-in', async () => {
     window.history.pushState({}, '', '/login?error=expired&redirect=%2Ftapes')
 

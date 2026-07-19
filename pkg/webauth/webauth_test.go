@@ -738,7 +738,8 @@ func TestCallback_idpError_isRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/auth/callback?error=access_denied&state=the-state", nil)
+	req, err := http.NewRequest(http.MethodGet,
+		server.URL+"/auth/callback?error=access_denied&error_description=User+not+assigned&state=the-state", nil)
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
 
@@ -755,6 +756,49 @@ func TestCallback_idpError_isRejected(t *testing.T) {
 	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
 	assert.Contains(t, location, "error=denied")
 	assert.Contains(t, location, "redirect=%2Fruns%2Fabc")
+
+	// The provider's own description is carried through to the login page so the
+	// operator can see why the sign-in was refused, rather than only a generic
+	// "not authorized" message.
+	loginURL, err := url.Parse(location)
+	require.NoError(t, err)
+	assert.Equal(t, "User not assigned", loginURL.Query().Get("error_description"))
+}
+
+func TestSanitizeIdPErrorDescription(t *testing.T) {
+	tests := []struct {
+		name        string
+		description string
+		want        string
+	}{
+		{name: "empty stays empty", description: "", want: ""},
+		{
+			name:        "a normal message is preserved",
+			description: "The request is otherwise malformed",
+			want:        "The request is otherwise malformed",
+		},
+		{
+			name:        "whitespace runs collapse and trim",
+			description: "  too\t\tmany\n\nspaces  ",
+			want:        "too many spaces",
+		},
+		{
+			name:        "control and bidi/format runes are dropped",
+			description: "safe\x00text\u202ehere",
+			want:        "safetexthere",
+		},
+		{
+			name:        "over-long input is capped",
+			description: strings.Repeat("x", 400),
+			want:        strings.Repeat("x", idpErrorDescriptionMaxLen),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, sanitizeIdPErrorDescription(test.description))
+		})
+	}
 }
 
 // TestCallback_idpError_isLoggedToAccessLog covers the diagnostic gap behind

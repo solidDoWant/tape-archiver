@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { sanitizeRedirectPath } from './route'
+import { sanitizeErrorDescription, sanitizeRedirectPath } from './route'
 import { IconSpinner, IconWarning } from './icons'
 import Footer from './Footer'
 
@@ -23,25 +23,36 @@ type LoginState = 'default' | 'redirecting' | 'error-denied' | 'error-expired'
 // pkg/webauth's OIDC callback handler redirects here with ?error=denied or
 // ?error=expired on failure (see webauth.go's loginErrorRedirect), and
 // AuthGate (App.tsx) redirects here with ?redirect=<original path> when an
-// unauthenticated browser requests any other page.
-function readLoginState(search: string): { state: LoginState; redirect: string } {
+// unauthenticated browser requests any other page. On a provider-side denial
+// (?error=denied) the callback also passes the provider's own
+// ?error_description, surfaced (sanitized, attributed) so the operator sees why
+// the identity provider refused the sign-in rather than only a generic message.
+function readLoginState(search: string): {
+  state: LoginState
+  redirect: string
+  errorDescription: string
+} {
   const params = new URLSearchParams(search)
   const error = params.get('error')
   const redirect = sanitizeRedirectPath(params.get('redirect'))
 
   if (error === 'denied') {
-    return { state: 'error-denied', redirect }
+    return {
+      state: 'error-denied',
+      redirect,
+      errorDescription: sanitizeErrorDescription(params.get('error_description')),
+    }
   }
 
   if (error === 'expired') {
-    return { state: 'error-expired', redirect }
+    return { state: 'error-expired', redirect, errorDescription: '' }
   }
 
-  return { state: 'default', redirect }
+  return { state: 'default', redirect, errorDescription: '' }
 }
 
 function LoginPage() {
-  const { state: initialState, redirect } = readLoginState(window.location.search)
+  const { state: initialState, redirect, errorDescription } = readLoginState(window.location.search)
   const [redirecting, setRedirecting] = useState(false)
 
   // Focus the primary sign-in button on load so the operator can sign in with a
@@ -133,6 +144,16 @@ function LoginPage() {
             <div>
               <div className="text-[12.5px] font-semibold text-red">{errTitle}</div>
               <div className="mt-0.5 text-[11.5px] leading-relaxed text-text-dim">{errBody}</div>
+              {/* The provider's own error_description, when it sent one. Kept
+                  visually distinct and explicitly attributed to the identity
+                  provider so this untrusted, provider-supplied text never reads
+                  as tape-archiver's own copy (see sanitizeErrorDescription). */}
+              {state === 'error-denied' && errorDescription && (
+                <div className="mt-1.5 text-[11.5px] leading-relaxed text-text-dim">
+                  <span>Identity provider: </span>
+                  <span className="text-text">{errorDescription}</span>
+                </div>
+              )}
             </div>
           </div>
         )}

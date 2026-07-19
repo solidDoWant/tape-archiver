@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { Link, RouterProvider } from './router'
-import { parseRoute, runPath, sanitizeRedirectPath, useNavigate, useRoute } from './route'
+import {
+  parseRoute,
+  runPath,
+  sanitizeErrorDescription,
+  sanitizeRedirectPath,
+  useNavigate,
+  useRoute,
+} from './route'
 
 beforeEach(() => {
   window.history.pushState({}, '', '/')
@@ -103,6 +110,37 @@ describe('sanitizeRedirectPath', () => {
 
   it('preserves a path that merely starts with login', () => {
     expect(sanitizeRedirectPath('/login-help')).toBe('/login-help')
+  })
+})
+
+describe('sanitizeErrorDescription', () => {
+  it('defaults empty/missing values to an empty string', () => {
+    expect(sanitizeErrorDescription('')).toBe('')
+    expect(sanitizeErrorDescription(null)).toBe('')
+    expect(sanitizeErrorDescription(undefined)).toBe('')
+  })
+
+  it('preserves a normal provider message', () => {
+    expect(sanitizeErrorDescription('The request is otherwise malformed')).toBe(
+      'The request is otherwise malformed',
+    )
+  })
+
+  it('collapses whitespace and trims', () => {
+    expect(sanitizeErrorDescription('  too    many\n\tspaces  ')).toBe('too many spaces')
+  })
+
+  it('strips control and bidi/format characters that could disrupt or reorder the text', () => {
+    // A NUL (control, U+0000) and a right-to-left override (format, U+202E):
+    // both must be removed so they cannot corrupt or visually reorder the text.
+    expect(sanitizeErrorDescription('safe\u0000text\u202Ehere')).toBe('safe text here')
+  })
+
+  it('caps an over-long description with an ellipsis', () => {
+    const long = 'x'.repeat(500)
+    const result = sanitizeErrorDescription(long)
+    expect(result.length).toBeLessThanOrEqual(201)
+    expect(result.endsWith('…')).toBe(true)
   })
 })
 

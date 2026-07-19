@@ -105,6 +105,37 @@ export function sanitizeRedirectPath(path: string | null | undefined): string {
   return path
 }
 
+// errorDescriptionMaxLen caps how many characters of a provider
+// error_description LoginPage will show — see sanitizeErrorDescription.
+const errorDescriptionMaxLen = 200
+
+// sanitizeErrorDescription bounds an OIDC error_description for display on the
+// login page. It reaches the SPA as the ?error_description query param on
+// /login: pkg/webauth's callback redirect sets it (already sanitized once
+// server-side), but /login can also be opened directly with any query, so the
+// value is always attacker-controllable. React escapes it against XSS on its
+// own; this additionally strips control and format runes (the latter includes
+// bidi overrides that could reorder the displayed text), collapses whitespace,
+// and caps the length so a crafted value cannot disrupt or dominate the page.
+// LoginPage renders the result attributed to the identity provider so it never
+// reads as first-party copy. Returns '' when nothing usable remains.
+export function sanitizeErrorDescription(value: string | null | undefined): string {
+  if (!value) {
+    return ''
+  }
+
+  const cleaned = value
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (cleaned.length <= errorDescriptionMaxLen) {
+    return cleaned
+  }
+
+  return cleaned.slice(0, errorDescriptionMaxLen).trimEnd() + '…'
+}
+
 // runPath builds the URL for a given run ID, the inverse of parseRoute's
 // "run" case — the one place that knows the "/runs/{id}" URL shape, so
 // callers (SubmitRunForm's onViewRun wiring, RunHistory's row links) never

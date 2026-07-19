@@ -36,9 +36,14 @@ provider to sign in, then returns you to wherever you were headed. There is no s
 at the identity provider, never in this UI.
 
 The login page also reports sign-in problems rather than leaving you on a provider error
-page: **Access denied** when your account authenticated but is not authorized for this
-archive, and **Session expired** when a login attempt went stale or your previous
-session timed out — both with a control to retry (or try a different account).
+page: **Access denied** when the identity provider refused the sign-in (for example your
+account is not assigned to this application), and **Session expired** when a login
+attempt went stale or your previous session timed out — both with a control to retry (or
+try a different account). When the provider includes a reason with its denial, that
+message is shown too, attributed to the identity provider (e.g. "Identity provider: User
+not assigned to application"), so you can tell a policy/assignment denial apart from a
+malformed request without digging through server logs. That text comes straight from the
+provider and is sanitized before display.
 
 Session expiry mid-use is handled the same way: if your session ends while a tab is
 open (for example past the server's `maxSessionDuration`), the next thing the app
