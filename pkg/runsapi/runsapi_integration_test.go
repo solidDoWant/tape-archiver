@@ -531,9 +531,12 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	})
 
 	// A production (non-dry-run) submit requires the deployment to own the
-	// library devices (runsapi.requireDeviceOwnership); declare them so this
-	// test's production submissions are accepted.
-	handler := runsapi.New(temporalClient, runsapi.WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, ""))
+	// library devices *and* the delivery webhook (runsapi.requireDeviceOwnership,
+	// issue #304): validSubmitConfigJSON carries a delivery.webhookUrl, which a
+	// production run may not deliver its escrow-key-bearing report to unless the
+	// deployment owns a webhook (which then overrides the client's). Declare both
+	// so this test's production submissions are accepted.
+	handler := runsapi.New(temporalClient, runsapi.WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "https://discord.com/api/webhooks/deploy/deploy"))
 	server := httptest.NewServer(handler)
 
 	defer server.Close()

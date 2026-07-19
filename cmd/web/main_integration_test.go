@@ -427,10 +427,15 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	setupEnv(t, webListenAddr)
 
 	// A production (non-dry-run) submit requires the deployment to own the
-	// library devices (runsapi.requireDeviceOwnership); provide them via the
-	// same env vars cmd/web reads (LIBRARY_CHANGER/LIBRARY_DRIVES).
+	// library devices *and* the delivery webhook (runsapi.requireDeviceOwnership,
+	// issue #304): validRunConfigJSON carries a delivery.webhookUrl, which a
+	// production run may not deliver its escrow-key-bearing report to unless the
+	// deployment owns a webhook (which then overrides the client's). Provide all
+	// three via the same env vars cmd/web reads (LIBRARY_CHANGER / LIBRARY_DRIVES
+	// / DELIVERY_WEBHOOK_URL).
 	t.Setenv("LIBRARY_CHANGER", "/dev/sch0")
 	t.Setenv("LIBRARY_DRIVES", "/dev/nst0,/dev/nst1")
+	t.Setenv("DELIVERY_WEBHOOK_URL", "https://discord.com/api/webhooks/deploy/deploy")
 
 	ctx := t.Context()
 
