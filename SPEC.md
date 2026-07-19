@@ -489,7 +489,13 @@ transient upload failure (a 429 rate-limit or a 5xx, or a transport blip) is ret
 bounded number of times so a brief outage still delivers; a deterministic rejection (a
 permanent 4xx — a deleted or rotated webhook, or a report the endpoint refuses as too
 large) fails the run fast rather than retrying forever, so the failure alert below fires
-instead of the run wedging silently after all tapes are already written.
+instead of the run wedging silently after all tapes are already written. The report is
+posted with `?wait=true` so Discord returns the created message; the Deliver activity
+records that message's identity (its channel and message IDs, plus the webhook's guild
+from a best-effort webhook lookup) as its result, so the web UI can deep-link to the
+posted report from the run overview. That capture is best-effort — it never turns a
+delivered report into a failed run — and is reconstructed on demand from workflow
+history, adding no persistent state (§4.2).
 
 **Failure alert (operational, configured via env var).** A separate failure webhook,
 configured on the worker via the `DISCORD_FAILURE_WEBHOOK_URL` environment variable
@@ -533,18 +539,25 @@ affected tapes for fresh blanks and resumes, or aborts; if neither happens withi
 `library.writeFailureWaitTimeoutSeconds` (default 12 h) the run fails in that defined
 paused state and is reported.
 
-**Resume signals are matched to the pause that is waiting.** Every operator pause — the
-Eject I/O-station pause, the write-path pause, and the optical-burn pause — drains any
-resume signal already buffered *before it dispatches that pause's alert*, then waits. A
-resume buffered before the alert is stale — a double `tapectl resume`, or one that raced
-an auto-resume (the Eject poll can resume on the access bit while a signal is still in
-flight) — and is discarded, so it can never instantly satisfy a later pause. Without this,
-a surplus resume could skip a between-burn-set disc-swap pause and blank a just-verified
-recovery disc. The drain runs before the alert, never at wait entry: a resume the operator
-sends *in response to* this pause's alert is appended after the alert and always survives —
-even if it lands while the control worker is restarting, deploying, or backlogged and so is
-buffered ahead of the workflow task that begins the wait. A buffered *abort* is never
-discarded: aborting is always a safe, reported, no-further-data outcome.
+**Resume and abort signals are matched to the pause that is waiting.** Every operator
+pause — the Eject I/O-station pause, the write-path pause, and the optical-burn pause —
+drains any resume *and abort* signal already buffered *before it dispatches that pause's
+alert*, then waits. A signal buffered before the alert is stale — a double `tapectl
+resume`/`abort`, one that raced an auto-resume (the Eject poll can resume on the access
+bit while a signal is still in flight), or a web-API resume/abort request
+(`POST /api/runs/{runID}/resume`/`abort`) whose non-atomic pause-state check and signal
+send straddled the pause resolving by other means — and is discarded, so it can never
+instantly satisfy a later, unrelated pause. Without this, a surplus resume could skip a
+between-burn-set disc-swap pause and blank a just-verified recovery disc, and a surplus
+abort could silently end a run at a pause the operator never intended to abort. The drain
+runs before the alert, never at wait entry: a resume or abort the operator sends *in
+response to* this pause's alert is appended after the alert and always survives — even if
+it lands while the control worker is restarting, deploying, or backlogged and so is
+buffered ahead of the workflow task that begins the wait. Draining the abort channel does
+not change which pauses *accept* abort: the Eject I/O-station pause's own wait still never
+listens for it (every tape is already safely written by then, so there is nothing left for
+an abort to protect against) — the drain only stops a stale abort from surviving past that
+pause onto a later one.
 
 ## 12. Dry-run and the virtual library
 
@@ -629,14 +642,58 @@ refinement as issues are implemented.
   activities.
 - `cmd/tapectl` — CLI to submit a run config to Temporal, trigger dry-runs, inspect.
 - `cmd/gen-config-schema` — emits the committed JSON schema for the run config.
+- `cmd/web` — web UI HTTP server (epic #239): serves the embedded React SPA at `/` and
+  the JSON API (`pkg/runsapi`) under `/api/*` — `GET /api/runs`/`GET
+  /api/runs/{runID}` (list/describe backup runs via Temporal visibility +
+  `LastCompletedPhaseQuery` + `CurrentPauseQuery`), `POST /api/runs` (submit a run,
+  including dry-run, via `pkg/runsubmit` — the same submission path `tapectl run
+  [--dry-run]` uses, so the CLI and browser can never drift), `POST
+  /api/runs/{runID}/resume` / `POST /api/runs/{runID}/abort` (send the same
+  `OperatorResumeSignal`/`OperatorAbortSignal` `tapectl resume`/`tapectl abort` send,
+  after confirming via `CurrentPauseQuery` that the run is actually paused and the
+  signal applies to that pause kind), `POST /api/runs/{runID}/cancel` (graceful
+  Temporal cancellation of any in-progress run — paused or not — via
+  `CancelWorkflow`, after confirming the execution is still Running; the workflow's
+  deferred cleanup runs on a disconnected context so it tears down its mounts,
+  releases its hold, posts the failure/cancellation alert, and closes as
+  `Canceled` — never `TerminateWorkflow`, which would skip that cleanup), and `GET
+  /api/events/runs/{runID}` (Server-Sent Events live view over the same state,
+  including pause changes). The same API is self-described by an OpenAPI 3.1
+  document (`GET /api/openapi.json`/`.yaml`) with a browsable reference page (`GET
+  /api/docs`) — generated from the handlers' own Go request/response types via
+  `huma` as a description-only layer that leaves how each endpoint is served
+  unchanged (`pkg/runsapi`'s `openapi.go`). Every page and
+  `/api/*` route is gated behind OIDC authorization-code-flow authentication
+  (`pkg/webauth`; provider-agnostic via standard OIDC discovery) — `cmd/web` refuses
+  to start without a complete OIDC configuration. `/healthz` + `/readyz`
+  (`pkg/health`, own `HEALTH_ADDR`, readiness gated on Temporal connectivity) and
+  `/metrics` (`pkg/metrics`, own `METRICS_ADDR`, including Temporal SDK metrics) stay
+  unauthenticated on their own dedicated ports, since Kubernetes probes and
+  Prometheus scrapes cannot perform an OIDC login. Thin wrapper over `pkg/webserver`
+  + `pkg/runsapi` + `pkg/webauth` +
+  `pkg/temporalclient`/`pkg/health`/`pkg/metrics` (the same factories `cmd/worker`
+  uses); the SPA build is embedded via `go:embed` from `cmd/web/dist` (populated by
+  `web/`'s build — see `web/`, below).
 - `pkg/` — one concern per package: `tape` (changer via SG_IO, `mt`), `ltfs`, `agewrap`, `par2`,
   `archive` (tar), `zfs`, `k8ssnap` (VolumeSnapshot discovery), `report` (PDF),
   `recoverykit` (ISO), `webhook` (Discord), `checksum`, `logging`, `metrics`,
-  `temporalclient`.
+  `temporalclient`, `webserver` (`cmd/web`'s HTTP handler: mounts the embedded-SPA
+  serving and the `/api/*` handler together, SPA lowest-priority), `runsapi`
+  (`cmd/web`'s `/api/runs` JSON handlers, backed by Temporal visibility +
+  `LastCompletedPhaseQuery`/`CurrentPauseQuery` + `pkg/runsubmit`, unit-testable
+  against a fake Temporal client interface), `runsubmit` (the submission path shared
+  by `cmd/tapectl` and `pkg/runsapi`: dry-run mhvtl device override, the fixed
+  singleton `StartWorkflowOptions`, and singleton-conflict error translation),
+  `webauth` (`cmd/web`'s OIDC session middleware: login/callback/logout routes, an
+  encrypted-cookie session with no server-side store, gating every other route).
 - `internal/config` — run-config types and env parsing.
 - `workflows/backup/` — the backup workflow and activities, split by concern
   (`resolve.go`, `plan.go`, `prepare.go`, `verify.go`, `write.go`, `library.go`,
   `report.go`, `deliver.go`) with co-located tests.
+- `web/` — the web UI frontend: Vite + React + TypeScript + Tailwind CSS, `npm`
+  project with a committed `package-lock.json`. `npm run build` writes its output
+  into `cmd/web/dist`, not `web/dist` (a `go:embed` pattern can only reach the
+  embedding file's own directory subtree); see `docs/web-ui-design.md`.
 - `schemas/` — generated config schema. `deploy/charts/` — Helm chart for the control
   worker. `docs/` — operator docs. `e2e/` — end-to-end tests.
 - `nix/` — build derivations: `ltfs.nix`, the `mhvtl` userspace/kernel modules, and

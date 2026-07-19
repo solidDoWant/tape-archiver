@@ -1,0 +1,250 @@
+---
+config:
+  # temporal selects the Temporal frontend cmd/web connects to (pkg/temporalclient —
+  # the same envconfig-driven client cmd/worker/tapectl use to serve GET /api/runs,
+  # GET /api/runs/{runID}, and POST /api/runs). address is required and helm
+  # template fails when empty; namespace has a sensible default.
+  #
+  # Non-secret fields (address, namespace, tls.*, grpcMeta) are rendered into a
+  # temporal.toml ConfigMap consumed via TEMPORAL_CONFIG_FILE, exactly mirroring
+  # deploy/charts/tape-archiver-control-worker's config.temporal.* — see that
+  # chart's values.yaml for the full field-by-field rationale. Secret material
+  # (apiKey, TLS cert/key/CA bytes) comes from k8s Secrets, surfaced as either env
+  # vars or mounted files; never rendered in plaintext.
+  temporal:
+    # address is the Temporal frontend host:port (no scheme). Written to address in
+    # the rendered temporal.toml. Example: "temporal-frontend.temporal.svc.cluster.local:7233".
+    address: ""
+    # namespace is the Temporal namespace GET/POST /api/runs operate against.
+    # Written to namespace in the rendered temporal.toml. Defaults to Temporal's
+    # built-in "default" namespace.
+    namespace: "default"
+    # apiKey is the Temporal Cloud / authenticated frontend API key. Sets
+    # TEMPORAL_API_KEY on the web container. Use secretKeyRef in production; value
+    # is intended for dev only. Setting both is rejected. When both name and key
+    # under secretKeyRef are empty, no API key env var is set.
+    #
+    # File-mounted keys: a value of the form "file:///absolute/path" tells the
+    # binary to read the API key from disk on every Temporal RPC, picking up
+    # external rotators without a process restart. To use this, mount the backing
+    # Secret yourself via resources.controllers.main.persistence and set
+    # apiKey.value to the resulting in-container path with the file:// prefix.
+    apiKey:
+      value: ""
+      secretKeyRef:
+        name: ""
+        key: ""
+    # tls configures transport security to the Temporal frontend. enabled: false
+    # uses plaintext gRPC, even when apiKey is set. enabled: true turns on
+    # server-side TLS; mTLS and a custom CA are optional. Each reference points at
+    # an existing k8s Secret (e.g. one produced by cert-manager). References that
+    # share a Secret name share one volume mount.
+    tls:
+      enabled: false
+      # serverName overrides the SNI / cert-verification hostname (TEMPORAL_TLS_SERVER_NAME).
+      serverName: ""
+      # disableHostVerification skips server certificate hostname verification.
+      # Development / self-signed only.
+      disableHostVerification: false
+      # clientCertificate enables mTLS by pointing at a kubernetes.io/tls Secret
+      # containing the client cert and private key ("tls.crt" / "tls.key").
+      clientCertificate:
+        secretName: ""
+      # caCert overrides the trusted CA pool. Free-form secretKeyRef because CA
+      # bundles are not standardised on a single Secret layout; key defaults to
+      # "ca.crt" (cert-manager / most k8s tooling convention).
+      caCert:
+        secretKeyRef:
+          name: ""
+          key: "ca.crt"
+    # grpcMeta is a map of gRPC metadata headers added to every Temporal RPC. Keys
+    # are passed through verbatim. Rendered under [profile.default.grpc_meta] in
+    # temporal.toml.
+    grpcMeta: {}
+
+  web:
+    # logLevel is passed verbatim to the web server's logging setup via LOG_LEVEL
+    # (empty -> info).
+    logLevel: info
+    # temporalUiUrl is the browsable Temporal Web UI base URL (rendered to
+    # TEMPORAL_UI_URL — docs/configuration.md). When set, each run's overview page
+    # links to that run's workflow-history view in the Temporal UI, targeting the
+    # namespace from config.temporal.namespace above. Leave empty to show no link.
+    temporalUiUrl: ""
+    # metricsScrapeWaitTimeout overrides METRICS_SCRAPE_WAIT_TIMEOUT (a Go duration
+    # string, e.g. "60s") — how long shutdown waits for a final Prometheus scrape.
+    # Leave empty to use cmd/web's own default (0s — no wait; the pod drains within
+    # roughly cmd/web's 10s HTTP shutdown deadline of SIGTERM). A positive value
+    # delays every pod's SIGTERM exit by up to that long — keep it well under the
+    # pod's terminationGracePeriodSeconds (this chart sets 30) or the kubelet will
+    # SIGKILL the pod mid-wait.
+    metricsScrapeWaitTimeout: ""
+    # The web UI always exposes /metrics on port 9090 regardless of this value. The
+    # toggle controls whether a PodMonitor is created for cluster-side scraping.
+    # Leave false when running without prometheus-operator CRDs installed.
+    metrics:
+      enabled: false
+
+    # oidc configures the OIDC authorization-code-flow identity provider
+    # (pkg/webauth) that gates every page and /api/* route (docs/configuration.md
+    # "OIDC authentication (cmd/web)"). issuerUrl/clientId/redirectUrl are required
+    # plain strings — helm template fails when any is empty, since cmd/web itself
+    # refuses to start without a complete OIDC configuration.
+    oidc:
+      # issuerUrl is the identity provider's issuer URL, used for OIDC discovery
+      # (GET {issuerUrl}/.well-known/openid-configuration). Any standards-compliant
+      # provider works (Keycloak, Authentik, Dex, ...).
+      issuerUrl: ""
+      # clientId is this app's client ID at the provider above.
+      clientId: ""
+      # redirectUrl is this app's OIDC callback URL, exactly as registered with the
+      # provider (e.g. "https://tape-archiver.example.com/auth/callback").
+      redirectUrl: ""
+      # clientSecret is this app's confidential-client secret at the provider
+      # above. Unlike config.temporal.apiKey there is no plaintext `value`
+      # fallback: it must always be sourced from an existing k8s Secret via
+      # secretKeyRef (name and key both required) — helm template fails
+      # otherwise. This is a hard requirement, not a convention carried over from
+      # the control-worker chart: OIDC client secrets are the kind of credential
+      # this chart must never allow into a rendered manifest or a committed
+      # values file.
+      clientSecret:
+        secretKeyRef:
+          name: ""
+          key: ""
+
+    # sessionKey must reference an existing k8s Secret holding a base64-encoded
+    # 32-byte AES-256 key (e.g. `openssl rand -base64 32`), surfaced as
+    # WEB_SESSION_KEY (AES-256-GCM session/login-state cookie encryption — cmd/web
+    # holds no server-side session store, docs/web-ui-design.md §3). As with
+    # oidc.clientSecret, there is no plaintext `value` fallback; secretKeyRef (name
+    # and key both required) is mandatory — helm template fails otherwise.
+    sessionKey:
+      secretKeyRef:
+        name: ""
+        key: ""
+
+    # dryRun configures the mhvtl device nodes a "POST /api/runs" dry-run
+    # submission's library targets are redirected to (MHVTL_CHANGER_DEV /
+    # MHVTL_DRIVE0_DEV / MHVTL_DRIVE1_DEV — docs/configuration.md). Leave all
+    # three empty (the default) to make the web UI refuse dry-run submissions
+    # with a 400 — the right posture for a production deployment pointed at a
+    # real tape library. Only set these against a Temporal/mhvtl stack meant for
+    # dry-run testing; all three must be set together or none are (cmd/web
+    # requires all three for a dry-run to succeed).
+    dryRun:
+      mhvtlChangerDev: ""
+      mhvtlDrive0Dev: ""
+      mhvtlDrive1Dev: ""
+
+    # library carries the deployment's fixed tape-library device targets the
+    # guided config form ("Start new run" -> Form mode) sources read-only rather
+    # than as per-run free-text inputs (issue #304 — LIBRARY_CHANGER /
+    # LIBRARY_DRIVES, docs/configuration.md). These are the real-hardware
+    # analogue of dryRun.mhvtl* above: they are the actual library the form fills
+    # into a submitted run config, so the operator never re-types (or mis-types)
+    # a changer/drive path per run. Leave empty (the default) to make Form mode
+    # show these as "not configured"; the operator can still supply them per run
+    # via the config page's JSON / paste mode.
+    library:
+      # changer is the changer/medium-changer device path (e.g. "/dev/sch0").
+      changer: ""
+      # drives is the list of tape-drive device paths (e.g. ["/dev/nst0",
+      # "/dev/nst1"]), rendered to LIBRARY_DRIVES as a comma-separated list.
+      drives: []
+      # topology is the physical library's slot layout (issue #305 —
+      # LIBRARY_SLOT_COUNT / LIBRARY_CLEANING_SLOTS / LIBRARY_IO_STATION_SLOTS,
+      # docs/configuration.md), from which the guided config form renders the
+      # blank/write-target slot-grid picker bounded to this deployment's real
+      # library instead of a free-form list of slot numbers. Like the devices
+      # above, it describes the deployment's hardware, not a per-run choice.
+      # Leave slotCount 0 (the default) to show the picker "not configured"; the
+      # operator can still set blank slots per run via the config page's JSON /
+      # paste mode.
+      topology:
+        # slotCount is the number of physical storage slots; the picker numbers
+        # them 1..slotCount.
+        slotCount: 0
+        # cleaningSlots / ioStationSlots are the slot numbers reserved for
+        # cleaning cartridges and the I/O station (import/export / mail slot),
+        # rendered non-selectable in the picker. Each renders to a
+        # comma-separated list (e.g. [45] -> "45", [46, 47] -> "46,47").
+        cleaningSlots: []
+        ioStationSlots: []
+
+    # delivery carries the deployment's fixed Discord report webhook the guided
+    # config form sources read-only (issue #304 — DELIVERY_WEBHOOK_URL,
+    # docs/configuration.md), for the same reason as library above. Leave empty
+    # to show the webhook field as "not configured" in Form mode.
+    delivery:
+      webhookUrl: ""
+      # opticalBurnDrives is the deployment's fixed optical burner device paths
+      # (issue #317 — OPTICAL_BURNER_DRIVES, docs/configuration.md), the delivery
+      # analogue of library.drives above: a burner device path (e.g. "/dev/sr0")
+      # is a property of the host, not a per-run choice, so the guided config
+      # form sources it read-only and the operator only toggles optical burn
+      # on/off and sets the copy count per run. Rendered to OPTICAL_BURNER_DRIVES
+      # as a comma-separated list. Leave empty (the default) to show the burner
+      # drives as "not configured" when a run enables optical burn; the operator
+      # can still supply them per run via the config page's JSON / paste mode.
+      opticalBurnDrives: []
+
+# resources follows the bjw-s app-template schema, same convention as
+# deploy/charts/tape-archiver-control-worker. Values here are deep-merged over the
+# chart-computed controller, Service, env vars, and podMonitor; user-supplied values
+# take precedence.
+#
+# The chart generates:
+#   - a single Deployment controller named "main" (image, named ports "http" (8080 —
+#     the SPA + JSON API, WEB_LISTEN_ADDRESS), "health" (8081, HEALTH_ADDR), and
+#     "metrics" (9090, METRICS_ADDR); hardened securityContext; httpGet liveness
+#     (/healthz) and readiness (/readyz) probes on the health port; a
+#     terminationGracePeriodSeconds of 30 covering cmd/web's SIGTERM drain —
+#     bounded at roughly its 10s HTTP shutdown deadline plus a couple of seconds
+#     of client teardown, and normally far quicker, so 30 leaves ample headroom
+#     unless config.web.metricsScrapeWaitTimeout re-enables the final-scrape
+#     wait, in which case raise this to keep it comfortably above that value).
+#   - a ClusterIP Service ("main") exposing the "http" port, for an Ingress (below)
+#     or any other in-cluster caller to target.
+#
+# Override the controller by adding resources.controllers.main with the standard
+# bjw-s controller schema (replicas, pod, containers.main, etc.); override or extend
+# the Service the same way under resources.service.main.
+#
+# No ScaledJob/KEDA support here (unlike the control worker) — the web UI is a
+# long-running HTTP service serving live browser/API traffic, not a queue-driven
+# job, so there is nothing to scale to zero between runs.
+resources:
+  controllers:
+    # Override the chart-generated Deployment here. For example, to pin an image
+    # tag or scale replicas:
+    #   main:
+    #     replicas: 2
+    #     containers:
+    #       main:
+    #         image:
+    #           repository: ghcr.io/soliddowant/tape-archiver/web
+    #           tag: v1.2.3
+    main: {}
+  # ingress is entirely operator-configured (bjw-s app-template's native schema) —
+  # the chart computes nothing here beyond the "main" Service above, which a
+  # single-host/single-path Ingress auto-detects as its backend when a path's
+  # `service` is left unset (bjw-s' ingress service auto-detection applies because
+  # this chart renders exactly one enabled Service). Disabled by default (no
+  # entries). Example (cert-manager + nginx-ingress):
+  #
+  #   ingress:
+  #     main:
+  #       enabled: true
+  #       className: nginx
+  #       annotations:
+  #         cert-manager.io/cluster-issuer: letsencrypt-prod
+  #       hosts:
+  #         - host: tape-archiver.example.com
+  #           paths:
+  #             - path: /
+  #       tls:
+  #         - hosts:
+  #             - tape-archiver.example.com
+  #           secretName: tape-archiver-web-tls
+  ingress: {}

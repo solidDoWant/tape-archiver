@@ -53,6 +53,19 @@ func (c *Config) Validate() error {
 	// at a time (SPEC §4.3 phases 6–8). The tape path checks at run time that the
 	// plan's physical tapes fit the configured drives and blank slots.
 
+	// Every logical tape needs one blank per copy (physical tapes = logical tapes
+	// × copies, SPEC §4.3), so the blank slots only form whole logical-tape sets
+	// when their count is a positive multiple of Copies. A leftover (count mod
+	// Copies != 0) is dead weight: those blanks can never complete another logical
+	// tape's copy set. Reject it here rather than let the operator stage a run
+	// whose slot selection can't be fully used. Copies >= 1 and len(BlankSlots)
+	// >= 1 are already enforced above, so the multiple is guaranteed >= 1.
+	if len(c.Library.BlankSlots)%c.Copies != 0 {
+		return fmt.Errorf(
+			"library.blankSlots: the number of blank slots (%d) must be a positive multiple of copies (%d), so every logical tape gets a full set of copies",
+			len(c.Library.BlankSlots), c.Copies)
+	}
+
 	if err := c.Redundancy.validate(); err != nil {
 		return err
 	}

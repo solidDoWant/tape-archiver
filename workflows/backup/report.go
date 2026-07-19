@@ -220,6 +220,9 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		return ReportOutput{}, fmt.Errorf("create report output directory %q: %w", outDir, err)
 	}
 
+	slog.InfoContext(ctx, "report: escrow identity verified; building recovery artifacts",
+		"tapes", len(input.Written), "opticalBurn", input.Config.Delivery.OpticalBurn.Enabled())
+
 	// Render the PDF to memory so the same bytes are both written to disk and (when
 	// burning) embedded in the ISO (SPEC §10) — no round-trip through the filesystem.
 	pdf, err := renderReportPDF(ctx, input)
@@ -236,7 +239,7 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 	// disc is the ISO's durable home (SPEC §10, §11), so a run without burning
 	// produces just the report.
 	if !input.Config.Delivery.OpticalBurn.Enabled() {
-		slog.Info("report: built recovery artifacts", "report", reportPath)
+		slog.InfoContext(ctx, "report: built recovery artifacts", "report", reportPath)
 
 		return ReportOutput{ReportPath: reportPath}, nil
 	}
@@ -275,7 +278,7 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		return ReportOutput{}, fmt.Errorf("write disc-content manifest to %q: %w", discManifestPath, err)
 	}
 
-	slog.Info("report: built recovery artifacts", "report", reportPath, "iso", uncompressedISOPath)
+	slog.InfoContext(ctx, "report: built recovery artifacts", "report", reportPath, "iso", uncompressedISOPath)
 
 	return ReportOutput{
 		ReportPath:          reportPath,
@@ -348,6 +351,9 @@ func (a *ReportActivities) rebuildReport(ctx context.Context, outDir string, inp
 	if err := os.WriteFile(reportPath, pdf, 0o644); err != nil {
 		return "", fmt.Errorf("write delivered PDF report to %q: %w", reportPath, err)
 	}
+
+	slog.InfoContext(ctx, "report: re-rendered the delivered report to record the burned discs",
+		"report", reportPath, "discs", len(input.Discs))
 
 	return reportPath, nil
 }
@@ -709,7 +715,7 @@ func queryDeviceIdentity(ctx context.Context, library config.Library) deviceIden
 
 	if len(library.Drives) > 0 {
 		if info, err := tape.NewDrive(library.Drives[0]).Inquire(ctx); err != nil {
-			slog.Warn("report: could not read drive identity", "device", library.Drives[0], "error", err)
+			slog.WarnContext(ctx, "report: could not read drive identity", "device", library.Drives[0], "error", err)
 		} else {
 			if model := info.Model(); model != "" {
 				identity.driveModel = model
@@ -725,7 +731,7 @@ func queryDeviceIdentity(ctx context.Context, library config.Library) deviceIden
 
 	if library.Changer != "" {
 		if info, err := tape.NewChanger(library.Changer).Inquire(ctx); err != nil {
-			slog.Warn("report: could not read library identity", "device", library.Changer, "error", err)
+			slog.WarnContext(ctx, "report: could not read library identity", "device", library.Changer, "error", err)
 		} else if model := info.Model(); model != "" {
 			identity.libraryModel = model
 		}

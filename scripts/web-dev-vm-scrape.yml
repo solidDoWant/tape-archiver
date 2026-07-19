@@ -1,0 +1,29 @@
+# web-dev-vm-scrape.yml — VictoriaMetrics promscrape config for `make web-dev`
+# (issue #280). Static targets only: the dev stack's control/data workers
+# always listen on fixed, well-known addresses (scripts/web-dev-up.sh's
+# CONTROL_METRICS_ADDR/DATA_METRICS_ADDR, matching docs/configuration.md's
+# METRICS_ADDR), so no service discovery is needed. victoriametrics runs with
+# network_mode: host (see docker-compose.web-dev.yml) specifically so these
+# 127.0.0.1 targets are reachable at all: the workers run directly on the
+# host (not in a container), and there's no host.docker.internal on a native
+# Linux Docker Engine without extra "extra_hosts" wiring.
+#
+# Scraped metrics include the write-health gauges
+# workflows/backup/writehealth.go registers
+# (tape_archiver_write_throughput_mbps, _repositions, _tapealert_flags,
+# _below_floor, each labeled `barcode`) on the data worker's endpoint, plus
+# both workers' other Prometheus metrics (Temporal SDK, health) on the same
+# /metrics endpoint.
+scrape_configs:
+  - job_name: tape-archiver-control-worker
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["127.0.0.1:19090"]
+        labels:
+          role: control
+  - job_name: tape-archiver-data-worker
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["127.0.0.1:19091"]
+        labels:
+          role: data

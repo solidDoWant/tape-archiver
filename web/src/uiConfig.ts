@@ -1,0 +1,125 @@
+import { useEffect, useState } from 'react'
+import { apiFetch } from './api'
+import type { DeployConfig } from './configModel'
+
+// UiConfig mirrors pkg/runsapi's GET /api/config/ui JSON shape: server-provided
+// deploy-time config the SPA needs. temporalUiBaseUrl is the browsable Temporal
+// Web UI base (cmd/web's TEMPORAL_UI_URL); it is empty when the operator has not
+// configured one, in which case the run overview's Temporal-workflow link is
+// simply not shown. library and delivery carry the deploy-owned library device
+// targets and Discord webhook URL the guided config form sources read-only
+// rather than as per-run free-text inputs (issue #304 — see ConfigForm.tsx);
+// each is empty when the deployment did not configure it.
+export interface UiConfig {
+  temporalUiBaseUrl: string
+  temporalNamespace: string
+  // library carries the deploy-owned changer/drive device targets (issue #304)
+  // and the physical library topology (issue #305): slotCount is the number of
+  // storage slots (numbered 1..slotCount by the slot-grid picker), and
+  // cleaningSlots/ioStationSlots are the slot numbers the picker renders
+  // non-selectable. slotCount is 0 and the slot arrays [] when the deployment
+  // did not declare a topology.
+  library: {
+    changer: string
+    drives: string[]
+    slotCount: number
+    cleaningSlots: number[]
+    ioStationSlots: number[]
+  }
+  // delivery carries whether a Discord webhook is configured (issue #304) and
+  // the optical burner device paths (issue #317) the guided config form sources
+  // read-only. webhookConfigured is only the boolean state, never the URL: a
+  // Discord webhook URL is a credential (it embeds a posting token), so the
+  // server never sends it to the browser — cmd/web re-applies the deployment's
+  // own webhook to every submitted run server-side. opticalBurnDrives is []
+  // (never null) when the deployment did not configure any burner drives.
+  delivery: { webhookConfigured: boolean; opticalBurnDrives: string[] }
+}
+
+export type UiConfigState =
+  | { status: 'loading' }
+  | { status: 'loaded'; config: UiConfig }
+  | { status: 'error' }
+
+// useUiConfig fetches GET /api/config/ui once on mount. Same one-shot,
+// error-swallowing pattern as useBuildInfo (buildInfo.ts): a failure just means
+// the outbound links it feeds are omitted, never a broken page.
+export function useUiConfig(): UiConfigState {
+  const [state, setState] = useState<UiConfigState>({ status: 'loading' })
+
+  useEffect(() => {
+    let cancelled = false
+
+    apiFetch<UiConfig>('/api/config/ui')
+      .then((config) => {
+        if (!cancelled) {
+          setState({ status: 'loaded', config })
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setState({ status: 'error' })
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  return state
+}
+
+// deployConfigFrom extracts the deploy-owned library devices (issue #304), the
+// optical burner drives (issue #317), and the physical library topology (issue
+// #305) that the guided config form needs, from the GET /api/config/ui fetch
+// state. Until the fetch has loaded (or if it failed), it yields empty values —
+// the guided form then shows a loading/unavailable state for the read-only
+// device fields and the slot picker, and its Review step surfaces the run-config
+// schema's own "changer must not be empty" / "at least one drive is required"
+// validation rather than the SPA inventing a default. The Discord webhook is
+// deliberately not part of this: its URL is a credential the server never sends
+// (see UiConfig.delivery) and re-applies to every run itself, so buildConfig
+// leaves delivery.webhookUrl empty rather than sourcing it here.
+export function deployConfigFrom(state: UiConfigState): DeployConfig {
+  if (state.status === 'loaded') {
+    return {
+      changer: state.config.library.changer,
+      drives: state.config.library.drives,
+      opticalBurnDrives: state.config.delivery.opticalBurnDrives,
+      slotCount: state.config.library.slotCount,
+      cleaningSlots: state.config.library.cleaningSlots,
+      ioStationSlots: state.config.library.ioStationSlots,
+    }
+  }
+
+  return {
+    changer: '',
+    drives: [],
+    opticalBurnDrives: [],
+    slotCount: 0,
+    cleaningSlots: [],
+    ioStationSlots: [],
+  }
+}
+
+// temporalWorkflowUrl builds the Temporal Web UI deep-link for one workflow
+// execution, or null when no UI base URL is configured (so the caller renders
+// no link). The path is Temporal's standard
+// {base}/namespaces/{ns}/workflows/{workflowId}/{runId}/history. workflowId is
+// the run's own Temporal WorkflowID (backup.WorkflowID = "backup" for every
+// run), passed in from the run detail rather than hardcoded here.
+export function temporalWorkflowUrl(
+  config: UiConfig | undefined,
+  workflowId: string,
+  runId: string,
+): string | null {
+  if (!config || !config.temporalUiBaseUrl) {
+    return null
+  }
+
+  const base = config.temporalUiBaseUrl.replace(/\/+$/, '')
+  const namespace = encodeURIComponent(config.temporalNamespace || 'default')
+
+  return `${base}/namespaces/${namespace}/workflows/${encodeURIComponent(workflowId)}/${encodeURIComponent(runId)}/history`
+}

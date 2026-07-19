@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- tape-archiver: a two-reel data-cartridge mark in the app's warm archival
+       palette (dark-ink badge, cream reels, amber hubs). A solid badge keeps it
+       legible on both light and dark browser chrome. -->
+  <rect width="32" height="32" rx="7" fill="#211f1c"/>
+  <!-- reels -->
+  <g>
+    <circle cx="11" cy="13" r="5.3" fill="#f3f0e9"/>
+    <circle cx="21" cy="13" r="5.3" fill="#f3f0e9"/>
+    <circle cx="11" cy="13" r="2.5" fill="#b9821b"/>
+    <circle cx="21" cy="13" r="2.5" fill="#b9821b"/>
+    <circle cx="11" cy="13" r="1" fill="#211f1c"/>
+    <circle cx="21" cy="13" r="1" fill="#211f1c"/>
+  </g>
+  <!-- exposed tape / label strip along the cartridge base -->
+  <rect x="6" y="21.5" width="20" height="3.4" rx="1.7" fill="#f3f0e9"/>
+</svg>

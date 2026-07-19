@@ -1,0 +1,2 @@
+# Fetched by `helm dependency build` during the build/lint process.
+charts/

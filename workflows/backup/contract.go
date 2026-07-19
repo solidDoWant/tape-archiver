@@ -9,6 +9,16 @@
 package backup
 
 const (
+	// WorkflowID is the fixed Temporal workflow ID every backup run submits
+	// under. Runs are a singleton on purpose: the backup model is serial (one
+	// data worker on one storage host, one disk staging area — SPEC §4.2), so
+	// all runs must be mutually exclusive. cmd/tapectl submits new runs under
+	// this ID, and it is the single source of truth for anything that lists or
+	// describes past/current executions via Temporal visibility (e.g.
+	// pkg/runsapi, cmd/web's GET /api/runs and /api/runs/{runID}) so those
+	// surfaces cannot drift from what tapectl actually submits under.
+	WorkflowID = "backup"
+
 	// WorkflowType is the Temporal workflow type name a backup run is started
 	// under. The control worker registers the workflow under this name.
 	WorkflowType = "Backup"
@@ -45,6 +55,18 @@ const (
 	// workflow resumes automatically without this signal; it is the fallback for
 	// those that do not, and the sole resume path for a write-path pause.
 	OperatorResumeSignal = "operatorResume"
+
+	// CurrentPauseQuery is the Temporal query that returns which operator-in-the-
+	// loop pause, if any, is currently blocking the run (SPEC §4.3 phase 8, §4.3
+	// phases 6-8, §10): the Eject phase's I/O-station-full pause, a Load/Write
+	// failure on the tape path, or a Burn-phase pause. It returns the zero-value
+	// CurrentPause (Kind PauseNone) when the run is not currently paused. The
+	// workflow registers a handler for it so an operator (or the web UI —
+	// docs/web-ui-design.md §3) can see that a run is paused and why without
+	// consulting the Temporal UI event history. It is purely additive: the pause
+	// logic itself, and the OperatorResumeSignal/OperatorAbortSignal contract
+	// above, are unchanged by its existence.
+	CurrentPauseQuery = "currentPause"
 
 	// OperatorAbortSignal is the Temporal signal an operator sends to abort a run
 	// paused because a Load or Write failed for one drive-set (SPEC §4.3): instead

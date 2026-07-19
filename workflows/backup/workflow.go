@@ -137,6 +137,16 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 		return Result{}, fmt.Errorf("install %s query handler: %w", LastCompletedPhaseQuery, queryErr)
 	}
 
+	// CurrentPauseQuery is a pure read of state.currentPause — a plain struct
+	// field the pause sites (ejectPhase, waitForOperator, waitForBurnOperator)
+	// set/clear around their existing wait, with no new workflow primitives and
+	// no change to signal-handling order or timing.
+	if queryErr := workflow.SetQueryHandler(ctx, CurrentPauseQuery, func() (CurrentPause, error) {
+		return state.currentPause, nil
+	}); queryErr != nil {
+		return Result{}, fmt.Errorf("install %s query handler: %w", CurrentPauseQuery, queryErr)
+	}
+
 	// failingPhase names the phase in flight so the deferred failure alert can
 	// report where the run failed. It is the last phase started; on success the
 	// deferred handler is a no-op because err is nil.

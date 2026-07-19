@@ -6,7 +6,20 @@ MODULE_NAME := $(shell go list -m)
 
 BIN_DIR := $(PROJECT_DIR)/bin
 
-GO_SOURCE_FILES := $(shell find cmd pkg \( -name '*.go' ! -name '*_test.go' \) 2>/dev/null)
+GO_SOURCE_FILES := $(shell find cmd pkg internal workflows \( -name '*.go' ! -name '*_test.go' \) 2>/dev/null)
+
+# web/ (Vite + React + TypeScript) frontend, embedded into cmd/web via
+# go:embed (cmd/web/assets.go). WEB_DIR is the npm project root; vite.config.ts
+# writes `npm run build`'s output directly into CMD_WEB_DIST (go:embed can only
+# reach the embedding file's own directory subtree, so the build output has to
+# land inside cmd/web/, not WEB_DIR itself — see cmd/web/assets.go).
+WEB_DIR := web
+CMD_WEB_DIST := cmd/web/dist
+CMD_WEB_DIST_STAMP := $(CMD_WEB_DIST)/.build-stamp
+WEB_SRC_FILES := $(shell find $(WEB_DIR)/src $(WEB_DIR)/public -type f 2>/dev/null) \
+	$(WEB_DIR)/package.json $(WEB_DIR)/index.html $(WEB_DIR)/vite.config.ts \
+	$(WEB_DIR)/tsconfig.json $(WEB_DIR)/tsconfig.app.json $(WEB_DIR)/tsconfig.node.json \
+	$(WEB_DIR)/eslint.config.js
 
 ##@ General
 
@@ -25,7 +38,11 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: lint
-lint: ## Run golangci-lint.
+# golangci-lint (like go vet/go build — see cmd/web/assets.go) compiles fine
+# against the committed dist/.gitkeep placeholder, so it has no dependency on
+# a real frontend build; only frontend-lint (eslint + tsc, which lint web/'s
+# sources directly) needs the frontend's node_modules installed.
+lint: frontend-lint ## Run golangci-lint (Go) and eslint + tsc --noEmit (frontend).
 	golangci-lint run ./...
 
 .PHONY: lint-fix
@@ -33,7 +50,11 @@ lint-fix: ## Run golangci-lint and perform fixes.
 	golangci-lint run --fix ./...
 
 .PHONY: test
-test: fmt vet ## Run unit tests with race detector.
+# go vet/go test compile cmd/web fine against the committed dist/.gitkeep
+# placeholder (see cmd/web/assets.go), so fmt/vet have no dependency on a real
+# frontend build; frontend-test (vitest, which needs node_modules but not a
+# built dist/) still makes this target exercise the frontend too.
+test: fmt vet frontend-test ## Run unit tests with race detector (Go + frontend vitest).
 	go test -race -count=1 ./...
 
 .PHONY: test-integration
@@ -56,6 +77,11 @@ test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests
 	}
 
 .PHONY: test-e2e
+# -timeout 40m (bumped from 30m): TestWebUIEndToEnd (e2e/web_test.go, issue
+# #260) adds a second Helm chart deploy (the web UI) into the same kind
+# cluster plus a real, real-mhvtl-backed backup run driven through a browser
+# on top of the existing suite's own real-run tests, so the whole binary's
+# aggregate budget needs headroom beyond the pre-existing 30m.
 test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: control worker in a kind cluster (Helm chart + image), data worker as its OCI container on the host, against mhvtl + ZFS pool + Temporal (brings host resources up/down; the suite manages the cluster + containers).
 	@{ \
 	  gocache=$$(mktemp -d); \
@@ -68,13 +94,19 @@ test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: con
 	  : "shared kind cluster + Temporal, so package binaries must not run"; \
 	  : "concurrently. Runs under sudo so the test process can drive the tape"; \
 	  : "devices and corrupt the root-owned staged slices (AC4)."; \
+	  : "PLAYWRIGHT_BROWSERS_PATH/PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD are passed"; \
+	  : "through explicitly (sudo strips the rest of the environment by"; \
+	  : "default) so TestWebUIEndToEnd (e2e/web_test.go) finds the"; \
+	  : "nix-provided Chromium instead of skipping — see flake.nix's devShell."; \
 	  sudo env \
 	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
 	    TAPE_POOL_MOUNT=/mnt/tape-test-pool/archive TAPE_POOL_DATASET=tape_test/archive \
 	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
 	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
+	    PLAYWRIGHT_BROWSERS_PATH="$$PLAYWRIGHT_BROWSERS_PATH" \
+	    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="$$PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" \
 	    PATH="$$PATH" HOME="$$HOME" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
-	    go test -count=1 -p 1 -timeout 30m -tags e2e ./e2e/...; \
+	    go test -count=1 -p 1 -timeout 40m -tags e2e ./e2e/...; \
 	}
 
 .PHONY: benchmark
@@ -127,6 +159,9 @@ DATA_WORKER_IMAGE_TAGS := $(DATA_WORKER_IMAGE):$(VERSION) $(if $(filter true,$(P
 CONTROL_WORKER_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/control-worker
 CONTROL_WORKER_IMAGE_TAGS := $(CONTROL_WORKER_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(CONTROL_WORKER_IMAGE):latest)
 
+WEB_IMAGE := $(CONTAINER_REGISTRY)/tape-archiver/web
+WEB_IMAGE_TAGS := $(WEB_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(WEB_IMAGE):latest)
+
 # Build a streamed OCI image, load it into the local Docker daemon, tag it, and
 # (when PUSH_ALL=true) push every tag. $(1)=flake attr, $(2)=tag list.
 define build-load-image
@@ -146,9 +181,10 @@ define build-load-image
 endef
 
 .PHONY: build-images
-build-images: ## Build the data- and control-worker OCI images, load them into the local Docker daemon, and tag them (PUSH_ALL=true also tags :latest and pushes).
+build-images: ## Build the data-worker, control-worker, and web OCI images, load them into the local Docker daemon, and tag them (PUSH_ALL=true also tags :latest and pushes).
 	@$(call build-load-image,dataWorkerImage,$(DATA_WORKER_IMAGE_TAGS))
 	@$(call build-load-image,controlWorkerImage,$(CONTROL_WORKER_IMAGE_TAGS))
+	@$(call build-load-image,webImage,$(WEB_IMAGE_TAGS))
 
 ##@ Deploy
 
@@ -162,8 +198,27 @@ CHART_LINT_ADDRESS ?= temporal-frontend.temporal.svc.cluster.local:7233
 CHART_LINT_SCALEDJOB_ARGS := --set resources.controllers.main.type=scaledjob \
 	--set config.temporal.keda.apiKey.value=chart-lint-placeholder
 
+WEB_CHART := deploy/charts/tape-archiver-web
+# Placeholder values only used to satisfy chart-lint's render/lint checks; none of
+# these are baked into any release artifact. secretKeyRef references point at
+# Secret names that need not actually exist for `helm template`/`helm lint`.
+WEB_CHART_LINT_ARGS := --set config.temporal.address=$(CHART_LINT_ADDRESS) \
+	--set config.web.oidc.issuerUrl=https://idp.example.com \
+	--set config.web.oidc.clientId=tape-archiver-web \
+	--set config.web.oidc.redirectUrl=https://tape-archiver.example.com/auth/callback \
+	--set config.web.oidc.clientSecret.secretKeyRef.name=chart-lint-placeholder \
+	--set config.web.oidc.clientSecret.secretKeyRef.key=clientSecret \
+	--set config.web.sessionKey.secretKeyRef.name=chart-lint-placeholder \
+	--set config.web.sessionKey.secretKeyRef.key=sessionKey
+
+# Render args for the web chart's optional Ingress shape.
+WEB_CHART_LINT_INGRESS_ARGS := --set resources.ingress.main.enabled=true \
+	--set resources.ingress.main.className=nginx \
+	--set resources.ingress.main.hosts[0].host=tape-archiver.example.com \
+	--set resources.ingress.main.hosts[0].paths[0].path=/
+
 .PHONY: chart-lint
-chart-lint: ## Fetch chart deps, lint, and render both control-worker chart shapes (Deployment + ScaledJob; no cluster needed).
+chart-lint: ## Fetch chart deps, lint, and render the control-worker chart shapes (Deployment + ScaledJob) and the web chart shapes (Deployment + Service, and Ingress when enabled); no cluster needed.
 	helm dependency update $(CONTROL_WORKER_CHART)
 	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS)
 	helm lint $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $(CHART_LINT_SCALEDJOB_ARGS)
@@ -180,6 +235,35 @@ chart-lint: ## Fetch chart deps, lint, and render both control-worker chart shap
 		|| { echo "chart-lint: scaledjob without a KEDA credential must render (plaintext Temporal)"; exit 1; }
 	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) --set resources.controllers.main.type=scaledjob \
 		| grep -q '^kind: TriggerAuthentication' && { echo "chart-lint: plaintext scaledjob must not emit a TriggerAuthentication"; exit 1; } || true
+	# --- web chart ---
+	helm dependency update $(WEB_CHART)
+	helm lint $(WEB_CHART) $(WEB_CHART_LINT_ARGS)
+	helm lint $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS)
+	# Default shape: Deployment + Service, no Ingress (disabled by default), no
+	# ScaledJob (the web UI is a Deployment-only chart, no KEDA support).
+	# A per-invocation mktemp path (not a fixed /tmp name) plus a trap-based
+	# cleanup: each Makefile recipe line otherwise runs in its own shell, so
+	# wrapping this in one `@{ ... }` block is what lets the same $$tmpfile be
+	# referenced across the render + all four assertions below, and the trap
+	# still removes it if an assertion exits early — a fixed shared path would
+	# race two concurrent `make chart-lint` runs (e.g. two CI checks on a
+	# shared runner) reading/deleting each other's rendered YAML.
+	@{ \
+	  tmpfile=$$(mktemp); \
+	  trap 'rm -f "$$tmpfile"' EXIT; \
+	  helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) > "$$tmpfile"; \
+	  grep -q '^kind: Deployment' "$$tmpfile" \
+	    || { echo "chart-lint: Deployment not rendered by the web chart"; exit 1; }; \
+	  grep -q '^kind: Service' "$$tmpfile" \
+	    || { echo "chart-lint: Service not rendered by the web chart"; exit 1; }; \
+	  grep -q '^kind: Ingress' "$$tmpfile" \
+	    && { echo "chart-lint: Ingress rendered by the web chart despite being disabled by default"; exit 1; } || true; \
+	  grep -q '^kind: ScaledJob' "$$tmpfile" \
+	    && { echo "chart-lint: ScaledJob rendered by the web chart — it is a Deployment-only chart"; exit 1; } || true; \
+	}
+	# Opt-in Ingress shape: must render an Ingress alongside the Deployment + Service.
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS) \
+		| grep -q '^kind: Ingress' || { echo "chart-lint: Ingress not rendered by the web chart when enabled"; exit 1; }
 
 DATA_WORKER_UNIT := deploy/data-worker/tape-archiver-data-worker.service
 
@@ -189,27 +273,71 @@ unit-lint: ## Verify the reference data-worker systemd unit (no running service 
 
 ##@ Helm
 
-# Package (and optionally publish) the control-worker Helm chart, following the
-# media-processor pattern. The chart version and app version are both stamped from
-# VERSION at package time, so the packaged artifact is versioned in lockstep with the
-# worker images. HELM_PUSH defaults to PUSH_ALL: the default (false) only writes the
-# packaged .tgz under bin/helm/ — it never publishes; HELM_PUSH=true pushes it to the
-# OCI chart registry. Only the control worker has a chart; the data worker deploys via
-# a systemd unit + Docker container (SPEC §4.1).
+# Package (and optionally publish) the control-worker and web Helm charts, following
+# the media-processor pattern. Each chart's version and app version are both stamped
+# from VERSION at package time, so the packaged artifacts are versioned in lockstep
+# with the images. HELM_PUSH defaults to PUSH_ALL: the default (false) only writes
+# the packaged .tgz files under bin/helm/ — it never publishes; HELM_PUSH=true pushes
+# them to the OCI chart registry. The data worker has no chart — it deploys via a
+# systemd unit + Docker container (SPEC §4.1).
 HELM_REGISTRY := $(CONTAINER_REGISTRY)/charts
 HELM_PUSH ?= $(PUSH_ALL)
 HELM_PACKAGE := $(BIN_DIR)/helm/tape-archiver-control-worker-$(VERSION).tgz
+WEB_HELM_PACKAGE := $(BIN_DIR)/helm/tape-archiver-web-$(VERSION).tgz
 # Chart inputs, excluding fetched subcharts under charts/ so a dependency update does
 # not spuriously re-trigger packaging.
 HELM_CHART_FILES := $(shell find $(CONTROL_WORKER_CHART) -type f ! -path "*/charts/*" 2>/dev/null)
+WEB_HELM_CHART_FILES := $(shell find $(WEB_CHART) -type f ! -path "*/charts/*" 2>/dev/null)
+
+# Package (and optionally push) one chart into the target rule's own $(@D)/$@ —
+# mirrors build-load-image's parameterized-macro pattern above, so a future change
+# to the packaging/push flow (e.g. extra `helm package` flags) is made once instead
+# of hand-applied to two near-identical recipes. $(1)=chart dir.
+define package-helm-chart
+	@mkdir -p "$(@D)"
+	helm package "$(1)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
+	$(if $(filter true,$(HELM_PUSH)),helm push "$@" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
+endef
 
 $(HELM_PACKAGE): $(HELM_CHART_FILES)
-	@mkdir -p "$(@D)"
-	helm package "$(CONTROL_WORKER_CHART)" --dependency-update --version "$(VERSION)" --app-version "$(VERSION)" --destination "$(@D)"
-	$(if $(filter true,$(HELM_PUSH)),helm push "$(HELM_PACKAGE)" oci://$(HELM_REGISTRY),@echo "Skipping chart push (set PUSH_ALL=true to push to oci://$(HELM_REGISTRY))")
+	$(call package-helm-chart,$(CONTROL_WORKER_CHART))
+
+$(WEB_HELM_PACKAGE): $(WEB_HELM_CHART_FILES)
+	$(call package-helm-chart,$(WEB_CHART))
 
 .PHONY: helm
-helm: $(HELM_PACKAGE) ## Package the control-worker Helm chart into bin/helm/ (PUSH_ALL=true also pushes it to the OCI chart registry).
+helm: $(HELM_PACKAGE) $(WEB_HELM_PACKAGE) ## Package the control-worker and web Helm charts into bin/helm/ (PUSH_ALL=true also pushes them to the OCI chart registry).
+
+##@ Frontend
+
+$(WEB_DIR)/node_modules/.package-lock.json: $(WEB_DIR)/package.json $(WEB_DIR)/package-lock.json
+	cd $(WEB_DIR) && npm ci
+	@touch $@
+
+# Rebuilds only when frontend sources (or the installed deps) actually
+# changed, same file-target caching pattern as the $(BIN_DIR)/* Go targets
+# below. `npm run build` (tsc -b && vite build) empties CMD_WEB_DIST before
+# writing, which is why the stamp file is (re)touched after the build rather
+# than tracked as a build output itself. emptyOutDir also deletes the
+# committed CMD_WEB_DIST/.gitkeep placeholder (see cmd/web/assets.go), so it
+# is recreated afterward — otherwise every build would dirty the working
+# tree with a spurious "deleted: .gitkeep".
+$(CMD_WEB_DIST_STAMP): $(WEB_DIR)/node_modules/.package-lock.json $(WEB_SRC_FILES)
+	cd $(WEB_DIR) && npm run build
+	@touch $(CMD_WEB_DIST)/.gitkeep
+	@touch $@
+
+.PHONY: frontend-build
+frontend-build: $(CMD_WEB_DIST_STAMP) ## Build the web/ frontend; output lands in cmd/web/dist (embedded by cmd/web).
+
+.PHONY: frontend-test
+frontend-test: $(WEB_DIR)/node_modules/.package-lock.json ## Run the frontend's vitest unit tests.
+	cd $(WEB_DIR) && npm test
+
+.PHONY: frontend-lint
+frontend-lint: $(WEB_DIR)/node_modules/.package-lock.json ## Run eslint and tsc --noEmit over the frontend.
+	cd $(WEB_DIR) && npm run lint
+	cd $(WEB_DIR) && npm run typecheck
 
 ##@ Build
 
@@ -225,17 +353,44 @@ $(BIN_DIR)/tapectl: $(GO_SOURCE_FILES)
 	@mkdir -p "$(BIN_DIR)"
 	go build -ldflags="-s -w" -o "$@" ./cmd/tapectl
 
+# cmd/web embeds CMD_WEB_DIST at compile time (go:embed), so it must exist
+# (and be current) before this compiles; see the Frontend section above.
+$(BIN_DIR)/web: $(CMD_WEB_DIST_STAMP) $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/web
+
+# webdevoidc/webdevseed/webdevdiscord (issues #265/#313, `make web-dev`) are
+# dev-tooling-only binaries — deliberately NOT part of `build`'s default binary
+# set below (they are never shipped in an image or used outside a developer's
+# own machine); the web-dev target below builds them directly as its own
+# prerequisites.
+$(BIN_DIR)/webdevoidc: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/webdevoidc
+
+$(BIN_DIR)/webdevseed: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/webdevseed
+
+$(BIN_DIR)/webdevdiscord: $(GO_SOURCE_FILES)
+	@mkdir -p "$(BIN_DIR)"
+	go build -ldflags="-s -w" -o "$@" ./cmd/webdevdiscord
+
 .PHONY: build
-build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl ## Build all binaries into bin/.
+build: $(BIN_DIR)/worker $(BIN_DIR)/gen-config-schema $(BIN_DIR)/tapectl $(BIN_DIR)/web ## Build all binaries into bin/.
 
 .PHONY: clean
-clean: ## Remove build artifacts (binaries, packaged Helm chart, fetched chart subcharts).
-	@rm -rf $(BIN_DIR) $(CONTROL_WORKER_CHART)/charts
+# find, not rm -rf $(CMD_WEB_DIST)/*: dist/.build-stamp is a dotfile, and a
+# shell glob doesn't match those, so a glob-based rm would silently leave the
+# stamp in place and cause the next build to skip a fresh frontend build.
+clean: ## Remove build artifacts (binaries, packaged Helm charts, fetched chart subcharts, frontend build output).
+	@rm -rf $(BIN_DIR) $(CONTROL_WORKER_CHART)/charts $(WEB_CHART)/charts
+	@find $(CMD_WEB_DIST) -mindepth 1 -not -name '.gitkeep' -delete
 
 ##@ Release
 
 .PHONY: build-all
-build-all: build-images helm ## Build all release artifacts: both worker images and the packaged control-worker chart (pushes when PUSH_ALL=true).
+build-all: build-images helm ## Build all release artifacts: the data-, control-, and web images, and the packaged control-worker + web Helm charts (pushes when PUSH_ALL=true).
 
 # Cut a release, mirroring media-processor: VERSION drives the tag `v$(VERSION)`. This
 # is a dry run by default — SAFETY_PREFIX is `echo` unless PUSH_ALL=true, so the tag,
@@ -278,3 +433,77 @@ zpool-up: ## Create an ephemeral file-backed ZFS pool for integration tests.
 .PHONY: zpool-down
 zpool-down: ## Destroy the ephemeral ZFS test pool.
 	@$(PROJECT_DIR)/scripts/zpool-down.sh
+
+# WEB_DEV_STATE_DIR holds web-dev-up.sh/web-dev-down.sh's PID files, logs, the
+# persisted WEB_SESSION_KEY, and the data worker's staging directory —
+# entirely outside the repo, mirroring zpool-up.sh's /var/tmp backing file and
+# mhvtl-up.sh's /opt/mhvtl media directory.
+WEB_DEV_STATE_DIR ?= /var/tmp/tape-archiver-web-dev
+
+# WEB_DEV_OBS_COMPOSE invokes docker-compose.web-dev.yml under its own
+# explicit compose project name: the directory basename (the same
+# per-directory default docker compose would derive itself, preserving
+# per-worktree isolation) plus an "-obs" suffix so it never shares a project
+# with the root docker-compose.yml (dev Temporal) — sharing one would make
+# each side's `down --remove-orphans` delete the other side's containers as
+# "orphans"; see docker-compose.web-dev.yml's header comment.
+# scripts/web-dev-up.sh constructs the identical invocation itself (see its
+# observability-stack comment for why it can't go through this Makefile).
+WEB_DEV_OBS_COMPOSE = WEB_DEV_LOG_DIR=$(WEB_DEV_STATE_DIR)/logs docker compose \
+	-p "$$(basename $(PROJECT_DIR) | tr '[:upper:]' '[:lower:]')-obs" \
+	-f $(PROJECT_DIR)/docker-compose.web-dev.yml
+
+.PHONY: web-dev-observability-up
+# The mkdir matters: the vector service bind-mounts the logs directory, and
+# if it doesn't exist before `compose up`, Docker auto-creates it as
+# root:root — which then breaks web-dev-up.sh's later unprivileged daemons
+# (webdevoidc in particular) trying to create their log files in it. The
+# mkdir runs as the invoking user, matching web-dev-up.sh's own `mkdir -p
+# "$LOG_DIR"`, so the directory ends up correctly owned whichever entry
+# point (this target standalone, or web-dev-up.sh's direct compose call)
+# creates it first. This target is still deliberately NOT a `web-dev`
+# Makefile prerequisite: web-dev-up.sh calls the compose stack directly, the
+# same reason zpool-up.sh is invoked directly rather than via a `zpool-up`
+# prerequisite (see web-dev's own comment below). Exposed as its own target
+# for manual use/discoverability and as the counterpart web-dev-down invokes
+# below.
+web-dev-observability-up: ## Start the web-dev-only VictoriaLogs + VictoriaMetrics + log-shipper stack (issue #280; never a dependency of test-integration/test-e2e — see docker-compose.web-dev.yml).
+	mkdir -p $(WEB_DEV_STATE_DIR)/logs
+	$(WEB_DEV_OBS_COMPOSE) up -d --wait --wait-timeout 120
+	@echo "VictoriaLogs is ready: http://localhost:9428  VictoriaMetrics: http://localhost:8428"
+
+.PHONY: web-dev-observability-down
+web-dev-observability-down: ## Stop the web-dev-only VictoriaLogs/VictoriaMetrics/log-shipper stack and remove its volumes/networks.
+	$(WEB_DEV_OBS_COMPOSE) down -v --remove-orphans
+
+.PHONY: web-dev
+# Depends on temporal-up/mhvtl-up directly (not web-dev-up.sh calling `make`
+# itself), the same pattern test-integration/test-e2e already use, so Make's
+# own dependency graph — not ad hoc shell — decides what needs bringing up.
+# recovery-binaries provides the real static age/par2/zstd/tar the data
+# worker's Report phase requires (nix build .#recoveryBinaries, cached after
+# the first run).
+#
+# Deliberately NOT a zpool-up (or web-dev-observability-up) prerequisite
+# here, unlike temporal-up/mhvtl-up: zpool-up.sh destroys and recreates the
+# pool on every invocation (the right behavior for test-integration/test-e2e,
+# which each want a guaranteed-clean pool) — for web-dev, that would silently
+# blow away the ZFS snapshot backing whatever sample runs are still in
+# flight (webdevseed's background seeding pass, or any run submitted through
+# the UI mid-session) if it ran again while a previous invocation's state
+# was still around (e.g. after a crash/SIGKILL, which cannot be trapped —
+# see web-dev-up.sh's "Interrupt handling" comment and web-dev-down below).
+# web-dev-observability-up has a different ordering constraint (see its own
+# comment above) but the same conclusion: web-dev-up.sh instead calls
+# zpool-up.sh and the observability compose stack directly, each only when
+# needed/in the right order.
+web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed $(BIN_DIR)/webdevdiscord recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics + a local OIDC provider + a fake Discord webhook + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
+	@BIN_DIR=$(BIN_DIR) WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-up.sh
+
+.PHONY: web-dev-down
+web-dev-down: ## Tear down everything `make web-dev` brought up: the OIDC provider and control/data workers, then VictoriaLogs/VictoriaMetrics, Temporal/mhvtl/zpool (via their own *-down targets). Also what `make web-dev` itself runs on interrupt; use this directly only after a crash/SIGKILL.
+	@WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-down.sh
+	@$(MAKE) web-dev-observability-down
+	@$(MAKE) zpool-down
+	@$(MAKE) mhvtl-down
+	@$(MAKE) temporal-down

@@ -91,6 +91,7 @@ func TestBackupEndToEnd(t *testing.T) {
 
 	stagingDir := t.TempDir()
 	binariesDir := testutil.RecoveryBinariesDir(t)
+	sourcesDir := testutil.RecoverySourcesDir(t)
 
 	// Mirror the production worker options (cmd/worker.workerOptions): session
 	// support on the data worker, defaults on the control worker. Eager activity
@@ -102,7 +103,7 @@ func TestBackupEndToEnd(t *testing.T) {
 	t.Cleanup(controlWorker.Stop)
 
 	dataWorker := worker.New(temporalClient, DataTaskQueue, worker.Options{EnableSessionWorker: true})
-	RegisterData(dataWorker, DataConfig{StagingDir: stagingDir, RecoveryBinariesDir: binariesDir})
+	RegisterData(dataWorker, DataConfig{StagingDir: stagingDir, RecoveryBinariesDir: binariesDir, RecoverySourcesDir: sourcesDir})
 	require.NoError(t, dataWorker.Start(), "start data worker")
 	t.Cleanup(dataWorker.Stop)
 

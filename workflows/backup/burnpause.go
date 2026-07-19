@@ -23,14 +23,35 @@ import (
 // the operator loads fresh blanks into. It fires the best-effort pause alert,
 // then blocks on resume, abort, or the configured burn-wait timeout, returning
 // which fired.
-func waitForBurnOperator(ctx workflow.Context, cfg config.Config, devices []string, cause error) pauseOutcome {
+//
+// state.currentPause (read by CurrentPauseQuery) is set to PauseBurn for the
+// duration of the wait and cleared as soon as it returns — a plain struct-field
+// assignment around the pre-existing wait call, with no effect on its timing or
+// signal handling.
+func waitForBurnOperator(ctx workflow.Context, cfg config.Config, state *runState, devices []string, cause error) pauseOutcome {
 	// Drain before the alert is dispatched so only genuinely-stale (pre-alert)
-	// resumes are discarded and a resume prompted by this alert survives (issue #216).
-	drainStaleResumeSignals(ctx)
+	// resumes/aborts are discarded and a resume or abort prompted by this alert
+	// survives (issues #216, #254).
+	drainStalePauseSignals(ctx)
 
 	notifyBurnPause(ctx, devices, cause)
 
-	return waitForBurnCleared(ctx, cfg)
+	errSummary := ""
+	if cause != nil {
+		errSummary = cause.Error()
+	}
+
+	state.currentPause = CurrentPause{
+		Kind:         PauseBurn,
+		Devices:      devices,
+		ErrorSummary: errSummary,
+	}
+
+	outcome := waitForBurnCleared(ctx, cfg)
+
+	state.currentPause = CurrentPause{}
+
+	return outcome
 }
 
 // waitForBurnCleared blocks until the operator resumes or aborts the run, or the

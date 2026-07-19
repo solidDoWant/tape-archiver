@@ -286,7 +286,7 @@ func Build(ctx context.Context, in Input, w io.Writer) (Manifest, error) {
 	}
 	defer func() {
 		if cerr := writer.Cleanup(); cerr != nil {
-			slog.Warn("recoverykit: cleaning up ISO staging directory", "error", cerr)
+			slog.WarnContext(ctx, "recoverykit: cleaning up ISO staging directory", "error", cerr)
 		}
 	}()
 
@@ -435,7 +435,7 @@ func stageBinaries(ctx context.Context, writer *iso9660.ImageWriter, dir string,
 
 		manifest[readbackPath(target)] = digest
 
-		slog.Debug("recoverykit: staged recovery binary", "binary", entry.Name())
+		slog.DebugContext(ctx, "recoverykit: staged recovery binary", "binary", entry.Name())
 
 		staged++
 	}
@@ -444,7 +444,7 @@ func stageBinaries(ctx context.Context, writer *iso9660.ImageWriter, dir string,
 		return fmt.Errorf("no recovery binaries found in %s", dir)
 	}
 
-	slog.Info("recoverykit: staged recovery binaries", "count", staged, "source", dir)
+	slog.InfoContext(ctx, "recoverykit: staged recovery binaries", "count", staged, "source", dir)
 
 	return nil
 }
@@ -498,7 +498,7 @@ func stageSources(ctx context.Context, writer *iso9660.ImageWriter, dir string, 
 
 		manifest[readbackPath(target)] = digest
 
-		slog.Debug("recoverykit: staged recovery source", "source", entry.Name())
+		slog.DebugContext(ctx, "recoverykit: staged recovery source", "source", entry.Name())
 
 		staged++
 	}
@@ -507,7 +507,7 @@ func stageSources(ctx context.Context, writer *iso9660.ImageWriter, dir string, 
 		return fmt.Errorf("no recovery source archives found in %s", dir)
 	}
 
-	slog.Info("recoverykit: staged recovery sources", "count", staged, "source", dir)
+	slog.InfoContext(ctx, "recoverykit: staged recovery sources", "count", staged, "source", dir)
 
 	return nil
 }

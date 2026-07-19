@@ -251,6 +251,7 @@ func TestRequireNoArgs(t *testing.T) {
 	require.NoError(t, requireNoArgs("status", nil))
 	require.NoError(t, requireNoArgs("resume", nil))
 	require.NoError(t, requireNoArgs("abort", nil))
+	require.NoError(t, requireNoArgs("cancel", nil))
 
 	err := requireNoArgs("resume", []string{"backup"})
 	require.Error(t, err)
@@ -279,6 +280,17 @@ func TestAbortRunMissingTemporalAddress(t *testing.T) {
 	withGetenv(t, func(string) string { return "" })
 
 	err := abortRun(context.Background(), nil, &bytes.Buffer{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
+}
+
+// TestCancelRunMissingTemporalAddress exercises the cancel path with no
+// TEMPORAL_ADDRESS: it must fail with a descriptive error and never attempt a
+// connection.
+func TestCancelRunMissingTemporalAddress(t *testing.T) {
+	withGetenv(t, func(string) string { return "" })
+
+	err := cancelRun(context.Background(), nil, &bytes.Buffer{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }

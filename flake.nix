@@ -73,6 +73,28 @@
           inherit worker;
           nixpkgsRev = nixpkgs.shortRev or "dirty";
         };
+
+        # Hermetic build of the web/ frontend (Vite + React + TypeScript SPA):
+        # `npm ci`-equivalent dependency fetch pinned by npmDepsHash, then
+        # `npm run build`, entirely inside the Nix sandbox — no network access
+        # at build time (docs/web-ui-design.md §4). Consumed by `web` below.
+        webFrontend = pkgs.callPackage ./nix/web-frontend.nix { };
+
+        # The web UI HTTP server binary (`cmd/web`): the built frontend above,
+        # embedded via go:embed. Built once here and bundled into the web OCI
+        # image below.
+        web = pkgs.callPackage ./nix/web.nix { inherit webFrontend; };
+
+        # Reproducible OCI image for the web UI (docs/web-ui-design.md §5): the
+        # `web` binary plus TLS roots and a minimal HTTP client for the
+        # container HEALTHCHECK — no tape/bulk-data tooling, same "lightweight,
+        # no bulk data" posture as the control-worker image. streamLayeredImage
+        # emits a script that streams the image tarball to stdout, so `make
+        # build-images` pipes it straight into `docker load`.
+        webImage = pkgs.callPackage ./nix/web-image.nix {
+          inherit web;
+          nixpkgsRev = nixpkgs.shortRev or "dirty";
+        };
       in
       {
         # Expose as flake packages so `nix build .#mhvtl`, `.#mhvtlKernel`,
@@ -87,6 +109,9 @@
           inherit worker;
           inherit dataWorkerImage;
           inherit controlWorkerImage;
+          inherit webFrontend;
+          inherit web;
+          inherit webImage;
           default = mhvtlUserspace;
         };
 
@@ -96,6 +121,27 @@
             pkgs.golangci-lint
             pkgs.gnumake
             pkgs.kubernetes-helm
+
+            # setsid — scripts/web-dev-up.sh (`make web-dev`, issue #265) uses it to
+            # detach the local OIDC provider, control/data workers, and sample-run
+            # seeding into their own session, so a developer's Ctrl+C (which only
+            # signals the terminal's foreground process group) stops just the
+            # foreground `cmd/web` process, not the rest of the dev stack.
+            pkgs.util-linux
+
+            # pkill/pgrep (procps) — scripts/web-dev-up.sh/web-dev-down.sh use
+            # `pkill --pgroup`/`pgrep -g` to probe/signal a whole setsid-created
+            # process group at once (needed because worker-control/worker-data
+            # run under sudo: the PID a "setsid sudo env ... worker &" launch
+            # actually records is sudo's own, not the real worker process it
+            # forks — a single-PID kill against sudo's PID, especially SIGKILL,
+            # can orphan that child instead of stopping it; signaling the whole
+            # group reaches it regardless of the fork/exec chain). util-linux's
+            # own `kill` (pkgs.util-linux, above) does NOT support the
+            # traditional POSIX "negative PID = process group" kill(2) target
+            # the way procps'/BSD kill does — confirmed the hard way — so this
+            # is a genuinely separate dependency, not redundant with it.
+            pkgs.procps
 
             # kind + kubectl drive the e2e suite (e2e/, `make test-e2e`): it
             # stands up a real kind cluster and deploys the control worker via
@@ -164,6 +210,25 @@
             # health`, etc. The version is pinned to match the server image in
             # docker-compose.yml so the client/server wire protocol stays in sync.
             pkgs.temporal-cli
+
+            # Node.js (current Active LTS) — builds and tests the web/ frontend
+            # (Vite + React + TypeScript + Tailwind, cmd/web's embedded SPA).
+            # Ships npm, used for the committed package-lock.json.
+            pkgs.nodejs_24
+
+            # Chromium for the Playwright e2e suite (web/e2e/, driven by
+            # e2e/web_test.go's TestWebUIEndToEnd — issue #260). Playwright's
+            # own `npx playwright install` browser-download step produces a
+            # binary that cannot run in this repo's NixOS-style sandbox
+            # (missing system libs the dynamic linker can't resolve outside a
+            # nixpkgs-patched RPATH) — confirmed first during sub-issue 7's ad
+            # hoc browser verification. playwright-driver.browsers ships a
+            # nixpkgs-patched Chromium built for exactly the @playwright/test
+            # version pinned in web/package.json (kept in lockstep — see that
+            # file), wired in below via PLAYWRIGHT_BROWSERS_PATH +
+            # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD, the standard nixpkgs pattern
+            # for using Playwright without its own browser download.
+            pkgs.playwright-driver.browsers
           ];
 
           # Expose the built kernel modules so the up-scripts can load them
@@ -174,6 +239,13 @@
           shellHook = ''
             export MHVTL_KO="${mhvtlKernel}/lib/modules/$(ls ${mhvtlKernel}/lib/modules)/kernel/drivers/scsi/mhvtl.ko"
             export ZFS_MODULES="${zfsKernel}"
+
+            # Point @playwright/test at the nixpkgs-provided, pre-patched
+            # Chromium instead of trying (and failing, in this sandbox) to
+            # download its own — see the playwright-driver.browsers comment
+            # above and web/playwright.config.ts.
+            export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+            export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
           '';
         };
       });

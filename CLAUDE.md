@@ -32,7 +32,12 @@ When a change touches any of these, call it out explicitly.
 
 ## Tech Stack
 
-- **Go 1.26**, single module.
+- **Go 1.26**, single module (`go.mod` at the repo root). The one exception is
+  `web/go.mod`: a deliberately empty nested module that fences the `web/` npm project
+  (and its `node_modules`, which can ship incidental `.go` files) out of the root
+  module's `./...` package walk — see `web/go.mod`'s doc comment. It carries no real
+  Go code and is not part of the single-module Go surface described elsewhere in this
+  file.
 - **Temporal** for orchestration. Two task queues: `control` (runs in Kubernetes) and
   `data` (runs as a container on the storage host, where the bulk data lives).
 - **External tooling** bundled in the data worker image at pinned versions, matching the
@@ -47,14 +52,16 @@ When a change touches any of these, call it out explicitly.
 See `SPEC.md` §15 for the full layout. In brief:
 
 - `cmd/` — binaries: `worker` (Temporal worker; role selects control vs data),
-  `tapectl` (CLI to submit/inspect runs), `gen-config-schema`.
+  `tapectl` (CLI to submit/inspect runs), `gen-config-schema`, `web` (the web UI's
+  Go server), `webdevoidc`/`webdevseed` (local-only `make web-dev` dev tooling —
+  a standalone fake OIDC provider and sample-run seeder, never deployed).
 - `pkg/` — one concern per package (tape/changer, ltfs, age, par2, tar, zfs, k8s
   snapshot discovery, PDF report, recovery ISO, Discord webhook, checksums, logging,
   metrics, temporal client).
 - `internal/config` — run-config types and env parsing.
 - `workflows/backup/` — the backup workflow and activities, split by concern, with
   co-located tests.
-- `schemas/` — generated JSON config schema (committed). `deploy/charts/` — Helm chart.
+- `schemas/` — generated JSON config schema (committed). `deploy/charts/` — Helm charts.
   `docs/` — operator docs. `e2e/` — end-to-end tests. `bin/` — build output.
 - `.claude/` — slash commands and gitignored per-issue task files.
 
@@ -71,20 +78,34 @@ as the project is implemented; keep this list current):
 - `make benchmark` — write-rate / shoe-shining benchmarks (real hardware).
 - `make generate-schema` — regenerate the committed config JSON schema.
 - `make update-dependencies` — update deps, `go mod tidy`, refresh Nix vendor hashes.
-- `make build-images` — build worker OCI image(s) via Nix.
-- `make helm` — package the control-worker Helm chart into `bin/helm/`
-  (`PUSH_ALL=true` also pushes it to the OCI chart registry).
-- `make build-all` — build both worker images and package the chart in one command.
+- `make build-images` — build the data-worker, control-worker, and web OCI images via
+  Nix.
+- `make helm` — package the control-worker and web Helm charts into `bin/helm/`
+  (`PUSH_ALL=true` also pushes them to the OCI chart registry).
+- `make build-all` — build all worker/web images and package both charts in one
+  command.
 - `make release` — cut the `v$(VERSION)` git tag + GitHub release (dry run unless
   `PUSH_ALL=true`; requires an authenticated `gh`).
-- `make chart-lint` — fetch deps, lint, and render the control-worker Helm chart
-  (`deploy/charts/`); no cluster required.
+- `make chart-lint` — fetch deps, lint, and render both the control-worker and web
+  Helm charts (`deploy/charts/`); no cluster required.
 - `make temporal-up` / `make temporal-down` — local Temporal for integration tests.
 - `make mhvtl-up` / `make mhvtl-down` — virtual tape library for tests/dry-run.
 - `make zpool-up` / `make zpool-down` — ephemeral file-backed ZFS pool for `pkg/zfs`
   integration tests. The flake builds a version-matched ZFS kernel module
   (`$ZFS_MODULES`); `zpool-up` loads it at runtime (needs `sudo`), falling back to
   the host's own module when the flake build does not match the running kernel.
+- `make web-dev` / `make web-dev-down` — one-command local web UI: dev Temporal +
+  mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics (`docker-compose.web-dev.yml`,
+  fed by a `vector` shipper tailing the dev workers' structured log files) +
+  a local-only fake OIDC provider (`cmd/webdevoidc`) + a local-only fake
+  Discord webhook receiver (`cmd/webdevdiscord`) + real control/data
+  workers, seeded with a few sample dry-run backups (`cmd/webdevseed`),
+  `cmd/web` running in the foreground. Interrupting it (Ctrl+C/SIGINT or
+  SIGTERM) waits for `cmd/web` to shut down gracefully, then runs the full
+  `web-dev-down` teardown automatically, so every `make web-dev` starts from
+  a clean slate; `make web-dev-down` itself remains the remedy after a
+  crash/SIGKILL, which cannot be trapped. See `docs/web-ui.md`'s "Local
+  development" section.
 
 ## Dev Tools
 

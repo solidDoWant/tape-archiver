@@ -1,6 +1,9 @@
 // Package logging configures the global slog handler for the project. Setup
 // installs a structured JSON handler that writes to stderr; every other package
-// logs through the standard library slog default.
+// logs through the standard library slog default. The JSON handler is wrapped in
+// a contextHandler that lifts Temporal run identity (WorkflowID/RunID) carried by
+// the log context onto every record, so bulk activity logging is attributable to
+// its run (see context_handler.go and #303).
 package logging
 
 import (
@@ -17,7 +20,7 @@ import (
 func Setup(level string) {
 	lvl, unrecognized := parseLevel(level)
 
-	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
+	handler := contextHandler{Handler: slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})}
 	slog.SetDefault(slog.New(handler))
 
 	if unrecognized {

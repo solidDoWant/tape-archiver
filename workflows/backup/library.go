@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -91,6 +92,8 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 
 	loaded := make([]LoadedTape, setSize)
 
+	slog.InfoContext(ctx, "load: loading blank tapes into drives and blank-checking them", "tapes", setSize)
+
 	// relocated records, per storage slot, the barcode of the unexpected tape a
 	// relocation earlier in this Load moved into it. The inventory is read once
 	// before the loop, so each iteration works from that stale snapshot. The map
@@ -160,6 +163,10 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 			SGDevice:          sgDev,
 			OverwroteNonBlank: overwroteNonBlank,
 		}
+
+		slog.InfoContext(ctx, "load: tape loaded and blank-checked",
+			"barcode", barcode, "drive", assignment.DriveIndex, "slot", targetSlot,
+			"blank", blank, "device", stDev)
 	}
 
 	return loaded, nil
@@ -559,8 +566,14 @@ func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectRes
 			return EjectResult{}, fmt.Errorf("eject tape %s (drive %d, index %d): %w", wt.Barcode, wt.DriveIndex, i, err)
 		}
 
-		if !exported {
+		if exported {
+			slog.InfoContext(ctx, "eject: written tape exported to the I/O station for removal",
+				"barcode", wt.Barcode, "drive", wt.DriveIndex)
+		} else {
 			remaining = append(remaining, wt)
+
+			slog.InfoContext(ctx, "eject: I/O station full; written tape unloaded to its storage slot to await export",
+				"barcode", wt.Barcode, "drive", wt.DriveIndex, "slot", wt.SourceSlot)
 		}
 	}
 
@@ -570,8 +583,13 @@ func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectRes
 		return EjectResult{}, fmt.Errorf("inventory after eject: %w", err)
 	}
 
+	inIOStation := barcodesInIOStation(inv)
+
+	slog.InfoContext(ctx, "eject: drive-set eject complete",
+		"exported", len(input.WrittenTapes)-len(remaining), "awaitingExport", len(remaining), "inIOStation", len(inIOStation))
+
 	return EjectResult{
-		InIOStation: barcodesInIOStation(inv),
+		InIOStation: inIOStation,
 		Remaining:   remaining,
 	}, nil
 }
@@ -705,7 +723,13 @@ const (
 // the remaining tapes into the freed slots. If the operator never responds within
 // the configured wait, it fails the run; every written tape is by then in an I/O
 // or storage slot and none is in a drive.
-func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) error {
+//
+// state.currentPause (read by CurrentPauseQuery) is set to PauseEject for the
+// duration of the wait below and cleared as soon as it returns, on every exit
+// path (resumed, timed out, or the wait itself errors) — a plain struct-field
+// assignment around the pre-existing wait call, with no effect on its timing or
+// signal handling.
+func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState, written []WrittenTape) error {
 	if len(written) == 0 {
 		return nil
 	}
@@ -725,14 +749,26 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, written []WrittenTape) 
 
 		// The I/O station is full with tapes still to export. Alert the operator
 		// which tapes to remove, then pause until the station is cleared. Drain any
-		// stale resume before the alert is dispatched so only genuinely-stale
-		// (pre-alert) resumes are discarded while a resume prompted by this alert
-		// survives (issue #216).
-		drainStaleResumeSignals(ctx)
+		// stale resume or abort before the alert is dispatched so only genuinely-
+		// stale (pre-alert) signals are discarded while one prompted by this alert
+		// survives (issues #216, #254). waitForIOCleared below never listens on the
+		// abort channel itself (an Eject pause rejects abort), so this drain's only
+		// effect on abort is to stop a stale one from leaking forward onto a later,
+		// unrelated pause.
+		drainStalePauseSignals(ctx)
 
 		notifyOperatorPause(ctx, result.InIOStation, len(remaining))
 
+		state.currentPause = CurrentPause{
+			Kind:           PauseEject,
+			AffectedTapes:  barcodeStrings(result.InIOStation),
+			AwaitingExport: len(remaining),
+		}
+
 		resumed, err := waitForIOCleared(ctx, cfg)
+
+		state.currentPause = CurrentPause{}
+
 		if err != nil {
 			return err
 		}
@@ -781,9 +817,10 @@ func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (Eje
 // reports it can auto-resume (IOStatus.CanAutoResume) or false when the wait
 // deadline elapses.
 //
-// Stale buffered resumes are drained by the caller before the pause alert is
-// dispatched (issue #216), not here at wait entry, so a resume the operator sends
-// in response to the alert is never discarded.
+// Stale buffered resumes (and, since issue #254, aborts) are drained by the caller
+// before the pause alert is dispatched (issue #216), not here at wait entry, so a
+// resume the operator sends in response to the alert is never discarded. This wait
+// itself still never listens on the abort channel — an Eject pause rejects abort.
 func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
 	signalCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 

@@ -1,0 +1,96 @@
+# docker-compose.web-dev.yml — VictoriaLogs + VictoriaMetrics + a Vector log
+# shipper for the `make web-dev` local stack (issue #280), so the (future,
+# #274/#275) log/metric panels have real local data to render. Kept as its
+# own compose file, separate from the root docker-compose.yml that
+# temporal-up/temporal-down also back for test-integration/test-e2e, so these
+# three containers only ever run for `make web-dev` — never for the test
+# suites (this is dev-only tooling; see this file's non-goals in issue #280).
+#
+# Every invocation of this file passes an explicit project name (see the
+# Makefile's WEB_DEV_OBS_COMPOSE and scripts/web-dev-up.sh): the directory
+# basename — the same per-directory value docker compose would derive by
+# default, keeping per-worktree isolation — plus an "-obs" suffix. The suffix
+# matters: without it this file and the root docker-compose.yml (dev
+# Temporal, run from the same directory) share one compose project, so each
+# side's `down --remove-orphans` (temporal-down, web-dev-observability-down)
+# would delete the OTHER side's containers as "orphans" — e.g. a standalone
+# `make web-dev-observability-down` would kill the dev Temporal container out
+# from under a running `make web-dev` session (observed live before the
+# suffix existed, as mutual "Found orphan containers" warnings).
+#
+# network_mode: host on all three services: victoriametrics must scrape the
+# dev control/data workers' METRICS_ADDR endpoints, which listen on the
+# host's loopback interface (127.0.0.1:19090/19091 — see
+# scripts/web-dev-vm-scrape.yml) because the workers run directly on the
+# host, not in a container; vector's sink posts to victorialogs' ingest
+# endpoint the same way. host networking is the simplest way to reach the
+# host loopback from inside a container on a native Linux Docker Engine
+# (unlike Docker Desktop, there is no host.docker.internal DNS name without
+# extra `extra_hosts` wiring) — an acceptable dev-only tradeoff in reduced
+# container network isolation (see CLAUDE.md's Dev Tools section).
+
+services:
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.24.0-victorialogs
+    restart: on-failure
+    network_mode: host
+    command:
+      - -httpListenAddr=:9428
+    volumes:
+      - victorialogs_data:/victoria-logs-data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9428/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.147.0
+    restart: on-failure
+    network_mode: host
+    command:
+      - -httpListenAddr=:8428
+      - -promscrape.config=/etc/victoriametrics/scrape.yml
+      - -promscrape.config.strictParse=true
+    volumes:
+      - victoriametrics_data:/victoria-metrics-data
+      - ./scripts/web-dev-vm-scrape.yml:/etc/victoriametrics/scrape.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8428/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # vector tails the dev workers' log files (bind-mounted from
+  # $WEB_DEV_STATE_DIR/logs on the host — see scripts/web-dev-up.sh, which
+  # sets WEB_DEV_LOG_DIR before bringing this stack up) and ships them into
+  # victorialogs — see scripts/web-dev-vector.yml for the pipeline itself.
+  # Depends on victorialogs being healthy first so it isn't posting into a
+  # not-yet-serving endpoint at startup (it would just retry, but there is no
+  # reason to make it). The healthcheck hits vector's own API (enabled in
+  # web-dev-vector.yml, loopback-only) so `up --wait` fails fast and visibly
+  # if the config doesn't load rather than reporting a crash-looping shipper
+  # as up: vector exits on a config error, and without a healthcheck compose
+  # counts a just-started (about-to-crash) container as ready.
+  vector:
+    image: timberio/vector:0.44.0-alpine
+    restart: on-failure
+    network_mode: host
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+    volumes:
+      - ./scripts/web-dev-vector.yml:/etc/vector/vector.yaml:ro
+      - ${WEB_DEV_LOG_DIR:?WEB_DEV_LOG_DIR must be set — see scripts/web-dev-up.sh}:/var/log/tape-archiver:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8686/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+volumes:
+  victorialogs_data:
+  victoriametrics_data:

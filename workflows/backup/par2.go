@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -112,9 +113,26 @@ func generatePAR2(ctx context.Context, cfg config.Config, plan TapePlan, staged 
 		}
 
 		sets = append(sets, set)
+
+		slog.InfoContext(ctx, "par2: generated recovery set for archive",
+			"sourceIndex", set.SourceIndex, "redundancyPercent", set.RedundancyPercent,
+			"recoveryFiles", len(set.Files), "bytes", par2SetBytes(set))
 	}
 
+	slog.InfoContext(ctx, "par2: generated recovery sets for all archives", "archives", len(sets))
+
 	return sets, nil
+}
+
+// par2SetBytes sums the on-disk size of a recovery set's staged files, for the
+// per-archive progress log.
+func par2SetBytes(set PAR2Set) int64 {
+	var total int64
+	for _, file := range set.Files {
+		total += file.SizeBytes
+	}
+
+	return total
 }
 
 // par2Percentages maps each placed archive's SourceIndex to the integer PAR2

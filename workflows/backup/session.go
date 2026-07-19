@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -289,7 +290,14 @@ func newWriteActivities(registry *MountRegistry, stagingDir string) *WriteActivi
 // MaximumAttempts is 1: mkltfs is destructive and non-idempotent. A failure
 // here fails the Write phase without retry.
 func (a *WriteActivities) FormatTape(ctx context.Context, input FormatInput) error {
-	return ltfs.NewVolume(input.Device).Format(ctx, input.Barcode)
+	if err := ltfs.NewVolume(input.Device).Format(ctx, input.Barcode); err != nil {
+		return err
+	}
+
+	slog.InfoContext(ctx, "write: formatted tape with a fresh LTFS volume",
+		"barcode", input.Barcode, "device", input.Device)
+
+	return nil
 }
 
 // WriteTree mounts the LTFS volume on the formatted tape, copies the staged
@@ -329,6 +337,11 @@ func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) e
 
 	a.registry.Put(input.Device, mount)
 
+	writtenBytes := tapeWrittenBytes(input.Archives)
+
+	slog.InfoContext(ctx, "write: mounted LTFS volume; streaming staged tree to tape",
+		"barcode", input.Barcode, "device", input.Device, "archives", len(input.Archives), "bytes", writtenBytes)
+
 	if err := copyTape(ctx, mount.Mountpoint(), input.Archives); err != nil {
 		return fmt.Errorf("copy staged tree to tape %s: %w", input.Barcode, err)
 	}
@@ -337,6 +350,9 @@ func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) e
 	if err := writeManifest(mount.Mountpoint(), manifest); err != nil {
 		return fmt.Errorf("write manifest to tape %s: %w", input.Barcode, err)
 	}
+
+	slog.InfoContext(ctx, "write: staged tree and per-tape manifest written to tape",
+		"barcode", input.Barcode, "device", input.Device, "archives", len(input.Archives), "bytes", writtenBytes)
 
 	return nil
 }
@@ -412,6 +428,9 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 	}
 
 	a.registry.Delete(input.Device)
+
+	slog.InfoContext(ctx, "write: finalized tape; LTFS index written to tape and captured to disk",
+		"barcode", input.Barcode, "device", input.Device, "indexPath", indexPath)
 
 	return indexPath, nil
 }

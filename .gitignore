@@ -10,3 +10,14 @@ result
 
 # Claude Code per-issue task scratch (local only, never committed)
 /.claude/tasks/
+
+# web/ (Vite/React/TS frontend) build tooling and output. web/vite.config.ts
+# writes `npm run build`'s output directly into cmd/web/dist/ (go:embed can
+# only reach the embedding file's own directory subtree — see
+# cmd/web/assets.go) rather than web/dist, so both are ignored here; a
+# committed cmd/web/dist/.gitkeep placeholder keeps `go build`/`go vet`/
+# `golangci-lint`/`go test ./...` compiling before any frontend build has run.
+/web/node_modules/
+/web/dist/
+/cmd/web/dist/*
+!/cmd/web/dist/.gitkeep

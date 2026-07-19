@@ -215,6 +215,70 @@ resources:
         ttlSecondsAfterFinished: 600
 ```
 
+## Network policy and firewall rules
+
+The chart renders **no** `NetworkPolicy` by default — pod traffic is unrestricted unless
+your cluster enforces a default-deny baseline. In a locked-down cluster, allow the flows
+below. They can be authored as standalone manifests or rendered by this chart through the
+bjw-s passthrough at `resources.networkpolicies.<name>` (the same `resources` deep-merge
+that overrides the controller — see [above](#kubernetes-resources-resources)); installing
+and running a CNI that actually enforces `NetworkPolicy` (Cilium, Calico, …) is the
+operator's responsibility, outside this chart's scope.
+
+The worker exposes **no** `Service` — nothing in the cluster connects *to* it for work. It
+only dials out (Temporal, the Kubernetes API, optionally Discord) and accepts health probes
+and, when enabled, a metrics scrape.
+
+### Egress (worker → …)
+
+| Destination | Port | When | Purpose |
+| --- | --- | --- | --- |
+| Temporal frontend (`config.temporal.address`) | `7233` gRPC (`443` for Temporal Cloud) | always | Poll the `control` queue; drive workflows/activities. |
+| Kubernetes API server | `443` (`6443` on some distros) | runs naming k8s sources | `VolumeSnapshot` discovery (SPEC §3). |
+| Discord (`discord.com`) | `443` HTTPS | `discordFailureWebhookUrl` set | Run-failure alerts (SPEC §11). |
+| Cluster DNS (CoreDNS/kube-dns) | `53` UDP+TCP | always | Resolve all of the above. |
+
+An egress policy **must** allow DNS (`53`) alongside the real destinations, or name
+resolution fails before any connection is attempted.
+
+### Ingress (… → worker)
+
+| Source | Port | When | Purpose |
+| --- | --- | --- | --- |
+| kubelet / node | `8080` (`health`) | always | Liveness/readiness probes. Probes originate from the **node**, not a pod — a policy that only allows pod sources will fail them, so allow the node/host-network range. |
+| Prometheus | `9090` (`metrics`) | `config.controlWorker.metrics.enabled` | `PodMonitor` scrape of `/metrics`. |
+
+No other workload connects to the worker; on the KEDA `ScaledJob` path there is nothing to
+reach between runs.
+
+> On the KEDA path the **KEDA operator** — not the worker — dials the Temporal frontend to
+> read the `control` backlog. If you also restrict *ingress* to the Temporal frontend, allow
+> KEDA's namespace too, or the scaler can never poll and the worker never scales up.
+
+Example — a default-deny egress policy that permits exactly the flows above (tune the
+namespace/label selectors and CIDRs to your cluster):
+
+```yaml
+resources:
+  networkpolicies:
+    egress:
+      controller: main
+      policyTypes: [Egress]
+      rules:
+        egress:
+          - to: [namespaceSelector: {}]            # cluster DNS
+            ports:
+              - { protocol: UDP, port: 53 }
+              - { protocol: TCP, port: 53 }
+          - to:                                     # Temporal frontend
+              - namespaceSelector:
+                  matchLabels: { kubernetes.io/metadata.name: temporal }
+            ports:
+              - { protocol: TCP, port: 7233 }
+          - ports:                                  # Kubernetes API + Discord (443)
+              - { protocol: TCP, port: 443 }
+```
+
 ## Example: authenticated Temporal Cloud + secret webhook
 
 ```yaml

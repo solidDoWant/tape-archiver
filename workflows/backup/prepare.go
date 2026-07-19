@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +158,10 @@ func (a *PrepareActivities) prepare(ctx context.Context, stagingDir string, inpu
 
 	staged := make([]StagedArchive, 0, len(input.Archives))
 
+	slog.InfoContext(ctx, "prepare: staging resolved archives to disk", "archives", len(input.Archives), "stagingDir", stagingDir)
+
+	var totalBytes int64
+
 	for _, resolvedArchive := range input.Archives {
 		result, err := a.stageArchive(ctx, stagingDir, resolvedArchive, recipients, sliceSize)
 		if err != nil {
@@ -164,7 +169,14 @@ func (a *PrepareActivities) prepare(ctx context.Context, stagingDir string, inpu
 		}
 
 		staged = append(staged, result)
+		totalBytes += result.SizeBytes
+
+		slog.InfoContext(ctx, "prepare: staged archive",
+			"sourceIndex", resolvedArchive.SourceIndex, "label", resolvedArchive.Label,
+			"compressed", resolvedArchive.Compression, "slices", len(result.Slices), "bytes", result.SizeBytes)
 	}
+
+	slog.InfoContext(ctx, "prepare: staged all archives to disk", "archives", len(staged), "totalBytes", totalBytes)
 
 	return staged, nil
 }

@@ -30,6 +30,7 @@ type capture struct {
 	hits        atomic.Int32
 	contentType string
 	body        []byte
+	rawQuery    string
 }
 
 // newServer returns an httptest server that records each request into a capture
@@ -109,12 +110,28 @@ func TestSendFile(t *testing.T) {
 	tests := []struct {
 		name        string
 		status      int
+		respBody    string
 		emptyURL    bool
 		missingFile bool
 		assertError require.ErrorAssertionFunc
 		expectHit   bool
+		wantMessage *webhook.PostedMessage
 	}{
-		{name: "uploads multipart attachment", status: http.StatusOK, expectHit: true},
+		{
+			name:        "uploads multipart attachment and returns the posted message",
+			status:      http.StatusOK,
+			respBody:    `{"id":"msg-123","channel_id":"chan-456","other":"ignored"}`,
+			expectHit:   true,
+			wantMessage: &webhook.PostedMessage{ID: "msg-123", ChannelID: "chan-456"},
+		},
+		{
+			// A 2xx whose body is not the expected message JSON means the report
+			// was delivered but the deep-link identity is lost: no message, no error.
+			name:      "delivered but unparseable response yields no message and no error",
+			status:    http.StatusOK,
+			respBody:  "not json",
+			expectHit: true,
+		},
 		{name: "non-2xx error", status: http.StatusBadRequest, assertError: require.Error, expectHit: true},
 		{name: "missing file error", status: http.StatusOK, missingFile: true, assertError: require.Error, expectHit: false},
 		{name: "empty URL no-op", emptyURL: true, expectHit: false},
@@ -129,7 +146,19 @@ func TestSendFile(t *testing.T) {
 				assertError = require.NoError
 			}
 
-			server, cap := newServer(t, test.status)
+			cap := &capture{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+
+				cap.hits.Add(1)
+				cap.contentType = r.Header.Get("Content-Type")
+				cap.body = body
+				cap.rawQuery = r.URL.RawQuery
+
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.respBody)
+			}))
+			t.Cleanup(server.Close)
 
 			url := server.URL
 			if test.emptyURL {
@@ -142,16 +171,21 @@ func TestSendFile(t *testing.T) {
 			}
 
 			client := webhook.New(url)
-			err := client.SendFile(t.Context(), path)
+			message, err := client.SendFile(t.Context(), path)
 			assertError(t, err)
 
 			if !test.expectHit {
 				assert.Equal(t, int32(0), cap.hits.Load())
+				assert.Nil(t, message)
 
 				return
 			}
 
 			require.Equal(t, int32(1), cap.hits.Load())
+
+			// The report webhook is posted with ?wait=true so Discord returns the
+			// created message object the run-overview deep-link needs (issue #306).
+			assert.Equal(t, "wait=true", cap.rawQuery)
 
 			mediaType, params, perr := mime.ParseMediaType(cap.contentType)
 			require.NoError(t, perr)
@@ -167,6 +201,53 @@ func TestSendFile(t *testing.T) {
 			got, perr := io.ReadAll(part)
 			require.NoError(t, perr)
 			assert.Equal(t, fileContents, string(got))
+
+			assert.Equal(t, test.wantMessage, message)
+		})
+	}
+}
+
+func TestFetchWebhookGuild(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		status      int
+		respBody    string
+		emptyURL    bool
+		assertError require.ErrorAssertionFunc
+		wantGuild   string
+	}{
+		{name: "returns the webhook's guild", status: http.StatusOK, respBody: `{"guild_id":"guild-789","channel_id":"chan-456"}`, wantGuild: "guild-789"},
+		{name: "absent guild_id yields empty", status: http.StatusOK, respBody: `{"channel_id":"chan-456"}`, wantGuild: ""},
+		{name: "non-2xx is an error", status: http.StatusNotFound, respBody: "", assertError: require.Error},
+		{name: "empty URL no-op", emptyURL: true, wantGuild: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assertError := test.assertError
+			if assertError == nil {
+				assertError = require.NoError
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodGet, r.Method)
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.respBody)
+			}))
+			t.Cleanup(server.Close)
+
+			url := server.URL
+			if test.emptyURL {
+				url = ""
+			}
+
+			guild, err := webhook.New(url).FetchWebhookGuild(t.Context())
+			assertError(t, err)
+			assert.Equal(t, test.wantGuild, guild)
 		})
 	}
 }
@@ -369,14 +450,15 @@ func TestSendFileBoundedByContextNotFixedTimeout(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), serverDelay*5)
 		defer cancel()
 
-		require.NoError(t, client.SendFile(ctx, path))
+		_, err := client.SendFile(ctx, path)
+		require.NoError(t, err)
 	})
 
 	t.Run("fails with deadline error when context deadline is below server delay", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), serverDelay/4)
 		defer cancel()
 
-		err := client.SendFile(ctx, path)
+		_, err := client.SendFile(ctx, path)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
 	})

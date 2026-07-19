@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
 	"github.com/solidDoWant/tape-archiver/internal/envvar"
@@ -67,12 +68,20 @@ func main() {
 // workerOptions returns the Temporal worker options for the given role. The
 // data worker enables session support so its write-phase activities can be
 // pinned to a single process via workflow.CreateSession (SPEC §4.3 phase 7).
+//
+// Both roles install logTagsInterceptor so every activity's log lines carry the
+// run's WorkflowID/RunID and the web UI's run-detail log panel can find them
+// (#303).
 func workerOptions(role Role) worker.Options {
-	if role == RoleData {
-		return worker.Options{EnableSessionWorker: true}
+	options := worker.Options{
+		Interceptors: []interceptor.WorkerInterceptor{&logTagsInterceptor{}},
 	}
 
-	return worker.Options{}
+	if role == RoleData {
+		options.EnableSessionWorker = true
+	}
+
+	return options
 }
 
 // run parses configuration, sets up logging, metrics, and the Temporal client,

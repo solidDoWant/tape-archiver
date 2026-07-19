@@ -2,7 +2,9 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,6 +56,28 @@ func (r *uploadRecorder) names() []string {
 	return append([]string(nil), r.uploads...)
 }
 
+// deliverAPIRecorder emulates the two Discord calls a successful Deliver makes
+// against a webhook URL: the ?wait=true multipart POST that returns the created
+// message ({id, channel_id}), and the follow-up GET on the webhook object that
+// returns its guild ({guild_id}). It lets a test assert the full DeliverResult.
+type deliverAPIRecorder struct {
+	guildID   string
+	channelID string
+	messageID string
+}
+
+func (d *deliverAPIRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if req.Method == http.MethodGet {
+		_ = json.NewEncoder(w).Encode(map[string]string{"guild_id": d.guildID})
+
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]string{"id": d.messageID, "channel_id": d.channelID})
+}
+
 // writeReportArtifact stages a dummy report and returns its path.
 func writeReportArtifact(t *testing.T) (reportPath string) {
 	t.Helper()
@@ -75,14 +99,65 @@ func TestDeliverUploadsReportOnly(t *testing.T) {
 
 	var acts DeliverActivities
 
-	err := acts.Deliver(t.Context(), DeliverInput{
+	result, err := acts.Deliver(t.Context(), DeliverInput{
 		WebhookURL: server.URL,
 		ReportPath: writeReportArtifact(t),
 	})
 	require.NoError(t, err)
+	require.NotNil(t, result)
 
 	assert.Equal(t, []string{reportFileName}, recorder.names(),
 		"exactly one file — the report — must be uploaded, and no ISO")
+}
+
+// TestDeliverCapturesPostedMessage covers issue #306: on a successful delivery the
+// activity records the posted message's guild/channel/message identity (from the
+// ?wait=true post response plus the webhook-object guild lookup) as its result, so
+// the run overview can deep-link to the Discord message.
+func TestDeliverCapturesPostedMessage(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(&deliverAPIRecorder{guildID: "g1", channelID: "c1", messageID: "m1"})
+	t.Cleanup(server.Close)
+
+	var acts DeliverActivities
+
+	result, err := acts.Deliver(t.Context(), DeliverInput{
+		WebhookURL: server.URL,
+		ReportPath: writeReportArtifact(t),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, &DeliverResult{GuildID: "g1", ChannelID: "c1", MessageID: "m1"}, result)
+}
+
+// TestDeliverGuildLookupFailureStillSucceeds covers issue #306's best-effort
+// guarantee: when the report is delivered but the follow-up guild lookup fails, the
+// activity still succeeds with the channel+message captured and an empty guild — a
+// missing guild only omits the deep-link, it never turns a delivered report into a
+// failed run.
+func TestDeliverGuildLookupFailureStillSucceeds(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet {
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"m1","channel_id":"c1"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	var acts DeliverActivities
+
+	result, err := acts.Deliver(t.Context(), DeliverInput{
+		WebhookURL: server.URL,
+		ReportPath: writeReportArtifact(t),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, &DeliverResult{ChannelID: "c1", MessageID: "m1"}, result)
 }
 
 // TestDeliverEmptyWebhookNoOp covers AC3: a run with delivery disabled (empty
@@ -92,11 +167,12 @@ func TestDeliverEmptyWebhookNoOp(t *testing.T) {
 
 	var acts DeliverActivities
 
-	err := acts.Deliver(t.Context(), DeliverInput{
+	result, err := acts.Deliver(t.Context(), DeliverInput{
 		WebhookURL: "",
 		ReportPath: writeReportArtifact(t),
 	})
 	require.NoError(t, err)
+	assert.Equal(t, &DeliverResult{}, result, "a disabled webhook yields an empty result — no link")
 }
 
 // TestDeliverReportFailureFails covers AC6: a failed report upload fails the
@@ -110,7 +186,7 @@ func TestDeliverReportFailureFails(t *testing.T) {
 
 	var acts DeliverActivities
 
-	err := acts.Deliver(t.Context(), DeliverInput{
+	_, err := acts.Deliver(t.Context(), DeliverInput{
 		WebhookURL: server.URL,
 		ReportPath: writeReportArtifact(t),
 	})
@@ -140,10 +216,10 @@ func TestDeliverPhaseSetsHeartbeatTimeout(t *testing.T) {
 	var gotHeartbeatTimeout time.Duration
 
 	env.OnActivity((&DeliverActivities{}).Deliver, mock.Anything, mock.Anything).Return(
-		func(ctx context.Context, _ DeliverInput) error {
+		func(ctx context.Context, _ DeliverInput) (*DeliverResult, error) {
 			gotHeartbeatTimeout = activity.GetInfo(ctx).HeartbeatTimeout
 
-			return nil
+			return &DeliverResult{}, nil
 		})
 
 	env.ExecuteWorkflow(deliverPhaseTestWorkflow, config.Config{})
@@ -224,7 +300,7 @@ func TestDeliverDeterministicRejectionIsNonRetryable(t *testing.T) {
 
 			var acts DeliverActivities
 
-			err := acts.Deliver(t.Context(), DeliverInput{
+			_, err := acts.Deliver(t.Context(), DeliverInput{
 				WebhookURL: server.URL,
 				ReportPath: writeReportArtifact(t),
 			})
@@ -324,7 +400,7 @@ func TestDeliverFailureAlertNamesDeliver(t *testing.T) {
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
 		Return(ReportOutput{}, nil)
 	env.OnActivity((&DeliverActivities{}).Deliver, mock.Anything, mock.Anything).
-		Return(temporal.NewNonRetryableApplicationError(
+		Return(nil, temporal.NewNonRetryableApplicationError(
 			`deliver report "report.pdf": webhook: unexpected status 404`,
 			deliverWebhookRejectedErrorType, nil))
 

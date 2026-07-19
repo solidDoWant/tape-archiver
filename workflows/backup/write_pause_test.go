@@ -34,20 +34,30 @@ import (
 // runs before the alert dispatch. It fires exactly once, on the named pause-alert
 // activity's first start.
 func resumeWhilePauseAlertFires(env *testsuite.TestWorkflowEnvironment, alertActivity string) {
+	signalWhilePauseAlertFires(env, alertActivity, OperatorResumeSignal)
+}
+
+// signalWhilePauseAlertFires delivers the named signal as the named pause-alert
+// activity starts — see resumeWhilePauseAlertFires for why that reproduces the
+// alert-to-wait-entry gap deterministically. It backs both the resume-gap tests
+// (issue #216) and their abort counterpart (issue #254): an abort the operator
+// sends in response to a pause's alert must abort that pause, not be drained as
+// stale. It fires exactly once, on the named activity's first start.
+func signalWhilePauseAlertFires(env *testsuite.TestWorkflowEnvironment, alertActivity, signalName string) {
 	var once sync.Once
 
-	// Deliver the resume as the alert activity starts: the signal is then buffered
-	// while the alert runs, so it lands in history before the workflow task that
-	// begins the wait. A drain relocated ahead of the alert dispatch has already
-	// run, so the resume survives; a drain at wait entry runs after the alert and
-	// discards it (the run then times out) — which is the #216 regression.
+	// Deliver the signal as the alert activity starts: it is then buffered while
+	// the alert runs, so it lands in history before the workflow task that begins
+	// the wait. A drain relocated ahead of the alert dispatch has already run, so
+	// the signal survives; a drain at wait entry runs after the alert and discards
+	// it — the #216 regression (for resume) and its #254 abort analogue.
 	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
 		if info.ActivityType.Name != alertActivity {
 			return
 		}
 
 		once.Do(func() {
-			env.SignalWorkflow(OperatorResumeSignal, nil)
+			env.SignalWorkflow(signalName, nil)
 		})
 	})
 }
@@ -63,10 +73,18 @@ type writePauseParams struct {
 // Load/Write-failure pause loop can be tested with mocked tape activities,
 // signals, and the test env's time-skipping — without the full pipeline. It seeds
 // a plan whose logical tapes carry no archives, so archivesForTape yields an empty
-// (valid) tree and the mocked WriteTree copies nothing.
+// (valid) tree and the mocked WriteTree copies nothing. It registers
+// CurrentPauseQuery against its own local state, mirroring the real Backup entry
+// point (workflow.go), so tests can query pause state mid-pause.
 func writePauseTestWorkflow(ctx workflow.Context, params writePauseParams) error {
 	state := &runState{plan: TapePlan{Copies: 2, Tapes: []PlannedTape{{}, {}}}}
 	failing := ""
+
+	if err := workflow.SetQueryHandler(ctx, CurrentPauseQuery, func() (CurrentPause, error) {
+		return state.currentPause, nil
+	}); err != nil {
+		return err
+	}
 
 	return runDriveSet(ctx, params.Cfg, state, params.Set, &failing)
 }
@@ -285,6 +303,68 @@ func TestWritePathPauseSignalResume(t *testing.T) {
 	assert.Equal(t, 101, retry[0].BlankSlot, "the fresh blank is reloaded into the failed tape's slot")
 }
 
+// TestWritePathCurrentPauseQuery covers the CurrentPauseQuery contract for a
+// write-failure pause: while paused it reports PauseWriteFailure with the
+// failing phase, the affected tape, the slot to restock, and an error summary,
+// and once resumed to completion it reports no pause.
+func TestWritePathCurrentPauseQuery(t *testing.T) {
+	cfg := twoDriveConfig(3600)
+	env := newWritePauseEnv(t)
+	expectHealthyWriteExceptFormat(env)
+
+	var (
+		mu           sync.Mutex
+		formatsByDev = map[string]int{}
+	)
+
+	// /dev/sg1 fails its first format attempt, then succeeds on the resume retry.
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			formatsByDev[input.Device]++
+
+			if input.Device == "/dev/sg1" && formatsByDev[input.Device] == 1 {
+				return errors.New("mkltfs: drive reported a hard write error")
+			}
+
+			return nil
+		})
+
+	mockLoadFromSet(env, cfg)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
+
+	env.RegisterDelayedCallback(func() {
+		value, err := env.QueryWorkflow(CurrentPauseQuery)
+		require.NoError(t, err)
+
+		var pause CurrentPause
+		require.NoError(t, value.Get(&pause))
+
+		assert.Equal(t, PauseWriteFailure, pause.Kind)
+		assert.Equal(t, PhaseWrite, pause.Phase)
+		assert.Equal(t, []string{string(barcodeForSlot(101))}, pause.AffectedTapes)
+		assert.Equal(t, []int{101}, pause.ReloadSlots)
+		assert.Contains(t, pause.ErrorSummary, "hard write error")
+
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 10*time.Second)
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	value, err := env.QueryWorkflow(CurrentPauseQuery)
+	require.NoError(t, err)
+
+	var pause CurrentPause
+	require.NoError(t, value.Get(&pause))
+	assert.Equal(t, PauseNone, pause.Kind, "pause state clears once the run completes")
+}
+
 // TestWritePathResumeInAlertToWaitGapResumes covers issue #216 AC1: a resume the
 // operator sends after a write-failure pause's alert has fired but before the
 // workflow task that begins the wait executes (a control-worker restart/deploy or
@@ -411,6 +491,252 @@ func TestWritePathStaleResumeSignalDoesNotSatisfyLaterPause(t *testing.T) {
 
 	assert.Equal(t, 2, pauseAlerts, "both write-failure pauses alert the operator")
 	assert.Equal(t, 2, formatsByDev["/dev/sg1"], "the failed tape is retried once; the drained signal blocks a third attempt")
+}
+
+// TestWritePathStaleAbortSignalDoesNotAbortLaterPause covers issue #254 AC1 for the
+// write path: an abort buffered during one pause but not consumed before that pause
+// resolves by other means must not abort a later, unrelated pause. /dev/sg1 fails
+// its first two format attempts; during the first write-failure pause the operator
+// resumes while a racing (stale) abort — e.g. a delayed web-API request whose
+// pause-state check passed before the resume landed — is delivered right after it.
+// The resume clears the first pause; the buffered abort must be drained at the
+// second pause's entry, so that pause waits for a fresh action and — none arriving —
+// times out. Without the drain the stale abort would silently abort the second pause.
+func TestWritePathStaleAbortSignalDoesNotAbortLaterPause(t *testing.T) {
+	cfg := twoDriveConfig(300)
+	env := newWritePauseEnv(t)
+	expectHealthyWriteExceptFormat(env)
+
+	var (
+		mu           sync.Mutex
+		formatsByDev = map[string]int{}
+		pauseAlerts  int
+	)
+
+	// /dev/sg1 fails its first two format attempts (so the run pauses twice); a
+	// leaked abort at the second pause would end the run there instead of waiting.
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			formatsByDev[input.Device]++
+
+			if input.Device == "/dev/sg1" && formatsByDev[input.Device] <= 2 {
+				return errors.New("mkltfs: drive reported a hard write error")
+			}
+
+			return nil
+		})
+
+	mockLoadFromSet(env, cfg)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ WritePathPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			pauseAlerts++
+
+			return nil
+		})
+
+	// During the first write-failure pause the operator resumes and a stale abort
+	// races in behind it. The resume clears that pause; the buffered abort must not
+	// leak forward to the second.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+		env.SignalWorkflow(OperatorAbortSignal, nil)
+	}, 30*time.Second)
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err, "the stale abort must not satisfy the second pause; it times out")
+	assert.Contains(t, err.Error(), "did not resume or abort",
+		"the second pause times out waiting for a fresh action")
+	assert.NotContains(t, err.Error(), "aborted by operator",
+		"the stale abort must not end the run at the second pause")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 2, pauseAlerts, "both write-failure pauses alert the operator")
+	assert.Equal(t, 2, formatsByDev["/dev/sg1"], "the failed tape is retried exactly once; the drained abort neither ends the run nor triggers more retries")
+}
+
+// TestWritePathAbortInAlertToWaitGapAborts is the issue #254 counterpart of
+// TestWritePathResumeInAlertToWaitGapResumes: an abort the operator sends after a
+// write-failure pause's alert has fired but before the workflow task that begins
+// the wait executes must abort the run, not be drained as stale. It pins the abort
+// drain to the same before-the-alert location as the resume drain (issue #216) —
+// a drain at wait entry would discard this legitimate abort and the run would
+// retry or time out instead of aborting.
+func TestWritePathAbortInAlertToWaitGapAborts(t *testing.T) {
+	cfg := twoDriveConfig(300)
+	env := newWritePauseEnv(t)
+	expectHealthyWriteExceptFormat(env)
+
+	var (
+		mu          sync.Mutex
+		formats     int
+		pauseAlerts int
+	)
+
+	// /dev/sg1 always fails to format, so anything but an honored abort (a drained
+	// abort, then a retry or timeout) is distinguishable from the aborted outcome.
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			formats++
+
+			if input.Device == "/dev/sg1" {
+				return errors.New("mkltfs: drive reported a hard write error")
+			}
+
+			return nil
+		})
+
+	mockLoadFromSet(env, cfg)
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ WritePathPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			pauseAlerts++
+
+			return nil
+		})
+
+	// The operator aborts in the alert-to-wait-entry gap.
+	signalWhilePauseAlertFires(env, "NotifyWritePathPause", OperatorAbortSignal)
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err, "an aborted run ends with an error")
+	assert.Contains(t, err.Error(), "aborted by operator",
+		"an abort in the alert-to-wait gap must abort the run, not be drained")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
+}
+
+// TestWritePathAbortDuringEjectPauseDoesNotAbortLaterPause covers issue #254's
+// motivating scenario end to end: an abort delivered while the run is at an Eject
+// I/O-station pause — which never listens for abort (an Eject pause rejects abort;
+// every tape is already safely written) — stays buffered, and without the drain it
+// would silently abort the write-failure pause that follows. /dev/sg1's write
+// fails, the Eject that frees its drive fills the station (Eject pause), the
+// stale abort arrives and the operator then resumes the export; the subsequent
+// write-failure pause must wait for a fresh action and — none arriving — time out,
+// not consume the leaked abort.
+func TestWritePathAbortDuringEjectPauseDoesNotAbortLaterPause(t *testing.T) {
+	cfg := twoDriveConfig(300)
+	env := newWritePauseEnv(t)
+	// The Eject pause auto-resume poll loop runs in this child workflow
+	// (issue #168); it must be registered for the parent to start it.
+	env.RegisterWorkflow(ioStationWaitWorkflow)
+	expectHealthyWriteExceptFormat(env)
+
+	var (
+		mu               sync.Mutex
+		ejectCalls       int
+		ejectPauseAlerts int
+		writePauseAlerts int
+	)
+
+	// /dev/sg1 always fails to format, so the run reaches a write-failure pause
+	// right after the Eject phase; only a fresh resume could retry it.
+	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input FormatInput) error {
+			if input.Device == "/dev/sg1" {
+				return errors.New("mkltfs: drive reported a hard write error")
+			}
+
+			return nil
+		})
+
+	mockLoadFromSet(env, cfg)
+
+	// The first Eject fills the I/O station with one tape still to export; the
+	// second (after the operator clears the station) exports the remainder.
+	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input EjectInput) (EjectResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			ejectCalls++
+
+			if ejectCalls == 1 {
+				return EjectResult{
+					InIOStation: []tape.Barcode{input.WrittenTapes[0].Barcode},
+					Remaining:   input.WrittenTapes[1:],
+				}, nil
+			}
+
+			return EjectResult{}, nil
+		})
+
+	// The library never reports access state, so only the resume signal ends the
+	// Eject pause — the buffered abort cannot (and must not) end it.
+	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
+		IOStatus{FreeSlots: 0, AccessReported: false}, nil)
+
+	env.OnActivity((&FailureActivities{}).NotifyOperatorPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ OperatorPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			ejectPauseAlerts++
+
+			return nil
+		})
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ WritePathPauseInput) error {
+			mu.Lock()
+			defer mu.Unlock()
+
+			writePauseAlerts++
+
+			return nil
+		})
+
+	// During the Eject pause a stale abort lands (e.g. a delayed web-API abort
+	// whose pause-state check raced the pause changing), then the operator clears
+	// the station and resumes. The Eject wait consumes only the resume; the abort
+	// stays buffered and must not leak into the write-failure pause that follows.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorAbortSignal, nil)
+		env.SignalWorkflow(OperatorResumeSignal, nil)
+	}, 30*time.Second)
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+
+	err := env.GetWorkflowError()
+	require.Error(t, err, "the leaked abort must not satisfy the write-failure pause; it times out")
+	assert.Contains(t, err.Error(), "did not resume or abort",
+		"the write-failure pause times out waiting for a fresh action")
+	assert.NotContains(t, err.Error(), "aborted by operator",
+		"the abort buffered at the Eject pause must not end the run at the later pause")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	assert.Equal(t, 1, ejectPauseAlerts, "the Eject I/O-station pause alerts once")
+	assert.Equal(t, 2, ejectCalls, "the export resumes on the honored resume signal")
+	assert.Equal(t, 1, writePauseAlerts, "the write-failure pause is reached and alerts once")
 }
 
 // TestWritePathPauseAbort covers AC3: an operator abort ends the run in a defined,
