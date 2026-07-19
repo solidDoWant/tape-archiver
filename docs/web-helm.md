@@ -172,6 +172,9 @@ chart — it has no `ScaledJob` path.
 | `logLevel` | `info` | `LOG_LEVEL` for the web server. |
 | `metricsScrapeWaitTimeout` | `""` | `METRICS_SCRAPE_WAIT_TIMEOUT` override (Go duration, e.g. `60s`). Leave empty for `cmd/web`'s own default of `0s` — no shutdown-time wait for a final scrape, so pods drain within roughly `cmd/web`'s 10-second HTTP shutdown deadline (see `docs/configuration.md`). Setting a positive value delays every pod's SIGTERM exit by up to that long; keep it well under the pod's `terminationGracePeriodSeconds` (chart default 30) or the kubelet will SIGKILL the pod mid-wait. |
 | `metrics.enabled` | `false` | Emit a `PodMonitor` for the always-on `/metrics` endpoint (port 9090). Requires prometheus-operator CRDs. |
+| `observability.victoriaMetricsUrl` | `""` | `VICTORIAMETRICS_URL` — base URL of a VictoriaMetrics instance backing the live drive-metrics panel (e.g. `http://victoriametrics:8428`). Empty disables it (endpoints return a stable `503`). See [Live drive metrics](configuration.md#live-drive-metrics-victoriametrics). |
+| `observability.victoriaLogsUrl` | `""` | `VICTORIALOGS_URL` — base URL of a VictoriaLogs instance backing the live run-logs panel (e.g. `http://victorialogs:9428`). Empty leaves logs unavailable. See [Live run logs](configuration.md#get-apirunsrunidlogs-log-panel-issue-274). |
+| `observability.logsStreamFilter` | `""` | `VICTORIALOGS_STREAM_FILTER` — LogsQL fragment ANDed onto every log query (e.g. to scope a shared VictoriaLogs deployment). Empty uses `cmd/web`'s default of `*` (match everything). |
 | `oidc.issuerUrl` | `""` (**required**) | OIDC identity provider issuer URL (used for discovery). |
 | `oidc.clientId` | `""` (**required**) | This app's OIDC client ID. |
 | `oidc.redirectUrl` | `""` (**required**) | This app's OIDC callback URL, exactly as registered with the provider. |
@@ -271,7 +274,8 @@ delivery webhook is only written into the submitted run config for the data work
 | --- | --- | --- | --- |
 | Temporal frontend (`config.temporal.address`) | `7233` gRPC (`443` for Temporal Cloud) | always | Submit/inspect runs. |
 | OIDC provider (`config.web.oidc.issuerUrl`) | `443` HTTPS | always | Discovery, JWKS, and code/token exchange at login. Often egresses the cluster to a public IdP — allow it explicitly or every login hangs. |
-| VictoriaMetrics | operator-defined | live drive metrics configured | Only if you add `VICTORIAMETRICS_URL` via the container `env` passthrough (no first-class chart field) — see [Live drive metrics](configuration.md#live-drive-metrics-victoriametrics). |
+| VictoriaMetrics (`config.web.observability.victoriaMetricsUrl`) | operator-defined | live drive metrics configured | Read-only proxy backing the live drive-metrics panel — see [Live drive metrics](configuration.md#live-drive-metrics-victoriametrics). |
+| VictoriaLogs (`config.web.observability.victoriaLogsUrl`) | operator-defined | live run logs configured | Read-only proxy backing the live run-logs panel — see [Live run logs](configuration.md#get-apirunsrunidlogs-log-panel-issue-274). |
 | Cluster DNS (CoreDNS/kube-dns) | `53` UDP+TCP | always | Resolve all of the above. |
 
 An egress policy **must** allow DNS (`53`) alongside the real destinations, or name

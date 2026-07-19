@@ -85,6 +85,29 @@ config:
     metrics:
       enabled: false
 
+    # observability points the web UI at the optional VictoriaMetrics / VictoriaLogs
+    # backends it proxies read-only to power the live drive-metrics and live run-logs
+    # panels (docs/configuration.md "Live drive metrics" / "Live run logs"). All three
+    # are non-secret plain URLs/filters, independent of one another, and default empty:
+    # the web UI starts and runs normally with any or all unset, the corresponding
+    # panel just shows its explicit "unavailable" state. Note VictoriaMetrics also
+    # appears in the egress table in docs/web-helm.md — allow it in any NetworkPolicy.
+    observability:
+      # victoriaMetricsUrl is the base URL of a VictoriaMetrics instance scraping the
+      # workers' metrics endpoints (e.g. "http://victoriametrics:8428"), surfaced as
+      # VICTORIAMETRICS_URL. Empty disables the live drive-metrics endpoints (both
+      # return a stable 503).
+      victoriaMetricsUrl: ""
+      # victoriaLogsUrl is the base URL of a VictoriaLogs instance an external
+      # collector ships worker slog JSON into (e.g. "http://victorialogs:9428"),
+      # surfaced as VICTORIALOGS_URL. Empty means live run logs are unavailable.
+      victoriaLogsUrl: ""
+      # logsStreamFilter is a LogsQL filter fragment ANDed onto every log query
+      # (VICTORIALOGS_STREAM_FILTER), e.g. to scope a shared VictoriaLogs deployment
+      # to one tenant/stream. Empty leaves cmd/web's own default of "*" (match
+      # everything) — the right default for a dedicated VictoriaLogs instance.
+      logsStreamFilter: ""
+
     # oidc configures the OIDC authorization-code-flow identity provider
     # (pkg/webauth) that gates every page and /api/* route (docs/configuration.md
     # "OIDC authentication (cmd/web)"). issuerUrl/clientId/redirectUrl are required

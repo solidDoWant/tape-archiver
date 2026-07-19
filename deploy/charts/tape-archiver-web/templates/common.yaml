@@ -202,6 +202,23 @@ resolution (deploy/charts/tape-archiver-control-worker/templates/common.yaml).
   {{- $_ := set $env "TEMPORAL_UI_URL" .Values.config.web.temporalUiUrl -}}
 {{- end -}}
 
+{{/* VICTORIAMETRICS_URL / VICTORIALOGS_URL / VICTORIALOGS_STREAM_FILTER: optional,
+   non-secret observability backends the web UI proxies read-only (docs/configuration.md
+   "Live drive metrics" / "Live run logs"). Each is independent and omitted when unset:
+   no VICTORIAMETRICS_URL disables the live-metrics endpoints (stable 503), no
+   VICTORIALOGS_URL disables the live-logs panel. logsStreamFilter only sharpens the
+   logs query and is meaningless without victoriaLogsUrl, but it is rendered
+   independently — cmd/web simply ignores it when logs are unconfigured. */}}
+{{- if .Values.config.web.observability.victoriaMetricsUrl -}}
+  {{- $_ := set $env "VICTORIAMETRICS_URL" .Values.config.web.observability.victoriaMetricsUrl -}}
+{{- end -}}
+{{- if .Values.config.web.observability.victoriaLogsUrl -}}
+  {{- $_ := set $env "VICTORIALOGS_URL" .Values.config.web.observability.victoriaLogsUrl -}}
+{{- end -}}
+{{- if .Values.config.web.observability.logsStreamFilter -}}
+  {{- $_ := set $env "VICTORIALOGS_STREAM_FILTER" .Values.config.web.observability.logsStreamFilter -}}
+{{- end -}}
+
 {{/* TEMPORAL_API_KEY: env var (not TOML) so the SDK's env-over-file precedence
    keeps the secret out of the ConfigMap. */}}
 {{- if $temporalAPIKeySecretName -}}
