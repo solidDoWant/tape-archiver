@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -49,6 +50,8 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+
+	"github.com/solidDoWant/tape-archiver/pkg/webserver"
 )
 
 // sessionKeyLen is the required length, in bytes, of Config.SessionKey — 32
@@ -301,6 +304,7 @@ func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 		// cross-origin case; this adds an explicit Fetch-Metadata / Origin check
 		// so a same-site (sibling-subdomain / XSS) forgery cannot drive a run.
 		if strings.HasPrefix(r.URL.Path, "/api/") && isCrossSiteMutation(r) {
+			webserver.Annotate(r.Context(), slog.String("deny_reason", "cross-site mutation blocked (CSRF)"))
 			writeJSONError(w, http.StatusForbidden, "cross-site request forbidden")
 
 			return
@@ -309,6 +313,13 @@ func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 		identity, ok := a.identityFromSessionCookie(r)
 		if !ok {
 			if strings.HasPrefix(r.URL.Path, "/api/") {
+				// The client-facing 401 is deliberately opaque (no-cookie,
+				// expired, and tampered all look identical to the caller — see
+				// identityFromSessionCookie), but the server-side access log can
+				// safely distinguish the common "session simply expired / never
+				// present" case from an invalid cookie, which is what an operator
+				// debugging a 401 actually needs.
+				webserver.Annotate(r.Context(), slog.String("deny_reason", sessionDenyReason(r)))
 				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 
 				return
@@ -321,6 +332,21 @@ func (a *Authenticator) requireSession(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
 	})
+}
+
+// sessionDenyReason classifies why a gated /api/* request had no valid
+// session, for the access log only (never surfaced to the caller — see
+// requireSession). It distinguishes a request that carried no session cookie
+// at all (the ordinary "signed out / session expired and cleared" case) from
+// one that carried a cookie the server rejected (expired-but-still-sent,
+// tampered, or encrypted under a rotated key) — the distinction an operator
+// needs when a browser is unexpectedly getting 401s.
+func sessionDenyReason(r *http.Request) string {
+	if _, err := r.Cookie(sessionCookieName); err != nil {
+		return "no session cookie"
+	}
+
+	return "invalid or expired session cookie"
 }
 
 // isCrossSiteMutation reports whether r is a state-changing request that a
@@ -430,7 +456,8 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	state, ok := a.consumeStateCookie(w, r)
 	if !ok {
-		loginErrorRedirect(w, r, loginErrorExpired, "")
+		// No state cookie yet, so there is no RedirectPath to preserve.
+		rejectCallback(w, r, loginErrorExpired, "", "missing or expired login-state cookie")
 
 		return
 	}
@@ -438,48 +465,58 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
 	if errParam := query.Get("error"); errParam != "" {
-		loginErrorRedirect(w, r, loginErrorDenied, state.RedirectPath)
+		// The identity provider itself denied the request — this is the branch
+		// behind the SPA's "authenticated but not authorized" message. The IdP's
+		// own error code and description are the only real diagnostic here (the
+		// app applies no authorization of its own), so log them: an "access_denied"
+		// with "user not assigned to this application" is a provider-side role
+		// assignment, not anything to change in tape-archiver.
+		rejectCallback(w, r, loginErrorDenied, state.RedirectPath, "identity provider returned an error",
+			slog.String("idp_error", errParam),
+			slog.String("idp_error_description", query.Get("error_description")))
 
 		return
 	}
 
 	returnedState := query.Get("state")
 	if returnedState == "" || subtle.ConstantTimeCompare([]byte(returnedState), []byte(state.State)) != 1 {
-		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
+		rejectCallback(w, r, loginErrorExpired, state.RedirectPath, "state mismatch (stale login attempt or CSRF)")
 
 		return
 	}
 
 	code := query.Get("code")
 	if code == "" {
-		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
+		rejectCallback(w, r, loginErrorExpired, state.RedirectPath, "no authorization code in callback")
 
 		return
 	}
 
 	token, err := a.oauth2Config.Exchange(r.Context(), code, oauth2.VerifierOption(state.PKCEVerifier))
 	if err != nil {
-		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
+		rejectCallback(w, r, loginErrorExpired, state.RedirectPath, "authorization code exchange failed",
+			slog.Any("error", err))
 
 		return
 	}
 
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
+		rejectCallback(w, r, loginErrorExpired, state.RedirectPath, "no id_token in token response")
 
 		return
 	}
 
 	idToken, err := a.verifier.Verify(r.Context(), rawIDToken)
 	if err != nil {
-		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
+		rejectCallback(w, r, loginErrorExpired, state.RedirectPath, "id_token verification failed",
+			slog.Any("error", err))
 
 		return
 	}
 
 	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(state.Nonce)) != 1 {
-		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
+		rejectCallback(w, r, loginErrorExpired, state.RedirectPath, "id_token nonce mismatch")
 
 		return
 	}
@@ -491,7 +528,8 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := idToken.Claims(&claims); err != nil {
-		loginErrorRedirect(w, r, loginErrorExpired, state.RedirectPath)
+		rejectCallback(w, r, loginErrorExpired, state.RedirectPath, "id_token claims decode failed",
+			slog.Any("error", err))
 
 		return
 	}
@@ -663,6 +701,19 @@ const (
 // so a successful retry still lands wherever the operator originally meant
 // to go. Called only by handleCallback; see its doc comment for which
 // failures map to which code.
+// rejectCallback records why a login callback failed on the access-log record
+// for this request (webserver.Annotate) and then redirects to the SPA login
+// page via loginErrorRedirect. The failure is served as a 302, so without this
+// annotation an operator would see only an opaque redirect and the SPA's
+// generic "not authorized" message — reason (and, where available, the IdP
+// error or the underlying Go error) is the diagnostic that was previously
+// thrown away. extra carries case-specific fields (the IdP error/description,
+// an exchange/verification error); reason is a short stable classification.
+func rejectCallback(w http.ResponseWriter, r *http.Request, code, redirectPath, reason string, extra ...slog.Attr) {
+	webserver.Annotate(r.Context(), append([]slog.Attr{slog.String("auth_error", reason)}, extra...)...)
+	loginErrorRedirect(w, r, code, redirectPath)
+}
+
 func loginErrorRedirect(w http.ResponseWriter, r *http.Request, code string, redirectPath string) {
 	target := url.URL{Path: loginPath}
 

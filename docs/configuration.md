@@ -468,7 +468,31 @@ response `status` and `bytes`, the elapsed `duration_ms`, the client `remote` ad
 and — when the request carried a valid session cookie — the authenticated operator's
 OIDC `subject` as `user`. The record's level tracks the status so failures stay visible
 even at a raised `LOG_LEVEL`: `5xx` logs at `error`, `4xx` at `warn`, everything else at
-`info` (so `LOG_LEVEL=warn` keeps only failed requests). Two things are deliberately
+`info` (so `LOG_LEVEL=warn` keeps only failed requests).
+
+A failing request also carries a **reason** explaining *why* it ended as it did, and any
+record carrying such a reason is raised to at least `warn` (so it stays visible at
+`LOG_LEVEL=warn` even when its status alone would be `info`):
+
+- A gated `/api/*` request rejected by the session middleware carries `deny_reason` —
+  `no session cookie` / `invalid or expired session cookie` for a `401`, or
+  `cross-site mutation blocked (CSRF)` for a `403`.
+- A **failed login** carries `auth_error` naming the stage that failed. This is the
+  field to look at for the SPA's "authenticated but isn't authorized for this archive"
+  message: `cmd/web` applies **no authorization of its own** (any authenticated user is
+  allowed), so that message means the **identity provider itself** denied the login —
+  the callback arrives at `/auth/callback?error=...`. That record carries
+  `auth_error: "identity provider returned an error"` plus the provider's own
+  `idp_error` (e.g. `access_denied`) and `idp_error_description` — look at the IdP's
+  side (an app-assignment/consent/policy denial), not tape-archiver. Note the failing
+  callback is served as a `302` redirect, so filtering by error *status* alone will not
+  surface it — filter on the presence of `auth_error` (or the `warn` level). Other
+  `auth_error` values (`state mismatch (stale login attempt or CSRF)`, `authorization
+  code exchange failed`, `id_token verification failed`, `id_token nonce mismatch`, …)
+  cover the remaining callback-rejection stages, some with an `error` field carrying the
+  underlying failure.
+
+Two things are deliberately
 excluded: the **query string** is never logged (only `path`), so the OIDC authorization
 `code`/`state` on `/auth/callback` never reach the log — run IDs, which live in the path
 (`/api/runs/{runID}`), are logged, as an access log is meant to record which resource was

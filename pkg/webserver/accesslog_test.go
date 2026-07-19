@@ -2,6 +2,7 @@ package webserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -201,6 +202,54 @@ func TestAccessLogRemoteAddr(t *testing.T) {
 			assert.Equal(t, test.want, decodeRecord(t, buf)["remote"])
 		})
 	}
+}
+
+func TestAccessLogAnnotate(t *testing.T) {
+	t.Run("annotated fields are merged and the record is raised to warn", func(t *testing.T) {
+		buf := &bytes.Buffer{}
+		// A handler that annotates and then responds with a 302 — the shape of a
+		// failed OIDC callback: its status alone would keep it at info, but the
+		// annotation must surface it at warn so it is not hidden at LOG_LEVEL=warn.
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Annotate(r.Context(),
+				slog.String("auth_error", "identity provider returned an error"),
+				slog.String("idp_error", "access_denied"),
+			)
+			w.WriteHeader(http.StatusFound)
+		})
+
+		handler := AccessLog(captureLogger(buf), nil, inner)
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/auth/callback", nil))
+
+		record := decodeRecord(t, buf)
+		assert.Equal(t, "WARN", record["level"], "an annotated request is surfaced at warn even though 302 alone is info")
+		assert.Equal(t, "identity provider returned an error", record["auth_error"])
+		assert.Equal(t, "access_denied", record["idp_error"])
+	})
+
+	t.Run("a 5xx annotation stays at error, not downgraded to warn", func(t *testing.T) {
+		buf := &bytes.Buffer{}
+		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			Annotate(r.Context(), slog.String("reason", "temporal unreachable"))
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+
+		handler := AccessLog(captureLogger(buf), nil, inner)
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/runs", nil))
+
+		record := decodeRecord(t, buf)
+		assert.Equal(t, "ERROR", record["level"], "the level is the higher of status and annotation, never downgraded")
+		assert.Equal(t, "temporal unreachable", record["reason"])
+	})
+}
+
+// TestAnnotateWithoutMiddleware verifies Annotate is a safe no-op when the
+// context did not come through AccessLog, so a handler can call it
+// unconditionally (e.g. in a unit test that exercises it directly).
+func TestAnnotateWithoutMiddleware(t *testing.T) {
+	assert.NotPanics(t, func() {
+		Annotate(context.Background(), slog.String("reason", "nowhere to go"))
+	})
 }
 
 // TestAccessLogPreservesFlush guards the SSE path: pkg/runsapi drives its

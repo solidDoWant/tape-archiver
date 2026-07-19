@@ -1,10 +1,12 @@
 package webauth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -18,6 +20,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/pkg/webserver"
 )
 
 // testConfig builds a Config wired to a fresh fake OIDC provider, plus a
@@ -752,6 +755,60 @@ func TestCallback_idpError_isRejected(t *testing.T) {
 	assert.True(t, strings.HasPrefix(location, "/login?"), "expected a redirect to the login page, got %q", location)
 	assert.Contains(t, location, "error=denied")
 	assert.Contains(t, location, "redirect=%2Fruns%2Fabc")
+}
+
+// TestCallback_idpError_isLoggedToAccessLog covers the diagnostic gap behind
+// the prod "authenticated but not authorized" report: when the IdP denies the
+// login (callback carries ?error=...), the app applies no authorization of its
+// own, so the IdP's error code and description are the only cause — and they
+// must reach the access log, not be discarded. The callback is served as a 302,
+// so the record must be raised to warn to stay visible at a raised LOG_LEVEL.
+func TestCallback_idpError_isLoggedToAccessLog(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	authenticator, err := New(t.Context(), testConfig(t, idp))
+	require.NoError(t, err)
+
+	buf := &bytes.Buffer{}
+	logger := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// The real cmd/web chain: AccessLog wrapping the gated handler — the whole
+	// point is that webauth's callback annotation surfaces through webserver's
+	// access log.
+	server := httptest.NewServer(webserver.AccessLog(logger, nil, authenticator.Wrap(echoHandler())))
+	t.Cleanup(server.Close)
+
+	stateCookieValue, err := authenticator.encrypt(statePurpose, stateClaims{
+		State:        "the-state",
+		Nonce:        "the-nonce",
+		PKCEVerifier: "verifier",
+		RedirectPath: "/runs/abc",
+		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodGet,
+		server.URL+"/auth/callback?error=access_denied&error_description=User+not+assigned+to+application&state=the-state", nil)
+	require.NoError(t, err)
+	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookieValue})
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	var record map[string]any
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &record))
+
+	assert.Equal(t, "/auth/callback", record["path"])
+	assert.Equal(t, "WARN", record["level"], "a login failure must stay visible at LOG_LEVEL=warn")
+	assert.Equal(t, "identity provider returned an error", record["auth_error"])
+	assert.Equal(t, "access_denied", record["idp_error"])
+	assert.Equal(t, "User not assigned to application", record["idp_error_description"])
+	assert.NotContains(t, buf.String(), "the-state", "the query string (state) must never be logged")
 }
 
 // TestCallback_pkceMismatch_isRejected covers the PKCE verifier in the state

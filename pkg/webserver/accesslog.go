@@ -1,6 +1,7 @@
 package webserver
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -30,7 +31,13 @@ import (
 //
 // The record's level tracks the status so failures stay visible even when the
 // deployment raises LOG_LEVEL above info: 5xx logs at error, 4xx at warn,
-// everything else at info.
+// everything else at info. A handler can additionally attach fields explaining
+// *why* a request ended as it did — the reason for a 401/403, the IdP error
+// behind a failed /auth/callback — with Annotate; a request carrying any such
+// annotation is treated as noteworthy and logged at warn-or-higher even when
+// its status alone (e.g. the 302 the OIDC login callback redirects with on
+// failure) would be info. This is what lets the access log, on its own,
+// explain an otherwise-opaque login failure.
 //
 // userFor may be nil (no user attribution). It is called once per request,
 // after next returns; cmd/web passes a closure over
@@ -43,6 +50,11 @@ func AccessLog(logger *slog.Logger, userFor func(*http.Request) string, next htt
 		start := time.Now()
 
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		// Install the per-request annotation sink so handlers below can call
+		// Annotate to explain the outcome; read back after next returns.
+		notes := &requestNotes{}
+		r = r.WithContext(context.WithValue(r.Context(), requestNotesKey{}, notes))
 
 		next.ServeHTTP(recorder, r)
 
@@ -63,8 +75,54 @@ func AccessLog(logger *slog.Logger, userFor func(*http.Request) string, next htt
 			}
 		}
 
-		logger.LogAttrs(r.Context(), levelForStatus(recorder.status), "web: request", attrs...)
+		level := levelForStatus(recorder.status)
+
+		if len(notes.attrs) > 0 {
+			attrs = append(attrs, notes.attrs...)
+
+			// An annotated request is one a handler flagged as noteworthy (it
+			// recorded why the request ended as it did), so surface it even at a
+			// raised LOG_LEVEL — a failing login callback redirects 302, whose
+			// status alone would keep it at info and hide it at LOG_LEVEL=warn.
+			if level < slog.LevelWarn {
+				level = slog.LevelWarn
+			}
+		}
+
+		logger.LogAttrs(r.Context(), level, "web: request", attrs...)
 	})
+}
+
+// requestNotes is the per-request sink AccessLog installs in the request
+// context for Annotate to append to. It is written only from the request's own
+// handler goroutine (before next returns) and read only after next returns, in
+// the same goroutine, so it needs no synchronisation.
+type requestNotes struct {
+	attrs []slog.Attr
+}
+
+// requestNotesKey is an unexported context key type, so the sink AccessLog
+// stores can never collide with another package's context value.
+type requestNotesKey struct{}
+
+// Annotate attaches structured fields to the access-log record AccessLog will
+// emit for the current request, so a handler can record *why* a request ended
+// as it did — the reason a gate returned 401/403, the identity provider's
+// error behind a failed /auth/callback — without standing up its own logging.
+// A request carrying any annotation is logged at warn-or-higher regardless of
+// status, so a failure that is served as a redirect (the OIDC callback's 302)
+// is not hidden when the deployment runs above info.
+//
+// It is a no-op when ctx is not from a request wrapped by AccessLog (e.g. a
+// unit test exercising a handler directly), so callers never have to guard the
+// call. Call it from the request's own handler goroutine.
+func Annotate(ctx context.Context, attrs ...slog.Attr) {
+	notes, ok := ctx.Value(requestNotesKey{}).(*requestNotes)
+	if !ok {
+		return
+	}
+
+	notes.attrs = append(notes.attrs, attrs...)
 }
 
 // levelForStatus maps a response status to the level its access-log record is
