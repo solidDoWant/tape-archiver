@@ -216,6 +216,12 @@
             # Ships npm, used for the committed package-lock.json.
             pkgs.nodejs_24
 
+            # npm-check-updates (ncu) — `make update-dependencies-major` uses it
+            # to bump web/package.json's semver ranges across major versions,
+            # which `npm update` (make update-dependencies) never does. Not a
+            # build/test dependency; only the dependency-maintenance targets.
+            pkgs.npm-check-updates
+
             # Chromium for the Playwright e2e suite (web/e2e/, driven by
             # e2e/web_test.go's TestWebUIEndToEnd — issue #260). Playwright's
             # own `npx playwright install` browser-download step produces a

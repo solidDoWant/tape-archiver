@@ -129,9 +129,64 @@ generate-versions: ## Regenerate committed external-tool versions for the report
 
 ##@ Dependencies
 
+# Nix fixed-output hashes that are a function of OUR OWN dependency manifests
+# (go.mod/go.sum, web/package-lock.json), refreshed by the loop at the end of
+# update-dependencies. Each entry is "file:variable:flakeAttr". This excludes
+# the version-pinned external tools (nix/ltfs.nix, nix/mhvtl-*.nix,
+# nix/recovery-binaries.nix): those track the exact versions on the recovery
+# disc (SPEC §2 principle 1) and are bumped by hand, never auto-updated.
+#
+# webFrontend (npmDepsHash) is listed before web (vendorHash) on purpose:
+# `nix build .#web` builds the frontend first, so a stale npmDepsHash would fail
+# that build before web's Go vendor hash is reached. worker is independent.
+NIX_HASH_TARGETS := \
+	nix/web-frontend.nix:npmDepsHash:webFrontend \
+	nix/worker.nix:vendorHash:worker \
+	nix/web.nix:vendorHash:web
+
 .PHONY: update-dependencies
-update-dependencies: ## TODO: Update Go deps, go mod tidy, refresh Nix vendor hashes (owned by later issue).
-	@echo "update-dependencies: not yet implemented" >&2; exit 1
+# Updates every dependency surface as far as it goes automatically:
+#   - Nix flake inputs: `nix flake update`.
+#   - Go modules: `go get -u ./...` — latest within the current major (a Go
+#     major is a distinct import path, so it can't be auto-bumped).
+#   - Frontend npm: `npm-check-updates -u --peer` bumps package.json's ranges to
+#     the latest majors (which `npm update` won't), `--peer` holding each package
+#     to a version its dependents' peer ranges accept so `npm install` doesn't
+#     ERESOLVE; ncu prints anything it skipped. `npm install` writes the lockfile.
+#
+# The final block refreshes each NIX_HASH_TARGETS hash: fake it, build the flake
+# attr, and read the real hash back from the fixed-output-hash mismatch. The
+# `got:` line is matched strictly and validated as an SRI hash so it can't catch
+# buildNpmPackage's own remediation text (which also prints `got: sha256-`). If a
+# major bump stops the sources building, no mismatch is reported: the original
+# hash is restored and the target aborts with the build tail rather than
+# committing a broken update.
+update-dependencies: ## Update all dependencies (Nix flake inputs, Go modules, frontend npm incl. majors) and refresh the Nix vendor/npm hashes.
+	nix flake update
+	go get -u ./...
+	go mod tidy
+	cd $(WEB_DIR) && npm-check-updates -u --peer
+	cd $(WEB_DIR) && npm install
+	@{ \
+	  fake="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; \
+	  for target in $(NIX_HASH_TARGETS); do \
+	    file=$${target%%:*}; rest=$${target#*:}; var=$${rest%%:*}; attr=$${rest##*:}; \
+	    orig=$$(sed -n "s|.*$$var[[:space:]]*=[[:space:]]*\"\(sha256-[^\"]*\)\".*|\1|p" "$$file" | head -1); \
+	    [ -n "$$orig" ] || { echo "error: could not find $$var in $$file" >&2; exit 1; }; \
+	    echo "Refreshing $$var in $$file via nix build .#$$attr ..."; \
+	    sed -i "s|\($$var[[:space:]]*=[[:space:]]*\)\"sha256-[^\"]*\"|\1\"$$fake\"|" "$$file"; \
+	    out=$$(nix build ".#$$attr" 2>&1) || true; \
+	    hash=$$(printf '%s\n' "$$out" | sed -nE 's|^[[:space:]]*got:[[:space:]]+(sha256-[A-Za-z0-9+/]+=*)[[:space:]]*$$|\1|p' | head -1); \
+	    if ! printf '%s' "$$hash" | grep -qE '^sha256-[A-Za-z0-9+/]+=*$$'; then \
+	      sed -i "s|\($$var[[:space:]]*=[[:space:]]*\)\"$$fake\"|\1\"$$orig\"|" "$$file"; \
+	      echo "error: .#$$attr did not report a fixed-output-hash mismatch; restored $$file to $$orig. Build tail:" >&2; \
+	      printf '%s\n' "$$out" | tail -20 >&2; \
+	      exit 1; \
+	    fi; \
+	    sed -i "s|\($$var[[:space:]]*=[[:space:]]*\)\"$$fake\"|\1\"$$hash\"|" "$$file"; \
+	    if [ "$$hash" = "$$orig" ]; then echo "$$var unchanged ($$orig)"; else echo "Updated $$var: $$orig -> $$hash"; fi; \
+	  done; \
+	}
 
 ##@ Recovery Disc
 
