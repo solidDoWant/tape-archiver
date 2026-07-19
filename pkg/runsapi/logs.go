@@ -3,8 +3,20 @@
 // that returns the log lines an external collector shipped for one run (the
 // whole run, or one of the 11 pipeline phases — SPEC §4.3), never a raw
 // LogsQL passthrough. The VictoriaLogs URL/credentials are configured
-// server-side only (VICTORIALOGS_URL, VICTORIALOGS_STREAM_FILTER — see
-// docs/configuration.md) and never reach the browser.
+// server-side only (VICTORIALOGS_URL, VICTORIALOGS_STREAM_FILTER,
+// VICTORIALOGS_FIELD_PREFIX — see docs/configuration.md) and never reach the
+// browser.
+//
+// The default field mapping this endpoint assumes is the one
+// docker-compose.web-dev.yml's vector shipper produces: a worker's slog JSON
+// keys land as TOP-LEVEL VictoriaLogs fields (RunID, level, Error/error) with
+// the message in _msg (_msg_field=msg, _time_field=time). Not every real
+// collector produces that shape — a fluentbit/fluentd kubernetes filter with
+// Merge_Log On + Merge_Log_Key nests every parsed key under a prefix
+// ("<key>.RunID", ...) and leaves _msg holding the raw JSON line — so
+// VICTORIALOGS_FIELD_PREFIX (empty by default) shifts every worker-originated
+// field reference to that prefix in both the query and the response
+// projection. See its doc comment below.
 //
 // This is a plain JSON endpoint, not a Server-Sent Events stream like
 // events.go's GET /api/events/runs/{runID}: the browser's EventSource API
@@ -32,6 +44,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -54,6 +67,21 @@ const (
 	// default for the common case of one VictoriaLogs instance dedicated to
 	// this deployment.
 	defaultVictoriaLogsStreamFilter = "*"
+	// victoriaLogsFieldPrefixEnv adapts every field reference that originates
+	// from a worker's slog JSON (RunID/level/msg/Error/error) to a collector
+	// that nests those keys under a prefix instead of shipping them as
+	// top-level VictoriaLogs fields. The canonical case is a fluentbit/fluentd
+	// kubernetes filter with Merge_Log On + Merge_Log_Key <key>: it parses each
+	// JSON line and lands every parsed key under "<key>.<name>" (VictoriaLogs
+	// flattens the nested object to dotted field names), with _msg holding the
+	// raw JSON line rather than the human message. Setting this to, e.g.,
+	// "log_fields." makes buildLogsQLQuery filter on "log_fields.RunID" and
+	// parseLogsQLRecord read "log_fields.level"/"log_fields.msg"/... instead.
+	// Empty (the default) preserves exactly the top-level-field behavior this
+	// endpoint shipped with. Fields VictoriaLogs itself owns (_time, _stream,
+	// _stream_id) and the operator-supplied VICTORIALOGS_STREAM_FILTER are
+	// never prefixed. See docs/configuration.md "Live run logs".
+	victoriaLogsFieldPrefixEnv = "VICTORIALOGS_FIELD_PREFIX"
 )
 
 // maxLogLines hard-caps how many lines a single request can return,
@@ -231,7 +259,9 @@ func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 		streamFilter = defaultVictoriaLogsStreamFilter
 	}
 
-	lines, err := queryVictoriaLogs(ctx, victoriaLogsURL, streamFilter, runID, window.start, window.end, since, window.spans, maxLogLines)
+	fieldPrefix := h.getenv(victoriaLogsFieldPrefixEnv)
+
+	lines, err := queryVictoriaLogs(ctx, victoriaLogsURL, streamFilter, fieldPrefix, runID, window.start, window.end, since, window.spans, maxLogLines)
 	if err != nil {
 		// Any failure to reach or parse VictoriaLogs' response, now that
 		// VICTORIALOGS_URL is confirmed set, is reported exactly like an
@@ -393,7 +423,7 @@ func phaseActivitySpans(history runHistory, phase string) []timeSpan {
 // queryVictoriaLogs issues one LogsQL query (buildLogsQLQuery) against
 // VictoriaLogs' HTTP query API and decodes its newline-delimited JSON
 // response into LogLines, oldest first.
-func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) ([]LogLine, error) {
+func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, fieldPrefix, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) ([]LogLine, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, vlQueryTimeout)
 	defer cancel()
 
@@ -403,7 +433,7 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string,
 	}
 
 	query := request.URL.Query()
-	query.Set("query", buildLogsQLQuery(streamFilter, runID, start, end, since, spans, limit))
+	query.Set("query", buildLogsQLQuery(streamFilter, fieldPrefix, runID, start, end, since, spans, limit))
 	request.URL.RawQuery = query.Encode()
 
 	response, err := http.DefaultClient.Do(request)
@@ -418,14 +448,22 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string,
 		return nil, fmt.Errorf("victorialogs returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	return parseLogsQLResponse(response.Body)
+	return parseLogsQLResponse(response.Body, fieldPrefix)
 }
 
 // buildLogsQLQuery composes the LogsQL query string for one request:
-// streamFilter (operator config) ANDed with an exact match on RunID (never
-// client-supplied LogsQL — runID is validated as a UUID by the caller
-// before this is ever invoked) and a time-range clause. since, when set and
-// later than start, replaces the lower bound.
+// streamFilter (operator config) ANDed with an exact match on the worker's
+// RunID field (never client-supplied LogsQL — runID is validated as a UUID by
+// the caller before this is ever invoked) and a time-range clause. since, when
+// set and later than start, replaces the lower bound.
+//
+// fieldPrefix (VICTORIALOGS_FIELD_PREFIX) shifts the worker-originated RunID
+// field to the collector's naming: empty leaves the top-level "RunID:=" this
+// endpoint shipped with, while e.g. "log_fields." yields
+// "log_fields.RunID":=. The prefixed field name is quoted ("<prefix>RunID")
+// so its dot — and any future prefix character — is a literal field-name
+// character to LogsQL rather than syntax. _time (the time filter/sort pipes
+// below) is VictoriaLogs-native and is never prefixed.
 //
 // When the match set exceeds limit, the query keeps the NEWEST limit lines,
 // then returns them oldest-first (the order the log panel renders and the
@@ -457,7 +495,7 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, runID string,
 // filterLinesToSpans, so a phase that logged far more than limit lines could
 // return almost nothing. The client-side filterLinesToSpans still runs as an
 // inclusive-boundary safety net.
-func buildLogsQLQuery(streamFilter, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) string {
+func buildLogsQLQuery(streamFilter, fieldPrefix, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) string {
 	lower := start
 	if since != nil && since.After(start) {
 		lower = *since
@@ -474,7 +512,22 @@ func buildLogsQLQuery(streamFilter, runID string, start time.Time, end *time.Tim
 		timeFilter = fmt.Sprintf("%s AND %s", timeFilter, spanFilter)
 	}
 
-	return fmt.Sprintf("(%s) AND RunID:=%q AND %s | sort by (_time) desc | limit %d | sort by (_time)", streamFilter, runID, timeFilter, limit)
+	return fmt.Sprintf("(%s) AND %s:=%q AND %s | sort by (_time) desc | limit %d | sort by (_time)", streamFilter, prefixedFieldName(fieldPrefix, "RunID"), runID, timeFilter, limit)
+}
+
+// prefixedFieldName renders a worker-originated slog field's LogsQL field-name
+// reference under fieldPrefix. With no prefix it is the bare name ("RunID"),
+// preserving the original unquoted form. With a prefix it is the quoted,
+// prefixed name ("log_fields.RunID") so the dot separating the merge key from
+// the field — and any other character a future prefix might carry — is a
+// literal field-name character rather than LogsQL syntax. VictoriaLogs-owned
+// fields (_time, _stream, _stream_id) never pass through here.
+func prefixedFieldName(fieldPrefix, name string) string {
+	if fieldPrefix == "" {
+		return name
+	}
+
+	return strconv.Quote(fieldPrefix + name)
 }
 
 // spansTimeFilter renders a phase's activity spans as a LogsQL disjunction —
@@ -522,25 +575,6 @@ func parseVLTime(raw string) (time.Time, error) {
 	return time.Parse(time.RFC3339, raw)
 }
 
-// vlRecord is one line of VictoriaLogs' LogsQL query response, decoded down
-// to the fields LogLine needs. VictoriaLogs' own JSON stream
-// ingestion (docker-compose.web-dev.yml's vector container,
-// docs/web-ui.md) is configured with _msg_field=msg and _time_field=time
-// (see this package's doc comment), so a worker's slog JSON "msg"/"time"
-// keys surface here as "_msg"/"_time"; "level" passes through unchanged,
-// slog's own field name — as do "Error"/"error" (see LogLine.Error).
-type vlRecord struct {
-	Time  string `json:"_time"`
-	Msg   string `json:"_msg"`
-	Level string `json:"level"`
-	// Error / ErrorLower are the two conventions a log line's error detail
-	// arrives under: the Temporal SDK's own logger uses "Error", this repo's
-	// slog error logs use "error". At most one is set on any given line;
-	// parseLogsQLResponse prefers "Error" and falls back to "error".
-	Error      string `json:"Error"`
-	ErrorLower string `json:"error"`
-}
-
 // maxLogLineBytes bounds one VictoriaLogs NDJSON record. Ordinary log lines
 // are far smaller; a pathological one (e.g. a stack trace or a large manifest
 // embedded in a single structured field) is skipped rather than allowed to
@@ -553,8 +587,10 @@ const maxLogLineBytes = 1 << 20
 
 // parseLogsQLResponse decodes VictoriaLogs' LogsQL query response: one JSON
 // object per line (https://docs.victoriametrics.com/victorialogs/querying/#json-stream-decoding),
-// not a single JSON array/document.
-func parseLogsQLResponse(body io.Reader) ([]LogLine, error) {
+// not a single JSON array/document. fieldPrefix (VICTORIALOGS_FIELD_PREFIX)
+// shifts the worker-originated field names each record is read under — see
+// parseLogsQLRecord.
+func parseLogsQLResponse(body io.Reader, fieldPrefix string) ([]LogLine, error) {
 	lines := make([]LogLine, 0)
 	reader := bufio.NewReader(body)
 
@@ -564,7 +600,7 @@ func parseLogsQLResponse(body io.Reader) ([]LogLine, error) {
 		if tooLong {
 			slog.Warn("runsapi: skipping oversized victorialogs response line", "limit_bytes", maxLogLineBytes)
 		} else if trimmed := bytes.TrimSpace(raw); len(trimmed) > 0 {
-			if line, ok := parseLogsQLRecord(trimmed); ok {
+			if line, ok := parseLogsQLRecord(trimmed, fieldPrefix); ok {
 				lines = append(lines, line)
 			}
 		}
@@ -585,28 +621,73 @@ func parseLogsQLResponse(body io.Reader) ([]LogLine, error) {
 // blank the console during a live tail, possibly dropping the surrounding
 // error lines an operator is watching for), so the caller skips it and keeps
 // decoding.
-func parseLogsQLRecord(raw []byte) (LogLine, bool) {
-	var record vlRecord
+//
+// The record is decoded into a map so the worker-originated fields can be
+// looked up by a name computed at runtime from fieldPrefix
+// (VICTORIALOGS_FIELD_PREFIX) — the static struct tags this used to decode
+// into cannot express a runtime prefix. With no prefix (the default) the
+// vector-shipped shape is read: message from _msg, and level/Error/error as
+// top-level fields — exactly as before. With a prefix (e.g. "log_fields.", a
+// fluentbit merge-key pipeline) level/Error/error are read from their
+// prefixed names, and the human message from "<prefix>msg", falling back to
+// _msg only when that field is absent (under a merge-key pipeline _msg is the
+// raw JSON slog line, not the message, so the prefixed field is preferred).
+// _time is VictoriaLogs-native and is read unprefixed either way.
+func parseLogsQLRecord(raw []byte, fieldPrefix string) (LogLine, bool) {
+	var fields map[string]json.RawMessage
 
-	if err := json.Unmarshal(raw, &record); err != nil {
+	if err := json.Unmarshal(raw, &fields); err != nil {
 		slog.Warn("runsapi: skipping undecodable victorialogs response line", "error", err)
 
 		return LogLine{}, false
 	}
 
-	parsedTime, err := parseVLTime(record.Time)
+	rawTime, _ := stringField(fields, "_time")
+
+	parsedTime, err := parseVLTime(rawTime)
 	if err != nil {
-		slog.Warn("runsapi: skipping victorialogs record with unparseable time", "time", record.Time, "error", err)
+		slog.Warn("runsapi: skipping victorialogs record with unparseable time", "time", rawTime, "error", err)
 
 		return LogLine{}, false
 	}
 
-	errText := record.Error
-	if errText == "" {
-		errText = record.ErrorLower
+	level, _ := stringField(fields, fieldPrefix+"level")
+
+	errText, ok := stringField(fields, fieldPrefix+"Error")
+	if !ok {
+		errText, _ = stringField(fields, fieldPrefix+"error")
 	}
 
-	return LogLine{Time: parsedTime, Level: record.Level, Message: record.Msg, Error: errText}, true
+	// Default/legacy shape: the message is _msg. With a prefix, prefer
+	// "<prefix>msg" (the human message) and fall back to _msg only when that
+	// field is entirely absent — never when it is present but empty.
+	message, _ := stringField(fields, "_msg")
+	if fieldPrefix != "" {
+		if prefixed, present := stringField(fields, fieldPrefix+"msg"); present {
+			message = prefixed
+		}
+	}
+
+	return LogLine{Time: parsedTime, Level: level, Message: message, Error: errText}, true
+}
+
+// stringField reads name from a decoded VictoriaLogs record as a string.
+// present is false when the field is absent or is not a JSON string — under
+// the real pipelines this endpoint targets every field it reads (RunID,
+// level, msg, Error/error, _time, _msg) arrives as a string, so a non-string
+// value is treated as absent rather than an error, keeping one odd field from
+// dropping an otherwise-good line.
+func stringField(fields map[string]json.RawMessage, name string) (value string, present bool) {
+	raw, ok := fields[name]
+	if !ok {
+		return "", false
+	}
+
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+
+	return value, true
 }
 
 // readBoundedLine reads one '\n'-terminated line from reader, capped at limit

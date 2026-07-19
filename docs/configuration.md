@@ -443,6 +443,7 @@ resume/abort actions, gated behind OIDC authentication (`pkg/webauth`) — see
 | `VICTORIAMETRICS_URL` | no | Base URL of a VictoriaMetrics instance scraping the workers' `METRICS_ADDR` endpoints (e.g. `http://127.0.0.1:8428`), backing the live drive metrics endpoints — see [Live drive metrics (VictoriaMetrics)](#live-drive-metrics-victoriametrics) above. Unset disables live drive metrics entirely: both endpoints return a stable `503` rather than falling back to any other data source. |
 | `VICTORIALOGS_URL` | no | Base URL of a VictoriaLogs instance (e.g. `http://victorialogs:9428`) that an external log collector (outside this repo's scope) ships worker `slog` JSON stdout into. Backs `GET /api/runs/{runID}/logs` (see below). Unset means logs are simply unavailable — `cmd/web` still starts and runs normally, the log panel just shows its explicit "unavailable" state. |
 | `VICTORIALOGS_STREAM_FILTER` | no | A LogsQL filter fragment ANDed onto every log query `GET /api/runs/{runID}/logs` issues (e.g. to scope queries to one tenant/stream in a shared VictoriaLogs deployment). Defaults to `*` (match everything) when unset — the right default for a VictoriaLogs instance dedicated to this deployment. |
+| `VICTORIALOGS_FIELD_PREFIX` | no | A field-name prefix for the worker's `slog` fields (`RunID`, `level`, `msg`, `Error`/`error`), for collectors that nest them under a prefix instead of shipping them as top-level VictoriaLogs fields — set it when a fluentbit/fluentd `kubernetes` filter runs with `Merge_Log On` + `Merge_Log_Key <key>` (each parsed JSON key lands under `<key>.<name>`, and `_msg` holds the raw JSON line). The value is the merge key plus a trailing dot, e.g. `log_fields.`; the log query then filters on `"log_fields.RunID"` and the message text comes from `log_fields.msg` (falling back to `_msg` only when absent). Empty (default) = the top-level-field shape the dev stack's `vector` shipper produces (`_msg_field=msg`) — full backward compatibility. VictoriaLogs-owned fields (`_time`, `_stream`) and `VICTORIALOGS_STREAM_FILTER` are never prefixed. |
 | `OIDC_ISSUER_URL` | yes | The OIDC identity provider's issuer URL, used for discovery (`GET {OIDC_ISSUER_URL}/.well-known/openid-configuration`). Any standards-compliant provider works (Keycloak, Authentik, Dex, ...) — `cmd/web` contains no IdP-specific code. |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | yes | This app's confidential-client credentials at the provider above. |
 | `OIDC_REDIRECT_URL` | yes | This app's OIDC callback URL, exactly as registered with the provider (e.g. `https://tape-archiver.example.com/auth/callback`) — see [OIDC authentication](#oidc-authentication-cmdweb) below. |
@@ -828,6 +829,23 @@ Query parameters:
 query-language string rather than only ever passing it as an opaque RPC argument.
 Unknown/aged-out run IDs use the same `404`/`410` classification as the history-derived
 endpoints above.
+
+**Collector field naming (`VICTORIALOGS_FIELD_PREFIX`).** By default this endpoint
+expects the worker's `slog` keys as top-level VictoriaLogs fields (`RunID`, `level`,
+`Error`/`error`) with the human message in `_msg` — the shape the dev stack's `vector`
+shipper produces (`_msg_field=msg`). Real-world Kubernetes log pipelines often differ: a
+fluentbit/fluentd `kubernetes` filter with `Merge_Log On` + `Merge_Log_Key <key>` parses
+each JSON log line and nests every key under `<key>.<name>` (VictoriaLogs flattens the
+nested object to dotted field names), leaving `_msg` holding the raw JSON line rather than
+the message. Against such a pipeline the default `RunID:=` filter matches zero records and
+the panel is permanently empty. Set `VICTORIALOGS_FIELD_PREFIX` to the merge key plus a
+trailing dot (e.g. `log_fields.` for `Merge_Log_Key log_fields`) to shift every
+worker-originated field reference to the collector's naming: the query filters on
+`"log_fields.RunID"` and the projected `level`/`error` and the message text are read from
+`log_fields.level`/`log_fields.error`/`log_fields.msg` (the message falls back to `_msg`
+only when `log_fields.msg` is absent). Fields VictoriaLogs itself owns (`_time`, `_stream`)
+and `VICTORIALOGS_STREAM_FILTER` are never prefixed. Leaving it empty preserves exactly the
+top-level-field behavior above.
 
 When `VICTORIALOGS_URL` is unset, or is set but VictoriaLogs cannot be reached or
 returns an error, the response is `503` with the same `{"error": "..."}` body shape

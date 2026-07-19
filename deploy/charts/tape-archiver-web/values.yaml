@@ -107,6 +107,16 @@ config:
       # to one tenant/stream. Empty leaves cmd/web's own default of "*" (match
       # everything) — the right default for a dedicated VictoriaLogs instance.
       logsStreamFilter: ""
+      # logsFieldPrefix (VICTORIALOGS_FIELD_PREFIX) adapts the log query and response
+      # to a collector that nests the worker's slog fields under a prefix instead of
+      # shipping them as top-level VictoriaLogs fields. Set this when a fluentbit/
+      # fluentd kubernetes filter runs with Merge_Log On + Merge_Log_Key <key>: it
+      # parses each JSON log line and lands every key under "<key>.<name>" (VL flattens
+      # to dotted field names), leaving _msg as the raw JSON line. The value is the
+      # merge key plus a trailing dot, e.g. "log_fields." for Merge_Log_Key log_fields;
+      # the panel then reads RunID/level/msg/Error from the prefixed names. Empty
+      # (default) = the top-level-field shape (e.g. the dev stack's vector shipper).
+      logsFieldPrefix: ""
 
     # oidc configures the OIDC authorization-code-flow identity provider
     # (pkg/webauth) that gates every page and /api/* route (docs/configuration.md

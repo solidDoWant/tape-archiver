@@ -515,6 +515,164 @@ func TestGetRunLogsErrorClassificationMatchesOtherEndpoints(t *testing.T) {
 	}
 }
 
+// TestBuildLogsQLQueryFieldPrefix pins the exact query string in both field
+// namings: an empty prefix keeps the original top-level, unquoted "RunID:="
+// (full backward compatibility), while a merge-key prefix shifts it to the
+// quoted "log_fields.RunID":= so the dot is a literal field-name character.
+// The stream filter and every _time clause are VictoriaLogs-owned and stay
+// unprefixed either way.
+func TestBuildLogsQLQueryFieldPrefix(t *testing.T) {
+	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{
+			name:   "no prefix keeps the original top-level RunID field",
+			prefix: "",
+			want: fmt.Sprintf(
+				`(*) AND RunID:=%q AND _time:[%s, %s] | sort by (_time) desc | limit %d | sort by (_time)`,
+				testRunID, formatVLTime(start), formatVLTime(end), maxLogLines,
+			),
+		},
+		{
+			name:   "merge-key prefix quotes and prefixes only the RunID field",
+			prefix: "log_fields.",
+			want: fmt.Sprintf(
+				`(*) AND "log_fields.RunID":=%q AND _time:[%s, %s] | sort by (_time) desc | limit %d | sort by (_time)`,
+				testRunID, formatVLTime(start), formatVLTime(end), maxLogLines,
+			),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := buildLogsQLQuery("*", test.prefix, testRunID, start, &end, nil, nil, maxLogLines)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+// TestParseLogsQLRecordFieldPrefix decodes a realistic record from each
+// pipeline shape. Under a merge-key prefix the worker's fields are nested as
+// "log_fields.*" (all string-valued) and _msg is the raw JSON slog line, so
+// the human message must come from log_fields.msg, not _msg; the legacy shape
+// reads _msg and top-level fields exactly as before.
+func TestParseLogsQLRecordFieldPrefix(t *testing.T) {
+	tests := []struct {
+		name        string
+		prefix      string
+		raw         string
+		wantLevel   string
+		wantMessage string
+		wantError   string
+	}{
+		{
+			name:   "merge-key INFO line reads log_fields.msg, not the raw _msg blob",
+			prefix: "log_fields.",
+			raw: `{"_time":"2026-07-19T18:40:12.483920117Z",` +
+				`"_msg":"{\"time\":\"2026-07-19T18:40:12.483872052Z\",\"level\":\"INFO\",\"msg\":\"resolved snapshot for archival\",\"RunID\":\"01983f2e-7c41-7f8a-9b3d-2a6c58e01f77\",\"size_bytes\":48318382080}",` +
+				`"log_fields.level":"INFO","log_fields.msg":"resolved snapshot for archival",` +
+				`"log_fields.RunID":"01983f2e-7c41-7f8a-9b3d-2a6c58e01f77","log_fields.size_bytes":"48318382080",` +
+				`"kubernetes.namespace.name":"backup","stream":"stderr"}`,
+			wantLevel:   "INFO",
+			wantMessage: "resolved snapshot for archival",
+			wantError:   "",
+		},
+		{
+			name:   "merge-key ERROR line surfaces the capitalized Error field",
+			prefix: "log_fields.",
+			raw: `{"_time":"2026-07-19T18:41:03.102455890Z",` +
+				`"_msg":"{\"level\":\"ERROR\",\"msg\":\"Activity error.\"}",` +
+				`"log_fields.level":"ERROR","log_fields.msg":"Activity error.",` +
+				`"log_fields.ActivityType":"PrepareStaging","log_fields.Attempt":"3",` +
+				`"log_fields.Error":"prepare staging: dataset busy: cannot hold snapshot: pool suspended"}`,
+			wantLevel:   "ERROR",
+			wantMessage: "Activity error.",
+			wantError:   "prepare staging: dataset busy: cannot hold snapshot: pool suspended",
+		},
+		{
+			name:        "merge-key line surfaces the lowercase error field",
+			prefix:      "log_fields.",
+			raw:         `{"_time":"2026-07-19T18:41:03Z","log_fields.level":"ERROR","log_fields.msg":"prepare failed","log_fields.error":"disk full"}`,
+			wantLevel:   "ERROR",
+			wantMessage: "prepare failed",
+			wantError:   "disk full",
+		},
+		{
+			name:   "merge-key line missing log_fields.msg falls back to _msg",
+			prefix: "log_fields.",
+			// No log_fields.msg field at all — the human message is unavailable,
+			// so _msg (here a plain message, not a JSON blob) is used.
+			raw:         `{"_time":"2026-07-19T18:41:03Z","_msg":"fallback message","log_fields.level":"WARN"}`,
+			wantLevel:   "WARN",
+			wantMessage: "fallback message",
+			wantError:   "",
+		},
+		{
+			name:        "legacy shape reads _msg and top-level fields",
+			prefix:      "",
+			raw:         `{"_time":"2026-07-19T18:40:12.483872052Z","level":"INFO","RunID":"01983f2e-7c41-7f8a-9b3d-2a6c58e01f77","size_bytes":48318382080,"_msg":"resolved snapshot for archival"}`,
+			wantLevel:   "INFO",
+			wantMessage: "resolved snapshot for archival",
+			wantError:   "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			line, ok := parseLogsQLRecord([]byte(test.raw), test.prefix)
+			require.True(t, ok)
+			assert.Equal(t, test.wantLevel, line.Level)
+			assert.Equal(t, test.wantMessage, line.Message)
+			assert.Equal(t, test.wantError, line.Error)
+		})
+	}
+}
+
+// TestGetRunLogsFieldPrefixEndToEnd drives a merge-key-shaped fake VictoriaLogs
+// through the whole handler with VICTORIALOGS_FIELD_PREFIX set: the query must
+// filter on the prefixed RunID field and the projected lines must carry the
+// prefixed level/message rather than the raw _msg JSON blob.
+func TestGetRunLogsFieldPrefixEndToEnd(t *testing.T) {
+	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	close := start.Add(time.Hour)
+	lineTime := start.Add(time.Minute).UTC().Format(time.RFC3339Nano)
+
+	body := fmt.Sprintf(
+		`{"_time":%q,"_msg":"{\"msg\":\"raw json blob\"}","log_fields.level":"INFO","log_fields.msg":"human message","log_fields.RunID":"x"}`,
+		lineTime,
+	)
+
+	fake := newFakeVictoriaLogs(t, http.StatusOK, body+"\n")
+	getenv := envWith(map[string]string{
+		victoriaLogsURLEnv:         fake.URL,
+		victoriaLogsFieldPrefixEnv: "log_fields.",
+	})
+
+	temporalClient := &fakeTemporalClient{describeResponse: describeResponseFor(testRunID, enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &close)}
+	handler := newMux(newHandler(temporalClient, getenv))
+
+	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs", nil)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	var response RunLogsResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+
+	require.Len(t, response.Lines, 1)
+	assert.Equal(t, "human message", response.Lines[0].Message, "the panel shows the prefixed message, not the raw _msg JSON")
+	assert.Equal(t, "INFO", response.Lines[0].Level)
+
+	require.Len(t, fake.queries, 1)
+	query, err := url.QueryUnescape(fake.queries[0])
+	require.NoError(t, err)
+	assert.Contains(t, query, `"log_fields.RunID":="`+testRunID+`"`, "the query filters on the prefixed, quoted RunID field")
+	assert.NotContains(t, query, ` RunID:=`, "the unprefixed RunID field must not appear")
+}
+
 // envWith returns a getenv func serving overrides, and "" for anything else
 // — the same shape newHandler's getenv parameter expects.
 func envWith(overrides map[string]string) func(string) string {

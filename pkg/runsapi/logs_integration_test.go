@@ -80,6 +80,61 @@ func TestGetRunLogsAgainstRealVictoriaLogs(t *testing.T) {
 	assert.True(t, body.Lines[0].Time.Before(body.Lines[1].Time))
 }
 
+// TestGetRunLogsFieldPrefixAgainstRealVictoriaLogs is the merge-key
+// counterpart to the test above: it ingests records whose worker fields are
+// nested under a "log_fields." prefix (the shape a fluentbit kubernetes filter
+// with Merge_Log_Key produces) and _msg holds the raw slog line, then drives
+// them back out with VICTORIALOGS_FIELD_PREFIX=log_fields. set — proving the
+// prefixed "log_fields.RunID":= filter and the log_fields.msg projection are
+// valid against a real VictoriaLogs instance, not just this package's fake.
+func TestGetRunLogsFieldPrefixAgainstRealVictoriaLogs(t *testing.T) {
+	victoriaLogsURL := os.Getenv(victoriaLogsURLEnv)
+	if victoriaLogsURL == "" {
+		t.Skipf("%s not set; run `make web-dev-observability-up` and re-run with VICTORIALOGS_URL=http://localhost:9428", victoriaLogsURLEnv)
+	}
+
+	const prefix = "log_fields."
+
+	runID := "88888888-7777-4666-8555-" + fmt.Sprintf("%012d", time.Now().UnixNano()%1_000_000_000_000)
+
+	start := time.Now().Add(-time.Hour).UTC()
+	line1Time := time.Now().Add(-time.Minute).UTC()
+	line2Time := time.Now().Add(-30 * time.Second).UTC()
+
+	insertPrefixedLines(t, victoriaLogsURL, prefix, runID, []syntheticLine{
+		{Time: line1Time, Level: "INFO", Msg: "resolving snapshots"},
+		{Time: line2Time, Level: "WARN", Msg: "pack running slow"},
+	})
+
+	getenv := envWith(map[string]string{
+		victoriaLogsURLEnv:         victoriaLogsURL,
+		victoriaLogsFieldPrefixEnv: prefix,
+	})
+	temporalClient := &fakeTemporalClient{
+		describeResponse: describeResponseFor(runID, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, start, nil),
+	}
+	handler := newMux(newHandler(temporalClient, getenv))
+
+	var body RunLogsResponse
+
+	require.Eventually(t, func() bool {
+		recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+runID+"/logs", nil)
+		if recorder.Code != http.StatusOK {
+			return false
+		}
+
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+
+		return len(body.Lines) == 2
+	}, 10*time.Second, 200*time.Millisecond, "expected 2 prefixed lines to become queryable in VictoriaLogs")
+
+	assert.True(t, body.Live)
+	assert.Equal(t, "resolving snapshots", body.Lines[0].Message, "the human message comes from the prefixed field, not the raw _msg blob")
+	assert.Equal(t, "INFO", body.Lines[0].Level)
+	assert.Equal(t, "pack running slow", body.Lines[1].Message)
+	assert.Equal(t, "WARN", body.Lines[1].Level)
+}
+
 type syntheticLine struct {
 	Time  time.Time
 	Level string
@@ -101,6 +156,57 @@ func insertSyntheticLines(t *testing.T, victoriaLogsURL, runID string, lines []s
 	}
 
 	url := strings.TrimSuffix(victoriaLogsURL, "/") + "/insert/jsonline?_stream_fields=WorkflowID,RunID&_msg_field=msg&_time_field=time"
+
+	response, err := http.Post(url, "application/stream+json", strings.NewReader(builder.String()))
+	require.NoError(t, err)
+
+	defer func() { _ = response.Body.Close() }()
+
+	require.Equal(t, http.StatusOK, response.StatusCode)
+}
+
+// insertPrefixedLines ingests lines in the fluentbit merge-key shape: the
+// worker's slog fields nested under a "<prefix without the dot>" object (which
+// VictoriaLogs flattens to "<prefix>time"/"<prefix>level"/... dotted field
+// names) and _msg holding the byte-exact raw slog line, exactly as a
+// kubernetes filter with Merge_Log_Key produces. VL's own _time is taken from
+// a top-level ingestTime field so it stays VictoriaLogs-native.
+func insertPrefixedLines(t *testing.T, victoriaLogsURL, prefix, runID string, lines []syntheticLine) {
+	t.Helper()
+
+	// The merge object's name is the prefix with its trailing dot removed
+	// (e.g. "log_fields." -> "log_fields"): VictoriaLogs flattens {mergeKey:
+	// {level: ...}} to "mergeKey.level".
+	mergeKey := strings.TrimSuffix(prefix, ".")
+
+	var builder strings.Builder
+
+	for _, line := range lines {
+		workerTime := line.Time.Format(time.RFC3339Nano)
+		rawSlogLine := fmt.Sprintf(`{"time":%q,"level":%q,"msg":%q,"WorkflowID":"backup","RunID":%q}`,
+			workerTime, line.Level, line.Msg, runID)
+
+		record := map[string]any{
+			"ingestTime": workerTime,
+			"_msg":       rawSlogLine,
+			mergeKey: map[string]any{
+				"time":       workerTime,
+				"level":      line.Level,
+				"msg":        line.Msg,
+				"WorkflowID": "backup",
+				"RunID":      runID,
+			},
+		}
+
+		encoded, err := json.Marshal(record)
+		require.NoError(t, err)
+
+		builder.Write(encoded)
+		builder.WriteByte('\n')
+	}
+
+	url := strings.TrimSuffix(victoriaLogsURL, "/") +
+		"/insert/jsonline?_stream_fields=" + prefix + "WorkflowID," + prefix + "RunID&_msg_field=_msg&_time_field=ingestTime"
 
 	response, err := http.Post(url, "application/stream+json", strings.NewReader(builder.String()))
 	require.NoError(t, err)
