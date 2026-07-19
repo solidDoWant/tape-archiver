@@ -148,9 +148,8 @@ resources:
     # The control worker discovers ZFS snapshots by reading VolumeSnapshot resources
     # from the Kubernetes API via an in-cluster client (pkg/k8ssnap uses
     # rest.InClusterConfig), so its ServiceAccount token must be mounted. bjw-s
-    # defaults this to false; snapshot discovery would fail without it. Binding the
-    # RBAC the token needs (a Role/ClusterRole for VolumeSnapshots) is the operator's
-    # responsibility — see docs/control-worker-helm.md.
+    # defaults this to false; snapshot discovery would fail without it. The RBAC the
+    # token needs is granted by default via the serviceAccount + rbac blocks below.
     automountServiceAccountToken: true
     securityContext:
       runAsNonRoot: true
@@ -191,3 +190,54 @@ resources:
     #     job:
     #       ttlSecondsAfterFinished: 600
     main: {}
+
+# serviceAccount is the ServiceAccount the control worker runs as, following the bjw-s
+# app-template schema. The chart declares exactly one, so the single "main" controller
+# binds to it automatically, and the rbac ClusterRoleBinding below grants it the
+# Kubernetes API access k8s snapshot resolution needs. Disabling it (enabled: false)
+# falls back to the namespace "default" ServiceAccount, which then holds no snapshot
+# RBAC — only do so if you bind that access yourself.
+serviceAccount:
+  control-worker:
+    enabled: true
+
+# rbac grants the control worker's ServiceAccount the Kubernetes API access it needs to
+# resolve k8s snapshot sources, following the bjw-s app-template schema. The control
+# worker reads VolumeSnapshot objects and follows each to its bound VolumeSnapshotContent
+# to recover the CSI snapshotHandle (pkg/k8ssnap). The access is strictly read-only
+# (get/list) and is enabled by default: every run that names a k8s source needs it, and a
+# run that names only raw ZFS sources simply never exercises it — so there is no
+# deployment where granting it causes harm.
+#
+# It is a ClusterRole (not a namespaced Role) because the access is inherently
+# cluster-scoped: a label-selector group lists VolumeSnapshots across all namespaces (an
+# empty namespace means cluster-wide — SPEC §5), and VolumeSnapshotContent is itself a
+# cluster-scoped resource.
+#
+# Note VolumeGroupSnapshots need no additional grant: the group path resolves by listing
+# the member VolumeSnapshots by label selector, never by reading a VolumeGroupSnapshot or
+# VolumeGroupSnapshotContent object.
+#
+# To grant the access out-of-band instead, set rbac.roles.snapshot-reader.enabled and
+# rbac.bindings.snapshot-reader.enabled to false and bind your own ClusterRole to the
+# ServiceAccount.
+rbac:
+  roles:
+    snapshot-reader:
+      enabled: true
+      type: ClusterRole
+      rules:
+        - apiGroups: ["snapshot.storage.k8s.io"]
+          resources: ["volumesnapshots"]
+          verbs: ["get", "list"]
+        - apiGroups: ["snapshot.storage.k8s.io"]
+          resources: ["volumesnapshotcontents"]
+          verbs: ["get"]
+  bindings:
+    snapshot-reader:
+      enabled: true
+      type: ClusterRoleBinding
+      roleRef:
+        identifier: snapshot-reader
+      subjects:
+        - identifier: control-worker

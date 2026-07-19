@@ -34,7 +34,7 @@ import (
 // snapshot carrying the `democratic-csi:managed_resource=true` property the
 // data-side Verify requires, plus pre-created **bound** VolumeSnapshot /
 // VolumeSnapshotContent objects whose snapshotHandle resolves to it. A completed
-// run proves resolution, the operator-granted VolumeSnapshot RBAC, the
+// run proves resolution, the chart's shipped VolumeSnapshot RBAC, the
 // handle→ZFS mapping, and the data-side verify all work.
 func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 	h := requireHarness(t)
@@ -85,7 +85,7 @@ func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 		"k8s VolumeSnapshot run must complete successfully")
 
 	// A completed run means the k8s source resolved (VolumeSnapshot + Content read
-	// under the granted RBAC, handle mapped) and the snapshot verified + backed up.
+	// under the chart's shipped RBAC, handle mapped) and the snapshot verified + backed up.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete for a k8s source")
 	assert.Len(t, h.rec.uploadsFor(runID), 1, "the report is delivered (report-only delivery, SPEC §5)")
 }

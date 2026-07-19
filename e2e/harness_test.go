@@ -106,10 +106,6 @@ const (
 	// publishes an OCI chart at ghcr.io, but the Pages repo is the more broadly
 	// reachable of the two; the operator images still come from ghcr regardless.)
 	kedaChartRepo = "https://kedacore.github.io/charts"
-	// rbacName is the ClusterRole + binding granting the control worker's
-	// ServiceAccount read access to VolumeSnapshots (the chart omits this by
-	// design — it is the operator's responsibility).
-	rbacName = "tape-archiver-e2e-snapshot-reader"
 )
 
 // orderedPhases is the full phase sequence the backup workflow completes, in order
@@ -260,7 +256,6 @@ func setupHarness() (*e2eHarness, error) {
 		{"staging-dir", h.createStagingDir},
 		{"optical-discs", h.setupOpticalDiscs},
 		{"deploy-control-worker", h.deployControlWorker},
-		{"snapshot-rbac", h.grantSnapshotRBAC},
 		{"data-worker-container", h.startDataWorker},
 	}
 
@@ -368,43 +363,6 @@ func (h *e2eHarness) installSnapshotCRDs() error {
 		"crd/volumesnapshotcontents.snapshot.storage.k8s.io")
 
 	return err
-}
-
-// grantSnapshotRBAC binds a ClusterRole (get/list on VolumeSnapshots +
-// VolumeSnapshotContents) to the control worker's ServiceAccount. The chart omits
-// this by design (operator's responsibility), so the k8s-source path would fail
-// with a forbidden error without it — the test exercises that requirement too.
-func (h *e2eHarness) grantSnapshotRBAC() error {
-	sa, err := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "get", "deployment", "-n", namespace,
-		"-o", "jsonpath={.items[0].spec.template.spec.serviceAccountName}")
-	if err != nil {
-		return err
-	}
-
-	sa = strings.TrimSpace(sa)
-	if sa == "" {
-		sa = helmRelease
-	}
-
-	if _, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "create", "clusterrole", rbacName,
-		"--verb=get,list",
-		"--resource=volumesnapshots.snapshot.storage.k8s.io,volumesnapshotcontents.snapshot.storage.k8s.io",
-	); err != nil {
-		return err
-	}
-
-	if _, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "create", "clusterrolebinding", rbacName,
-		"--clusterrole="+rbacName, "--serviceaccount="+namespace+":"+sa,
-	); err != nil {
-		return err
-	}
-
-	h.push(func() {
-		_, _ = execOut(h.repoRoot, h.kubeEnv(), "kubectl", "delete", "clusterrolebinding", rbacName, "--ignore-not-found")
-		_, _ = execOut(h.repoRoot, h.kubeEnv(), "kubectl", "delete", "clusterrole", rbacName, "--ignore-not-found")
-	})
-
-	return nil
 }
 
 func (h *e2eHarness) joinTemporalToNetwork() error {

@@ -121,11 +121,42 @@ resources:
             requests: { cpu: 100m, memory: 128Mi }
 ```
 
-> Snapshot discovery reads `VolumeSnapshot` resources from the Kubernetes API via an
-> in-cluster client, so the chart mounts the pod's ServiceAccount token
-> (`automountServiceAccountToken: true`). Granting that ServiceAccount the necessary RBAC —
-> binding a `Role`/`ClusterRole` for `VolumeSnapshot`s to the chart-created ServiceAccount —
-> is left to the operator and is outside this chart's scope.
+### Snapshot RBAC
+
+Snapshot discovery reads `VolumeSnapshot` resources from the Kubernetes API via an
+in-cluster client and follows each to its bound `VolumeSnapshotContent`, so the chart
+mounts the pod's ServiceAccount token (`automountServiceAccountToken: true`) and, **by
+default**, grants that ServiceAccount the RBAC it needs. The chart renders a dedicated
+`ServiceAccount`, a `ClusterRole` granting strictly read-only access, and a
+`ClusterRoleBinding` joining the two:
+
+| API group | Resources | Verbs |
+| --- | --- | --- |
+| `snapshot.storage.k8s.io` | `volumesnapshots` | `get`, `list` |
+| `snapshot.storage.k8s.io` | `volumesnapshotcontents` | `get` |
+
+It is a `ClusterRole` rather than a namespaced `Role` because the access is inherently
+cluster-scoped: a label-selector group lists `VolumeSnapshot`s across all namespaces (an
+empty namespace means cluster-wide — SPEC §5), and `VolumeSnapshotContent` is itself a
+cluster-scoped resource. **`VolumeGroupSnapshot`s need no additional grant** — the group
+path resolves by listing the member `VolumeSnapshot`s by label selector, never by reading
+a `VolumeGroupSnapshot` or `VolumeGroupSnapshotContent` object.
+
+To grant the access out-of-band instead (e.g. a Role scoped to a single namespace, or a
+centrally-managed ClusterRole), disable the chart's RBAC and bind your own:
+
+```yaml
+serviceAccount:
+  control-worker:
+    enabled: false   # falls back to the namespace "default" ServiceAccount
+rbac:
+  roles:
+    snapshot-reader:
+      enabled: false
+  bindings:
+    snapshot-reader:
+      enabled: false
+```
 
 ## Autoscaling (KEDA scale-to-zero)
 
