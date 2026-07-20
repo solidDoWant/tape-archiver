@@ -133,9 +133,11 @@ type RunDetail struct {
 	// empty phase.
 	LastCompletedPhase string `json:"lastCompletedPhase"`
 
-	// LastCompletedPhaseUnknown records that the last-completed-phase query
-	// could not be answered this fetch (RPC failed / would not decode), as
-	// opposed to a successful query reporting "" (nothing completed yet). Like
+	// LastCompletedPhaseUnknown records that the last-completed-phase could not
+	// be determined this fetch: the live query failed (RPC failed / would not
+	// decode) AND the raw-history fallback fetchRunDetail then tries
+	// (deriveLastCompletedPhase, derive.go) also failed — as opposed to a
+	// successful query/derivation reporting "" (nothing completed yet). Like
 	// CurrentPauseInfo.Unknown below, it is serialized (omitempty) so a client
 	// can surface a transient "phase unavailable" marker rather than a
 	// definitive empty phase: LastCompletedPhase == "" alone cannot distinguish
@@ -200,13 +202,17 @@ type CurrentPauseInfo struct {
 	// hand-duplicating the same kind-based rule and risking the two
 	// silently drifting apart. Always false when Kind == "" or Unknown.
 	CanAbort bool `json:"canAbort,omitempty"`
-	// Unknown is true when backup.CurrentPauseQuery itself failed (e.g. no
-	// worker currently polling) rather than confirming the run isn't paused.
-	// Kind == "" alone cannot distinguish "confirmed not paused" from
-	// "couldn't ask" — collapsing the two would let a run that genuinely
-	// needs operator action render as healthy on a transient query blip.
-	// Clients should treat Unknown == true as "pause status unavailable,
-	// check `tapectl status`", not as "not paused".
+	// Unknown is true when the pause state could not be determined at all:
+	// backup.CurrentPauseQuery failed (e.g. no worker currently polling) AND
+	// the raw-history fallback that fetchRunDetail then tries (derivePause,
+	// derive.go) also failed. Kind == "" alone cannot distinguish "confirmed
+	// not paused" from "couldn't ask" — collapsing the two would let a run
+	// that genuinely needs operator action render as healthy on a query blip.
+	// The history fallback resolves that in the common "no worker polling"
+	// case (issue #329), so Unknown now survives only a genuine Temporal
+	// outage where even history cannot be read. Clients should treat
+	// Unknown == true as "pause status unavailable, check `tapectl status`",
+	// not as "not paused".
 	Unknown bool `json:"unknown,omitempty"`
 }
 
@@ -653,12 +659,12 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 			// A query failure here (e.g. no worker currently polling) is not
 			// fatal to this request, mirroring queryLastCompletedPhase above:
 			// the execution status/timing already fetched via Describe is
-			// still valid and useful on its own. Unlike LastCompletedPhase,
-			// though, this field gates whether an operator sees Resume/Abort
-			// controls, so the failure is recorded (CurrentPauseInfo.Unknown)
-			// rather than silently collapsed into "not paused" — a run that
-			// is genuinely paused must never render as healthy just because
-			// one query attempt hiccuped.
+			// still valid and useful on its own. It is only marked unknown
+			// for now — after this group completes, a run whose pause could
+			// not be queried falls back to the history-derived pause below,
+			// which clears the mark; a run that is genuinely paused must never
+			// render as healthy just because the live query hiccuped (this
+			// field gates whether an operator sees Resume/Abort controls).
 			slog.WarnContext(groupCtx, "runsapi: current pause query failed", "run_id", runID, "error", err)
 
 			currentPauseUnknown = true
@@ -673,6 +679,30 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 
 	if err := group.Wait(); err != nil {
 		return RunDetail{}, err
+	}
+
+	// When either live query could not be answered — almost always because no
+	// control worker is polling (KEDA scaled the ScaledJob to zero for an idle
+	// operator pause, issue #329) — reconstruct the missing field(s) from raw
+	// workflow history, which the Temporal frontend serves directly with no
+	// worker. History is authoritative, so a successful derivation clears the
+	// Unknown marker entirely: Unknown survives only when history itself cannot
+	// be read (a genuine Temporal outage), the sole case left where the client
+	// should still show "unavailable" rather than a definitive value.
+	if currentPauseUnknown || lastCompletedPhaseUnknown {
+		if history, historyErr := fetchRunHistory(ctx, temporalClient, runID); historyErr != nil {
+			slog.WarnContext(ctx, "runsapi: history fallback for run detail failed", "run_id", runID, "error", historyErr)
+		} else {
+			if currentPauseUnknown {
+				currentPause = derivePause(history)
+				currentPauseUnknown = false
+			}
+
+			if lastCompletedPhaseUnknown {
+				lastCompletedPhase = deriveLastCompletedPhase(history)
+				lastCompletedPhaseUnknown = false
+			}
+		}
 	}
 
 	pauseInfo := toCurrentPauseInfo(currentPause)
@@ -1031,7 +1061,7 @@ func (h *handler) signalPausedRun(w http.ResponseWriter, r *http.Request, signal
 		return
 	}
 
-	pause, err := queryCurrentPause(ctx, h.temporalClient, runID)
+	pause, err := h.currentPauseForAction(ctx, runID)
 	if err != nil {
 		switch status := statusForTemporalError(err); status {
 		case http.StatusNotFound:
@@ -1173,6 +1203,39 @@ func queryCurrentPause(ctx context.Context, temporalClient TemporalClient, runID
 	}
 
 	return pause, nil
+}
+
+// currentPauseForAction resolves a run's current pause for the resume/abort
+// handlers, falling back to the history-derived pause (derive.go) when the live
+// backup.CurrentPauseQuery cannot be answered. The fallback matters most for the
+// exact case these handlers exist to serve: a run paused awaiting the operator
+// has no control worker polling (KEDA scaled it to zero, issue #329), so the
+// live query fails — yet the run genuinely is paused and the operator's
+// resume/abort must go through. The signal send that follows needs no worker up
+// front either; delivering it enqueues a workflow task, which wakes KEDA and a
+// worker replays and processes it.
+//
+// On the fallback path the original live-query error is returned when history
+// itself cannot be read, so signalPausedRun's statusForTemporalError
+// classification (a NotFound run, an aged-out history) is unchanged from before
+// the fallback existed.
+func (h *handler) currentPauseForAction(ctx context.Context, runID string) (backup.CurrentPause, error) {
+	pause, err := queryCurrentPause(ctx, h.temporalClient, runID)
+	if err == nil {
+		return pause, nil
+	}
+
+	slog.WarnContext(ctx, "runsapi: current pause query failed for action; falling back to history", "run_id", runID, "error", err)
+
+	history, historyErr := fetchRunHistory(ctx, h.temporalClient, runID)
+	if historyErr != nil {
+		// Prefer the live-query error for classification: it is the more direct
+		// signal of why the run could not be reached (and history's own error is
+		// logged where fetchRunHistory's callers surface it).
+		return backup.CurrentPause{}, err
+	}
+
+	return derivePause(history), nil
 }
 
 // errRunNotPaused is a synthetic (non-Temporal) error signalPausedRun returns

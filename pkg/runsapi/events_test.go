@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -74,6 +75,7 @@ type dynamicTemporalClient struct {
 	phaseErr      error
 	pause         backup.CurrentPause
 	pauseErr      error
+	historyErr    error
 	describeCalls int
 }
 
@@ -121,6 +123,30 @@ func (c *dynamicTemporalClient) setPhaseErr(err error) {
 	defer c.mu.Unlock()
 
 	c.phaseErr = err
+}
+
+// setHistoryErr makes a subsequent GetWorkflowHistory fail with err (nil to go
+// back to serving an empty history). fetchRunDetail falls back to raw history
+// whenever a live query fails (issue #329), so a test simulating a query blip
+// that must still surface as Unknown — the case #325's carry-forward guards —
+// has to fail history too: with history readable, the fallback would resolve
+// the blip authoritatively and Unknown would never be reported.
+func (c *dynamicTemporalClient) setHistoryErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.historyErr = err
+}
+
+func (c *dynamicTemporalClient) GetWorkflowHistory(_ context.Context, _, _ string, _ bool, _ enumspb.HistoryEventFilterType) client.HistoryEventIterator {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.historyErr != nil {
+		return &fakeHistoryIterator{err: c.historyErr}
+	}
+
+	return &fakeHistoryIterator{}
 }
 
 func (c *dynamicTemporalClient) callCount() int {
@@ -549,6 +575,11 @@ func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
 	// == "" alongside the phase change, exactly the bug being guarded
 	// against here.
 	client.setPauseErr(assertError{"no worker polling"})
+	// Fail history too: with it readable, fetchRunDetail's history fallback
+	// (issue #329) would resolve the pause authoritatively and Unknown would
+	// never arise — this test exercises the deeper case (both live query and
+	// history unreadable) that still reaches #325's carry-forward.
+	client.setHistoryErr(assertError{"history unavailable"})
 	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
 
 	second := waitForFrame(t, frames, 2*time.Second)
@@ -564,6 +595,7 @@ func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
 
 	// The query recovers; a real pause-clear is still detected normally.
 	client.setPauseErr(nil)
+	client.setHistoryErr(nil)
 	client.setPause(backup.CurrentPause{})
 
 	third := waitForFrame(t, frames, 2*time.Second)
@@ -610,6 +642,11 @@ func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
 	// were compared directly instead of carried forward, this would push an
 	// empty LastCompletedPhase alongside the pause change.
 	client.setPhaseErr(assertError{"no poller seen for task queue recently, worker may be down"})
+	// Fail history too, so this tick truly cannot determine the phase and
+	// reaches #325's carry-forward; with history readable the #329 fallback
+	// would resolve the phase instead. The pause query still answers, so the
+	// pause change below is what triggers the event.
+	client.setHistoryErr(assertError{"history unavailable"})
 	client.setPause(backup.CurrentPause{Kind: backup.PauseEject, AwaitingExport: 1})
 
 	second := waitForFrame(t, frames, 2*time.Second)
@@ -625,6 +662,7 @@ func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
 
 	// The query recovers; a genuine phase advance is still detected normally.
 	client.setPhaseErr(nil)
+	client.setHistoryErr(nil)
 	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
 
 	third := waitForFrame(t, frames, 2*time.Second)
@@ -640,13 +678,15 @@ func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
 // LastCompletedPhaseQuery has no last-known phase to fall back to, so it must
 // emit LastCompletedPhaseUnknown == true (not a silent empty phase) so a fresh
 // page load during a long-activity blip renders "phase unavailable", not
-// "not started" (issue #323).
+// "not started" (issue #323). History fails too here, so the #329 history
+// fallback cannot resolve the phase either — Unknown is the correct last resort.
 func TestStreamRunEventsInitialPhaseQueryFailureReportsUnknown(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
 	client := &dynamicTemporalClient{}
 	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Generate PAR2")
 	client.setPhaseErr(assertError{"no poller seen for task queue recently, worker may be down"})
+	client.setHistoryErr(assertError{"history unavailable"})
 
 	server := httptest.NewServer(New(client))
 	t.Cleanup(server.Close)

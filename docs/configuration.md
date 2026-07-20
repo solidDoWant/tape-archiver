@@ -522,17 +522,25 @@ every other field is populated only where it applies to that pause kind (e.g. `p
 a Burn pause).
 
 Both query-backed fields degrade gracefully rather than fabricating a definitive answer
-when their live workflow query cannot be answered (e.g. during a long PAR2/tape activity
-with no workflow-task traffic, the query may transiently fail even though the run is
-healthy): `lastCompletedPhaseUnknown: true` accompanies an empty `lastCompletedPhase` to
-mean "couldn't read", distinct from a successful query reporting `""` (nothing completed
-yet); likewise `currentPause.unknown: true` means the pause query failed, distinct from a
-confirmed not-paused run (`kind: ""`, no `unknown`). A client must treat either flag as
-"state temporarily unavailable" — not as "not started" / "not paused" — so a run mid-way
-through a long phase never renders as if it had regressed. Both flags are omitted when
-false. An unknown but well-formed run ID is `404`; a malformed one (Temporal run
-IDs are UUIDs) is `400`. Both, like every `/api/*` route, require an authenticated session
-(see below) — an unauthenticated request gets `401`, not `404`/`400`.
+when their live workflow query cannot be answered. A live query needs a worker polling the
+task queue to replay against, and two situations leave none: a long PAR2/tape activity with
+no workflow-task traffic (a transient blip), and — the worse case — a run paused awaiting
+an operator, which is blocked on a signal with zero pending workflow tasks, so a
+KEDA-scaled control worker scales to zero for the whole idle wait, making the pause query
+fail *consistently* precisely when the operator needs to act on it. To cover both, a failed
+query falls back to reconstructing the field from the run's raw Temporal workflow history
+(served by the frontend, needing no worker): the current pause is rebuilt from the pause
+site's own alert-activity input, and the last completed phase from the phase timeline. Only
+if history itself cannot be read (a genuine Temporal outage) does the field report unknown:
+`lastCompletedPhaseUnknown: true` accompanies an empty `lastCompletedPhase` to mean
+"couldn't read", distinct from a successful read reporting `""` (nothing completed yet);
+likewise `currentPause.unknown: true` means neither the query nor history could determine
+the pause, distinct from a confirmed not-paused run (`kind: ""`, no `unknown`). A client
+must treat either flag as "state temporarily unavailable" — not as "not started" / "not
+paused" — so a run mid-way through a long phase never renders as if it had regressed. Both
+flags are omitted when false. An unknown but well-formed run ID is `404`; a malformed one
+(Temporal run IDs are UUIDs) is `400`. Both, like every `/api/*` route, require an
+authenticated session (see below) — an unauthenticated request gets `401`, not `404`/`400`.
 
 ### OIDC authentication (`cmd/web`)
 
@@ -631,7 +639,12 @@ resume`/`tapectl abort` send. Unlike the CLI, which signals unconditionally (a h
 operator has just watched the pause happen), these routes first check the run's current
 pause state (`currentPause` query, the same one `GET /api/runs/{runID}` reports) and
 refuse to send a signal a running workflow would only buffer and potentially misapply to
-a later, unrelated pause:
+a later, unrelated pause. That check falls back to the history-derived pause when the live
+query cannot be answered — the common case here, since a paused run has no polling worker
+(a KEDA-scaled control worker scales to zero for the idle wait), so without the fallback
+the operator could never resume or abort from the UI at all. The signal send needs no
+worker up front either: delivering it enqueues a workflow task, which wakes the worker to
+process it. The refusals still apply:
 
 - If the run is not currently paused, both routes return `409 Conflict` without sending
   anything.
