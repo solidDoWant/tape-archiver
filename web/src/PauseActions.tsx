@@ -237,7 +237,16 @@ function PauseActions({ runId, pause }: PauseActionsProps) {
 
         {pause.devices && pause.devices.length > 0 ? <p><span className="font-semibold">Burner devices:</span> {pause.devices.join(', ')}</p> : null}
 
-        {pause.errorSummary ? <p><span className="font-semibold">Reason:</span> {pause.errorSummary}</p> : null}
+        {/* The reason is a joined error that carries real newlines — the ltfs
+            stderr dump and one line per failed tape — so render it in its own
+            pre-wrap block rather than inline, where a default <p> would collapse
+            the newlines into an unreadable single line. */}
+        {pause.errorSummary ? (
+          <div>
+            <span className="font-semibold">Reason:</span>
+            <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-text-dim">{pause.errorSummary}</pre>
+          </div>
+        ) : null}
       </div>
 
       {sentVerb ? (

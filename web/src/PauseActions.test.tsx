@@ -36,6 +36,27 @@ describe('PauseActions', () => {
     expect(screen.getByRole('button', { name: /^abort$/i })).toBeInTheDocument()
   })
 
+  it('preserves the newlines in a multi-line pause reason', () => {
+    // The pause reason is a joined write-failure error carrying the ltfs stderr
+    // dump on its own lines; it must render in a whitespace-preserving element
+    // so those newlines survive instead of collapsing into one run-on line.
+    const multiline =
+      'tape TA0001L6 (drive 0): ltfs exited with status 0 before the mount became ready\n' +
+      'ltfs output:\n' +
+      "  LTFS9015W Setting the locale to 'en_US.UTF-8'."
+
+    const { container } = render(
+      <PauseActions
+        runId="run-1"
+        pause={{ kind: 'write-failure', phase: 'Write', errorSummary: multiline, canAbort: true }}
+      />,
+    )
+
+    const reasonEl = container.querySelector('.whitespace-pre-wrap')
+    expect(reasonEl).not.toBeNull()
+    expect(reasonEl?.textContent).toBe(multiline)
+  })
+
   it('shows the eject pause detail with only Resume available', () => {
     render(
       <PauseActions

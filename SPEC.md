@@ -531,6 +531,12 @@ with HTTP 400 and dropped. The full, untruncated error is always preserved verba
 Temporal history and the structured logs; the alert is a best-effort pointer to that
 authoritative record, not the record itself.
 
+The summary is embedded in a fenced code block, on its own lines below the instructions.
+A write-failure summary is a joined error — the failing subprocess's captured stderr (a
+multi-line `ltfs`/`mkltfs` dump) plus one line per failed tape — whose newlines would
+otherwise collapse into an unreadable run-on when set inline; the code block preserves
+them and keeps the diagnostics visually separate from the operator instructions.
+
 **Operator-pause alert (operational, same failure webhook).** When the Eject phase fills
 the I/O station and pauses for the operator (§4.3 phase 8), it posts a message on the same
 `DISCORD_FAILURE_WEBHOOK_URL` naming the run, the tapes now in the I/O station ready for

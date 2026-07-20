@@ -273,6 +273,33 @@ func TestSendFailurePayload(t *testing.T) {
 	assert.Contains(t, payload.Content, assert.AnError.Error())
 }
 
+// TestSendFailureMultilineErrorFenced proves a multi-line error summary (the
+// write-path failure carries the ltfs stderr dump plus one line per failed
+// tape) reaches Discord inside a fenced code block with its newlines intact,
+// rather than collapsed into an unreadable single line.
+func TestSendFailureMultilineErrorFenced(t *testing.T) {
+	t.Parallel()
+
+	server, cap := newServer(t, http.StatusNoContent)
+
+	multiline := errors.New("ltfs exited with status 0 before the mount became ready\n" +
+		"ltfs output:\n  LTFS9015W Setting the locale to 'en_US.UTF-8'.")
+
+	client := webhook.New(server.URL)
+	client.SendFailure(t.Context(), "run-123", "Write", multiline)
+
+	require.Equal(t, int32(1), cap.hits.Load())
+
+	var payload struct {
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(cap.body, &payload))
+
+	// The error must survive verbatim, newlines and all, inside a fenced block.
+	assert.Contains(t, payload.Content, "```\n"+multiline.Error()+"\n```")
+	assert.Contains(t, payload.Content, "LTFS9015W")
+}
+
 func TestSendOperatorPausePayload(t *testing.T) {
 	t.Parallel()
 

@@ -173,7 +173,14 @@ function TapesSection({ runId, terminal }: TapesSectionProps) {
             </span>
           ) : null}
 
-          {tape.result === 'failed' && tape.error ? <span className="w-full text-[11px] text-red">{tape.error}</span> : null}
+          {/* whitespace-pre-wrap: tape errors carry real newlines — the ltfs
+              stderr dump and one line per failed tape — that a default span
+              would collapse into an unreadable single line. break-words keeps a
+              long unbroken device path or barcode from forcing a horizontal
+              scroll. */}
+          {tape.result === 'failed' && tape.error ? (
+            <span className="w-full whitespace-pre-wrap break-words font-mono text-[11px] text-red">{tape.error}</span>
+          ) : null}
         </li>
       ))}
     </ul>

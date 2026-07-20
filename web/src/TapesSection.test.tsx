@@ -79,6 +79,39 @@ describe('TapesSection', () => {
     expect(screen.getByText('written')).toBeInTheDocument()
   })
 
+  it('preserves the newlines in a multi-line failed-tape error', async () => {
+    // The write-path failure error carries the ltfs stderr dump on its own
+    // lines; a default span would collapse those newlines into an unreadable
+    // run-on, so the error must render in a whitespace-preserving element.
+    const multiline =
+      'drive 0: write tree: ltfs exited with status 0 before the mount became ready\n' +
+      'ltfs output:\n' +
+      "  LTFS9015W Setting the locale to 'en_US.UTF-8'."
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          runId: 'run-1',
+          tapes: [
+            { barcode: 'TA0044L6', tapeIndex: 0, copyIndex: 0, driveIndex: 0, slot: 1, result: 'failed', error: multiline },
+          ],
+        }),
+      ),
+    )
+
+    const { container } = render(<TapesSection runId="run-1" terminal={false} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('TA0044L6')).toBeInTheDocument()
+    })
+
+    const errorEl = container.querySelector('.whitespace-pre-wrap')
+    expect(errorEl).not.toBeNull()
+    // The raw text — every newline — survives in the DOM for the CSS to render.
+    expect(errorEl?.textContent).toBe(multiline)
+  })
+
   it('shows a no-tapes-yet message when the run has loaded nothing', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { runId: 'run-1', tapes: [] })))
 

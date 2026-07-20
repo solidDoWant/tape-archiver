@@ -57,6 +57,18 @@ func truncate(s string, max int) string {
 	return string([]rune(s)[:max-markerLen]) + truncationMarker
 }
 
+// codeBlock wraps an error/reason summary in a fenced code block on its own
+// lines. The joined write-failure summaries carry real newlines — the ltfs (or
+// mkltfs) stderr dump plus one line per failed tape — which Discord otherwise
+// renders as an unreadable run-on when they sit inline in a sentence. A fenced
+// block preserves those newlines verbatim and detaches the diagnostics from the
+// operator instructions around them. Callers pass the already-truncated summary
+// so the fence never lands inside a cut. (Subprocess output contains no triple
+// backticks, so the fence cannot be broken out of in practice.)
+func codeBlock(s string) string {
+	return "\n```\n" + s + "\n```"
+}
+
 // Message is a Discord webhook message payload. Only the content field is used;
 // it is rendered as the message body.
 type Message struct {
@@ -263,7 +275,7 @@ func (c *Client) SendFailure(ctx context.Context, runID, phase string, runErr er
 	errSummary = truncate(errSummary, maxSummaryLength)
 
 	msg := Message{
-		Content: fmt.Sprintf("Backup run %s failed in phase %q: %s", runID, phase, errSummary),
+		Content: fmt.Sprintf("Backup run %s failed in phase %q:%s", runID, phase, codeBlock(errSummary)),
 	}
 
 	if err := c.Send(ctx, msg); err != nil {
@@ -338,8 +350,8 @@ func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, af
 		Content: fmt.Sprintf(
 			"Backup run %s paused: %s failed for one drive-set. Remove the affected tape(s) [%s], "+
 				"load fresh blank tape(s) into slot(s) %s, then run `tapectl resume` to continue "+
-				"or `tapectl abort` to end the run. Error: %s",
-			runID, phase, tapes, formatSlots(reloadSlots), errSummary),
+				"or `tapectl abort` to end the run. Error:%s",
+			runID, phase, tapes, formatSlots(reloadSlots), codeBlock(errSummary)),
 	}
 
 	if err := c.Send(ctx, msg); err != nil {

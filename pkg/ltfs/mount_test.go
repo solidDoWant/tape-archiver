@@ -1,6 +1,7 @@
 package ltfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os/exec"
@@ -106,6 +107,86 @@ func TestUnmountIdempotentAfterDetach(t *testing.T) {
 
 			err := m.Unmount(t.Context())
 			test.wantErr(t, err)
+		})
+	}
+}
+
+// TestWaitForMountExitError proves waitForMount reports a legible error when the
+// ltfs process exits before the FUSE mount comes live, without a tape drive: the
+// mountpoint is a plain temp dir (never a mount boundary) and done is already
+// closed, so the poll sees "not mounted" then the closed done and returns the
+// exit error. It pins the two regressions from the write-path failure on run
+// 019f7dda: a nil waitErr (ltfs exited 0 without mounting) must never render as
+// the "%!w(<nil>)" verb error, and the captured ltfs stderr must survive with
+// its newlines intact so the multi-line diagnostics stay readable downstream.
+func TestWaitForMountExitError(t *testing.T) {
+	t.Parallel()
+
+	const ltfsStderr = "LTFS9015W Setting the locale to 'en_US.UTF-8'.\n" +
+		"7427 LTFS14000I LTFS starting, LTFS version 2.4.8.4 (Prelim), log level 2."
+
+	// The output block indents each ltfs line by two spaces and keeps the
+	// newline between them, so downstream surfaces render it multi-line.
+	const indentedOutput = "  LTFS9015W Setting the locale to 'en_US.UTF-8'.\n" +
+		"  7427 LTFS14000I LTFS starting, LTFS version 2.4.8.4 (Prelim), log level 2."
+
+	exitErr := errors.New("exit status 1")
+
+	tests := []struct {
+		name       string
+		waitErr    error
+		stderr     string
+		wantSubstr []string
+	}{
+		{
+			// The run-019f7dda regression: ltfs exited 0 (waitErr nil) after only
+			// printing startup notices, never mounting.
+			name:       "clean exit without mounting",
+			waitErr:    nil,
+			stderr:     ltfsStderr,
+			wantSubstr: []string{"status 0", "before the mount became ready", "ltfs output:", indentedOutput},
+		},
+		{
+			name:       "non-nil exit error is wrapped",
+			waitErr:    exitErr,
+			stderr:     ltfsStderr,
+			wantSubstr: []string{"exit status 1", "ltfs output:", indentedOutput},
+		},
+		{
+			name:       "no stderr omits the output block",
+			waitErr:    nil,
+			stderr:     "",
+			wantSubstr: []string{"status 0", "before the mount became ready"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := &Mount{
+				mountpoint: t.TempDir(), // exists but is not a mount point
+				stderr:     bytes.NewBufferString(test.stderr),
+				done:       closedDone(), // the supervised ltfs process has already exited
+				waitErr:    test.waitErr,
+			}
+
+			err := m.waitForMount(t.Context())
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), "%!w",
+				"a nil waitErr must not be wrapped with %%w")
+
+			for _, want := range test.wantSubstr {
+				assert.Contains(t, err.Error(), want)
+			}
+
+			if test.stderr == "" {
+				assert.NotContains(t, err.Error(), "ltfs output:")
+			}
+
+			if test.waitErr != nil {
+				assert.ErrorIs(t, err, test.waitErr, "the ltfs exit error must remain unwrappable")
+			}
 		})
 	}
 }

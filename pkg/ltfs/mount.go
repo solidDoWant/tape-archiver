@@ -3,6 +3,7 @@ package ltfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -156,13 +157,46 @@ func (m *Mount) waitForMount(ctx context.Context) error {
 
 		select {
 		case <-m.done:
-			return fmt.Errorf("ltfs exited before the mount became ready: %w: %s",
-				m.waitErr, strings.TrimSpace(m.stderr.String()))
+			// cmd.Wait reports nil when ltfs exits 0 without ever mounting (it can
+			// bail after printing only startup notices); wrapping that nil with %w
+			// renders "%!w(<nil>)", so the status-0 case is stated plainly instead.
+			if m.waitErr != nil {
+				return m.withLTFSOutput(
+					fmt.Errorf("ltfs exited before the mount became ready: %w", m.waitErr))
+			}
+
+			return m.withLTFSOutput(
+				errors.New("ltfs exited with status 0 before the mount became ready"))
 		case <-ctx.Done():
 			return fmt.Errorf("waiting for ltfs mount at %s: %w", m.mountpoint, ctx.Err())
 		case <-ticker.C:
 		}
 	}
+}
+
+// withLTFSOutput appends any captured ltfs stderr to err, on its own indented
+// lines under an "ltfs output:" header, so the drive's own diagnostics survive
+// to the operator (SPEC.md §11). The newlines are intentional and preserved
+// verbatim: every surface that renders this error — the web run view, the
+// operator pause alert, the Discord webhook — displays it multi-line. err is
+// returned unchanged when ltfs produced no output.
+func (m *Mount) withLTFSOutput(err error) error {
+	detail := strings.TrimSpace(m.stderr.String())
+	if detail == "" {
+		return err
+	}
+
+	return fmt.Errorf("%w\nltfs output:\n%s", err, indentLines(detail, "  "))
+}
+
+// indentLines prefixes every line of s with prefix.
+func indentLines(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // Unmount releases the FUSE mount and waits for the LTFS index to be written.
@@ -214,8 +248,8 @@ func (m *Mount) Unmount(ctx context.Context) error {
 	select {
 	case <-m.done:
 		if m.waitErr != nil {
-			return fmt.Errorf("ltfs index write at unmount failed: %w: %s",
-				m.waitErr, strings.TrimSpace(m.stderr.String()))
+			return m.withLTFSOutput(
+				fmt.Errorf("ltfs index write at unmount failed: %w", m.waitErr))
 		}
 
 		return nil
