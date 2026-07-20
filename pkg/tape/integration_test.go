@@ -5,6 +5,7 @@ package tape_test
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -88,6 +89,45 @@ func TestLoadConfirm(t *testing.T) {
 	require.GreaterOrEqual(t, len(inv.Drives), 1)
 	assert.False(t, inv.Drives[0].Loaded, "drive should be empty after Unload()")
 	assert.True(t, inv.Slots[0].Full, "slot should be full after Unload()")
+}
+
+// TestResolveViaSymlink reproduces issue #326: a changer or drive configured at a
+// stable udev symlink whose basename is not the kernel device name (as a dry run
+// targets /dev/mhvtl/changer -> sch2, /dev/mhvtl/drive0 -> nst0) must still resolve
+// its SCSI address. The resolver formerly built /sys/class/.../<basename>/device
+// from the path basename, which does not exist for such a symlink; it now matches
+// the node's device number, so a symlink resolves identically to the raw node.
+//
+// The symlinks live in t.TempDir() (not /dev), so this needs no root: os.Stat
+// follows the symlink to the real node's device number while the path basename
+// ("changer"/"drive0") deliberately differs from the kernel name.
+func TestResolveViaSymlink(t *testing.T) {
+	testutil.SkipIfMhvtlUnavailable(t)
+
+	linkDir := t.TempDir()
+
+	changerDev := testutil.ChangerDev(t)
+	changerLink := filepath.Join(linkDir, "changer")
+	require.NoError(t, os.Symlink(changerDev, changerLink))
+
+	// The changer resolves its sg node from the symlink's SCSI address; a
+	// successful Inventory proves resolution worked through the renamed path.
+	inv, err := tape.NewChanger(changerLink).Inventory(t.Context())
+	require.NoError(t, err, "changer inventory via symlink %s -> %s", changerLink, changerDev)
+	assert.Len(t, inv.Drives, 2, "expected 2 drives")
+
+	// The drive resolves its paired sg node the same way; assert the symlink
+	// yields the identical sg node as the raw tape node.
+	driveDev := testutil.Drive0Dev(t)
+	driveLink := filepath.Join(linkDir, "drive0")
+	require.NoError(t, os.Symlink(driveDev, driveLink))
+
+	wantSG, err := tape.NewDrive(driveDev).SGDevice()
+	require.NoError(t, err, "resolve sg node from raw tape node %s", driveDev)
+
+	gotSG, err := tape.NewDrive(driveLink).SGDevice()
+	require.NoError(t, err, "resolve sg node via symlink %s -> %s", driveLink, driveDev)
+	assert.Equal(t, wantSG, gotSG, "symlinked drive node must resolve the same sg node as the raw node")
 }
 
 // TestBlankCheck verifies that a freshly loaded mhvtl tape is reported as blank
