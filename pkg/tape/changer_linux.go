@@ -220,7 +220,7 @@ func (c *Changer) sgNode() (string, error) {
 // the same physical unit as the given changer node (/dev/schN), matching on the
 // SCSI address (H:C:T:L). It mirrors sgDeviceForTapeNode.
 func sgDeviceForChangerNode(device string) (string, error) {
-	changerAddr, err := scsiAddressOf(scsiChangerClassDir, filepath.Base(device))
+	changerAddr, err := scsiAddressOfDevNode(scsiChangerClassDir, device)
 	if err != nil {
 		return "", fmt.Errorf("resolve SCSI address of changer device %s: %w", device, err)
 	}

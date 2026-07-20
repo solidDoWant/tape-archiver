@@ -9,9 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // errUnexpectedSense is returned when the blank-check READ(6) completes with a
@@ -139,7 +142,7 @@ const (
 // classes expose a "device" symlink whose final component is the SCSI address
 // (H:C:T:L); the sg node with the matching address is the same unit.
 func sgDeviceForTapeNode(device string) (string, error) {
-	tapeAddr, err := scsiAddressOf(scsiTapeClassDir, filepath.Base(device))
+	tapeAddr, err := scsiAddressOfDevNode(scsiTapeClassDir, device)
 	if err != nil {
 		return "", fmt.Errorf("resolve SCSI address of tape device %s: %w", device, err)
 	}
@@ -184,6 +187,63 @@ func scsiAddressOf(classDir, node string) (string, error) {
 	}
 
 	return filepath.Base(link), nil
+}
+
+// scsiAddressOfDevNode returns the SCSI address (H:C:T:L) of the device node at
+// path, resolving it to its sysfs class entry by the node's device number (rdev)
+// rather than assuming the path basename equals the kernel device name.
+//
+// The basename assumption holds for the raw library nodes (/dev/sch0 -> sch0,
+// /dev/nst0 -> nst0) but not for the stable udev symlinks a dry run targets
+// (/dev/mhvtl/changer -> sch2, /dev/mhvtl/drive0 -> nst0), whose basename is not
+// a sysfs entry at all (issue #326). Matching on the device number is robust for
+// the raw node, any symlink, and any kernel renaming, so it needs no special case.
+func scsiAddressOfDevNode(classDir, path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("stat %s: no syscall.Stat_t (got %T)", path, info.Sys())
+	}
+
+	rdev := uint64(stat.Rdev)
+
+	name, err := classEntryForDevNumber(classDir, unix.Major(rdev), unix.Minor(rdev))
+	if err != nil {
+		return "", err
+	}
+
+	return scsiAddressOf(classDir, name)
+}
+
+// classEntryForDevNumber returns the name of the sysfs class entry under classDir
+// whose "dev" file reports the given character-device number (major:minor). Each
+// entry's "dev" file holds "major:minor\n"; the entry that matches names the same
+// physical unit as the device node with that number, regardless of how that node
+// is named or symlinked in /dev.
+func classEntryForDevNumber(classDir string, major, minor uint32) (string, error) {
+	want := fmt.Sprintf("%d:%d", major, minor)
+
+	entries, err := os.ReadDir(classDir)
+	if err != nil {
+		return "", err
+	}
+
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(classDir, entry.Name(), "dev"))
+		if err != nil {
+			continue
+		}
+
+		if strings.TrimSpace(string(data)) == want {
+			return entry.Name(), nil
+		}
+	}
+
+	return "", fmt.Errorf("no %s entry has device number %s", classDir, want)
 }
 
 // --- SG_IO plumbing -------------------------------------------------------
