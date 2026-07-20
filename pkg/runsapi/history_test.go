@@ -233,7 +233,7 @@ var testConfig = config.Config{
 		Changer: "/dev/sch0", Drives: []string{"/dev/nst0"}, BlankSlots: []int{1},
 		TapeCapacityBytes: 2_500_000_000_000,
 	},
-	Redundancy: config.Redundancy{TargetPercentage: floatPtr(10), SliceSizeBytes: 1 << 20},
+	Redundancy: config.Redundancy{TargetPercentage: floatPtr(10)},
 	Encryption: config.Encryption{Recipients: []string{"age1pq1examplerecipient"}, Identity: "AGE-SECRET-KEY-PQ-1EXAMPLE"},
 	Delivery:   config.Delivery{WebhookURL: "https://discord.example/webhook"},
 }
@@ -254,7 +254,9 @@ func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	b.completed(t, resolveK8s, []backup.ResolvedArchive{})
 
 	resolveCheck := b.scheduled(t, "ResolveAndCheck", backup.ResolveDataInput{Config: testConfig})
-	b.completed(t, resolveCheck, []backup.ResolvedArchive{{SourceIndex: 0, Label: "archive-0"}})
+	// EstimatedBytes drives the derived slice size (DeriveSliceSize): 5 TB / 800 =
+	// 6.25 GB → rounded up to 6 GiB, the per-archive term dominating here.
+	b.completed(t, resolveCheck, []backup.ResolvedArchive{{SourceIndex: 0, Label: "archive-0", EstimatedBytes: 5_000_000_000_000}})
 
 	hold := b.scheduled(t, "HoldSnapshots", nil)
 	b.completed(t, hold, nil)
@@ -404,6 +406,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		}
 
 		assertFactValue(t, byName[backup.PhaseResolve].Facts, "archives", "1")
+		assertFactValue(t, byName[backup.PhaseResolve].Facts, "sliceSize", "6 GiB")
 		assertFactValue(t, byName[backup.PhasePrepare].Facts, "archivesStaged", "1")
 		assertFactValue(t, byName[backup.PhasePack].Facts, "logicalTapes", "1")
 		assertFactValue(t, byName[backup.PhasePack].Facts, "copies", "1")

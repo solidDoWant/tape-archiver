@@ -18,12 +18,12 @@ const gib = int64(1) << 30
 
 // targetRedundancy is a fixed-percentage PAR2 config at the given percent.
 func targetRedundancy(percent float64) config.Redundancy {
-	return config.Redundancy{TargetPercentage: &percent, SliceSizeBytes: 1 << 20}
+	return config.Redundancy{TargetPercentage: &percent}
 }
 
 // fillRedundancy is a fill-to-capacity PAR2 config at the given floor percent.
 func fillRedundancy(floor float64) config.Redundancy {
-	return config.Redundancy{FillToCapacity: &config.FillConfig{Floor: floor}, SliceSizeBytes: 1 << 20}
+	return config.Redundancy{FillToCapacity: &config.FillConfig{Floor: floor}}
 }
 
 // packConfig is a run config sized for the Pack tests: the given native tape

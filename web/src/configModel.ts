@@ -42,7 +42,6 @@ export interface FillConfig {
 export interface Redundancy {
   targetPercentage?: number
   fillToCapacity?: FillConfig
-  sliceSizeBytes: number
 }
 
 export interface Library {
@@ -90,8 +89,6 @@ export const k8sApiVersions: Record<string, string> = {
   VolumeSnapshot: 'snapshot.storage.k8s.io/v1',
   VolumeGroupSnapshot: 'groupsnapshot.storage.k8s.io/v1alpha1',
 }
-
-const bytesPerGiB = 1024 * 1024 * 1024
 
 let nextSourceID = 0
 
@@ -180,7 +177,6 @@ export interface FormState {
   redundancyMode: 'fixed' | 'fillToCapacity'
   targetPercentage: number
   fillFloor: number
-  sliceSizeGiB: number
   blankSlots: number[]
   tapeGeneration: string
   allowNonBlankTapes: boolean
@@ -202,7 +198,6 @@ export function defaultFormState(): FormState {
     redundancyMode: 'fixed',
     targetPercentage: 10,
     fillFloor: 5,
-    sliceSizeGiB: 4,
     blankSlots: [],
     tapeGeneration: 'LTO-6',
     allowNonBlankTapes: false,
@@ -292,10 +287,12 @@ export function buildConfig(form: FormState, deploy: DeployConfig): RunConfig {
     ltoGenerations.find((generation) => generation.label === form.tapeGeneration)?.capacityBytes ??
     defaultLtoGeneration.capacityBytes
 
+  // Slice size is derived server-side from the resolved source sizes at the
+  // Resolve phase (issue #324), so it is not part of the submitted config.
   const redundancy: Redundancy =
     form.redundancyMode === 'fixed'
-      ? { targetPercentage: form.targetPercentage, sliceSizeBytes: Math.round(form.sliceSizeGiB * bytesPerGiB) }
-      : { fillToCapacity: { floor: form.fillFloor }, sliceSizeBytes: Math.round(form.sliceSizeGiB * bytesPerGiB) }
+      ? { targetPercentage: form.targetPercentage }
+      : { fillToCapacity: { floor: form.fillFloor } }
 
   // Dedup, preserving order (a slot is either blank or not, so a duplicate is
   // meaningless — but internal/config rejects duplicate slot addresses, so a
@@ -582,10 +579,6 @@ export function configToFormState(config: RunConfig): FormState {
 
   const redundancy = partial.redundancy as Partial<Redundancy> | undefined
   if (redundancy) {
-    if (typeof redundancy.sliceSizeBytes === 'number') {
-      form.sliceSizeGiB = redundancy.sliceSizeBytes / bytesPerGiB
-    }
-
     if (redundancy.fillToCapacity) {
       form.redundancyMode = 'fillToCapacity'
       if (typeof redundancy.fillToCapacity.floor === 'number') {

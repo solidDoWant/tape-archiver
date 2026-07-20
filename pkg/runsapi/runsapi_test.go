@@ -834,7 +834,7 @@ const validSubmitConfigJSON = `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 2,
   "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
-  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+  "redundancy": {"targetPercentage": 10},
   "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"}
 }`
 
@@ -1100,7 +1100,7 @@ func TestSubmitRun(t *testing.T) {
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
 		  "copies": 2,
 		  "library": {"changer": "/dev/rogue-sch", "drives": ["/dev/rogue0"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
-		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "redundancy": {"targetPercentage": 10},
 		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
 		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/rogue/rogue"}
 		}}`)
@@ -1160,7 +1160,7 @@ func TestSubmitRun(t *testing.T) {
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
 		  "copies": 2,
 		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
-		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "redundancy": {"targetPercentage": 10},
 		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
 		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/rogue/rogue"}
 		}`
@@ -1183,7 +1183,7 @@ func TestSubmitRun(t *testing.T) {
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
 		  "copies": 2,
 		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
-		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "redundancy": {"targetPercentage": 10},
 		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
 		  "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
 		}`
@@ -1220,7 +1220,7 @@ func TestSubmitRun(t *testing.T) {
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
 		  "copies": 2,
 		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
-		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "redundancy": {"targetPercentage": 10},
 		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
 		  "delivery": {"opticalBurn": {"drives": ["/dev/rogue-burner"], "copies": 2}}
 		}`
@@ -1248,7 +1248,7 @@ func TestSubmitRun(t *testing.T) {
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
 		  "copies": 2,
 		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
-		  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+		  "redundancy": {"targetPercentage": 10},
 		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
 		  "delivery": {"opticalBurn": {"drives": ["/dev/rogue-burner"], "copies": 0}}
 		}`

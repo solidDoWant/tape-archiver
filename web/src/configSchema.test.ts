@@ -12,7 +12,7 @@ const validConfig = {
     blankSlots: [1, 2],
     tapeCapacityBytes: 2500000000000,
   },
-  redundancy: { targetPercentage: 10, sliceSizeBytes: 1073741824 },
+  redundancy: { targetPercentage: 10 },
   encryption: {
     recipients: ['age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4'],
     identity: 'AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL',
@@ -47,7 +47,7 @@ describe('validateAgainstSchema', () => {
   it('reports an out-of-range numeric constraint', () => {
     const issues = validateAgainstSchema(testRunConfigSchema, {
       ...validConfig,
-      redundancy: { targetPercentage: 150, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 150 },
     })
 
     expect(issues).toContainEqual({ path: 'redundancy.targetPercentage', message: 'must be at most 100' })
@@ -56,10 +56,22 @@ describe('validateAgainstSchema', () => {
   it('reports a non-integer value against a multipleOf: 1 constraint', () => {
     const issues = validateAgainstSchema(testRunConfigSchema, {
       ...validConfig,
-      redundancy: { targetPercentage: 10.5, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 10.5 },
     })
 
     expect(issues).toContainEqual({ path: 'redundancy.targetPercentage', message: 'must be a multiple of 1' })
+  })
+
+  it('rejects the removed redundancy.sliceSizeBytes field, naming it (issue #324)', () => {
+    // Slice size is no longer operator-configurable; a JSON config that still sets
+    // it must fail validation with the field named, matching the server's
+    // DisallowUnknownFields rejection.
+    const issues = validateAgainstSchema(testRunConfigSchema, {
+      ...validConfig,
+      redundancy: { targetPercentage: 10, sliceSizeBytes: 1073741824 },
+    })
+
+    expect(issues).toContainEqual({ path: 'redundancy.sliceSizeBytes', message: 'is not a recognized field' })
   })
 
   it('reports each array item error at its own indexed path', () => {

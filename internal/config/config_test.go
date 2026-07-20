@@ -29,7 +29,6 @@ func validConfig() Config {
 		},
 		Redundancy: Redundancy{
 			TargetPercentage: ptr(10.0),
-			SliceSizeBytes:   1 << 30,
 		},
 		Encryption: Encryption{
 			Recipients: []string{"age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"},
@@ -62,7 +61,6 @@ func TestConfigRoundTrip(t *testing.T) {
 	})
 	original.Redundancy = Redundancy{
 		FillToCapacity: &FillConfig{Floor: 5.0},
-		SliceSizeBytes: 2 << 30,
 	}
 	original.Delivery.OpticalBurn = &OpticalBurn{
 		Drives:                 []string{"/dev/sr0", "/dev/sr1"},
@@ -451,12 +449,6 @@ func TestConfigValidate(t *testing.T) {
 			},
 			wantErr:     require.Error,
 			errContains: "redundancy.fillToCapacity.floor",
-		},
-		{
-			name:        "redundancy zero slice size",
-			mutate:      func(c *Config) { c.Redundancy.SliceSizeBytes = 0 },
-			wantErr:     require.Error,
-			errContains: "redundancy.sliceSizeBytes",
 		},
 		{
 			name:        "no encryption recipients",

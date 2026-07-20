@@ -165,11 +165,12 @@ func (l Library) EffectiveWriteFailureWaitTimeout() time.Duration {
 }
 
 // Redundancy specifies the PAR2 redundancy policy.
-// Exactly one of TargetPercentage or FillToCapacity must be set.
+// Exactly one of TargetPercentage or FillToCapacity must be set. The slice size is
+// no longer configured here — it is derived from the resolved source sizes at the
+// Resolve phase (workflows/backup.DeriveSliceSize; issue #324).
 type Redundancy struct {
 	TargetPercentage *float64    `json:"targetPercentage,omitempty" jsonschema:"minimum=1,maximum=100,multipleOf=1"`
 	FillToCapacity   *FillConfig `json:"fillToCapacity,omitempty"`
-	SliceSizeBytes   int64       `json:"sliceSizeBytes" jsonschema:"minimum=1"`
 }
 
 // FillConfig configures fill-to-capacity PAR2 mode, which expands redundancy to

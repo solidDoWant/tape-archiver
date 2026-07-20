@@ -529,19 +529,6 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               className={inputClass}
             />
           </div>
-          <div>
-            <label className={fieldLabelClass} htmlFor="config-slice-size">
-              slice size (GiB)
-            </label>
-            <NumberField
-              id="config-slice-size"
-              decimal
-              min={0}
-              value={form.sliceSizeGiB}
-              onValue={(sliceSizeGiB) => setForm((previous) => ({ ...previous, sliceSizeGiB }))}
-              className={inputClass}
-            />
-          </div>
         </div>
 
         <div className="mt-3">

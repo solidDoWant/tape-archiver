@@ -93,9 +93,9 @@ func TestPrepareArchivePipeline(t *testing.T) {
 			input := PrepareInput{
 				Config: config.Config{
 					Encryption: config.Encryption{Recipients: []string{recipient}},
-					Redundancy: config.Redundancy{SliceSizeBytes: smallSlice},
 				},
-				Archives: []ResolvedArchive{archiveOne},
+				Archives:       []ResolvedArchive{archiveOne},
+				SliceSizeBytes: smallSlice,
 			}
 
 			staged, err := activities.prepare(t.Context(), stagingDir, input)
@@ -176,9 +176,9 @@ func TestPrepareGroupArchive(t *testing.T) {
 	input := PrepareInput{
 		Config: config.Config{
 			Encryption: config.Encryption{Recipients: []string{recipient}},
-			Redundancy: config.Redundancy{SliceSizeBytes: 1 << 20},
 		},
-		Archives: []ResolvedArchive{groupArchive},
+		Archives:       []ResolvedArchive{groupArchive},
+		SliceSizeBytes: 1 << 20,
 	}
 
 	staged, err := activities.prepare(t.Context(), t.TempDir(), input)
@@ -228,9 +228,9 @@ func TestPrepareGroupArchiveDuplicateMember(t *testing.T) {
 	input := PrepareInput{
 		Config: config.Config{
 			Encryption: config.Encryption{Recipients: []string{recipient}},
-			Redundancy: config.Redundancy{SliceSizeBytes: 1 << 20},
 		},
-		Archives: []ResolvedArchive{groupArchive},
+		Archives:       []ResolvedArchive{groupArchive},
+		SliceSizeBytes: 1 << 20,
 	}
 
 	staged, err := activities.prepare(t.Context(), t.TempDir(), input)
@@ -262,12 +262,12 @@ func TestPrepareMultipleArchives(t *testing.T) {
 	input := PrepareInput{
 		Config: config.Config{
 			Encryption: config.Encryption{Recipients: []string{recipient}},
-			Redundancy: config.Redundancy{SliceSizeBytes: 1 << 20},
 		},
 		Archives: []ResolvedArchive{
 			{SourceIndex: 0, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/zero@s"}}},
 			{SourceIndex: 1, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/one@s"}}},
 		},
+		SliceSizeBytes: 1 << 20,
 	}
 
 	staged, err := activities.prepare(t.Context(), stagingDir, input)
@@ -295,11 +295,11 @@ func TestPrepareLocatorError(t *testing.T) {
 	input := PrepareInput{
 		Config: config.Config{
 			Encryption: config.Encryption{Recipients: []string{recipient}},
-			Redundancy: config.Redundancy{SliceSizeBytes: 1 << 20},
 		},
 		Archives: []ResolvedArchive{
 			{SourceIndex: 3, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/x@s"}}},
 		},
+		SliceSizeBytes: 1 << 20,
 	}
 
 	_, err := activities.prepare(t.Context(), t.TempDir(), input)
@@ -320,19 +320,19 @@ func TestPrepareInvalidConfig(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		redundancy config.Redundancy
+		sliceSize  int64
 		encryption config.Encryption
 		wantErr    string
 	}{
 		{
 			name:       "non-positive slice size",
-			redundancy: config.Redundancy{SliceSizeBytes: 0},
+			sliceSize:  0,
 			encryption: config.Encryption{Recipients: []string{recipient}},
 			wantErr:    "slice size must be positive",
 		},
 		{
 			name:       "no recipients",
-			redundancy: config.Redundancy{SliceSizeBytes: 1 << 20},
+			sliceSize:  1 << 20,
 			encryption: config.Encryption{},
 			wantErr:    "recipient",
 		},
@@ -348,8 +348,9 @@ func TestPrepareInvalidConfig(t *testing.T) {
 			}
 
 			input := PrepareInput{
-				Config:   config.Config{Encryption: test.encryption, Redundancy: test.redundancy},
-				Archives: []ResolvedArchive{{SourceIndex: 0, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/x@s"}}}},
+				Config:         config.Config{Encryption: test.encryption},
+				Archives:       []ResolvedArchive{{SourceIndex: 0, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/x@s"}}}},
+				SliceSizeBytes: test.sliceSize,
 			}
 
 			_, err := activities.prepare(t.Context(), t.TempDir(), input)

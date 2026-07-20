@@ -480,21 +480,27 @@ func TestResolveAndCheck(t *testing.T) {
 			assertErr:  require.Error,
 		},
 		{
-			// A 500 GB source fits on one tape (estimate 577.5 GB < 2.5 TB capacity),
-			// so the capacity check passes — but a 1 MB slice size yields ~577k
-			// slices, whose activity metadata blows past the Temporal payload bound.
-			// The run must fail here, in Resolve, before any staging, naming the
-			// offending config field.
-			name:    "rejects a slice size that would grow the payload past the Temporal limit",
+			// A 500 GB source fits on one tape (estimate 577.5 GB < 2.5 TB capacity).
+			// Before issue #324 an operator-set 1 MB slice would have yielded ~577k
+			// slices and been rejected here for blowing the Temporal payload bound;
+			// now the slice size is derived to satisfy that bound by construction, so
+			// the source resolves cleanly instead of failing before any staging.
+			name:    "large source resolves; the derived slice size satisfies the payload bound",
 			sources: []config.Source{zfsSource("pool/big@snap")},
 			pool: fakePool{
 				properties: map[string]map[string]string{"pool/big@snap": {}},
 				sizes:      map[string]int64{"pool/big@snap": 500_000_000_000},
 			},
-			redundancy:  config.Redundancy{TargetPercentage: floatPtr(10), SliceSizeBytes: 1_000_000},
-			capacity:    testTapeCapacity,
-			assertErr:   require.Error,
-			errContains: "redundancy.sliceSizeBytes",
+			redundancy: fixedRedundancy,
+			capacity:   testTapeCapacity,
+			// 500e9 * 1.05 * 1.10 = 577_500_000_000.
+			want: []ResolvedArchive{{
+				SourceIndex:    0,
+				Label:          "big",
+				Compression:    true,
+				Snapshots:      []ResolvedSnapshot{{ZFSPath: "pool/big@snap"}},
+				EstimatedBytes: 577_500_000_000,
+			}},
 		},
 	}
 
@@ -613,12 +619,13 @@ func TestCheckPayloadBound(t *testing.T) {
 			assertErr:      require.Error,
 		},
 		{
-			// A non-positive slice size is guarded upstream by config.Validate; the
-			// bound must not divide by zero.
-			name:           "non-positive slice size is a no-op",
+			// The slice size is derived (DeriveSliceSize) and is always >= 1 GiB, so a
+			// non-positive size can only be a derivation bug. The invariant flags it
+			// rather than dividing by zero.
+			name:           "non-positive slice size is flagged as an invariant violation",
 			resolved:       []ResolvedArchive{archive(1 << 40)},
 			sliceSizeBytes: 0,
-			assertErr:      require.NoError,
+			assertErr:      require.Error,
 		},
 	}
 
@@ -631,28 +638,82 @@ func TestCheckPayloadBound(t *testing.T) {
 	}
 }
 
-// TestCheckPayloadBoundNamesFieldAndSuggests asserts the rejection message is
-// actionable: it names redundancy.sliceSizeBytes and suggests a minimum slice size
-// that, when applied, actually clears the bound (AC1).
-func TestCheckPayloadBoundNamesFieldAndSuggests(t *testing.T) {
+// TestDeriveSliceSize covers the slice-size derivation that replaced the
+// operator-set redundancy.sliceSizeBytes (issue #324): the result is always a whole
+// number of GiB, at least 1 GiB, keeps the whole-run slice count within the payload
+// bound and every archive under the 1,000-slice cap, and — being a pure function —
+// is identical on repeated calls.
+func TestDeriveSliceSize(t *testing.T) {
 	t.Parallel()
 
-	// A 500 GB source at a 1 MB slice size is ~500k slices, whose metadata far
-	// exceeds the budget.
-	resolved := []ResolvedArchive{{EstimatedBytes: 500_000_000_000}}
-	sliceSizeBytes := int64(1_000_000)
+	const gib = int64(1) << 30
 
-	err := checkPayloadBound(resolved, sliceSizeBytes)
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "redundancy.sliceSizeBytes")
-	assert.ErrorContains(t, err, "increase sliceSizeBytes to at least")
+	archive := func(estimatedBytes int64) ResolvedArchive {
+		return ResolvedArchive{EstimatedBytes: estimatedBytes}
+	}
 
-	// The suggested minimum must clear the bound. Recompute it the same way the
-	// helper does and confirm the bound passes at that size.
-	maxSlices := int64((2 * 1024 * 1024 / 2) / 256)
-	headroom := maxSlices - int64(len(resolved))
-	suggested := (resolved[0].EstimatedBytes + headroom - 1) / headroom
-	require.NoError(t, checkPayloadBound(resolved, suggested))
+	tests := []struct {
+		name     string
+		resolved []ResolvedArchive
+		want     int64
+	}{
+		{
+			// A tiny run floors at 1 GiB rather than deriving a sub-GiB slice.
+			name:     "small run floors at 1 GiB",
+			resolved: []ResolvedArchive{archive(1024)},
+			want:     gib,
+		},
+		{
+			// An empty work list also floors at 1 GiB (both derivation terms are 0).
+			name:     "empty work list floors at 1 GiB",
+			resolved: nil,
+			want:     gib,
+		},
+		{
+			// The whole-run term dominates: 7 TB total / 3500 = 2 GB, rounded up to
+			// 2 GiB. (Each of the 7 archives alone is well under the per-archive term.)
+			name: "whole-run term dominates and rounds up to a whole GiB",
+			resolved: []ResolvedArchive{
+				archive(1_000_000_000_000), archive(1_000_000_000_000), archive(1_000_000_000_000),
+				archive(1_000_000_000_000), archive(1_000_000_000_000), archive(1_000_000_000_000),
+				archive(1_000_000_000_000),
+			},
+			want: 2 * gib,
+		},
+		{
+			// The per-archive term dominates: one 800 GB archive / 800 = 1 GB, and the
+			// whole-run term (800 GB / 3500) is far smaller — so the derived size is
+			// the 1 GiB floor, keeping that archive at ~745 slices (< 1,000).
+			name:     "single large archive is bounded by the per-archive term",
+			resolved: []ResolvedArchive{archive(800_000_000_000)},
+			want:     gib,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := DeriveSliceSize(test.resolved)
+			assert.Equal(t, test.want, got, "derived slice size")
+
+			// Whole GiB and at least 1 GiB (issue #324 criterion 3).
+			assert.Zero(t, got%gib, "slice size must be a whole number of GiB")
+			assert.GreaterOrEqual(t, got, gib, "slice size must be at least 1 GiB")
+
+			// Deterministic: a second call yields the identical value (criterion 4).
+			assert.Equal(t, got, DeriveSliceSize(test.resolved), "derivation must be deterministic")
+
+			// The derived size keeps the whole-run count within the payload bound and
+			// every archive under the 1,000-slice cap (criterion 3).
+			require.NoError(t, checkPayloadBound(test.resolved, got))
+
+			for _, resolvedArchive := range test.resolved {
+				sliceCount := ceilDiv(resolvedArchive.EstimatedBytes, got)
+				assert.LessOrEqual(t, sliceCount, int64(1000), "no archive may exceed 1,000 slices")
+			}
+		})
+	}
 }
 
 // TestResolveFailureAbortsBeforePrepare asserts that when Resolve fails, the run

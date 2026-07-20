@@ -275,9 +275,5 @@ func (r Redundancy) validate() error {
 		}
 	}
 
-	if r.SliceSizeBytes <= 0 {
-		return fmt.Errorf("redundancy.sliceSizeBytes: must be > 0, got %d", r.SliceSizeBytes)
-	}
-
 	return nil
 }

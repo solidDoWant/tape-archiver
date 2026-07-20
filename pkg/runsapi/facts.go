@@ -86,9 +86,18 @@ func phaseFacts(name string, status PhaseStatus, records []activityRecord, outco
 	}
 }
 
-// resolveFacts reports the resolved archive count from ResolveAndCheck's
-// completed result (resolve.go) — the final, data-side-verified work list
-// (rather than ResolveK8sSources' control-side-only partial list).
+// bytesPerGiB is the whole-GiB unit derived slice sizes are quantized to
+// (backup.DeriveSliceSize), so the Resolve "Slice size" fact renders them as an
+// exact GiB count rather than the rounded decimal humanizeBytes would give.
+const bytesPerGiB = 1 << 30
+
+// resolveFacts reports the resolved archive count and the run's derived slice size
+// (issue #324) from ResolveAndCheck's completed result (resolve.go) — the final,
+// data-side-verified work list (rather than ResolveK8sSources' control-side-only
+// partial list). The slice size is recomputed from the same resolved sizes the
+// workflow derives it from (DeriveSliceSize is a pure function of the archives'
+// EstimatedBytes), so this displays exactly the size Prepare sliced at without a
+// dedicated workflow query.
 func resolveFacts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "ResolveAndCheck"))
 	if !ok || !record.Completed {
@@ -100,7 +109,17 @@ func resolveFacts(records []activityRecord) []PhaseFact {
 		return nil
 	}
 
-	return []PhaseFact{intFact("archives", "Archives", len(archives))}
+	sliceSize := backup.DeriveSliceSize(archives)
+
+	return []PhaseFact{
+		intFact("archives", "Archives", len(archives)),
+		{
+			Key:   "sliceSize",
+			Label: "Slice size",
+			Value: fmt.Sprintf("%d GiB", sliceSize/bytesPerGiB),
+			Title: fmt.Sprintf("%s bytes", groupDigits(sliceSize)),
+		},
+	}
 }
 
 // prepareFacts reports the staged archive count and total staged bytes from

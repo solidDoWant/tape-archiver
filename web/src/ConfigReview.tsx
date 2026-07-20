@@ -25,9 +25,8 @@ export interface ConfigReviewProps {
 function ConfigReview({ config, dryRun }: ConfigReviewProps) {
   const redundancy = config.redundancy
   // Guard on each field being a present number, not just its block: a JSON-mode
-  // config with a redundancy block but a missing/non-numeric field (the
-  // committed schema requires only sliceSizeBytes) would otherwise render
-  // "floor undefined%" / "fixed undefined%".
+  // config with a redundancy block but a missing/non-numeric percentage would
+  // otherwise render "floor undefined%" / "fixed undefined%".
   const redundancyLabel =
     redundancy?.fillToCapacity && typeof redundancy.fillToCapacity.floor === 'number'
       ? `fill to capacity · floor ${redundancy.fillToCapacity.floor}%`

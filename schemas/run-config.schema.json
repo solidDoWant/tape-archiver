@@ -211,17 +211,10 @@
         },
         "fillToCapacity": {
           "$ref": "#/$defs/FillConfig"
-        },
-        "sliceSizeBytes": {
-          "type": "integer",
-          "minimum": 1
         }
       },
       "additionalProperties": false,
-      "type": "object",
-      "required": [
-        "sliceSizeBytes"
-      ]
+      "type": "object"
     },
     "Source": {
       "properties": {

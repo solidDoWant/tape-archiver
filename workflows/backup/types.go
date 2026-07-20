@@ -412,6 +412,11 @@ type runState struct {
 	// phase 1): every config Source expanded to its ZFS snapshot(s), verified and
 	// feasibility-checked. The Prepare phase consumes it.
 	resolved []ResolvedArchive
+	// sliceSizeBytes is the run's slice size, derived from the resolved sizes by
+	// DeriveSliceSize at the end of the Resolve phase (SPEC §4.3 phase 1, issue
+	// #324) — it is no longer an operator-set config field. The Prepare phase
+	// slices every encrypted archive at this size and the Report phase records it.
+	sliceSizeBytes int64
 	// staged is the prepared work list the Prepare phase produces (SPEC §4.3
 	// phase 2): each resolved archive tarred, optionally compressed, encrypted,
 	// sliced, and checksummed on disk, with its measured size. The Pack phase

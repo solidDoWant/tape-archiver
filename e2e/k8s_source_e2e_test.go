@@ -68,7 +68,7 @@ func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 		}}},
 		Copies:     1,
 		Library:    fixture.library,
-		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10), SliceSizeBytes: 1 << 20},
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10)},
 		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
 		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(runID)},
 	}

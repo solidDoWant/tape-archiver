@@ -117,7 +117,7 @@ describe('ConfigForm', () => {
     expect(screen.queryByLabelText('target %')).not.toBeInTheDocument()
   })
 
-  it('lets a numeric field be cleared and a decimal typed without snapping to a default', () => {
+  it('lets an integer field be cleared and retyped without snapping to a default', () => {
     let latest: FormState | undefined
     render(<Wrapper onForm={(form) => (latest = form)} />)
 
@@ -127,16 +127,12 @@ describe('ConfigForm', () => {
     fireEvent.change(copies, { target: { value: '' } })
     expect(copies.value).toBe('')
 
-    // A fractional value is preserved exactly as typed and committed to state,
-    // rather than being destroyed mid-decimal.
-    const slice = screen.getByLabelText('slice size (GiB)') as HTMLInputElement
-    fireEvent.change(slice, { target: { value: '0.5' } })
-    expect(slice.value).toBe('0.5')
-    expect(latest?.sliceSizeGiB).toBe(0.5)
+    // A retyped value is committed to state exactly as entered.
+    fireEvent.change(copies, { target: { value: '3' } })
+    expect(latest?.copies).toBe(3)
 
     // Blurring an emptied field restores the committed value so display and
     // state never disagree once focus moves on.
-    fireEvent.change(copies, { target: { value: '3' } })
     fireEvent.change(copies, { target: { value: '' } })
     fireEvent.blur(copies)
     expect(copies.value).toBe('3')
