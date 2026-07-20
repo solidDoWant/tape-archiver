@@ -290,10 +290,13 @@ func TestMaxOutputBytes(t *testing.T) {
 	}
 }
 
-// TestMaxOutputBytesTightAtScale confirms the bound converges on the redundancy
+// TestMaxOutputBytesTightAtScale confirms the bound stays close to the redundancy
 // percentage at LTO (terabyte) scale — where recovery packets dominate and the
-// replicated critical packets are negligible — so honest reservation costs almost
-// no usable capacity on a real tape (issue #148). It is pure arithmetic; no par2.
+// replicated critical packets are negligible — so honest reservation costs little
+// usable capacity on a real tape (issue #148). With the ~2,000-block target the
+// per-file rounding headroom is a real fraction of the set, so the bound runs at
+// about percent × (1 + sliceCount/2,000) — here ~11.2% for a nominal 10% — rather
+// than converging on the percentage itself. It is pure arithmetic; no par2.
 func TestMaxOutputBytesTightAtScale(t *testing.T) {
 	t.Parallel()
 
@@ -306,9 +309,10 @@ func TestMaxOutputBytesTightAtScale(t *testing.T) {
 	data := 6 * terabyte
 	bound := par2.MaxOutputBytes(data, sliceCount, percent)
 
-	// At 6 TB the bound sits just above the nominal 10% and well under 11%.
+	// At 6 TB the bound sits above the nominal 10% by roughly the 200/2,000
+	// per-file headroom and no more.
 	assert.Greater(t, bound, int64(float64(data)*0.10))
-	assert.Less(t, bound, int64(float64(data)*0.11))
+	assert.Less(t, bound, int64(float64(data)*0.115))
 }
 
 // repeatSizes returns a slice of count entries each equal to size.

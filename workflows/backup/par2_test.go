@@ -282,7 +282,7 @@ func TestFillPercent(t *testing.T) {
 	t.Run("raises to the largest percent whose real par2 output still fits", func(t *testing.T) {
 		t.Parallel()
 
-		tape := oneArchiveTape(130_150_000, 240_000)
+		tape := oneArchiveTape(368_000_000, 240_000_000)
 
 		got := fillPercent(tape, 5)
 		assert.GreaterOrEqual(t, got, 5, "never below the floor")

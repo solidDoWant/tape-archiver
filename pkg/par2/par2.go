@@ -19,6 +19,17 @@ import (
 // count.
 const maxSourceBlocks = 32768
 
+// targetSourceBlocks is the source-block count ComputeBlockSize aims for.
+// Reed-Solomon work scales linearly with the block count at a fixed redundancy
+// percentage, so more blocks buy finer scattered-defect repair granularity at
+// proportionally more compute — maxing the count at the format limit made
+// terabyte-scale archives take weeks to protect. Tolerance of contiguous
+// damage, which is how tape media actually fails past the drive's own ECC, is
+// independent of block count (SPEC §8). 2,000 — also par2's own default — sits
+// where the compute curve flattens (input hashing dominates below ~1,000
+// blocks) while still tolerating hundreds of scattered defects per archive.
+const targetSourceBlocks = 2000
+
 // blockSizeMultiple is the alignment par2 requires of every block size — a
 // block size that is not a multiple of 4 is rejected outright.
 const blockSizeMultiple = 4
@@ -217,22 +228,44 @@ func parseProgress(token string) (float64, bool) {
 // ComputeBlockSize returns the PAR2 block size to use for totalSize bytes spread
 // across fileCount files.
 //
-// PAR2 counts source blocks per file — sum(ceil(size_i / blockSize)) — so
-// per-file rounding can push the count up to fileCount-1 blocks above
-// ceil(totalSize / blockSize). Dividing by the limit less fileCount reserves
-// that headroom, keeping the real count within PAR2's 32,768-block limit
-// (SPEC §8). The result is rounded up to a multiple of 4 (which par2 requires)
-// and never falls below one such block.
+// The block size targets about targetSourceBlocks source blocks rather than the
+// 32,768-block format limit; see that constant for the compute/granularity
+// trade. PAR2 counts source blocks per file — sum(ceil(size_i / blockSize)) —
+// and a block never spans files, so two regimes apply:
+//
+//   - Few files (under half the target): per-file rounding can push the count up
+//     to fileCount-1 blocks above ceil(totalSize / blockSize), so dividing by
+//     the target less fileCount reserves that headroom and the real count stays
+//     at or under the target.
+//   - Many files (half the target and up): the file count dictates the block
+//     count anyway, so aim for one block per file. Dividing by fileCount-1
+//     keeps the block size at or above a uniform file size — a smaller block
+//     size only multiplies compute, while a much larger one would pad every
+//     recovery block past the data it protects.
+//
+// Either way the block size never drops below what PAR2's 32,768-block hard
+// limit demands (with the same per-file headroom); par2 rejects any larger
+// count. The result is rounded up to a multiple of 4 (which par2 requires) and
+// never falls below one such block.
 //
 // It is exported so the Pack phase can reserve a conservative upper bound on the
 // recovery-set size (MaxOutputBytes) from the same block size Generate will use.
 func ComputeBlockSize(totalSize int64, fileCount int) int64 {
+	var blockSize int64
+	if fileCount < targetSourceBlocks/2 {
+		blockSize = ceilDiv(totalSize, int64(targetSourceBlocks-fileCount))
+	} else {
+		blockSize = ceilDiv(totalSize, int64(fileCount-1))
+	}
+
 	capacity := int64(maxSourceBlocks - fileCount)
 	if capacity < 1 {
 		capacity = 1
 	}
 
-	blockSize := ceilDiv(totalSize, capacity)
+	if minimum := ceilDiv(totalSize, capacity); blockSize < minimum {
+		blockSize = minimum
+	}
 
 	// Round up to the next multiple of blockSizeMultiple; rounding up only ever
 	// lowers the block count, so the limit still holds. Enforce a one-block
@@ -268,8 +301,10 @@ func ComputeBlockSize(totalSize int64, fileCount int) int64 {
 //     yields at most bitLen(recoveryBlocks)+2 files, each holding at most
 //     bitLen(recoveryBlocks)+1 copies, so (bitLen+2)(bitLen+1) copies bound the total.
 //
-// At LTO (terabyte) scale the recovery packets dominate and the bound is tight
-// (~percent% + a fraction of a percent); at tiny sizes the replicated critical
+// At LTO (terabyte) scale the recovery packets dominate and the bound runs at
+// roughly percent × (1 + fileCount/targetSourceBlocks): the per-file rounding
+// headroom is a real fraction of a ~2,000-block set, so a 200-slice archive
+// reserves about 11% for a nominal 10%. At tiny sizes the replicated critical
 // packets dominate and the bound runs a small multiple above the real output —
 // always conservative, which is the safe direction for a capacity reserve
 // (principles 1 and 2: recoverability and never overrunning a tape).
