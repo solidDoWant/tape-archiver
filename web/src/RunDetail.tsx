@@ -372,7 +372,13 @@ function DegradedNotice({ runId, detail, message }: { runId: string; detail: Run
         <dt className="text-text-dim">Status</dt>
         <dd>{detail.status}</dd>
         <dt className="text-text-dim">Last completed phase</dt>
-        <dd>{detail.lastCompletedPhase ? phaseLabel(detail.lastCompletedPhase) : '—'}</dd>
+        <dd>
+          {detail.lastCompletedPhaseUnknown
+            ? 'Temporarily unavailable'
+            : detail.lastCompletedPhase
+              ? phaseLabel(detail.lastCompletedPhase)
+              : '—'}
+        </dd>
         <dt className="text-text-dim">Started</dt>
         <dd>{formatTimestamp(detail.startTime)}</dd>
         {detail.closeTime ? (

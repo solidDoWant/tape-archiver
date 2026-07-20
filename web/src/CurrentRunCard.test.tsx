@@ -100,6 +100,34 @@ describe('CurrentRunCard', () => {
     expect(screen.getByRole('link', { name: /open run/i })).toHaveAttribute('href', '/runs/run-live')
   })
 
+  it('states the phase is temporarily unavailable when the phase query failed, not a definitive "not started"', () => {
+    // Issue #323: during a long PAR2/tape activity the server's
+    // LastCompletedPhaseQuery can blip. An empty lastCompletedPhase with the
+    // unknown flag set means "couldn't read", so the card must NOT render the
+    // definitive "Starting…" / "Phase 0 of 11" of a genuinely-not-started run.
+    renderCard({
+      activeRun: run({ runId: 'run-live' }),
+      live: {
+        state: 'live',
+        detail: {
+          workflowId: 'backup',
+          runId: 'run-live',
+          status: 'Running',
+          startTime: '2026-07-01T00:00:00Z',
+          dryRun: false,
+          lastCompletedPhase: '',
+          lastCompletedPhaseUnknown: true,
+          currentPause: { kind: '' },
+        },
+      },
+    })
+
+    expect(screen.getByText('Phase unavailable')).toBeInTheDocument()
+    expect(screen.getByText(/phase temporarily unavailable/i)).toBeInTheDocument()
+    expect(screen.queryByText('Starting…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Phase 0 of 11')).not.toBeInTheDocument()
+  })
+
   it('shows a paused state with a narrative and Resume/Abort controls', () => {
     renderCard({
       activeRun: run({ runId: 'run-live' }),

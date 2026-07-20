@@ -128,17 +128,25 @@ type RunDetail struct {
 	// completed yet or the query could not be answered (e.g. no worker
 	// currently polling) — the latter is logged server-side rather than
 	// failing the request, since the execution status/timing above is still
-	// valid and useful on its own.
+	// valid and useful on its own. LastCompletedPhaseUnknown below distinguishes
+	// the two "" cases so a client never renders a failed query as a definitive
+	// empty phase.
 	LastCompletedPhase string `json:"lastCompletedPhase"`
 
-	// lastCompletedPhaseUnknown records that the last-completed-phase query
+	// LastCompletedPhaseUnknown records that the last-completed-phase query
 	// could not be answered this fetch (RPC failed / would not decode), as
-	// opposed to a successful query reporting "" (nothing completed yet). It is
-	// unexported — never serialized — and consulted only by streamRunEvents'
-	// poll loop, which carries the last known phase forward on an unknown tick
+	// opposed to a successful query reporting "" (nothing completed yet). Like
+	// CurrentPauseInfo.Unknown below, it is serialized (omitempty) so a client
+	// can surface a transient "phase unavailable" marker rather than a
+	// definitive empty phase: LastCompletedPhase == "" alone cannot distinguish
+	// "nothing completed yet" from "couldn't read", and collapsing the two would
+	// make a healthy run mid-way through a long phase (PAR2/tape) — exactly when
+	// its live query is most likely to blip — render as if it had not started
+	// (issue #323). It is also consulted by streamRunEvents' poll loop, which
+	// carries the last known phase (and this flag) forward on an unknown tick
 	// rather than emitting a spurious "phase regressed to empty" update, the
 	// same transient-blip handling CurrentPauseInfo.Unknown gets below.
-	lastCompletedPhaseUnknown bool
+	LastCompletedPhaseUnknown bool `json:"lastCompletedPhaseUnknown,omitempty"`
 
 	// CurrentPause is which operator-in-the-loop pause (if any) is blocking the
 	// run right now (backup.CurrentPauseQuery), with enough context for a
@@ -673,7 +681,7 @@ func fetchRunDetail(ctx context.Context, temporalClient TemporalClient, runID st
 	return RunDetail{
 		RunSummary:                toRunSummary(description.GetWorkflowExecutionInfo()),
 		LastCompletedPhase:        lastCompletedPhase,
-		lastCompletedPhaseUnknown: lastCompletedPhaseUnknown,
+		LastCompletedPhaseUnknown: lastCompletedPhaseUnknown,
 		CurrentPause:              pauseInfo,
 	}, nil
 }

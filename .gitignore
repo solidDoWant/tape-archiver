@@ -18,6 +18,9 @@ result
 # committed cmd/web/dist/.gitkeep placeholder keeps `go build`/`go vet`/
 # `golangci-lint`/`go test ./...` compiling before any frontend build has run.
 /web/node_modules/
+# Also ignore a stray repo-root node_modules/ (e.g. an incidental vitest
+# .vite cache), so a broad `git add -A` can never sweep it into a commit.
+/node_modules/
 /web/dist/
 /cmd/web/dist/*
 !/cmd/web/dist/.gitkeep

@@ -15,6 +15,15 @@ export interface RunEventDetail {
   // server-side): true when the run was submitted as a dry-run.
   dryRun: boolean
   lastCompletedPhase: string
+  // lastCompletedPhaseUnknown is true when the server's LastCompletedPhaseQuery
+  // could not be answered on the poll that produced this frame (RPC failed /
+  // would not decode), as opposed to a successful query reporting an empty
+  // phase (nothing completed yet). lastCompletedPhase == '' alone cannot
+  // distinguish the two, so a consumer must check this flag before rendering an
+  // empty phase as a definitive "not started" — a failed query is "couldn't
+  // read", surfaced as a transient "phase unavailable" marker, the phase-side
+  // analogue of currentPause.unknown (issue #323).
+  lastCompletedPhaseUnknown?: boolean
   // currentPause is which operator-in-the-loop pause (if any) is blocking
   // this run right now (backup.CurrentPauseQuery via pkg/runsapi). The SSE
   // poll loop behind this stream compares it on every tick alongside status/

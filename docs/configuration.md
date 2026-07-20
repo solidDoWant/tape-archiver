@@ -514,7 +514,18 @@ operator and why (`currentPause`, an object): `{"kind": "eject"|"write-failure"|
 "devices": [...], "errorSummary": "..."}` — `kind` is `""` when the run is not paused, and
 every other field is populated only where it applies to that pause kind (e.g. `phase`/
 `reloadSlots` for a Load/Write failure, `awaitingExport` for an Eject pause, `devices` for
-a Burn pause). An unknown but well-formed run ID is `404`; a malformed one (Temporal run
+a Burn pause).
+
+Both query-backed fields degrade gracefully rather than fabricating a definitive answer
+when their live workflow query cannot be answered (e.g. during a long PAR2/tape activity
+with no workflow-task traffic, the query may transiently fail even though the run is
+healthy): `lastCompletedPhaseUnknown: true` accompanies an empty `lastCompletedPhase` to
+mean "couldn't read", distinct from a successful query reporting `""` (nothing completed
+yet); likewise `currentPause.unknown: true` means the pause query failed, distinct from a
+confirmed not-paused run (`kind: ""`, no `unknown`). A client must treat either flag as
+"state temporarily unavailable" — not as "not started" / "not paused" — so a run mid-way
+through a long phase never renders as if it had regressed. Both flags are omitted when
+false. An unknown but well-formed run ID is `404`; a malformed one (Temporal run
 IDs are UUIDs) is `400`. Both, like every `/api/*` route, require an authenticated session
 (see below) — an unauthenticated request gets `401`, not `404`/`400`.
 
@@ -643,7 +654,14 @@ since the last event, so a quiescent run does not produce a stream of redundant 
 An operator-in-the-loop pause starting or clearing (e.g. after a resume/abort sent via
 the routes above) is exactly the kind of change that can happen with neither `status` nor
 `lastCompletedPhase` moving, so `currentPause` is compared alongside them — a client
-watching the live stream sees a pause (and its clearing) without a manual refresh. Once
+watching the live stream sees a pause (and its clearing) without a manual refresh. The
+same `lastCompletedPhaseUnknown` / `currentPause.unknown` graceful-degradation flags `GET
+/api/runs/{runID}` reports apply here too. When a live query blips on a poll, the stream
+carries the last known phase and pause state forward (never a spurious regress to an empty
+phase or a fabricated not-paused) rather than emitting the failed poll's zero value; only
+a stream whose very first poll already failed emits `lastCompletedPhaseUnknown: true` —
+there is no last-known value to fall back to then, and a client renders that as "state
+temporarily unavailable". Once
 the run reaches a terminal status (anything other than `RUNNING`), the server sends one
 final `update` followed by a `done` event (same body) and then closes the connection
 itself — the stream never polls a finished run forever, and a client does not need to
