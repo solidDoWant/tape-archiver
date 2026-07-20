@@ -394,6 +394,7 @@ func TestGetRun(t *testing.T) {
 		client           *fakeTemporalClient
 		wantStatus       int
 		wantPhase        string
+		wantPhaseUnknown bool
 		wantPauseKind    string
 		wantPauseUnknown bool
 		errAssert        require.ErrorAssertionFunc
@@ -472,7 +473,14 @@ func TestGetRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			name:  "a failed phase query does not fail the request; phase reports empty",
+			// A failed LastCompletedPhaseQuery must not be indistinguishable from
+			// a successful query reporting an empty phase (nothing completed
+			// yet): the request still succeeds, since Describe answered fine,
+			// but LastCompletedPhaseUnknown must say "couldn't read" so a client
+			// surfaces a transient "phase unavailable" marker rather than a
+			// definitive empty phase (issue #323) — the phase-side analogue of
+			// the current-pause case above.
+			name:  "a failed phase query does not fail the request; phase reports empty and unknown",
 			runID: "run-1",
 			client: &fakeTemporalClient{
 				describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
@@ -480,8 +488,9 @@ func TestGetRun(t *testing.T) {
 				},
 				queryErr: assertError{"no worker polling"},
 			},
-			wantStatus: http.StatusOK,
-			wantPhase:  "",
+			wantStatus:       http.StatusOK,
+			wantPhase:        "",
+			wantPhaseUnknown: true,
 		},
 	}
 
@@ -502,6 +511,7 @@ func TestGetRun(t *testing.T) {
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &detail))
 				assert.Equal(t, test.runID, detail.RunID)
 				assert.Equal(t, test.wantPhase, detail.LastCompletedPhase)
+				assert.Equal(t, test.wantPhaseUnknown, detail.LastCompletedPhaseUnknown)
 				assert.Equal(t, test.wantPauseKind, detail.CurrentPause.Kind)
 				assert.Equal(t, test.wantPauseUnknown, detail.CurrentPause.Unknown)
 				errAssert(t, nil)

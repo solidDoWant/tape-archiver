@@ -435,4 +435,25 @@ describe('RunDetail', () => {
     expect(screen.getByText('Running')).toBeInTheDocument()
     expect(screen.queryByRole('navigation', { name: /run phases/i })).not.toBeInTheDocument()
   })
+
+  it('reports the last completed phase as temporarily unavailable in the degraded view when the phase query failed', async () => {
+    // Issue #323: in the degraded fallback (phases endpoint down), the
+    // last-completed-phase row is sourced from the run detail's own query-backed
+    // field. When that query failed (lastCompletedPhaseUnknown), the row must say
+    // "Temporarily unavailable", not the "—" of a genuinely-not-started run.
+    stub({
+      '/api/runs/run-abc/phases': { status: 404, body: { error: 'not found' } },
+      '/api/runs/run-abc': {
+        status: 200,
+        body: { ...runningDetail, lastCompletedPhase: '', lastCompletedPhaseUnknown: true },
+      },
+    })
+
+    render(<RunDetail runId="run-abc" />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(/unavailable/i)
+    })
+    expect(screen.getByText('Temporarily unavailable')).toBeInTheDocument()
+  })
 })

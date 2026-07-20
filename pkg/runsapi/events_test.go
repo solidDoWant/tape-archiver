@@ -71,6 +71,7 @@ type dynamicTemporalClient struct {
 	mu            sync.Mutex
 	status        enumspb.WorkflowExecutionStatus
 	phase         string
+	phaseErr      error
 	pause         backup.CurrentPause
 	pauseErr      error
 	describeCalls int
@@ -106,6 +107,20 @@ func (c *dynamicTemporalClient) setPauseErr(err error) {
 	defer c.mu.Unlock()
 
 	c.pauseErr = err
+}
+
+// setPhaseErr makes a subsequent LastCompletedPhaseQuery fail with err (nil to
+// go back to answering normally with the current setState phase) — the
+// phase-side analogue of setPauseErr, letting a test simulate a transient
+// phase-query blip mid-stream without disturbing
+// DescribeWorkflowExecution/CurrentPauseQuery, the same way a real transient
+// "no worker polling" failure would only ever affect the one query that hit it
+// (issue #323).
+func (c *dynamicTemporalClient) setPhaseErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.phaseErr = err
 }
 
 func (c *dynamicTemporalClient) callCount() int {
@@ -149,6 +164,10 @@ func (c *dynamicTemporalClient) QueryWorkflow(_ context.Context, _, _, queryType
 		}
 
 		return fakeEncodedValue{value: c.pause}, nil
+	}
+
+	if c.phaseErr != nil {
+		return nil, c.phaseErr
 	}
 
 	return fakeEncodedValue{value: c.phase}, nil
@@ -552,6 +571,101 @@ func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
 	var recovered RunDetail
 	require.NoError(t, json.Unmarshal([]byte(third.data), &recovered))
 	assert.Equal(t, "", recovered.CurrentPause.Kind, "once the query recovers, a genuine pause-clear is still detected")
+}
+
+// TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty is the phase-side
+// analogue of the pause test above (issue #323): a transient
+// LastCompletedPhaseQuery failure mid-stream must never make a run that has
+// completed a phase look like it regressed to no phase at all. fetchRunDetail
+// reports this tick's phase as unknown; streamRunEvents must carry the last
+// known phase (and its known flag) forward into the event it pushes (triggered
+// here by an unrelated pause change), not emit an empty phase.
+func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
+	setEventPollInterval(t, 15*time.Millisecond)
+
+	client := &dynamicTemporalClient{}
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Generate PAR2")
+
+	server := httptest.NewServer(New(client))
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	frames := readSSEFrames(resp.Body)
+
+	first := waitForFrame(t, frames, 2*time.Second)
+
+	var initial RunDetail
+	require.NoError(t, json.Unmarshal([]byte(first.data), &initial))
+	require.Equal(t, "Generate PAR2", initial.LastCompletedPhase, "test setup: the stream must start out reporting the real phase")
+	require.False(t, initial.LastCompletedPhaseUnknown)
+
+	// Simulate the phase-query blip (a long PAR2/tape activity with no
+	// workflow-task traffic — exactly issue #323's trigger), then force an
+	// observable event by starting a pause — if fetchRunDetail's unknown phase
+	// were compared directly instead of carried forward, this would push an
+	// empty LastCompletedPhase alongside the pause change.
+	client.setPhaseErr(assertError{"no poller seen for task queue recently, worker may be down"})
+	client.setPause(backup.CurrentPause{Kind: backup.PauseEject, AwaitingExport: 1})
+
+	second := waitForFrame(t, frames, 2*time.Second)
+	assert.Equal(t, sseEventUpdate, second.event)
+
+	var duringBlip RunDetail
+	require.NoError(t, json.Unmarshal([]byte(second.data), &duringBlip))
+	assert.Equal(t, "eject", duringBlip.CurrentPause.Kind, "the pause change that triggered this event must still be visible")
+	assert.Equal(t, "Generate PAR2", duringBlip.LastCompletedPhase,
+		"a transient LastCompletedPhaseQuery failure must carry the last known phase forward, never regress to empty")
+	assert.False(t, duringBlip.LastCompletedPhaseUnknown,
+		"the carried-forward phase is the last known GOOD state, not an unknown one, once it's been folded into an emitted event")
+
+	// The query recovers; a genuine phase advance is still detected normally.
+	client.setPhaseErr(nil)
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
+
+	third := waitForFrame(t, frames, 2*time.Second)
+
+	var recovered RunDetail
+	require.NoError(t, json.Unmarshal([]byte(third.data), &recovered))
+	assert.Equal(t, "Verify", recovered.LastCompletedPhase, "once the query recovers, a genuine phase advance is still detected")
+	assert.False(t, recovered.LastCompletedPhaseUnknown)
+}
+
+// TestStreamRunEventsInitialPhaseQueryFailureReportsUnknown covers the case the
+// carry-forward cannot help: a stream whose very first poll already fails the
+// LastCompletedPhaseQuery has no last-known phase to fall back to, so it must
+// emit LastCompletedPhaseUnknown == true (not a silent empty phase) so a fresh
+// page load during a long-activity blip renders "phase unavailable", not
+// "not started" (issue #323).
+func TestStreamRunEventsInitialPhaseQueryFailureReportsUnknown(t *testing.T) {
+	setEventPollInterval(t, 15*time.Millisecond)
+
+	client := &dynamicTemporalClient{}
+	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Generate PAR2")
+	client.setPhaseErr(assertError{"no poller seen for task queue recently, worker may be down"})
+
+	server := httptest.NewServer(New(client))
+	t.Cleanup(server.Close)
+
+	resp, err := http.Get(server.URL + "/api/events/runs/run-1")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	frames := readSSEFrames(resp.Body)
+
+	first := waitForFrame(t, frames, 2*time.Second)
+
+	var initial RunDetail
+	require.NoError(t, json.Unmarshal([]byte(first.data), &initial))
+	assert.Equal(t, "", initial.LastCompletedPhase, "no last-known phase exists on the very first poll")
+	assert.True(t, initial.LastCompletedPhaseUnknown,
+		"an initial phase-query failure must report unknown, not a silent empty phase, so the UI shows 'unavailable' not 'not started'")
 }
 
 // TestStreamRunEventsStopsPollingOnClientDisconnect proves the server-side

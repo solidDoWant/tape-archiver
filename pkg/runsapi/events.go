@@ -200,14 +200,21 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 			// in a rolling deploy.
 			return
 		case next := <-sub.updates:
-			if next.lastCompletedPhaseUnknown {
+			if next.LastCompletedPhaseUnknown {
 				// LastCompletedPhaseQuery failed on the poll that produced this
 				// update (Describe still succeeded). Carry the last known phase
-				// forward rather than letting "" reach the delta check below,
-				// which would emit a spurious "phase regressed to empty" update
-				// that flaps back on the next successful poll — the same
-				// transient-blip handling CurrentPause.Unknown gets just below.
+				// AND its known/unknown flag forward rather than letting ""
+				// reach the delta check below, which would emit a spurious
+				// "phase regressed to empty" update that flaps back on the next
+				// successful poll — the same transient-blip handling
+				// CurrentPause.Unknown gets just below (which replaces the whole
+				// struct, Unknown flag included). Carrying the flag too means a
+				// run that once reported a known phase keeps rendering it as
+				// known through a blip, not flickering to "unavailable"; only a
+				// stream whose very first poll already failed emits Unknown ==
+				// true (there is no last-known value to fall back to then).
 				next.LastCompletedPhase = last.LastCompletedPhase
+				next.LastCompletedPhaseUnknown = last.LastCompletedPhaseUnknown
 			}
 
 			if next.CurrentPause.Unknown {
@@ -225,6 +232,7 @@ func (h *handler) streamRunEvents(w http.ResponseWriter, r *http.Request) {
 
 			if next.Status == last.Status &&
 				next.LastCompletedPhase == last.LastCompletedPhase &&
+				next.LastCompletedPhaseUnknown == last.LastCompletedPhaseUnknown &&
 				currentPauseEqual(next.CurrentPause, last.CurrentPause) {
 				continue
 			}

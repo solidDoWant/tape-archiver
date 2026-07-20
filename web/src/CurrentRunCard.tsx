@@ -110,6 +110,12 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
   if (activeRun) {
     const status = live.detail?.status ?? activeRun.status
     const lastCompletedPhase = live.detail?.lastCompletedPhase ?? ''
+    // phaseUnknown: the server could not read the run's last completed phase on
+    // the poll behind this frame (issue #323). An empty lastCompletedPhase then
+    // means "couldn't read", not "not started yet", so the progress readout
+    // below states the uncertainty instead of showing a definitive "Starting…"
+    // / "Phase 0 of N" — the phase-side analogue of pauseUnknown.
+    const phaseUnknown = Boolean(live.detail?.lastCompletedPhaseUnknown)
     const pause = live.detail?.currentPause
 
     // A run that closed (terminated/completed/canceled) while waiting at a
@@ -196,15 +202,17 @@ function CurrentRunCard({ loadState, error, activeRun, mostRecentRun, live, onSt
 
         <div className="flex flex-wrap items-baseline gap-3">
           <div className="text-[20px] font-semibold tracking-tight">{activeRun.runId}</div>
-          <span className="font-mono text-[11px] text-text-dim">{lastCompletedPhase ? phaseLabel(lastCompletedPhase) : 'Starting…'}</span>
+          <span className="font-mono text-[11px] text-text-dim">
+            {phaseUnknown ? 'Phase unavailable' : lastCompletedPhase ? phaseLabel(lastCompletedPhase) : 'Starting…'}
+          </span>
         </div>
 
         <div className="mt-3.5 h-2 overflow-hidden rounded-full bg-inset">
-          <div className="h-full bg-blue" style={{ width: `${progress.percent}%` }} />
+          <div className="h-full bg-blue" style={{ width: `${phaseUnknown ? 0 : progress.percent}%` }} />
         </div>
         <div className="mt-2.5 flex gap-4">
           <span className="font-mono text-[11px] text-text-dim">
-            Phase {progress.completed} of {progress.total}
+            {phaseUnknown ? 'Phase temporarily unavailable — the run is progressing' : `Phase ${progress.completed} of ${progress.total}`}
           </span>
         </div>
 
