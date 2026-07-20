@@ -428,22 +428,40 @@ function LogPanelWindow({ runId, phase, terminal }: LogPanelProps) {
                 {state.live ? 'No log lines yet.' : 'No log lines for this window.'}
               </p>
             ) : (
-              state.lines.map((line) => (
+              state.lines.map((line, index) => (
                 // Keyed on the line's own content identity (lineKey), not its
                 // array index: capLines trims from the front, so an index-based
                 // key shifts for every surviving line and remounts the whole
                 // (unchanged) list. appendNewLines already guarantees lineKey is
                 // unique across the rendered set.
-                <div key={lineKey(line)} className="whitespace-pre-wrap break-words">
-                  <span className="text-console-dim">{formatTimestamp(line.time)}</span>{' '}
-                  {line.level ? <span className={levelClass(line.level)}>[{line.level}]</span> : null}{' '}
-                  <span>{line.message}</span>
-                  {line.error ? (
-                    // The actual cause behind a terse message (e.g. a failing
-                    // activity's "Activity error."), indented under it so a long
-                    // error wraps readably rather than being lost.
-                    <span className="mt-0.5 block pl-4 text-red-300">{line.error}</span>
-                  ) : null}
+                <div key={lineKey(line)} className="flex gap-3">
+                  {/* GHA-style line-number gutter: right-aligned, dimmed, and
+                      non-selectable + aria-hidden so it is a pure visual index —
+                      it never lands in a copied selection or a screen reader's
+                      line read-out. Width scales with the current line count's
+                      digit width (tabular-nums keeps the monospace ch alignment
+                      exact) so the numbers stay right-aligned as the tail grows.
+                      Numbers cover the *rendered* window: capLines drops the
+                      oldest lines, so line 1 is the oldest line currently shown,
+                      not the run's absolute first line. */}
+                  <span
+                    aria-hidden="true"
+                    className="shrink-0 select-none text-right tabular-nums text-console-dim"
+                    style={{ width: `${String(state.lines.length).length}ch` }}
+                  >
+                    {index + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+                    <span className="text-console-dim">{formatTimestamp(line.time)}</span>{' '}
+                    {line.level ? <span className={levelClass(line.level)}>[{line.level}]</span> : null}{' '}
+                    <span>{line.message}</span>
+                    {line.error ? (
+                      // The actual cause behind a terse message (e.g. a failing
+                      // activity's "Activity error."), indented under it so a long
+                      // error wraps readably rather than being lost.
+                      <span className="mt-0.5 block pl-4 text-red-300">{line.error}</span>
+                    ) : null}
+                  </span>
                 </div>
               ))
             )}

@@ -117,6 +117,44 @@ describe('LogPanel', () => {
     expect(text.indexOf('resolving snapshots')).toBeLessThan(text.indexOf('pack slow'))
   })
 
+  it('numbers rendered lines in a non-selectable gutter, GHA-style', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          runId: 'run-1',
+          live: false,
+          lines: [
+            line('2026-07-10T12:00:00Z', 'INFO', 'resolving snapshots'),
+            line('2026-07-10T12:01:00Z', 'WARN', 'pack slow'),
+            line('2026-07-10T12:02:00Z', 'INFO', 'done'),
+          ],
+        }),
+      ),
+    )
+
+    render(<LogPanel runId="run-1" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('resolving snapshots')).toBeInTheDocument()
+    })
+
+    // Each rendered line carries its 1-based gutter number, hidden from
+    // assistive tech and excluded from text selection so a copied log body
+    // never picks up the line numbers.
+    for (const [ordinal, message] of [
+      ['1', 'resolving snapshots'],
+      ['2', 'pack slow'],
+      ['3', 'done'],
+    ] as const) {
+      const gutter = screen.getByText(ordinal)
+      expect(gutter).toHaveAttribute('aria-hidden', 'true')
+      expect(gutter).toHaveClass('select-none')
+      // The number sits in the same line row as its message.
+      expect(gutter.parentElement).toHaveTextContent(message)
+    }
+  })
+
   it('shows a line’s error detail under its message', async () => {
     vi.stubGlobal(
       'fetch',
