@@ -31,7 +31,10 @@ const (
 	// which includes an operator-in-the-loop pause within it; GET
 	// /api/runs/{runID}'s currentPause reports the pause itself), or a later
 	// phase already holding activity from an earlier drive-set of the
-	// still-running interleaved tape path.
+	// still-running interleaved tape path. The latter case does not apply while
+	// the run is paused: a pause pins "active" to the frontier (its own phase)
+	// alone, so a completed earlier-set/re-driven Eject does not spin alongside
+	// the paused Write (issue #331) — see buildPhaseTimeline.
 	PhaseActive PhaseStatus = "active"
 	// PhaseCompleted means the run verifiably moved past this phase: the
 	// whole run succeeded, or the phase precedes the pipeline frontier. This
@@ -150,7 +153,16 @@ func (h *handler) getRunPhases(w http.ResponseWriter, r *http.Request) {
 //   - active: the run is still open and this phase is the frontier itself, or
 //     a later phase already holding activity from an earlier drive-set — the
 //     interleaved tape path is genuinely still in progress as a unit, so a
-//     partially-driven Eject is "active", never prematurely "completed".
+//     partially-driven Eject is "active", never prematurely "completed". The
+//     "later phase holding an earlier set's activity" case is suppressed while
+//     the run is paused for the operator (derivePause), though: a pause is not
+//     "in progress as a unit" — the run is stopped on one specific phase (the
+//     frontier, which is always the pause's own phase). Without this, a
+//     write-failure pause — which ejects the set's tapes (a completed Eject
+//     activity) before pausing back on Write — would light BOTH Write (the
+//     frontier) and the already-completed Eject "active" at once, two spinners
+//     for one paused phase (issue #331). Only the frontier stays active while
+//     paused; the earlier-set/re-driven Eject falls to pending below.
 //   - pending: everything else. On a *failed* run this includes a
 //     later-than-failing phase with earlier-drive-set activity (e.g. set 1's
 //     completed Eject when set 2's Write failed): the phase as a whole never
@@ -172,6 +184,13 @@ func buildPhaseTimeline(history runHistory, outcomes []TapeOutcome) []PhaseInfo 
 
 	frontier, frontierFailed, failureText := timelineFrontier(history, byPhase)
 
+	// While the run is paused for the operator, only the frontier (the pause's
+	// own phase) is active: a later phase that merely holds an earlier drive-set's
+	// completed activity must not also spin. See the "active" bullet above and
+	// issue #331. derivePause reports PauseNone for a closed run, so this is only
+	// ever true on an open, currently-paused run.
+	paused := derivePause(history).Kind != backup.PauseNone
+
 	timeline := make([]PhaseInfo, 0, len(phaseOrder))
 
 	for i, name := range phaseOrder {
@@ -188,7 +207,7 @@ func buildPhaseTimeline(history runHistory, outcomes []TapeOutcome) []PhaseInfo 
 		case history.Succeeded || i < frontier:
 			info.Status = PhaseCompleted
 			info.StartTime, info.EndTime = spanPointers(records)
-		case !history.Closed && (i == frontier || len(records) > 0):
+		case !history.Closed && (i == frontier || (len(records) > 0 && !paused)):
 			info.Status = PhaseActive
 			info.StartTime, _ = spanPointers(records)
 		default:
