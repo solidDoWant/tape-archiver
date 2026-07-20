@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -163,6 +164,51 @@ func TestGenerateRejectsInvalidInput(t *testing.T) {
 			assert.NoFileExists(t, recoverySetPath)
 		})
 	}
+}
+
+// TestGenerateReportsProgress verifies WithProgress observes par2's completion
+// fraction: the callback fires with non-decreasing fractions within [0, 1] that
+// reach completion, and the recovery set is still produced correctly under the
+// default verbosity WithProgress selects.
+func TestGenerateReportsProgress(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	paths, _ := writeSlices(t, dir, []int{1_000_000, 1_000_000})
+
+	recoverySetPath := filepath.Join(dir, "archive.par2")
+
+	var (
+		mu        sync.Mutex
+		fractions []float64
+	)
+
+	err := par2.Generate(t.Context(), recoverySetPath, paths, 30, par2.WithProgress(func(fraction float64) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		fractions = append(fractions, fraction)
+	}))
+	require.NoError(t, err)
+
+	// Dropping -qq for progress must not change the output: a valid set is written.
+	assert.FileExists(t, recoverySetPath)
+	blockCount := par2Verify(t, recoverySetPath)
+	assert.LessOrEqual(t, blockCount, maxSourceBlocks)
+
+	require.NotEmpty(t, fractions, "progress callback must fire at least once")
+
+	for index, fraction := range fractions {
+		assert.GreaterOrEqual(t, fraction, 0.0, "fraction must not be negative")
+		assert.LessOrEqual(t, fraction, 1.0, "fraction must not exceed 1")
+
+		if index > 0 {
+			assert.GreaterOrEqual(t, fraction, fractions[index-1],
+				"par2 create progress must be non-decreasing")
+		}
+	}
+
+	assert.GreaterOrEqual(t, fractions[len(fractions)-1], 0.99, "progress must reach completion")
 }
 
 // TestMaxOutputBytes proves par2.MaxOutputBytes is a true upper bound on the real

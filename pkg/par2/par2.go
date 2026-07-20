@@ -23,6 +23,26 @@ const maxSourceBlocks = 32768
 // block size that is not a multiple of 4 is rejected outright.
 const blockSizeMultiple = 4
 
+// ProgressFunc receives par2's completion fraction for the current run, in the
+// range [0, 1], as par2 reports it. Generate calls it from the goroutine that
+// reads par2's output, so it must return quickly and must not block.
+type ProgressFunc func(fraction float64)
+
+// Option configures a Generate call.
+type Option func(*options)
+
+type options struct {
+	onProgress ProgressFunc
+}
+
+// WithProgress reports par2's completion fraction to onProgress as generation
+// runs. Supplying it makes Generate run par2 at its default verbosity rather than
+// fully silenced, because par2 emits its "Processing: N%" progress only at that
+// verbosity; without it Generate stays quiet and reports no progress.
+func WithProgress(onProgress ProgressFunc) Option {
+	return func(o *options) { o.onProgress = onProgress }
+}
+
 // Generate produces a PAR2 recovery set covering dataFiles at the given
 // redundancy percentage, writing the recovery files alongside them. It shells
 // out to the bundled par2 binary — the exact tool whose binary and source ship
@@ -38,14 +58,20 @@ const blockSizeMultiple = 4
 // redundancyPercent must be in [1, 100]: the recovery set can repair damage up
 // to that fraction of the data. The PAR2 block size is computed from the total
 // data size so the source block count stays within PAR2's 32,768-block hard
-// limit (SPEC §8).
-func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, redundancyPercent int) error {
+// limit (SPEC §8). Pass WithProgress to observe par2's completion fraction as it
+// runs.
+func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, redundancyPercent int, opts ...Option) error {
 	if redundancyPercent < 1 || redundancyPercent > 100 {
 		return fmt.Errorf("redundancy percentage must be in [1, 100], got %d", redundancyPercent)
 	}
 
 	if len(dataFiles) == 0 {
 		return fmt.Errorf("no data files given")
+	}
+
+	var cfg options
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	dir := filepath.Dir(recoverySetPath)
@@ -72,27 +98,40 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 
 	blockSize := ComputeBlockSize(totalSize, len(dataFiles))
 
-	// -qq fully silences par2's progress output; -s sets the block size, -r the
-	// redundancy percentage, -a the recovery set name. -- ends option parsing so
-	// data file names are never mistaken for flags.
-	args := []string{
-		"create", "-qq",
-		"-s" + strconv.FormatInt(blockSize, 10),
-		"-r" + strconv.Itoa(redundancyPercent),
+	// -s sets the block size, -r the redundancy percentage, -a the recovery set
+	// name. -- ends option parsing so data file names are never mistaken for
+	// flags. -qq fully silences par2, including its "Processing: N%" progress; it
+	// is dropped when a progress callback is set so that output exists to parse.
+	args := []string{"create"}
+	if cfg.onProgress == nil {
+		args = append(args, "-qq")
+	}
+
+	args = append(args,
+		"-s"+strconv.FormatInt(blockSize, 10),
+		"-r"+strconv.Itoa(redundancyPercent),
 		"-a", filepath.Base(recoverySetPath),
 		"--",
-	}
+	)
 	args = append(args, names...)
 
 	cmd := exec.CommandContext(ctx, "par2", args...)
 	cmd.Dir = dir
 
+	// Merge stdout and stderr into one sink: it retains the non-progress lines for
+	// a failure message and parses progress tokens into fraction callbacks. Both
+	// streams share the one sink, so os/exec drives it from a single goroutine.
 	var output strings.Builder
 
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	sink := &par2OutputSink{full: &output, onProgress: cfg.onProgress}
+	cmd.Stdout = sink
+	cmd.Stderr = sink
 
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+
+	sink.flush()
+
+	if err != nil {
 		if msg := strings.TrimSpace(output.String()); msg != "" {
 			return fmt.Errorf("%s: %w: %s", cmd, err, msg)
 		}
@@ -101,6 +140,78 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 	}
 
 	return nil
+}
+
+// par2OutputSink consumes par2's merged stdout/stderr. par2 reports progress as
+// "Processing: N%" tokens separated by carriage returns, interleaved with
+// ordinary newline-separated lines. The sink splits the stream on either
+// separator: progress tokens are parsed into fraction callbacks (when a callback
+// is set) and dropped, and every other line is retained in full for a failure
+// message. os/exec drives a single writer goroutine here — stdout and stderr
+// share one sink — so Write needs no synchronisation.
+type par2OutputSink struct {
+	full       *strings.Builder
+	onProgress ProgressFunc
+	partial    []byte // bytes since the last separator, possibly split across writes
+}
+
+func (s *par2OutputSink) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b == '\r' || b == '\n' {
+			s.emit()
+
+			continue
+		}
+
+		s.partial = append(s.partial, b)
+	}
+
+	return len(p), nil
+}
+
+// flush emits any trailing token par2 left without a final separator; call it
+// once par2 has exited and no further writes can arrive.
+func (s *par2OutputSink) flush() { s.emit() }
+
+// emit consumes the token accumulated since the last separator: a progress token
+// becomes a fraction callback, anything else is retained for the failure message.
+func (s *par2OutputSink) emit() {
+	token := strings.TrimSpace(string(s.partial))
+	s.partial = s.partial[:0]
+
+	if token == "" {
+		return
+	}
+
+	if s.onProgress != nil {
+		if fraction, ok := parseProgress(token); ok {
+			s.onProgress(fraction)
+
+			return
+		}
+	}
+
+	s.full.WriteString(token)
+	s.full.WriteByte('\n')
+}
+
+// parseProgress extracts the completion fraction from a par2 progress token like
+// "Processing: 42.3%", returning false for any other token.
+func parseProgress(token string) (float64, bool) {
+	const prefix = "Processing:"
+
+	if !strings.HasPrefix(token, prefix) || !strings.HasSuffix(token, "%") {
+		return 0, false
+	}
+
+	value := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(token, prefix), "%"))
+
+	percent, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	return percent / 100, true
 }
 
 // ComputeBlockSize returns the PAR2 block size to use for totalSize bytes spread

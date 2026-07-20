@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -67,19 +69,191 @@ type GeneratePAR2Input struct {
 	Archives []StagedArchive
 }
 
+// PAR2Progress is the Generate PAR2 activity's progress snapshot: it is the
+// heartbeat payload Temporal surfaces while the phase runs (and hands a retried
+// attempt via activity.GetHeartbeatDetails), and it is what the periodic progress
+// log reports. par2 crunches archives one at a time and a single archive can take
+// hours over terabytes, so the snapshot combines the per-archive count with the
+// in-flight archive's own completion fraction (parsed from par2) into a
+// byte-weighted overall percentage and a projected time to finish.
+type PAR2Progress struct {
+	// TotalArchives is how many archives the phase will generate a recovery set
+	// for; CompletedArchives is how many have finished.
+	TotalArchives     int `json:"totalArchives"`
+	CompletedArchives int `json:"completedArchives"`
+
+	// CurrentSourceIndex and CurrentRedundancyPercent identify the archive whose
+	// parity is being computed right now — the slow par2 call — and
+	// CurrentArchivePercent is that archive's own completion (0–100), from par2.
+	CurrentSourceIndex       int     `json:"currentSourceIndex"`
+	CurrentRedundancyPercent int     `json:"currentRedundancyPercent"`
+	CurrentArchivePercent    float64 `json:"currentArchivePercent"`
+
+	// OverallPercent is byte-weighted progress across every archive (0–100), and
+	// EstimatedTimeRemaining projects the time left from the byte rate observed so
+	// far. EstimatedTimeRemaining is zero until there is enough progress to
+	// estimate (and near zero as the phase finishes).
+	OverallPercent         float64       `json:"overallPercent"`
+	EstimatedTimeRemaining time.Duration `json:"estimatedTimeRemaining"`
+}
+
+// par2ProgressTracker holds the live progress the Generate PAR2 heartbeat and log
+// report. The work goroutine advances it — per archive, and (via par2's progress
+// callback) within the archive in flight — while the heartbeat goroutine snapshots
+// it, so its methods take a lock. The mutating methods are nil-safe: a nil tracker
+// (the test path, which runs generatePAR2 without a heartbeat) records nothing.
+type par2ProgressTracker struct {
+	// now and startedAt drive the ETA; totalArchives and totalBytes are the fixed
+	// denominators. All are set at construction and read without the lock.
+	now           func() time.Time
+	startedAt     time.Time
+	totalArchives int
+	totalBytes    int64
+
+	mu             sync.Mutex
+	completedCount int
+	completedBytes int64
+	current        par2CurrentArchive
+}
+
+// par2CurrentArchive is the tracker's view of the archive whose parity is being
+// computed: its identity, its data size (for byte-weighting), and its own
+// completion fraction as par2 reports it.
+type par2CurrentArchive struct {
+	sourceIndex       int
+	redundancyPercent int
+	dataBytes         int64
+	fraction          float64
+}
+
+// newPAR2ProgressTracker returns a tracker for a phase generating recovery sets
+// for the given archives, using now as its clock (injected so the ETA is
+// testable). startedAt is stamped now so the ETA measures from phase start.
+func newPAR2ProgressTracker(archives []StagedArchive, now func() time.Time) *par2ProgressTracker {
+	var totalBytes int64
+	for _, archive := range archives {
+		totalBytes += archive.SizeBytes
+	}
+
+	return &par2ProgressTracker{
+		now:           now,
+		startedAt:     now(),
+		totalArchives: len(archives),
+		totalBytes:    totalBytes,
+	}
+}
+
+// startArchive records that generation of the given archive has begun.
+func (p *par2ProgressTracker) startArchive(sourceIndex, redundancyPercent int, dataBytes int64) {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.current = par2CurrentArchive{
+		sourceIndex:       sourceIndex,
+		redundancyPercent: redundancyPercent,
+		dataBytes:         dataBytes,
+	}
+}
+
+// updateArchiveProgress records the in-flight archive's completion fraction (from
+// par2), clamped to [0, 1]. It is the par2.WithProgress callback.
+func (p *par2ProgressTracker) updateArchiveProgress(fraction float64) {
+	if p == nil {
+		return
+	}
+
+	fraction = math.Min(math.Max(fraction, 0), 1)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.current.fraction = fraction
+}
+
+// finishArchive records that the archive in flight has completed: its bytes fold
+// into the completed total and the in-flight slot clears, so no bytes are
+// double-counted between archives.
+func (p *par2ProgressTracker) finishArchive() {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.completedBytes += p.current.dataBytes
+	p.completedCount++
+	p.current = par2CurrentArchive{}
+}
+
+// snapshot computes the current PAR2Progress: the archive counts, the in-flight
+// archive, the byte-weighted overall percentage, and an ETA projected from the
+// byte rate observed since the phase started.
+func (p *par2ProgressTracker) snapshot() PAR2Progress {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Bytes done so far: every completed archive in full, plus the in-flight
+	// archive weighted by its own reported fraction.
+	doneBytes := p.completedBytes + int64(float64(p.current.dataBytes)*p.current.fraction)
+
+	progress := PAR2Progress{
+		TotalArchives:            p.totalArchives,
+		CompletedArchives:        p.completedCount,
+		CurrentSourceIndex:       p.current.sourceIndex,
+		CurrentRedundancyPercent: p.current.redundancyPercent,
+		CurrentArchivePercent:    roundPercent(p.current.fraction * 100),
+	}
+
+	if p.totalBytes > 0 {
+		progress.OverallPercent = roundPercent(float64(doneBytes) / float64(p.totalBytes) * 100)
+
+		// Project the remaining time from the average byte rate so far. Needs some
+		// progress and elapsed time to divide by; otherwise the ETA stays zero
+		// ("not yet estimable").
+		if elapsed := p.now().Sub(p.startedAt); elapsed > 0 && doneBytes > 0 {
+			remaining := p.totalBytes - doneBytes
+			eta := time.Duration(float64(remaining) / float64(doneBytes) * float64(elapsed))
+			progress.EstimatedTimeRemaining = eta.Round(time.Second)
+		}
+	}
+
+	return progress
+}
+
+// roundPercent rounds a percentage to one decimal place, matching par2's own 0.1%
+// progress granularity and keeping the payload and log tidy.
+func roundPercent(percent float64) float64 {
+	return math.Round(percent*10) / 10
+}
+
 // GeneratePAR2 generates a per-archive PAR2 recovery set for every staged archive
 // (SPEC §4.3 phase 4), returning a PAR2Set per input archive in the same order,
 // each with its recovery files' paths, sizes, and SHA-256 checksums.
 func (a *GeneratePAR2Activities) GeneratePAR2(ctx context.Context, input GeneratePAR2Input) ([]PAR2Set, error) {
 	// Emit a liveness heartbeat while generating parity so a data-worker restart
 	// mid-phase is caught within activityHeartbeatTimeout rather than the 24h
-	// StartToClose.
+	// StartToClose. Each tick also records the progress snapshot as the heartbeat
+	// payload and logs it, so a long archive is neither silent in the logs nor
+	// opaque in the Temporal UI — with a byte-weighted percentage and ETA.
 	var sets []PAR2Set
 
-	err := withActivityHeartbeat(ctx, func() error {
+	progress := newPAR2ProgressTracker(input.Archives, time.Now)
+
+	record := func() {
+		snapshot := progress.snapshot()
+		activity.RecordHeartbeat(ctx, snapshot)
+		logPAR2Progress(ctx, snapshot)
+	}
+
+	err := runWithHeartbeat(ctx, activityHeartbeatInterval, record, func() error {
 		var err error
 
-		sets, err = generatePAR2(ctx, input.Config, input.Plan, input.Archives)
+		sets, err = generatePAR2(ctx, input.Config, input.Plan, input.Archives, progress)
 
 		return err
 	})
@@ -87,9 +261,30 @@ func (a *GeneratePAR2Activities) GeneratePAR2(ctx context.Context, input Generat
 	return sets, err
 }
 
+// logPAR2Progress emits one periodic progress line for the Generate PAR2 phase.
+// The ETA is included only once it is estimable, so the line does not imply a
+// bogus "0s remaining" before the first bytes are done.
+func logPAR2Progress(ctx context.Context, progress PAR2Progress) {
+	attrs := []any{
+		"completedArchives", progress.CompletedArchives,
+		"totalArchives", progress.TotalArchives,
+		"currentSourceIndex", progress.CurrentSourceIndex,
+		"currentArchivePercent", progress.CurrentArchivePercent,
+		"overallPercent", progress.OverallPercent,
+	}
+
+	if progress.EstimatedTimeRemaining > 0 {
+		attrs = append(attrs, "eta", progress.EstimatedTimeRemaining.String())
+	}
+
+	slog.InfoContext(ctx, "par2: progress", attrs...)
+}
+
 // generatePAR2 is the body of the Generate PAR2 activity, split out so it can be
-// exercised without an activity context.
-func generatePAR2(ctx context.Context, cfg config.Config, plan TapePlan, staged []StagedArchive) ([]PAR2Set, error) {
+// exercised without an activity context. progress may be nil (the test path); when
+// set it is advanced per archive so the caller's heartbeat can report which archive
+// is in flight.
+func generatePAR2(ctx context.Context, cfg config.Config, plan TapePlan, staged []StagedArchive, progress *par2ProgressTracker) ([]PAR2Set, error) {
 	if len(staged) == 0 {
 		return nil, nil
 	}
@@ -99,6 +294,8 @@ func generatePAR2(ctx context.Context, cfg config.Config, plan TapePlan, staged 
 		return nil, err
 	}
 
+	slog.InfoContext(ctx, "par2: generating recovery sets", "archives", len(staged))
+
 	sets := make([]PAR2Set, 0, len(staged))
 
 	for _, archive := range staged {
@@ -107,12 +304,20 @@ func generatePAR2(ctx context.Context, cfg config.Config, plan TapePlan, staged 
 			return nil, fmt.Errorf("sources[%d] was staged but not placed on any tape by the Pack phase", archive.SourceIndex)
 		}
 
-		set, err := generateArchivePAR2(ctx, archive, percent)
+		progress.startArchive(archive.SourceIndex, percent, archive.SizeBytes)
+
+		slog.InfoContext(ctx, "par2: generating recovery set for archive",
+			"sourceIndex", archive.SourceIndex, "redundancyPercent", percent,
+			"slices", len(archive.Slices), "dataBytes", archive.SizeBytes)
+
+		set, err := generateArchivePAR2(ctx, archive, percent, progress)
 		if err != nil {
 			return nil, fmt.Errorf("generate PAR2 for sources[%d]: %w", archive.SourceIndex, err)
 		}
 
 		sets = append(sets, set)
+
+		progress.finishArchive()
 
 		slog.InfoContext(ctx, "par2: generated recovery set for archive",
 			"sourceIndex", set.SourceIndex, "redundancyPercent", set.RedundancyPercent,
@@ -219,8 +424,10 @@ func tapePAR2Bound(tape PlannedTape, percent int) int64 {
 
 // generateArchivePAR2 generates and stages one archive's PAR2 recovery set at the
 // given percentage: it runs par2 over the archive's slices, then measures and
-// checksums every recovery file the run produced.
-func generateArchivePAR2(ctx context.Context, archive StagedArchive, percent int) (PAR2Set, error) {
+// checksums every recovery file the run produced. When progress is non-nil the
+// archive's par2 completion fraction is fed into it (for the phase's heartbeat and
+// log); a nil tracker (the test path) generates quietly.
+func generateArchivePAR2(ctx context.Context, archive StagedArchive, percent int, progress *par2ProgressTracker) (PAR2Set, error) {
 	if len(archive.Slices) == 0 {
 		return PAR2Set{}, fmt.Errorf("staged archive has no slices to protect")
 	}
@@ -246,7 +453,15 @@ func generateArchivePAR2(ctx context.Context, archive StagedArchive, percent int
 		return PAR2Set{}, err
 	}
 
-	if err := par2.Generate(ctx, recoverySetPath, dataFiles, percent); err != nil {
+	// Feed par2's live completion fraction into the tracker so the phase's
+	// heartbeat and log can report within-archive progress and an ETA. Only when a
+	// tracker is present, so the test path stays fully quiet (keeping par2's -qq).
+	var opts []par2.Option
+	if progress != nil {
+		opts = append(opts, par2.WithProgress(progress.updateArchiveProgress))
+	}
+
+	if err := par2.Generate(ctx, recoverySetPath, dataFiles, percent, opts...); err != nil {
 		return PAR2Set{}, err
 	}
 

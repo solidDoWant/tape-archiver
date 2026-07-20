@@ -33,7 +33,7 @@ func verifyFixture(t *testing.T) (TapePlan, []StagedArchive, []PAR2Set) {
 	plan, err := pack(cfg, staged)
 	require.NoError(t, err)
 
-	sets, err := generatePAR2(t.Context(), cfg, plan, staged)
+	sets, err := generatePAR2(t.Context(), cfg, plan, staged, nil)
 	require.NoError(t, err)
 
 	return plan, staged, sets

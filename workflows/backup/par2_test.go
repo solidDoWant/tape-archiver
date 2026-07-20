@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,7 +46,7 @@ func TestGeneratePAR2FixedPercentage(t *testing.T) {
 	plan, err := pack(cfg, staged)
 	require.NoError(t, err)
 
-	sets, err := generatePAR2(t.Context(), cfg, plan, staged)
+	sets, err := generatePAR2(t.Context(), cfg, plan, staged, nil)
 	require.NoError(t, err)
 	require.Len(t, sets, len(staged))
 
@@ -86,7 +87,7 @@ func TestGeneratePAR2FillToCapacity(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, plan.Tapes, 1, "both archives must pack onto a single tape")
 
-	sets, err := generatePAR2(t.Context(), cfg, plan, staged)
+	sets, err := generatePAR2(t.Context(), cfg, plan, staged, nil)
 	require.NoError(t, err)
 	require.Len(t, sets, 2)
 
@@ -134,7 +135,7 @@ func TestGeneratePAR2FillToCapacityFitsRealPAR2(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, plan.Tapes, 1, "both archives must pack onto a single tape")
 
-	sets, err := generatePAR2(t.Context(), cfg, plan, staged)
+	sets, err := generatePAR2(t.Context(), cfg, plan, staged, nil)
 	require.NoError(t, err)
 	require.Len(t, sets, len(staged))
 
@@ -217,7 +218,7 @@ func TestGeneratePAR2RetriesAfterPartialAttempt(t *testing.T) {
 
 	// First attempt: leaves a full recovery set in every archive's staging dir —
 	// the "files already exist" partial precondition a retry must survive.
-	_, err = generatePAR2(t.Context(), cfg, plan, staged)
+	_, err = generatePAR2(t.Context(), cfg, plan, staged, nil)
 	require.NoError(t, err)
 
 	// Plant a stale leftover the current run will not regenerate, matching the
@@ -228,7 +229,7 @@ func TestGeneratePAR2RetriesAfterPartialAttempt(t *testing.T) {
 
 	// Retry over the same staging directories. Without the purge this fails
 	// deterministically (par2 create exits non-zero when recovery files exist).
-	sets, err := generatePAR2(t.Context(), cfg, plan, staged)
+	sets, err := generatePAR2(t.Context(), cfg, plan, staged, nil)
 	require.NoError(t, err)
 	require.Len(t, sets, len(staged))
 
@@ -254,7 +255,7 @@ func TestGeneratePAR2RetriesAfterPartialAttempt(t *testing.T) {
 func TestGeneratePAR2Empty(t *testing.T) {
 	t.Parallel()
 
-	sets, err := generatePAR2(t.Context(), packConfig(1_000_000, 1, 1, targetRedundancy(10)), TapePlan{}, nil)
+	sets, err := generatePAR2(t.Context(), packConfig(1_000_000, 1, 1, targetRedundancy(10)), TapePlan{}, nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, sets)
 }
@@ -316,6 +317,114 @@ func TestFillPercent(t *testing.T) {
 
 		assert.Equal(t, 7, fillPercent(oneArchiveTape(300_000_000, 0), 7))
 	})
+}
+
+// TestPAR2ProgressTracker verifies the progress tracker's snapshot: the archive
+// counts, the in-flight archive, the byte-weighted overall percentage, and the ETA
+// projected from the byte rate — using an injected clock so the ETA is
+// deterministic.
+func TestPAR2ProgressTracker(t *testing.T) {
+	t.Parallel()
+
+	// A controllable clock so the byte-rate ETA is deterministic.
+	current := time.Unix(0, 0)
+	clock := func() time.Time { return current }
+	advance := func(elapsed time.Duration) { current = current.Add(elapsed) }
+
+	// Two archives, 100 and 300 bytes (400 total), so overall progress is
+	// genuinely byte-weighted rather than a per-archive count.
+	archives := []StagedArchive{
+		{SourceIndex: 3, SizeBytes: 100},
+		{SourceIndex: 7, SizeBytes: 300},
+	}
+
+	tracker := newPAR2ProgressTracker(archives, clock)
+
+	// Nothing done yet: totals are set, and there is no ETA to project.
+	assert.Equal(t, PAR2Progress{TotalArchives: 2}, tracker.snapshot())
+
+	// First archive in flight, half its 100 bytes done after 10s: overall is
+	// 50/400 = 12.5%, and the ETA projects the remaining 350 bytes at 50 bytes /
+	// 10s = 70s.
+	tracker.startArchive(3, 20, 100)
+	tracker.updateArchiveProgress(0.5)
+	advance(10 * time.Second)
+
+	assert.Equal(t, PAR2Progress{
+		TotalArchives:            2,
+		CurrentSourceIndex:       3,
+		CurrentRedundancyPercent: 20,
+		CurrentArchivePercent:    50,
+		OverallPercent:           12.5,
+		EstimatedTimeRemaining:   70 * time.Second,
+	}, tracker.snapshot())
+
+	// Finishing folds the archive's bytes into the completed total and clears the
+	// in-flight slot, so no bytes are double-counted between archives.
+	tracker.finishArchive()
+
+	got := tracker.snapshot()
+	assert.Equal(t, 1, got.CompletedArchives)
+	assert.Zero(t, got.CurrentSourceIndex, "the in-flight slot clears between archives")
+	assert.Equal(t, 25.0, got.OverallPercent, "100 of 400 bytes are done")
+
+	// Second archive done: every byte is accounted for, so overall is 100% and no
+	// time remains.
+	tracker.startArchive(7, 35, 300)
+	tracker.updateArchiveProgress(1)
+	tracker.finishArchive()
+
+	got = tracker.snapshot()
+	assert.Equal(t, 2, got.CompletedArchives)
+	assert.Equal(t, 100.0, got.OverallPercent)
+	assert.Zero(t, got.EstimatedTimeRemaining, "no time remains once every archive is done")
+
+	// updateArchiveProgress clamps out-of-range fractions to [0, 1].
+	clampTracker := newPAR2ProgressTracker(archives, clock)
+	clampTracker.startArchive(1, 10, 100)
+	clampTracker.updateArchiveProgress(2)
+	assert.Equal(t, 100.0, clampTracker.snapshot().CurrentArchivePercent, "fraction above 1 clamps to 100%")
+	clampTracker.updateArchiveProgress(-1)
+	assert.Equal(t, 0.0, clampTracker.snapshot().CurrentArchivePercent, "fraction below 0 clamps to 0%")
+
+	// The mutating methods no-op on a nil tracker rather than panicking — the seam
+	// that lets generatePAR2 run without a heartbeat in tests.
+	var nilTracker *par2ProgressTracker
+
+	assert.NotPanics(t, func() {
+		nilTracker.startArchive(1, 10, 100)
+		nilTracker.updateArchiveProgress(0.5)
+		nilTracker.finishArchive()
+	})
+}
+
+// TestGeneratePAR2ReportsProgress verifies the activity body advances the progress
+// tracker as it generates each archive with the real par2 binary, ending with
+// every archive counted complete, all bytes done, and no time remaining.
+func TestGeneratePAR2ReportsProgress(t *testing.T) {
+	t.Parallel()
+
+	staged := []StagedArchive{
+		writeStagedArchive(t, 0, []int{100_000}),
+		writeStagedArchive(t, 1, []int{100_000}),
+	}
+
+	cfg := packConfig(500_000_000, 1, 1, targetRedundancy(20))
+
+	plan, err := pack(cfg, staged)
+	require.NoError(t, err)
+
+	tracker := newPAR2ProgressTracker(staged, time.Now)
+
+	sets, err := generatePAR2(t.Context(), cfg, plan, staged, tracker)
+	require.NoError(t, err)
+	require.Len(t, sets, len(staged))
+
+	got := tracker.snapshot()
+	assert.Equal(t, len(staged), got.TotalArchives)
+	assert.Equal(t, len(staged), got.CompletedArchives, "every archive must be counted complete")
+	assert.Equal(t, 100.0, got.OverallPercent, "all bytes are done once every archive is generated")
+	assert.Zero(t, got.EstimatedTimeRemaining, "no time remains once the phase is done")
 }
 
 // assertStagedRecoverySet verifies a generated recovery set is well-formed: the
