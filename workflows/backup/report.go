@@ -137,14 +137,17 @@ func newReportActivities(stagingRoot, binariesDir, sourcesDir string) *ReportAct
 // run state the report and ISO are assembled from. RunID and Date come from the
 // workflow (deterministic) so the artifact is stamped identically on any retry.
 type ReportInput struct {
-	Config   config.Config
-	RunID    string
-	Date     time.Time
-	Resolved []ResolvedArchive
-	Staged   []StagedArchive
-	PAR2     []PAR2Set
-	Plan     TapePlan
-	Written  []WrittenTape
+	Config config.Config
+	RunID  string
+	Date   time.Time
+	// SliceSizeBytes is the run's slice size the Resolve phase derived
+	// (DeriveSliceSize; issue #324), recorded in the report's build parameters.
+	SliceSizeBytes int64
+	Resolved       []ResolvedArchive
+	Staged         []StagedArchive
+	PAR2           []PAR2Set
+	Plan           TapePlan
+	Written        []WrittenTape
 	// Discs are the recovery discs burned for the run, populated only for the
 	// post-burn re-render of the delivered report (the Report phase itself runs
 	// before the Burn phase, so it leaves this empty). When set, the report records
@@ -484,7 +487,7 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 		Archives:          archives,
 		Tapes:             reportTapes(input, nameByIndex),
 		Discs:             reportDiscs(input.Discs),
-		Build:             buildParams(input.Config, device),
+		Build:             buildParams(input.Config, input.SliceSizeBytes, device),
 		AgeIdentity:       input.Config.Encryption.Identity,
 		RecoveryProcedure: recoveryProcedure,
 	}
@@ -626,15 +629,16 @@ func reportWriteHealth(health WriteHealth) *report.WriteHealth {
 }
 
 // buildParams records how the tapes were built (SPEC §9): tool and external tool
-// versions from the committed build info, slice size and PAR2 policy from the run
-// config, and the best-effort drive/library identifiers.
-func buildParams(cfg config.Config, device deviceIdentity) report.BuildParams {
+// versions from the committed build info, the run's derived slice size
+// (DeriveSliceSize; issue #324) and PAR2 policy from the run config, and the
+// best-effort drive/library identifiers.
+func buildParams(cfg config.Config, sliceSizeBytes int64, device deviceIdentity) report.BuildParams {
 	return report.BuildParams{
 		ToolVersion:     buildinfo.ToolVersion(),
 		AgeVersion:      buildinfo.AgeVersion(),
 		Par2Version:     buildinfo.Par2Version(),
 		LTFSVersion:     buildinfo.LTFSVersion(),
-		SliceSize:       cfg.Redundancy.SliceSizeBytes,
+		SliceSize:       sliceSizeBytes,
 		PAR2Redundancy:  redundancyPolicy(cfg.Redundancy),
 		DriveModel:      device.driveModel,
 		DriveGeneration: device.driveGeneration,
@@ -803,13 +807,14 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 // re-render sets it from the burned discs.
 func reportInput(ctx workflow.Context, cfg config.Config, state *runState) ReportInput {
 	return ReportInput{
-		Config:   cfg,
-		RunID:    workflow.GetInfo(ctx).WorkflowExecution.ID,
-		Date:     state.reportDate,
-		Resolved: state.resolved,
-		Staged:   state.staged,
-		PAR2:     state.par2,
-		Plan:     state.plan,
-		Written:  state.written,
+		Config:         cfg,
+		RunID:          workflow.GetInfo(ctx).WorkflowExecution.ID,
+		Date:           state.reportDate,
+		SliceSizeBytes: state.sliceSizeBytes,
+		Resolved:       state.resolved,
+		Staged:         state.staged,
+		PAR2:           state.par2,
+		Plan:           state.plan,
+		Written:        state.written,
 	}
 }

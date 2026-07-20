@@ -93,13 +93,12 @@ describe('ConfigReview', () => {
   })
 
   it('renders an em dash, not "floor undefined%", for a fill-to-capacity block missing its floor', () => {
-    // A JSON-mode config whose redundancy block omits the floor (the committed
-    // schema requires only sliceSizeBytes).
+    // A JSON-mode config whose redundancy block omits the floor.
     const config = {
       sources: [{ zfsPath: { name: 'pool/data' } }],
       copies: 2,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
-      redundancy: { fillToCapacity: {}, sliceSizeBytes: 1024 },
+      redundancy: { fillToCapacity: {} },
       encryption: { recipients: ['age1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
       delivery: { webhookUrl: '' },
     } as unknown as RunConfig
@@ -117,7 +116,7 @@ describe('ConfigReview', () => {
       sources: [{ zfsPath: { name: 'pool/data' } }],
       copies: 2,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1024 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: ['age1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
       delivery: { webhookUrl: '', opticalBurn: { drives: ['/dev/sr0'] } },
     } as unknown as RunConfig

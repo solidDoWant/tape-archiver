@@ -15,16 +15,17 @@ const validConfigJSON = `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 2,
   "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
-  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+  "redundancy": {"targetPercentage": 10},
   "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
   "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
 }`
 
 func TestParse(t *testing.T) {
 	tests := []struct {
-		name      string
-		json      string
-		assertErr require.ErrorAssertionFunc
+		name        string
+		json        string
+		assertErr   require.ErrorAssertionFunc
+		errContains string
 	}{
 		{
 			name:      "valid config",
@@ -35,6 +36,15 @@ func TestParse(t *testing.T) {
 			name:      "unknown field is rejected",
 			json:      `{"sources": [], "copies": 2, "copys": 3}`,
 			assertErr: require.Error,
+		},
+		{
+			// The slice size is no longer operator-configurable (issue #324); a config
+			// that still sets it is rejected, naming the removed field, via
+			// DisallowUnknownFields.
+			name:        "removed sliceSizeBytes field is rejected naming the field",
+			json:        `{"sources": [{"zfsPath": {"name": "p@s"}}], "copies": 2, "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824}}`,
+			assertErr:   require.Error,
+			errContains: "sliceSizeBytes",
 		},
 		{
 			name:      "missing sources fails validation",
@@ -49,7 +59,7 @@ func TestParse(t *testing.T) {
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 3,
   "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2, 3], "tapeCapacityBytes": 2500000000000},
-  "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824},
+  "redundancy": {"targetPercentage": 10},
   "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
   "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
 }`,
@@ -66,6 +76,10 @@ func TestParse(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			cfg, err := Parse([]byte(test.json))
 			test.assertErr(t, err)
+
+			if test.errContains != "" {
+				assert.ErrorContains(t, err, test.errContains)
+			}
 
 			if err == nil {
 				require.NotNil(t, cfg)

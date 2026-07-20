@@ -158,10 +158,12 @@ write window.
    and validate raw ZFS snapshot/dataset paths. Run a cheap
    feasibility pre-check from `zfs` properties (`logicalreferenced`, inflated by a small
    `tar` overhead and the configured PAR2 %) purely to reject any single archive that
-   cannot fit on one tape *before* doing real work. The same pre-check also rejects a
-   `sliceSizeBytes` so small for the resolved source size that the run's total slice
-   count would grow an activity payload past Temporal's ~2 MB limit, naming the field
-   and a suggested minimum. This is an estimate, not the plan.
+   cannot fit on one tape *before* doing real work. From the same resolved sizes it also
+   **derives the run's slice size** — the smallest whole GiB (≥ 1 GiB) that keeps the
+   whole-run slice count within Temporal's ~2 MB activity-payload budget and every
+   archive's slice count in the PAR2 block-count regime. Slice size is therefore not an
+   operator-set field; the payload bound is satisfied by construction and remains only as
+   an internal invariant. This is an estimate, not the plan.
    Immediately after Resolve produces the work list — before any staging — the run
    places a `zfs hold` on every resolved source snapshot and keeps it for the run's
    duration, so an external `zfs destroy` cannot prune a snapshot mid-run; the holds are
@@ -298,7 +300,8 @@ The config defines, at minimum:
   deliberately overwrite used tapes (§4.3 step 6).
 - **Redundancy** — PAR2 policy: a target redundancy percentage, or **fill-to-capacity**
   (size data first, then expand PAR2 to consume remaining tape down to a configured
-  floor). Slice size is configurable.
+  floor). Slice size is not configurable — it is derived from the resolved source sizes
+  at the Resolve phase (§4.3 step 1).
 - **Compression** — optional `zstd` before encryption, configurable per source,
   default on. Already-compressed sources (e.g. `media`) gain little but are unharmed.
 - **Encryption** — the age recipient(s) (`age1pq1…`) to encrypt to.

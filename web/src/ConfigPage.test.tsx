@@ -184,7 +184,7 @@ describe('ConfigPage', () => {
       sources: [{ zfsPath: { name: 'bulk-pool-01/from-json' } }],
       copies: 3,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: [], identity: '' },
       delivery: { webhookUrl: '' },
     }
@@ -236,7 +236,7 @@ describe('ConfigPage', () => {
         tapeCapacityBytes: 2500000000000,
         ioWaitTimeoutSeconds: 3600,
       },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
       delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
     }
@@ -265,7 +265,7 @@ describe('ConfigPage', () => {
       sources: [{ zfsPath: { name: 'bulk-pool-01/custom-capacity' } }],
       copies: 2,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 9999999999999 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
       delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
     }
@@ -288,7 +288,7 @@ describe('ConfigPage', () => {
       sources: [{ zfsPath: { name: 'bulk-pool-01/plain' } }],
       copies: 2,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
       delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
     }
@@ -312,7 +312,7 @@ describe('ConfigPage', () => {
       sources: [{ zfsPath: { name: 'bulk-pool-01/override' } }],
       copies: 2,
       library: { changer: '/dev/sch9', drives: ['/dev/nst8'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
       delivery: { webhookUrl: 'https://discord.com/api/webhooks/override/1' },
     }
@@ -515,7 +515,7 @@ describe('ConfigPage', () => {
       sources: [{ zfsPath: { name: 'bulk-pool-01/json' } }],
       copies: 1,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
       delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
     }
@@ -576,7 +576,7 @@ describe('ConfigPage', () => {
           sources: [{ zfsPath: { name: 'p' } }],
           copies: 1,
           library: { changer: 'c', drives: ['d'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
-          redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+          redundancy: { targetPercentage: 10 },
           encryption: { recipients: ['r'], identity: 'i' },
           delivery: { webhookUrl: 'w' },
         }),
@@ -612,7 +612,7 @@ describe('ConfigPage', () => {
           sources: [{ zfsPath: { name: 'p' } }],
           copies: 1,
           library: { changer: 'c', drives: ['d'], blankSlots: [], tapeCapacityBytes: 2500000000000 },
-          redundancy: { targetPercentage: 10, sliceSizeBytes: 1 },
+          redundancy: { targetPercentage: 10 },
           encryption: { recipients: ['r'], identity: 'i' },
           delivery: { webhookUrl: 'w' },
         }),
@@ -634,7 +634,7 @@ describe('ConfigPage', () => {
       sources: [{ zfsPath: { name: 'bulk-pool-01/archive@snap' }, label: 'archive', compression: true }],
       copies: 2,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [1, 2], tapeCapacityBytes: 2500000000000 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1073741824 },
+      redundancy: { targetPercentage: 10 },
       // The server redacts the age identity (a private key) — the restart must
       // never load the placeholder into the form as if it were a real key.
       encryption: { recipients: ['age1restarttestrecipient00000000000000000000000000000000000'], identity: '***redacted***' },
@@ -671,7 +671,7 @@ describe('ConfigPage', () => {
       sources: [{ zfsPath: { name: 'bulk-pool-01/archive@snap' }, compression: true }],
       copies: 1,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [1], tapeCapacityBytes: 2500000000000 },
-      redundancy: { targetPercentage: 10, sliceSizeBytes: 1073741824 },
+      redundancy: { targetPercentage: 10 },
       encryption: { recipients: ['age1restarttestrecipient00000000000000000000000000000000000'], identity: '***redacted***' },
       delivery: {},
     }

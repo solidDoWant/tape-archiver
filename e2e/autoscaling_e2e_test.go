@@ -117,7 +117,7 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 		Sources:    []config.Source{{ZFSPath: &config.ZFSPathSource{Name: source}}},
 		Copies:     copies,
 		Library:    fixture.library,
-		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10), SliceSizeBytes: 1 << 20},
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10)},
 		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
 		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(runID)},
 	}
@@ -239,7 +239,7 @@ func testFailureAlertFromZero(t *testing.T, h *e2eHarness) {
 		Sources:    []config.Source{{ZFSPath: &config.ZFSPathSource{Name: source}}},
 		Copies:     1,
 		Library:    fixture.library,
-		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10), SliceSizeBytes: 1 << 20},
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10)},
 		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
 		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(runID)},
 	}
@@ -296,7 +296,7 @@ func TestControlWorkerMultipleReplicas(t *testing.T) {
 		Sources:    []config.Source{{ZFSPath: &config.ZFSPathSource{Name: source}}},
 		Copies:     1,
 		Library:    fixture.library,
-		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10), SliceSizeBytes: 1 << 20},
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10)},
 		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
 		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(runID)},
 	}

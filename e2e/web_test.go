@@ -154,7 +154,7 @@ func TestWebUIEndToEnd(t *testing.T) {
 		Sources:    []config.Source{{ZFSPath: &config.ZFSPathSource{Name: source}}},
 		Copies:     1,
 		Library:    fixture.library,
-		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10), SliceSizeBytes: 1 << 20},
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10)},
 		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
 		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(deliveryToken)},
 	}
@@ -276,7 +276,7 @@ func TestWebUIEndToEnd(t *testing.T) {
 		// this the grid renders "topology not configured" and there is no slot
 		// to click. Cleaning/I/O-station slots are left at their empty defaults
 		// (no storage slot 1..47 is reserved in the mhvtl library).
-		"--set", "config.web.library.topology.slotCount=" + strconv.Itoa(webLibrarySlotCount),
+		"--set", "config.web.library.topology.slotCount="+strconv.Itoa(webLibrarySlotCount),
 		"--set-string", imagePath+".repository="+webRepo,
 		"--set-string", imagePath+".tag="+imageVersion,
 		"--set", imagePath+".pullPolicy=Never",

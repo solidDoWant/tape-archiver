@@ -118,7 +118,6 @@ func validBackupConfig() config.Config {
 		},
 		Redundancy: config.Redundancy{
 			TargetPercentage: &targetPercentage,
-			SliceSizeBytes:   1 << 30,
 		},
 		Encryption: config.Encryption{
 			Recipients: []string{"age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"},

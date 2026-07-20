@@ -108,10 +108,12 @@ func newPrepareActivities(stagingRoot string) *PrepareActivities {
 }
 
 // PrepareInput is the payload for the Prepare activity: the run config (for the
-// recipients and slice size) and the resolved work list to stage.
+// recipients), the resolved work list to stage, and the slice size the Resolve
+// phase derived for the run (DeriveSliceSize; issue #324).
 type PrepareInput struct {
-	Config   config.Config
-	Archives []ResolvedArchive
+	Config         config.Config
+	Archives       []ResolvedArchive
+	SliceSizeBytes int64
 }
 
 // PrepareArchives stages every resolved archive to disk (SPEC §4.3 phase 2),
@@ -154,7 +156,7 @@ func (a *PrepareActivities) PrepareArchives(ctx context.Context, input PrepareIn
 // activity context.
 func (a *PrepareActivities) prepare(ctx context.Context, stagingDir string, input PrepareInput) ([]StagedArchive, error) {
 	recipients := input.Config.Encryption.Recipients
-	sliceSize := input.Config.Redundancy.SliceSizeBytes
+	sliceSize := input.SliceSizeBytes
 
 	staged := make([]StagedArchive, 0, len(input.Archives))
 
@@ -367,7 +369,7 @@ func preparePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 
 	var activities *PrepareActivities
 
-	input := PrepareInput{Config: cfg, Archives: state.resolved}
+	input := PrepareInput{Config: cfg, Archives: state.resolved, SliceSizeBytes: state.sliceSizeBytes}
 
 	var staged []StagedArchive
 	if err := workflow.ExecuteActivity(dataCtx, activities.PrepareArchives, input).Get(dataCtx, &staged); err != nil {

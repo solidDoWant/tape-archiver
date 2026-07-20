@@ -32,7 +32,7 @@ describe('buildConfig', () => {
 
     expect(config.copies).toBe(2)
     expect(config.library.tapeCapacityBytes).toBe(2_500_000_000_000)
-    expect(config.redundancy).toEqual({ targetPercentage: 10, sliceSizeBytes: 4 * 1024 ** 3 })
+    expect(config.redundancy).toEqual({ targetPercentage: 10 })
     expect(config.delivery.opticalBurn).toBeUndefined()
   })
 
@@ -102,7 +102,7 @@ describe('buildConfig', () => {
 
     const config = buildConfig(form, testDeploy)
 
-    expect(config.redundancy).toEqual({ fillToCapacity: { floor: 7 }, sliceSizeBytes: 4 * 1024 ** 3 })
+    expect(config.redundancy).toEqual({ fillToCapacity: { floor: 7 } })
     expect(config.redundancy.targetPercentage).toBeUndefined()
   })
 
@@ -235,7 +235,7 @@ describe('configToFormState', () => {
       sources: [],
       copies: 1,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000, allowNonBlankTapes: 'false' },
-      redundancy: { sliceSizeBytes: 1024 },
+      redundancy: {},
       encryption: { recipients: [], identity: '' },
       delivery: { webhookUrl: '', opticalBurn: { drives: ['/dev/sr0'], copies: 1, allowNonBlankDiscs: 'yes' } },
     } as unknown as RunConfig
@@ -251,7 +251,7 @@ describe('configToFormState', () => {
       sources: [],
       copies: 1,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 999 },
-      redundancy: { sliceSizeBytes: 1024 },
+      redundancy: {},
       encryption: { recipients: [], identity: '' },
       delivery: { webhookUrl: '' },
     }
@@ -266,7 +266,7 @@ describe('configToFormState', () => {
       sources: [],
       copies: 1,
       library: { changer: '', drives: [], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
-      redundancy: { sliceSizeBytes: 1 },
+      redundancy: {},
       encryption: { recipients: [], identity: '' },
       delivery: { webhookUrl: '' },
     }
@@ -284,7 +284,7 @@ describe('configToFormState', () => {
       sources: 'nope',
       copies: 'two',
       library: { blankSlots: 5, tapeCapacityBytes: 'big' },
-      redundancy: { fillToCapacity: { floor: '3' }, sliceSizeBytes: 'x' },
+      redundancy: { fillToCapacity: { floor: '3' } },
       encryption: { recipients: 'age1abc', identity: 42 },
       delivery: { opticalBurn: { drives: [], copies: 'many' } },
     } as unknown as RunConfig
@@ -322,7 +322,7 @@ describe('unmodeledFields', () => {
     sources: [{ zfsPath: { name: 'pool/data' } }],
     copies: 2,
     library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
-    redundancy: { targetPercentage: 10, sliceSizeBytes: 1024 },
+    redundancy: { targetPercentage: 10 },
     encryption: { recipients: ['age1pq1abc'], identity: 'AGE-SECRET-KEY-PQ-1x' },
     delivery: { webhookUrl: 'https://discord.com/api/webhooks/1/a' },
   }
@@ -388,7 +388,7 @@ describe('deployOwnedFields', () => {
       sources: [],
       copies: 1,
       library: { changer: '/dev/sch0', drives: ['/dev/nst0'], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
-      redundancy: { sliceSizeBytes: 1 },
+      redundancy: {},
       encryption: { recipients: [], identity: '' },
       delivery: {
         webhookUrl: 'https://discord.com/api/webhooks/1/a',
@@ -409,7 +409,7 @@ describe('deployOwnedFields', () => {
       sources: [],
       copies: 1,
       library: { changer: '', drives: [], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
-      redundancy: { sliceSizeBytes: 1 },
+      redundancy: {},
       encryption: { recipients: [], identity: '' },
       delivery: { webhookUrl: '' },
     }
@@ -424,7 +424,7 @@ describe('unrepresentableK8sSources', () => {
       sources,
       copies: 1,
       library: { changer: '', drives: [], blankSlots: [], tapeCapacityBytes: 2_500_000_000_000 },
-      redundancy: { sliceSizeBytes: 1 },
+      redundancy: {},
       encryption: { recipients: [], identity: '' },
       delivery: { webhookUrl: '' },
     }

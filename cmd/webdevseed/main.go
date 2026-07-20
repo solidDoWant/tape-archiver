@@ -76,7 +76,6 @@ const (
 	slotPoolSize  = 3
 
 	tapeCapacityBytes = 2_500_000_000_000 // nominal LTO-6 native capacity, matching other sample configs in this repo
-	sliceSizeBytes    = 1 << 20           // small slices: keeps PAR2 generation fast against the zpool-up.sh 8M sample payload
 	redundancyPercent = 10.0
 )
 
@@ -284,7 +283,6 @@ func buildSeedConfig(source, recipient, identity string, slot int, webhookURL st
 		},
 		Redundancy: config.Redundancy{
 			TargetPercentage: ptrFloat(redundancyPercent),
-			SliceSizeBytes:   sliceSizeBytes,
 		},
 		Encryption: config.Encryption{
 			Recipients: []string{recipient},

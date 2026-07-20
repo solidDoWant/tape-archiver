@@ -167,7 +167,7 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 			BlankSlots:        []int{slotAddr},
 			TapeCapacityBytes: 2_500_000_000_000,
 		},
-		Redundancy: config.Redundancy{TargetPercentage: floatPointer(10), SliceSizeBytes: 1 << 20},
+		Redundancy: config.Redundancy{TargetPercentage: floatPointer(10)},
 		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
 		Delivery:   config.Delivery{WebhookURL: webhook.URL},
 	}

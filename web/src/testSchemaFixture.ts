@@ -94,11 +94,9 @@ export const testRunConfigSchema: JSONSchema = {
     Redundancy: {
       type: 'object',
       additionalProperties: false,
-      required: ['sliceSizeBytes'],
       properties: {
         targetPercentage: { type: 'number', multipleOf: 1, minimum: 1, maximum: 100 },
         fillToCapacity: { $ref: '#/$defs/FillConfig' },
-        sliceSizeBytes: { type: 'integer', minimum: 1 },
       },
     },
     Source: {

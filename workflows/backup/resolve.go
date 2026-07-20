@@ -211,9 +211,11 @@ func newResolveDataActivities() *ResolveDataActivities {
 // exists and is democratic-csi-managed, then sizes every archive and rejects any
 // whose estimate exceeds one tape's usable capacity — the native capacity less the
 // LTFS reserve Pack enforces (usableCapacity), so an archive admitted here is never
-// rejected at Pack only after hours of staging (issue #224). It also rejects a sliceSizeBytes so
-// small for the resolved source size that the run's slice count would grow an
-// activity payload past Temporal's ~2 MB limit (checkPayloadBound). The estimate
+// rejected at Pack only after hours of staging (issue #224). It then derives the
+// run's slice size from the resolved sizes (DeriveSliceSize) and asserts the
+// resulting whole-run slice count keeps an activity payload within Temporal's
+// ~2 MB limit (checkPayloadBound) — an invariant the derivation satisfies by
+// construction since issue #324, no longer an operator-error path. The estimate
 // inflates logicalreferenced by the configured overhead factor and PAR2 % purely
 // for these pre-checks; it is never the authoritative plan (that is the measured
 // Prepare size). It returns the full work list in config-source order.
@@ -265,12 +267,14 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 			"sourceIndex", index, "label", archive.Label, "estimatedBytes", estimate, "tapeUsableCapacityBytes", capacity)
 	}
 
-	if err := checkPayloadBound(resolved, cfg.Redundancy.SliceSizeBytes); err != nil {
+	sliceSize := DeriveSliceSize(resolved)
+	if err := checkPayloadBound(resolved, sliceSize); err != nil {
 		return nil, err
 	}
 
 	slog.InfoContext(ctx, "resolve: work list validated; every archive fits one tape",
-		"archives", len(resolved), "totalEstimatedBytes", totalEstimate, "tapeUsableCapacityBytes", capacity)
+		"archives", len(resolved), "totalEstimatedBytes", totalEstimate, "tapeUsableCapacityBytes", capacity,
+		"derivedSliceSizeBytes", sliceSize)
 
 	return resolved, nil
 }
@@ -297,27 +301,110 @@ const (
 	payloadBoundBudgetBytes = temporalPayloadLimitBytes / 2
 )
 
-// checkPayloadBound rejects a run whose estimated whole-run slice count would push
-// an activity payload past Temporal's blob-size limit (SPEC §4.3 phase 1). The
-// PrepareArchives result carries every archive's []StagedSlice in one payload, and
-// the same metadata re-ships through Pack, GeneratePAR2, Verify, the per-tape
-// WriteTreeInput, and Report; bounding the whole-run slice count bounds them all.
-// The one payload term that does not scale with slice metadata — the captured
-// LTFS index, which grows with the on-tape file count — is deliberately excluded:
-// FinalizeTape stages it to disk and the post-write phases pass it by path, so it
-// never travels in an activity payload and needs no budget here (issue #221).
+// Slice-size derivation constants (DeriveSliceSize). Every value below is a
+// deliberate choice, not an incidental magic number — the rationale is why the
+// derivation can replace the old operator-set redundancy.sliceSizeBytes and still
+// satisfy the Resolve payload bound and the per-archive PAR2 regime by
+// construction (issue #324).
+const (
+	// bytesPerGiB is the whole-GiB unit DeriveSliceSize rounds slices up to. Slices
+	// are quoted in GiB throughout the operator-facing surface (report, web), and a
+	// whole-GiB size is legible there and keeps the per-slice PAR2/index overhead a
+	// negligible fraction of each slice.
+	bytesPerGiB = 1 << 30
+
+	// minSliceSizeBytes is the 1 GiB floor. A small run would otherwise derive a
+	// sub-GiB slice, where fixed per-slice overhead (a PAR2 recovery file and an
+	// LTFS index entry per slice) stops being negligible; the floor is also the
+	// contract's stated minimum ("at least 1 GiB", issue #324 criterion 3).
+	minSliceSizeBytes = bytesPerGiB
+
+	// runSliceCountTarget bounds the WHOLE-RUN slice count: DeriveSliceSize makes
+	// the slice size at least totalEstimated/runSliceCountTarget, so the run's
+	// estimate-based slice count lands near this figure. The hard ceiling is
+	// payloadBoundBudgetBytes/perStagedSliceBytes = 1 MiB / 256 B = 4096 slices
+	// (checkPayloadBound). Targeting 3500 leaves ~596 slices of headroom for the
+	// per-archive ceiling rounding (up to one extra slice per archive, so up to
+	// ~595 archives fit under the ceiling) and for the gap between the inflated
+	// estimate used here and the smaller measured sizes Prepare actually slices.
+	runSliceCountTarget = 3500
+
+	// archiveSliceCountTarget bounds ANY SINGLE archive's slice count:
+	// DeriveSliceSize makes the slice size at least largestEstimated/800, so the
+	// largest archive lands near 800 slices and every other archive lower. That
+	// sits under the 1,000-slice hard cap (issue #324 criterion 3) with margin, and
+	// keeps each archive in the regime where PAR2's block-size targeting stays near
+	// its ~2,000-block sweet spot and the Pack PAR2 reserve (par2.MaxOutputBytes)
+	// stays tight (issue #324 technical context).
+	archiveSliceCountTarget = 800
+)
+
+// DeriveSliceSize computes the slice size for a run from its resolved work list,
+// replacing the operator-set redundancy.sliceSizeBytes removed in issue #324. It
+// is a pure function of the archives' inflated EstimatedBytes, so it is
+// deterministic and yields an identical value on every call and on Resolve retry
+// (SPEC §4.3 phase 1) — the Resolve phase, the Prepare/Report run state, and the
+// runsapi Resolve fact all obtain the same figure by calling it.
 //
-// The count is derived from each archive's inflated EstimatedBytes, so it
-// over-estimates and never under-bounds the payload (matching feasibilityEstimate).
-// The error names redundancy.sliceSizeBytes and the source-size relationship and
-// suggests a minimum, so a too-small slice on a large source fails here — before
-// any staging — instead of as a generic payload-too-large error after up to 24 h of
-// staging.
+// It takes the larger of two lower bounds, then rounds up to a whole GiB (rounding
+// up only lowers the slice count, so both bounds still hold) and floors at 1 GiB:
+//
+//   - totalEstimated/runSliceCountTarget keeps the whole-run slice count within the
+//     Temporal activity-payload budget (checkPayloadBound), so that gate is
+//     satisfied by construction rather than being an operator-error path.
+//   - largestEstimated/archiveSliceCountTarget keeps every archive's slice count
+//     under the per-archive cap, in the PAR2 block-count regime the derivation
+//     depends on.
+//
+// Because EstimatedBytes over-estimates (it inflates logicalreferenced by the
+// feasibility overhead and PAR2 %), the measured sizes Prepare actually slices are
+// smaller, so the real slice counts never exceed the derived-from-estimate bounds.
+func DeriveSliceSize(resolved []ResolvedArchive) int64 {
+	var totalEstimated, largestEstimated int64
+
+	for _, archive := range resolved {
+		totalEstimated += archive.EstimatedBytes
+		if archive.EstimatedBytes > largestEstimated {
+			largestEstimated = archive.EstimatedBytes
+		}
+	}
+
+	sliceSize := ceilDiv(totalEstimated, runSliceCountTarget)
+	if archiveTerm := ceilDiv(largestEstimated, archiveSliceCountTarget); archiveTerm > sliceSize {
+		sliceSize = archiveTerm
+	}
+
+	// Round up to a whole GiB, then enforce the 1 GiB floor (which also handles an
+	// empty work list, where both terms are 0).
+	sliceSize = ceilDiv(sliceSize, bytesPerGiB) * bytesPerGiB
+	if sliceSize < minSliceSizeBytes {
+		sliceSize = minSliceSizeBytes
+	}
+
+	return sliceSize
+}
+
+// checkPayloadBound is the internal invariant that the derived slice size keeps the
+// run's estimated whole-run slice count within Temporal's activity-payload budget
+// (SPEC §4.3 phase 1). The PrepareArchives result carries every archive's
+// []StagedSlice in one payload, and the same metadata re-ships through Pack,
+// GeneratePAR2, Verify, the per-tape WriteTreeInput, and Report; bounding the
+// whole-run slice count bounds them all. The one payload term that does not scale
+// with slice metadata — the captured LTFS index, which grows with the on-tape file
+// count — is deliberately excluded: FinalizeTape stages it to disk and the
+// post-write phases pass it by path, so it never travels in an activity payload and
+// needs no budget here (issue #221).
+//
+// Since issue #324 the slice size is derived by DeriveSliceSize, whose
+// runSliceCountTarget term satisfies this bound by construction, so this is no
+// longer an operator-fixable config error — a violation is a bug in the derivation.
+// It is retained as a cheap guard so such a regression fails loudly here, before
+// any staging, rather than as an opaque payload-too-large error after up to 24 h of
+// staging. The count is derived from each archive's inflated EstimatedBytes, so it
+// over-estimates and never under-bounds the real payload.
 func checkPayloadBound(resolved []ResolvedArchive, sliceSizeBytes int64) error {
 	if sliceSizeBytes <= 0 {
-		// Guarded upstream by config.Validate (redundancy.sliceSizeBytes must be
-		// > 0); avoid a divide-by-zero here if that ever changes.
-		return nil
+		return fmt.Errorf("internal: derived slice size must be positive, got %d bytes", sliceSizeBytes)
 	}
 
 	var totalEstimated, sliceCount int64
@@ -332,23 +419,11 @@ func checkPayloadBound(resolved []ResolvedArchive, sliceSizeBytes int64) error {
 		return nil
 	}
 
-	// Suggest the smallest slice size that keeps the whole-run count within budget,
-	// leaving room for the per-archive ceiling rounding (up to one extra slice per
-	// archive).
-	maxSlices := int64(payloadBoundBudgetBytes / perStagedSliceBytes)
-
-	headroom := maxSlices - int64(len(resolved))
-	if headroom < 1 {
-		headroom = 1
-	}
-
-	suggestedSliceSize := ceilDiv(totalEstimated, headroom)
-
 	return fmt.Errorf(
-		"redundancy.sliceSizeBytes (%d bytes) is too small for the estimated source size (%d bytes): "+
-			"it would produce ~%d slices whose activity metadata (~%d bytes) exceeds the safe Temporal "+
-			"payload budget (%d bytes, half the ~2 MB limit); increase sliceSizeBytes to at least %d bytes",
-		sliceSizeBytes, totalEstimated, sliceCount, payloadBytes, int64(payloadBoundBudgetBytes), suggestedSliceSize,
+		"internal: derived slice size %d bytes yields ~%d whole-run slices whose activity metadata "+
+			"(~%d bytes) exceeds the Temporal payload budget (%d bytes) for estimated source size %d bytes "+
+			"— DeriveSliceSize invariant violated",
+		sliceSizeBytes, sliceCount, payloadBytes, int64(payloadBoundBudgetBytes), totalEstimated,
 	)
 }
 
@@ -469,6 +544,11 @@ func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	}
 
 	state.resolved = resolved
+	// Derive the run's slice size from the resolved sizes once, here, so Prepare
+	// (slicing) and Report (build params) consume one deterministic value rather
+	// than recomputing it (issue #324). DeriveSliceSize is a pure function of the
+	// same EstimatedBytes the data activity validated above.
+	state.sliceSizeBytes = DeriveSliceSize(resolved)
 
 	return nil
 }
