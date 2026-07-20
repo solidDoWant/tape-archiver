@@ -428,10 +428,11 @@ func TestGetRun(t *testing.T) {
 		{
 			// A failed CurrentPauseQuery must not be indistinguishable from
 			// "confirmed not paused" (CurrentPause.Unknown exists exactly to
-			// prevent that): the request still succeeds, since the phase
-			// query answered fine, but the pause field must say "unknown",
-			// not silently claim the run is healthy.
-			name:  "a failed current-pause query does not fail the request; pause is reported unknown, not none",
+			// prevent that). The request still succeeds, since the phase query
+			// answered fine; the pause field says "unknown" only when the raw-
+			// history fallback (issue #329) cannot resolve it either — here the
+			// history read also fails, the sole remaining unavailable case.
+			name:  "a failed current-pause query with unreadable history is reported unknown, not none",
 			runID: "run-1",
 			client: &fakeTemporalClient{
 				describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
@@ -439,11 +440,40 @@ func TestGetRun(t *testing.T) {
 				},
 				queryResult:     "Write",
 				currentPauseErr: assertError{"no worker polling"},
+				historyFunc: func(string) client.HistoryEventIterator {
+					return &fakeHistoryIterator{err: assertError{"history unavailable"}}
+				},
 			},
 			wantStatus:       http.StatusOK,
 			wantPhase:        "Write",
 			wantPauseKind:    "",
 			wantPauseUnknown: true,
+		},
+		{
+			// The headline #329 case: the live CurrentPauseQuery fails (no
+			// control worker polling — KEDA scaled it to zero for the idle
+			// operator wait), but the run genuinely is paused. The history
+			// fallback reconstructs the pause from the alert activity's own
+			// recorded input, so the run reports its real pause and Unknown is
+			// cleared — the operator sees the pause and can act, instead of
+			// "Pause status unavailable".
+			name:  "a failed current-pause query falls back to the history-derived pause",
+			runID: "run-1",
+			client: &fakeTemporalClient{
+				describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
+					WorkflowExecutionInfo: executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, start, nil),
+				},
+				queryResult:     "Load",
+				currentPauseErr: assertError{"no worker polling"},
+				historyFunc: func(string) client.HistoryEventIterator {
+					return &fakeHistoryIterator{events: pausedRunHistory(t, notifyWritePathPauseActivity, backup.WritePathPauseInput{
+						Phase: backup.PhaseWrite, AffectedTapes: []string{"TA0001L6"}, ReloadSlots: []int{3}, ErrorSummary: "drive 0 write failed",
+					})}
+				},
+			},
+			wantStatus:    http.StatusOK,
+			wantPhase:     "Load",
+			wantPauseKind: "write-failure",
 		},
 		{
 			name:  "an unknown run returns 404, not a 500 or hang",
@@ -480,13 +510,16 @@ func TestGetRun(t *testing.T) {
 			// surfaces a transient "phase unavailable" marker rather than a
 			// definitive empty phase (issue #323) — the phase-side analogue of
 			// the current-pause case above.
-			name:  "a failed phase query does not fail the request; phase reports empty and unknown",
+			name:  "a failed phase query with unreadable history reports empty and unknown",
 			runID: "run-1",
 			client: &fakeTemporalClient{
 				describeResponse: &workflowservice.DescribeWorkflowExecutionResponse{
 					WorkflowExecutionInfo: executionInfo("run-1", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, start, nil),
 				},
 				queryErr: assertError{"no worker polling"},
+				historyFunc: func(string) client.HistoryEventIterator {
+					return &fakeHistoryIterator{err: assertError{"history unavailable"}}
+				},
 			},
 			wantStatus:       http.StatusOK,
 			wantPhase:        "",
@@ -565,14 +598,45 @@ func TestResumeRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			name:       "an unknown run returns 404, not a 500 or hang",
-			client:     &fakeTemporalClient{currentPauseErr: &serviceerror.NotFound{Message: "not found"}},
+			// A pause query that fails because no worker is polling (KEDA scaled
+			// it to zero for the idle wait) must not block the operator's resume:
+			// the handler falls back to the history-derived pause (issue #329),
+			// confirms the run is paused, and sends the signal — which itself
+			// wakes a worker to process it.
+			name: "a failed pause query falls back to history and resumes anyway",
+			client: &fakeTemporalClient{
+				currentPauseErr: assertError{"no worker polling"},
+				historyFunc: func(t *testing.T) func(string) client.HistoryEventIterator {
+					return func(string) client.HistoryEventIterator {
+						return &fakeHistoryIterator{events: pausedRunHistory(t, notifyWritePathPauseActivity, backup.WritePathPauseInput{Phase: backup.PhaseWrite})}
+					}
+				}(t),
+			},
+			wantStatus:          http.StatusAccepted,
+			wantSignalAttempted: true,
+		},
+		{
+			// Both the live query and the history fallback fail: a truly
+			// unreachable run. The original NotFound is preserved for
+			// classification, so this stays a 404 (not a spurious 409).
+			name: "an unknown run returns 404, not a 500 or hang",
+			client: &fakeTemporalClient{
+				currentPauseErr: &serviceerror.NotFound{Message: "not found"},
+				historyFunc: func(string) client.HistoryEventIterator {
+					return &fakeHistoryIterator{err: &serviceerror.NotFound{Message: "not found"}}
+				},
+			},
 			wantStatus: http.StatusNotFound,
 			errAssert:  require.Error,
 		},
 		{
-			name:       "a non-NotFound pause-query failure is a 502",
-			client:     &fakeTemporalClient{currentPauseErr: assertError{"transient RPC failure"}},
+			name: "a non-NotFound pause-query failure with unreadable history is a 502",
+			client: &fakeTemporalClient{
+				currentPauseErr: assertError{"transient RPC failure"},
+				historyFunc: func(string) client.HistoryEventIterator {
+					return &fakeHistoryIterator{err: assertError{"transient RPC failure"}}
+				},
+			},
 			wantStatus: http.StatusBadGateway,
 			errAssert:  require.Error,
 		},
@@ -654,8 +718,29 @@ func TestAbortRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			name:       "an unknown run returns 404, not a 500 or hang",
-			client:     &fakeTemporalClient{currentPauseErr: &serviceerror.NotFound{Message: "not found"}},
+			// The abort analogue of the resume fallback: a pause query that
+			// fails for want of a polling worker falls back to the history-
+			// derived pause (issue #329) and aborts anyway.
+			name: "a failed pause query falls back to history and aborts anyway",
+			client: &fakeTemporalClient{
+				currentPauseErr: assertError{"no worker polling"},
+				historyFunc: func(t *testing.T) func(string) client.HistoryEventIterator {
+					return func(string) client.HistoryEventIterator {
+						return &fakeHistoryIterator{events: pausedRunHistory(t, notifyBurnPauseActivity, backup.BurnPauseInput{Devices: []string{"/dev/sr0"}})}
+					}
+				}(t),
+			},
+			wantStatus:          http.StatusAccepted,
+			wantSignalAttempted: true,
+		},
+		{
+			name: "an unknown run returns 404, not a 500 or hang",
+			client: &fakeTemporalClient{
+				currentPauseErr: &serviceerror.NotFound{Message: "not found"},
+				historyFunc: func(string) client.HistoryEventIterator {
+					return &fakeHistoryIterator{err: &serviceerror.NotFound{Message: "not found"}}
+				},
+			},
 			wantStatus: http.StatusNotFound,
 			errAssert:  require.Error,
 		},
