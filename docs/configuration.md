@@ -742,7 +742,12 @@ partial activity (on a run failed at a later set's Write, set 1's already-ejecte
 tapes do not make `Eject` "completed" — the per-set reality stays visible through the
 tape-outcome endpoints below). On a still-running run, a later phase holding an
 earlier drive-set's activity reads `active` (the interleaved tape path is in progress
-as a unit), never prematurely `completed`. A phase containing individually
+as a unit), never prematurely `completed` — **except while the run is paused for the
+operator**, when only the frontier (the pause's own phase) reads `active`. A
+write-failure pause ejects the set's tapes (a completed `Eject` activity) before
+pausing back on `Write`, so without this both `Write` and the completed `Eject` would
+read `active` at once; while paused, that already-completed `Eject` reads `pending`
+instead, leaving `Write` the single active (paused) phase. A phase containing individually
 failed-and-retried work the run moved past (a Load/Write-failure pause resumed onto
 fresh blanks) is `completed`, not `failed`, with `error` carrying the failure text
 only on the `failed` phase. `facts` is a list of `{"key", "label", "value"}` observable facts

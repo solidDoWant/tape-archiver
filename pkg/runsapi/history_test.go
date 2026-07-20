@@ -744,6 +744,72 @@ func TestBuildPhaseTimeline(t *testing.T) {
 			"set 1's partial Eject activity keeps the phase active on an open run, never prematurely completed")
 		assert.Equal(t, PhasePending, byName[backup.PhaseReport].Status)
 	})
+
+	t.Run("a write-failure operator pause marks only Write active, not the already-completed Eject", func(t *testing.T) {
+		// Issue #331: a write-failure pause ejects the set's tapes (a completed
+		// Eject activity) and then pauses back on Write — NotifyWritePathPause,
+		// attributed to Write, is the latest-scheduled activity, so the frontier
+		// is Write. Unlike the open non-paused interleave above, Eject here holds
+		// only a completed record and nothing is running: while the run is paused,
+		// only the frontier (the pause's own phase) is active, so Eject must read
+		// pending, not active — otherwise both Write and Eject spin at once, two
+		// spinners for one paused phase.
+		b := newEventBuilder()
+		b.started(t, testConfig)
+
+		verify := b.scheduled(t, "Verify", backup.VerifyInput{})
+		b.completed(t, verify, backup.VerifiedPlan{})
+
+		load := b.scheduled(t, "Load", nil)
+		b.completed(t, load, []backup.LoadedTape{
+			{Barcode: "TAPE01", TapeIndex: 0, CopyIndex: 0, DriveIndex: 0, SourceSlot: 1},
+		})
+
+		format := b.scheduled(t, "FormatTape", struct{ Barcode string }{"TAPE01"})
+		b.completed(t, format, nil)
+
+		// The tape fails to write; the set is ejected anyway (freeing the drive),
+		// then the run pauses back on Write for the operator to swap in blanks.
+		write := b.scheduled(t, "WriteTree", struct{ Barcode string }{"TAPE01"})
+		b.failed(write, "drive 0: write tree: medium error")
+
+		eject := b.scheduled(t, "Eject", nil)
+		b.completed(t, eject, backup.EjectResult{InIOStation: []tape.Barcode{"TAPE01"}})
+
+		// The pause alert is the last scheduled activity, and the run stays open:
+		// derivePause reports this as an active write-failure pause on Write.
+		pause := b.scheduled(t, "NotifyWritePathPause", backup.WritePathPauseInput{Phase: backup.PhaseWrite})
+		b.completed(t, pause, nil)
+
+		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: b.events}
+		}}, "run-8")
+		require.NoError(t, err)
+
+		phases := buildPhaseTimeline(history, deriveTapeOutcomes(history.Activities))
+
+		byName := make(map[string]PhaseInfo, len(phases))
+		for _, phase := range phases {
+			byName[phase.Name] = phase
+		}
+
+		assert.Equal(t, PhaseCompleted, byName[backup.PhaseVerify].Status)
+		assert.Equal(t, PhaseCompleted, byName[backup.PhaseLoad].Status)
+
+		// Write is the frontier (the paused phase): active, and still spinning —
+		// a start time but no end time.
+		write0 := byName[backup.PhaseWrite]
+		assert.Equal(t, PhaseActive, write0.Status)
+		assert.NotNil(t, write0.StartTime)
+		assert.Nil(t, write0.EndTime)
+
+		// Eject already completed and nothing is running there: while paused it
+		// must not also spin (issue #331).
+		assert.Equal(t, PhasePending, byName[backup.PhaseEject].Status,
+			"a completed Eject must not read active alongside the paused Write frontier")
+
+		assert.Equal(t, PhasePending, byName[backup.PhaseReport].Status)
+	})
 }
 
 func assertFactValue(t *testing.T, facts []PhaseFact, key, want string) {
