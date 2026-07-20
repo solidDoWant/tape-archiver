@@ -462,9 +462,9 @@ is named in the same notice, exactly as a JSON → Form switch reports it.
 
 The **Tapes** page (`/tapes`) lists every physical tape written by a run still inside
 Temporal's history window — barcode, a link to the run that wrote it, its logical-tape
-and copy index, its write outcome (loaded/written/failed, with a failed tape's reason
-shown under the badge, and an **overwrote non-blank** flag when the run reused a
-non-blank tape via `library.allowNonBlankTapes` — SPEC §4.3 step 6), and a
+and copy index, its write outcome (loaded/written/failed, and an **overwrote
+non-blank** flag when the run reused a non-blank tape via
+`library.allowNonBlankTapes` — SPEC §4.3 step 6), and a
 summary of its measured write health (throughput, whether
 it stayed above the speed-matching floor, the reposition count — or an explicit note
 when repositions could not be measured — and any TapeAlert flags — SPEC §14). Each of
@@ -481,6 +481,17 @@ system. A banner at the top of the page states this explicitly. Once a run ages 
 Temporal's visibility retention window, the tapes it wrote drop off this list — its PDF
 report (delivered to Discord, see [`docs/report.md`](report.md)) remains the permanent
 record of what it wrote.
+
+A **failed** tape shows only the badge — its full failure text (an `ltfs`/`tar` stderr
+dump large enough to make the whole table unreadable) is not shown here; open the run's
+own detail page, or its PDF report, for the complete error.
+
+Dry-run tapes (runs submitted against the mhvtl virtual library) are **hidden by
+default** so the page reflects the physical library rather than virtual barcodes. When
+any of the reconstructed runs is a dry-run, a **Show dry-run tapes** toggle appears
+above the table with the hidden count; enabling it lists the dry-run tapes too, each
+tagged with a **DRY-RUN** badge so a virtual barcode is never mistaken for physical
+media.
 
 By default the page reconstructs tapes from the 50 most recent runs (the API's own
 default) — there is no "show more"/limit control on the page itself, matching the design

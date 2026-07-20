@@ -118,6 +118,12 @@ type AggregateTapeOutcome struct {
 	RunID        string    `json:"runId"`
 	RunStartTime time.Time `json:"runStartTime"`
 	RunStatus    string    `json:"runStatus"`
+	// DryRun is true when the run that loaded this tape was a dry-run against
+	// the mhvtl virtual library (runsubmit.MemoKeyDryRun), so its barcodes are
+	// virtual and do not correspond to a physical tape. The Tapes page uses
+	// this to keep dry-run tapes from being mistaken for the physical library's
+	// real inventory (hidden by default, surfaced behind a toggle).
+	DryRun bool `json:"dryRun"`
 }
 
 // RunError names a run whose tape outcomes could not be reconstructed
@@ -233,8 +239,10 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 
 	for _, execution := range executions {
 		runID := execution.GetExecution().GetRunId()
-		startTime := toRunSummary(execution).StartTime
+		summary := toRunSummary(execution)
+		startTime := summary.StartTime
 		status := execution.GetStatus().String()
+		dryRun := summary.DryRun
 
 		group.Go(func() error {
 			history, err := fetchRunHistory(groupCtx, h.temporalClient, runID)
@@ -267,6 +275,7 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 					RunID:        runID,
 					RunStartTime: startTime,
 					RunStatus:    status,
+					DryRun:       dryRun,
 				})
 			}
 

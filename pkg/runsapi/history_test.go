@@ -1021,6 +1021,49 @@ func TestListTapesHandler(t *testing.T) {
 		assert.Equal(t, "run-gone", body.RunErrors[0].RunID)
 	})
 
+	t.Run("flags dry-run tapes from the run's memo so a virtual mhvtl barcode is never mistaken for physical media", func(t *testing.T) {
+		start1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		start2 := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+		dryRunPayload, err := converter.GetDefaultDataConverter().ToPayload(true)
+		require.NoError(t, err)
+
+		dryRunExecution := executionInfo("run-dryrun", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start2, &start2)
+		dryRunExecution.Memo = &commonpb.Memo{Fields: map[string]*commonpb.Payload{runsubmit.MemoKeyDryRun: dryRunPayload}}
+
+		fake := &fakeTemporalClient{
+			listResponse: &workflowservice.ListWorkflowExecutionsResponse{
+				Executions: []*workflowpb.WorkflowExecutionInfo{
+					// A production run carries no dry-run memo at all, the way an
+					// unlabelled run reads as production (dryRunFromMemo).
+					executionInfo("run-prod", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start1, &start1),
+					dryRunExecution,
+				},
+			},
+			historyFunc: func(string) client.HistoryEventIterator {
+				return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
+			},
+		}
+
+		handler := newMux(newHandler(fake, emptyEnv))
+
+		recorder := doJSON(t, handler, http.MethodGet, "/api/tapes", nil)
+		require.Equal(t, http.StatusOK, recorder.Code)
+
+		var body AggregateTapesResponse
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+
+		byRun := map[string]bool{}
+		for _, tapeOutcome := range body.Tapes {
+			byRun[tapeOutcome.RunID] = tapeOutcome.DryRun
+		}
+
+		require.Contains(t, byRun, "run-dryrun")
+		require.Contains(t, byRun, "run-prod")
+		assert.True(t, byRun["run-dryrun"], "a tape from a dry-run run must be flagged dryRun")
+		assert.False(t, byRun["run-prod"], "a tape from a production run must not be flagged dryRun")
+	})
+
 	t.Run("masks an upstream-fault error in a per-run RunError rather than leaking raw Temporal detail", func(t *testing.T) {
 		start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 

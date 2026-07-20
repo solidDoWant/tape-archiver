@@ -3,6 +3,7 @@ import { apiFetch, ApiError, describeNetworkError, formatTimestamp } from './api
 import { Link } from './router'
 import { runPath } from './route'
 import { IconWarning } from './icons'
+import DryRunBadge from './DryRunBadge'
 
 // WriteHealthInfo/TapeOutcome mirror pkg/runsapi's tape-outcome JSON shapes
 // (tapes.go) — the same shapes DriveMetricsPanel.tsx's FinalDriveMetrics
@@ -40,6 +41,11 @@ interface AggregateTapeOutcome {
   runId: string
   runStartTime: string
   runStatus: string
+  // dryRun mirrors AggregateTapeOutcome.DryRun: the run was a dry-run against
+  // the mhvtl virtual library, so this barcode is virtual and not part of the
+  // physical library's inventory. Such rows are hidden by default (see the
+  // "Show dry-run tapes" toggle) so this page reflects real tapes.
+  dryRun: boolean
 }
 
 // RunError mirrors pkg/runsapi.RunError's JSON shape: a run still in
@@ -163,6 +169,10 @@ function WriteHealthCell({ health }: { health?: WriteHealthInfo }) {
 // request — nothing here is persisted UI-owned state).
 function TapesPage() {
   const [state, setState] = useState<LoadState>({ status: 'loading' })
+  // Dry-run (mhvtl) tapes are virtual and would make this page disagree with
+  // the physical library, so they are hidden by default and only shown when an
+  // operator opts in (e.g. to inspect a dry-run's results).
+  const [showDryRun, setShowDryRun] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -200,6 +210,12 @@ function TapesPage() {
       cancelled = true
     }
   }, [])
+
+  // Split physical from dry-run (mhvtl) tapes so the table reflects the real
+  // library by default; the toggle re-includes dry-run rows on demand.
+  const loadedTapes = state.status === 'loaded' ? state.tapes : []
+  const dryRunCount = loadedTapes.filter((tape) => tape.dryRun).length
+  const visibleTapes = showDryRun ? loadedTapes : loadedTapes.filter((tape) => !tape.dryRun)
 
   return (
     <div className="flex flex-col gap-5 p-6 sm:p-7">
@@ -263,10 +279,27 @@ function TapesPage() {
             </div>
           ) : null}
 
-          {state.tapes.length === 0 ? (
+          {dryRunCount > 0 ? (
+            <label className="flex max-w-3xl items-center gap-2 text-[12px] text-text-dim">
+              <input
+                type="checkbox"
+                checked={showDryRun}
+                onChange={(event) => setShowDryRun(event.target.checked)}
+                className="h-3.5 w-3.5 accent-blue"
+              />
+              Show dry-run tapes
+              <span className="text-text-faint">
+                ({dryRunCount} {dryRunCount === 1 ? 'tape' : 'tapes'} from mhvtl dry-runs, not
+                physical media)
+              </span>
+            </label>
+          ) : null}
+
+          {visibleTapes.length === 0 ? (
             <div className="max-w-3xl rounded-xl border border-dashed border-border-strong bg-surface p-6 text-center text-[12.5px] text-text-faint">
-              No tapes to show yet. This list fills in once a run has loaded at least one
-              tape.
+              {dryRunCount > 0 && !showDryRun
+                ? 'No physical tapes to show. Only dry-run (mhvtl) tapes were found in the recent runs — enable “Show dry-run tapes” above to see them.'
+                : 'No tapes to show yet. This list fills in once a run has loaded at least one tape.'}
             </div>
           ) : (
             <div className="max-w-3xl overflow-x-auto rounded-xl border border-border bg-surface shadow-card">
@@ -291,12 +324,20 @@ function TapesPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {state.tapes.map((tape) => (
+                  {visibleTapes.map((tape) => (
                     <tr
                       key={`${tape.runId}-${tape.tapeIndex}-${tape.copyIndex}-${tape.barcode}`}
                       className="border-b border-border last:border-0"
                     >
-                      <td className="px-4 py-3 font-mono font-semibold text-text">{tape.barcode}</td>
+                      <td className="px-4 py-3 font-mono font-semibold text-text">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {tape.barcode}
+                          {/* When dry-run rows are shown, tag them so a virtual
+                              mhvtl barcode is never mistaken for a physical
+                              tape. */}
+                          <DryRunBadge dryRun={tape.dryRun} />
+                        </div>
+                      </td>
                       <td className="px-4 py-3">
                         <Link
                           to={runPath(tape.runId)}
@@ -331,16 +372,11 @@ function TapesPage() {
                             </span>
                           </div>
                         ) : null}
-                        {tape.result === 'failed' && tape.error ? (
-                          // The failure reason is real information an
-                          // operator acts on (which tape to pull, what went
-                          // wrong) — render it visibly, not just as a hover
-                          // title a touch device or screen reader would
-                          // never surface.
-                          <div className="mt-1 max-w-[280px] font-mono text-[11px] break-words text-red">
-                            {tape.error}
-                          </div>
-                        ) : null}
+                        {/* The full failure text is deliberately not shown
+                            here: an ltfs/tar stderr dump is large enough to
+                            make the whole table unreadable. The "failed" badge
+                            marks which tape to pull; the run's own detail page
+                            and PDF report carry the full error. */}
                       </td>
                       <td className="px-4 py-3">
                         <WriteHealthCell health={tape.writeHealth} />

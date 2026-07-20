@@ -805,9 +805,12 @@ identity travels in the run's own history, not an external catalog (SPEC §4.2).
 
 `GET /api/tapes` returns `{"tapes": [...], "runErrors": [...]}` — the tape outcomes
 above aggregated across the most recent runs still in Temporal visibility, newest run
-first, each entry additionally carrying `{"runId", "runStartTime", "runStatus"}` so
-every tape is attributable back to its run (this drives the tapes page and the
-dashboard's library card). Reconstructing each run costs a full history fetch, so an
+first, each entry additionally carrying `{"runId", "runStartTime", "runStatus",
+"dryRun"}` so every tape is attributable back to its run (this drives the tapes page
+and the dashboard's library card). `dryRun` is `true` when the run was a dry-run
+against the mhvtl virtual library (its barcodes are virtual, not physical media); the
+tapes page reads it to keep dry-run tapes out of the physical-library view by default,
+surfacing them only behind a **Show dry-run tapes** toggle. Reconstructing each run costs a full history fetch, so an
 optional `limit` query parameter bounds how many of the newest runs are
 reconstructed: default `50`, capped at `1000` (the visibility page size); a
 non-positive or non-numeric value is `400`. The listing degrades per run within that

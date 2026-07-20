@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import TapesPage from './TapesPage'
 import { RouterProvider } from './router'
 
@@ -215,9 +216,10 @@ describe('TapesPage', () => {
 
     expect(screen.getByText(/below floor/i)).toBeInTheDocument()
     expect(screen.getByText(/tapealert/i)).toBeInTheDocument()
-    // The failed tape's reason is visible text, not just a hover title a
-    // touch device or screen reader would never surface.
-    expect(screen.getByText('drive reported a hard write error')).toBeInTheDocument()
+    // The failed tape's full failure text is deliberately NOT rendered here: an
+    // ltfs/tar stderr dump makes the whole table unreadable. The badge marks
+    // the failure; the run's detail page and PDF report carry the reason.
+    expect(screen.queryByText('drive reported a hard write error')).not.toBeInTheDocument()
   })
 
   it('flags a tape that overwrote a non-blank tape, alongside its written outcome', async () => {
@@ -412,5 +414,133 @@ describe('TapesPage', () => {
     expect(screen.getByText(/workflow history not found/)).toBeInTheDocument()
     // The degraded run must not hide the tapes that DID reconstruct fine.
     expect(screen.getByText('TA0005L6')).toBeInTheDocument()
+  })
+
+  it('hides dry-run (mhvtl) tapes by default so the page reflects the physical library', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            {
+              barcode: 'PHYS0001L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              runId: 'run-prod',
+              runStartTime: '2026-07-08T00:00:00Z',
+              runStatus: 'Completed',
+              dryRun: false,
+            },
+            {
+              barcode: 'VIRT0001L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              runId: 'run-dry',
+              runStartTime: '2026-07-09T00:00:00Z',
+              runStatus: 'Completed',
+              dryRun: true,
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    await waitFor(() => {
+      expect(screen.getByText('PHYS0001L6')).toBeInTheDocument()
+    })
+
+    // The dry-run tape is hidden by default; the physical tape is shown.
+    expect(screen.queryByText('VIRT0001L6')).not.toBeInTheDocument()
+  })
+
+  it('shows dry-run tapes tagged with a DRY-RUN badge when the toggle is enabled', async () => {
+    const user = userEvent.setup()
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            {
+              barcode: 'PHYS0001L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              runId: 'run-prod',
+              runStartTime: '2026-07-08T00:00:00Z',
+              runStatus: 'Completed',
+              dryRun: false,
+            },
+            {
+              barcode: 'VIRT0001L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              runId: 'run-dry',
+              runStartTime: '2026-07-09T00:00:00Z',
+              runStatus: 'Completed',
+              dryRun: true,
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    const toggle = await screen.findByRole('checkbox', { name: /show dry-run tapes/i })
+    expect(screen.queryByText('VIRT0001L6')).not.toBeInTheDocument()
+
+    await user.click(toggle)
+
+    // Now the dry-run tape is listed, distinguishable by its DRY-RUN badge so a
+    // virtual barcode is never mistaken for physical media.
+    expect(screen.getByText('VIRT0001L6')).toBeInTheDocument()
+    expect(screen.getByText('DRY-RUN')).toBeInTheDocument()
+  })
+
+  it('explains an all-dry-run listing rather than reading as empty', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            {
+              barcode: 'VIRT0001L6',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 1,
+              result: 'written',
+              runId: 'run-dry',
+              runStartTime: '2026-07-09T00:00:00Z',
+              runStatus: 'Completed',
+              dryRun: true,
+            },
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/only dry-run .* tapes were found/i)).toBeInTheDocument()
+    })
+
+    // The toggle is still offered so the operator can reveal them.
+    expect(screen.getByRole('checkbox', { name: /show dry-run tapes/i })).toBeInTheDocument()
   })
 })
