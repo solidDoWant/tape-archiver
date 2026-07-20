@@ -710,7 +710,10 @@ as a unit), never prematurely `completed`. A phase containing individually
 failed-and-retried work the run moved past (a Load/Write-failure pause resumed onto
 fresh blanks) is `completed`, not `failed`, with `error` carrying the failure text
 only on the `failed` phase. `facts` is a list of `{"key", "label", "value"}` observable facts
-recovered from the phase's own activity payloads where available — e.g. Resolve's
+(each optionally carrying a `title` — an exact/expanded form of `value` for a client
+to surface as hover text, e.g. the precise byte count behind Prepare's humanized
+`stagedBytes` `"5.6 GB"`) recovered from the phase's own activity payloads where
+available — e.g. Resolve's
 `archives`, Prepare's `archivesStaged`/`stagedBytes`, Pack's `logicalTapes`/`copies`,
 Generate PAR2's `recoverySets`, Verify's `filesVerified` (`"N/N"`), Load's
 `tapesLoaded`, Write's `tapesWritten` (and `tapesFailed` when any tape failed),

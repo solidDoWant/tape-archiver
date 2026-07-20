@@ -67,7 +67,7 @@ function PhaseDetail({ runId, index, phase, terminal }: PhaseDetailProps) {
               {phase.facts.map((fact) => (
                 <div key={fact.key} className="flex items-center justify-between border-b border-border py-2.5 last:border-b-0">
                   <dt className="text-[12.5px] text-text-dim">{fact.label}</dt>
-                  <dd className="font-mono text-[12px]">{fact.value}</dd>
+                  <dd className="font-mono text-[12px]" title={fact.title}>{fact.value}</dd>
                 </div>
               ))}
             </dl>

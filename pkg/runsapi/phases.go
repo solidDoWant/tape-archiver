@@ -61,6 +61,10 @@ type PhaseFact struct {
 	Label string `json:"label"`
 	// Value is the fact's pre-formatted display value, e.g. "71".
 	Value string `json:"value"`
+	// Title is an optional exact/expanded form of Value for a client to
+	// surface as hover text, e.g. the precise byte count behind a humanized
+	// "5.6 GB". Omitted (empty) when Value is already exact.
+	Title string `json:"title,omitempty"`
 }
 
 // PhaseInfo is one pipeline phase's timeline entry.

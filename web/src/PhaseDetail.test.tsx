@@ -64,6 +64,26 @@ describe('PhaseDetail', () => {
     await settle()
   })
 
+  it('surfaces a fact’s exact value as hover text via title', async () => {
+    stubPanels()
+
+    const phase: PhaseInfo = {
+      name: 'Prepare',
+      status: 'completed',
+      startTime: '2026-07-09T12:00:00Z',
+      endTime: '2026-07-09T12:01:00Z',
+      facts: [{ key: 'stagedBytes', label: 'Staged bytes', value: '6.0 GB', title: '6,000,000,000 bytes' }],
+    }
+
+    render(<PhaseDetail runId="run-1" index={2} phase={phase} terminal={false} />)
+
+    const value = screen.getByText('6.0 GB')
+    expect(value).toBeInTheDocument()
+    expect(value).toHaveAttribute('title', '6,000,000,000 bytes')
+
+    await settle()
+  })
+
   it('renders a pending placeholder without a log panel', () => {
     stubPanels()
 

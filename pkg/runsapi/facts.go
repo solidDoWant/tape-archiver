@@ -123,8 +123,56 @@ func prepareFacts(records []activityRecord) []PhaseFact {
 
 	return []PhaseFact{
 		intFact("archivesStaged", "Archives staged", len(staged)),
-		{Key: "stagedBytes", Label: "Staged bytes", Value: fmt.Sprintf("%d", totalBytes)},
+		{
+			Key:   "stagedBytes",
+			Label: "Staged bytes",
+			Value: humanizeBytes(totalBytes),
+			Title: fmt.Sprintf("%s bytes", groupDigits(totalBytes)),
+		},
 	}
+}
+
+// humanizeBytes renders a byte count in decimal (SI) units — matching the
+// decimal capacities the tape world quotes (an LTO-9 tape is 18 TB, not
+// TiB) — for compact display. The exact count travels alongside it in the
+// fact's Title for hover text, so this can round freely.
+func humanizeBytes(n int64) string {
+	const unit = 1000
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGTPE"[exp])
+}
+
+// groupDigits renders n with thousands separators (e.g. 6000000000 ->
+// "6,000,000,000") so the exact byte count in a fact's hover Title stays
+// legible.
+func groupDigits(n int64) string {
+	digits := fmt.Sprintf("%d", n)
+
+	sign := ""
+	if n < 0 {
+		sign, digits = "-", digits[1:]
+	}
+
+	var grouped []byte
+
+	for i, d := range []byte(digits) {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			grouped = append(grouped, ',')
+		}
+
+		grouped = append(grouped, d)
+	}
+
+	return sign + string(grouped)
 }
 
 // packFacts reports the logical tape count and copy count from Pack's

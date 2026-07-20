@@ -25,6 +25,9 @@ export interface PhaseFact {
   key: string
   label: string
   value: string
+  // title is an optional exact/expanded form of value (e.g. the precise byte
+  // count behind a humanized "5.6 GB"), surfaced as the value's hover text.
+  title?: string
 }
 
 // PhaseInfo mirrors pkg/runsapi.PhaseInfo, one entry of GET
