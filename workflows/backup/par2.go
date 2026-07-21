@@ -264,7 +264,20 @@ func (a *GeneratePAR2Activities) GeneratePAR2(ctx context.Context, input Generat
 // logPAR2Progress emits one periodic progress line for the Generate PAR2 phase.
 // The ETA is included only once it is estimable, so the line does not imply a
 // bogus "0s remaining" before the first bytes are done.
+//
+// The numbers are inlined into the message, not left solely in the structured
+// attributes: the web log panel projects only the message text (see
+// pkg/runsapi.LogLine), so a constant "par2: progress" message would read as
+// blank progress there. The structured attributes are retained for VictoriaLogs
+// and the Temporal heartbeat payload.
 func logPAR2Progress(ctx context.Context, progress PAR2Progress) {
+	msg := fmt.Sprintf("par2: progress %.1f%% overall (archive %d/%d, %.1f%% of current)",
+		progress.OverallPercent,
+		progress.CompletedArchives,
+		progress.TotalArchives,
+		progress.CurrentArchivePercent,
+	)
+
 	attrs := []any{
 		"completedArchives", progress.CompletedArchives,
 		"totalArchives", progress.TotalArchives,
@@ -274,10 +287,11 @@ func logPAR2Progress(ctx context.Context, progress PAR2Progress) {
 	}
 
 	if progress.EstimatedTimeRemaining > 0 {
+		msg += ", eta " + progress.EstimatedTimeRemaining.String()
 		attrs = append(attrs, "eta", progress.EstimatedTimeRemaining.String())
 	}
 
-	slog.InfoContext(ctx, "par2: progress", attrs...)
+	slog.InfoContext(ctx, msg, attrs...)
 }
 
 // generatePAR2 is the body of the Generate PAR2 activity, split out so it can be
