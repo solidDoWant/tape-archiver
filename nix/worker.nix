@@ -11,13 +11,19 @@
 {
   lib,
   buildGoModule,
+  # The tape-archiver git revision, stamped into the binary via -ldflags so
+  # internal/buildinfo.ToolVersion can report it at run time. Empty by default;
+  # flake.nix passes the flake's self.rev/self.dirtyRev. This is necessary
+  # because the src below is a lib.fileset copy with no .git directory, so the
+  # binary cannot recover the VCS revision from its own embedded build info.
+  version ? "",
 }:
 buildGoModule {
   pname = "tape-archiver-worker";
-  # Version is sourced from the module path / VCS at build time via the Go build
-  # info the binary already reads (internal/buildinfo.ToolVersion); this attr is
-  # only the derivation label.
-  version = "0-dev";
+  # The derivation label. The version the binary *reports* comes from the
+  # -ldflags -X stamp below (or the Go build info for a plain `go build`), not
+  # from this attr.
+  version = if version != "" then version else "0-dev";
 
   # The repository root. `lib.fileset` keeps the Nix store copy to the Go sources
   # and module metadata so unrelated edits (docs, nix, scripts) do not bust the
@@ -69,6 +75,9 @@ buildGoModule {
   ldflags = [
     "-s"
     "-w"
+  ]
+  ++ lib.optionals (version != "") [
+    "-X github.com/solidDoWant/tape-archiver/internal/buildinfo.version=${version}"
   ];
 
   # The Temporal worker has no unit tests that run hermetically without a live

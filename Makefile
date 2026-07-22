@@ -219,9 +219,17 @@ WEB_IMAGE_TAGS := $(WEB_IMAGE):$(VERSION) $(if $(filter true,$(PUSH_ALL)),$(WEB_
 
 # Build a streamed OCI image, load it into the local Docker daemon, tag it, and
 # (when PUSH_ALL=true) push every tag. $(1)=flake attr, $(2)=tag list.
+#
+# The image build passes VERSION through as TA_VERSION and runs `--impure` so the
+# flake can read it (builtins.getEnv) and stamp the human-readable release version
+# into the binary — the release version is a build argument, never committed to
+# git, so it cannot reach a pure evaluation any other way. The build is still
+# deterministic given the same TA_VERSION + commit; `--impure` only opens the env
+# channel for that one string. The imageName/imageTag evals stay pure — they do
+# not depend on the app version.
 define build-load-image
 	image_ref="$$(nix eval --raw .#$(1).imageName):$$(nix eval --raw .#$(1).imageTag)"; \
-	"$$(nix build --print-out-paths --no-link .#$(1))" | docker load; \
+	"$$(TA_VERSION="$(VERSION)" nix build --impure --print-out-paths --no-link .#$(1))" | docker load; \
 	for tag in $(2); do \
 	  echo "tagging $$image_ref -> $$tag"; \
 	  docker tag "$$image_ref" "$$tag"; \

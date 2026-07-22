@@ -16,6 +16,20 @@ func TestToolVersion(t *testing.T) {
 	assert.NotEmpty(t, ToolVersion())
 }
 
+// TestToolVersionStampedRevision checks that a link-time -ldflags stamp of the
+// revision (what the Nix image builds inject) is reported verbatim as the version,
+// overriding the build-info VCS fallback.
+func TestToolVersionStampedRevision(t *testing.T) {
+	// Not parallel: mutates the package-level `version` used by ToolVersion.
+	original := version
+
+	t.Cleanup(func() { version = original })
+
+	version = "abc1234"
+
+	assert.Equal(t, "abc1234", ToolVersion())
+}
+
 // TestExternalVersions checks the generated map is wired to the accessors: each
 // tool the report records resolves to the value captured in versions_generated.go
 // (regenerated with `make generate-versions`), never a blank field.

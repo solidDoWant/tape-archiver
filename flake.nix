@@ -11,6 +11,35 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
+        # The tape-archiver build version, stamped into the worker and web
+        # binaries via -ldflags (internal/buildinfo.ToolVersion reports it — the
+        # web UI shows it and every activity logs it). The binaries build from
+        # lib.fileset source copies with no .git directory, so they cannot recover
+        # any of this from their own embedded build info; it must be injected here.
+        #
+        # A released build reports exactly the release version (e.g. "1.2.3") —
+        # nothing appended. A development build, which has no release version to
+        # report, falls back to the git revision so the binary is still uniquely
+        # identifiable. Neither value is tracked in a committed file:
+        #
+        #   - release: the TA_VERSION env var, which the Makefile sets to $(VERSION)
+        #     for `make build-images`/`make release` (overridable at release time,
+        #     e.g. `make release VERSION=1.2.3`). It is a *build argument*, never
+        #     committed, and it is not read from a git tag — so it is available at
+        #     image-build time even though `make release` only tags afterwards.
+        #     builtins.getEnv returns "" under Nix's default pure evaluation — a
+        #     plain `nix build .#worker` — so those builds stay pure/reproducible
+        #     and take the revision branch below; only the Makefile's `--impure`
+        #     image builds read it.
+        #   - revision: self.shortRev (clean tree) / self.dirtyShortRev (a
+        #     "<shortrev>-dirty" string).
+        #
+        # Both empty (a pure `nix build` of a non-git source) leaves version "",
+        # and ToolVersion falls back to "unknown".
+        releaseVersion = builtins.getEnv "TA_VERSION";
+        revision = self.shortRev or self.dirtyShortRev or "";
+        version = if releaseVersion != "" then releaseVersion else revision;
+
         mhvtlUserspace = pkgs.callPackage ./nix/mhvtl-userspace.nix { };
 
         # Reference open-source LTFS (mkltfs/ltfs/ltfsck) — pkg/ltfs shells out
@@ -50,7 +79,7 @@
         # The Temporal worker binary (control/data — the role is a run-time env
         # var, SPEC §4.1). Built once here and bundled into the data-worker OCI
         # image below.
-        worker = pkgs.callPackage ./nix/worker.nix { };
+        worker = pkgs.callPackage ./nix/worker.nix { inherit version; };
 
         # Reproducible OCI image for the data worker (SPEC §4.1): the worker
         # binary plus its external tooling, all from this same pinned nixpkgs and
@@ -83,7 +112,7 @@
         # The web UI HTTP server binary (`cmd/web`): the built frontend above,
         # embedded via go:embed. Built once here and bundled into the web OCI
         # image below.
-        web = pkgs.callPackage ./nix/web.nix { inherit webFrontend; };
+        web = pkgs.callPackage ./nix/web.nix { inherit webFrontend version; };
 
         # Reproducible OCI image for the web UI (docs/web-ui-design.md §5): the
         # `web` binary plus TLS roots and a minimal HTTP client for the
