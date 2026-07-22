@@ -23,6 +23,11 @@ export interface RunHeaderInfo {
   statusLabel: string
   tone: RunHeaderTone
   runtime: string
+  // startedAt is the run's absolute wall-clock start time, already formatted for
+  // display (empty when the run has no recorded start yet). The runtime field is
+  // only relative ("ran 12h 9m"); the header shows this alongside it so an
+  // operator can see *when* a run began, not just how long it took/has run.
+  startedAt: string
 }
 
 const toneBadgeClass: Record<RunHeaderTone, string> = {
@@ -172,14 +177,15 @@ export function usePublishRunHeader(info: RunHeaderInfo | null): void {
   const statusLabel = info?.statusLabel ?? ''
   const tone = info?.tone ?? 'neutral'
   const runtime = info?.runtime ?? ''
+  const startedAt = info?.startedAt ?? ''
 
   useEffect(() => {
     if (!setInfo) {
       return
     }
 
-    setInfo(present ? { statusLabel, tone, runtime } : null)
+    setInfo(present ? { statusLabel, tone, runtime, startedAt } : null)
 
     return () => setInfo(null)
-  }, [setInfo, present, statusLabel, tone, runtime])
+  }, [setInfo, present, statusLabel, tone, runtime, startedAt])
 }

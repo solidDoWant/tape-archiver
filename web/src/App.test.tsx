@@ -303,7 +303,13 @@ describe('App shell (authenticated)', () => {
     // RunDetail publishes its status + runtime to the single shell header once the
     // run's detail loads — the status pill and runtime line the design mockup shows.
     expect(await screen.findByText('COMPLETE')).toBeInTheDocument()
-    expect(screen.getByText('ran 5h 14m')).toBeInTheDocument()
+    // The runtime line shows the relative runtime *and* the absolute wall-clock
+    // start time, joined by a middot, so an operator can see when the run began —
+    // not just how long it ran. The exact start rendering is locale/timezone
+    // dependent, so assert the stable pieces: the "ran 5h 14m" prefix and the
+    // start year.
+    const runtimeLine = screen.getByText(/^ran 5h 14m · /)
+    expect(runtimeLine).toHaveTextContent('2026')
 
     await settle()
   })

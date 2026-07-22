@@ -178,8 +178,10 @@ function ShellHeader({ route }: { route: Route }) {
     <header className="sticky top-0 z-5 flex items-center gap-3.5 border-b border-border bg-bg/80 px-5 py-4 backdrop-blur-sm sm:px-7">
       <div className="min-w-0">
         <div className="text-base font-semibold tracking-tight">{pageTitle(route)}</div>
-        {runInfo?.runtime ? (
-          <div className="mt-0.5 font-mono text-[11px] text-text-faint">{runInfo.runtime}</div>
+        {runInfo && (runInfo.runtime || runInfo.startedAt) ? (
+          <div className="mt-0.5 font-mono text-[11px] text-text-faint">
+            {[runInfo.runtime, runInfo.startedAt].filter(Boolean).join(' · ')}
+          </div>
         ) : null}
       </div>
       <div className="flex-1" />

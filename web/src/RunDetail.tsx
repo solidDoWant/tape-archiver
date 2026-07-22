@@ -252,6 +252,7 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
     statusLabel: view.label,
     tone: view.tone,
     runtime: headerRuntime(detail.startTime, detail.closeTime, isPaused, terminal),
+    startedAt: detail.startTime ? formatTimestamp(detail.startTime) : '',
   })
 
   const selectedPhaseIndex = phases.status === 'ready' ? phases.phases.findIndex((phase) => phase.name === selected) : -1
