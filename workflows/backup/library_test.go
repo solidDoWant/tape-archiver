@@ -18,6 +18,76 @@ func inventoryWith(drives []tape.DriveElement, slots []tape.StorageElement, ioSl
 	return tape.Inventory{Drives: drives, Slots: slots, IOSlots: ioSlots}
 }
 
+func TestFormatSlotRanges(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		addresses []int
+		want      string
+	}{
+		{name: "empty reads as none", addresses: nil, want: "none"},
+		{name: "single slot", addresses: []int{7}, want: "7"},
+		{name: "one contiguous run collapses", addresses: []int{1, 2, 3, 4}, want: "1-4"},
+		{name: "disjoint runs are separated", addresses: []int{1, 2, 3, 7, 8, 20}, want: "1-3, 7-8, 20"},
+		{name: "all isolated", addresses: []int{2, 4, 6}, want: "2, 4, 6"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, test.want, formatSlotRanges(test.addresses))
+		})
+	}
+}
+
+func TestOccupiedStorageSlots(t *testing.T) {
+	t.Parallel()
+
+	// Slot 3 is empty in the snapshot but holds a tape relocated during this
+	// Load, so it must still count as occupied; slot 2 is genuinely empty.
+	inv := inventoryWith(nil, []tape.StorageElement{
+		{Address: 1, Full: true},
+		{Address: 2, Full: false},
+		{Address: 3, Full: false},
+	}, nil)
+
+	got := occupiedStorageSlots(inv, map[int]tape.Barcode{3: "RELOC3"})
+
+	assert.Equal(t, []int{1, 3}, got)
+}
+
+// TestReconcileLoadEmptyTargetSlotErrorNamesWhereTapesAre is the diagnostic
+// contract for the failure an operator actually hits when the configured blank
+// slots no longer hold tapes (a prior run left them in the drives or the I/O
+// station): the error must say where the tapes *are*, so the run's own message is
+// enough to pick valid slots without a separate inventory.
+func TestReconcileLoadEmptyTargetSlotErrorNamesWhereTapesAre(t *testing.T) {
+	t.Parallel()
+
+	inv := inventoryWith(
+		[]tape.DriveElement{{Address: 0, Loaded: true, Barcode: "TA0005L6", SourceSlot: 5}},
+		[]tape.StorageElement{
+			{Address: 1, Full: true},
+			{Address: 2, Full: true},
+			{Address: 3, Full: true},
+			{Address: 20, Full: false}, // the configured blank slot, now empty
+		},
+		[]tape.IOElement{{Address: 48, Full: true}, {Address: 49, Full: false}},
+	)
+
+	// An empty drive, so reconcileLoad goes straight to the target-slot lookup.
+	_, err := reconcileLoad(t.Context(), nil, inv, tape.DriveElement{Address: 1}, 20, make(map[int]tape.Barcode))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "target slot 20 is empty")
+	assert.Contains(t, err.Error(), "storage slots holding tapes: 1-3",
+		"the error must name the slots that actually hold tapes")
+	assert.Contains(t, err.Error(), "tapes in drives: 1")
+	assert.Contains(t, err.Error(), "tapes in I/O station: 1")
+}
+
 func TestFindFreeStorageSlot(t *testing.T) {
 	t.Parallel()
 

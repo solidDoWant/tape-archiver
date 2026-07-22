@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -345,7 +347,19 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 	}
 
 	if !ok {
-		return "", fmt.Errorf("target slot %d is empty; cannot load a blank tape", targetSlot)
+		// Report where the tapes actually are, not just that this slot is empty.
+		// The usual cause is a configured blank slot that no longer holds a tape —
+		// a previous run left its tapes in the drives or the I/O station, or the
+		// configured slots never matched the library's contents. Naming the
+		// occupied slots makes the run's own error enough to pick valid slots (or
+		// to see that the library needs restocking) without a separate inventory.
+		return "", fmt.Errorf(
+			"target slot %d is empty; cannot load a blank tape "+
+				"(storage slots holding tapes: %s; tapes in drives: %d; tapes in I/O station: %d)",
+			targetSlot,
+			formatSlotRanges(occupiedStorageSlots(inv, relocated)),
+			loadedDriveCount(inv),
+			occupiedIOCount(inv))
 	}
 
 	if err := changer.Load(ctx, targetSlot, driveAddr); err != nil {
@@ -353,6 +367,98 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 	}
 
 	return targetBarcode, nil
+}
+
+// occupiedStorageSlots returns, in ascending order, the address of every storage
+// slot that holds a tape — including tapes moved into a slot by this Load's own
+// relocations, which the once-read inventory snapshot still shows as empty.
+func occupiedStorageSlots(inv tape.Inventory, relocated map[int]tape.Barcode) []int {
+	occupied := make(map[int]struct{}, len(inv.Slots))
+
+	for _, slot := range inv.Slots {
+		if slot.Full {
+			occupied[slot.Address] = struct{}{}
+		}
+	}
+
+	for address := range relocated {
+		occupied[address] = struct{}{}
+	}
+
+	addresses := make([]int, 0, len(occupied))
+	for address := range occupied {
+		addresses = append(addresses, address)
+	}
+
+	sort.Ints(addresses)
+
+	return addresses
+}
+
+// loadedDriveCount returns how many drives currently hold a tape.
+func loadedDriveCount(inv tape.Inventory) int {
+	var count int
+
+	for _, drive := range inv.Drives {
+		if drive.Loaded {
+			count++
+		}
+	}
+
+	return count
+}
+
+// occupiedIOCount returns how many I/O station slots currently hold a tape.
+func occupiedIOCount(inv tape.Inventory) int {
+	var count int
+
+	for _, ioSlot := range inv.IOSlots {
+		if ioSlot.Full {
+			count++
+		}
+	}
+
+	return count
+}
+
+// formatSlotRanges renders ascending slot addresses compactly, collapsing
+// consecutive runs into "start-end" so a 47-slot library reads as "1-19, 23-47"
+// rather than a wall of numbers. Returns "none" for an empty list.
+func formatSlotRanges(addresses []int) string {
+	if len(addresses) == 0 {
+		return "none"
+	}
+
+	var (
+		parts []string
+		start = addresses[0]
+		prev  = addresses[0]
+	)
+
+	for _, address := range addresses[1:] {
+		if address == prev+1 {
+			prev = address
+
+			continue
+		}
+
+		parts = append(parts, formatSlotRange(start, prev))
+		start, prev = address, address
+	}
+
+	parts = append(parts, formatSlotRange(start, prev))
+
+	return strings.Join(parts, ", ")
+}
+
+// formatSlotRange renders one inclusive slot range, collapsing a single-slot
+// range to the bare address.
+func formatSlotRange(start, end int) string {
+	if start == end {
+		return strconv.Itoa(start)
+	}
+
+	return fmt.Sprintf("%d-%d", start, end)
 }
 
 // findFreeStorageSlot returns the address of an empty storage slot, preferring
