@@ -17,6 +17,7 @@ import (
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/solidDoWant/tape-archiver/internal/buildinfo"
 	"github.com/solidDoWant/tape-archiver/internal/envvar"
 	"github.com/solidDoWant/tape-archiver/pkg/health"
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
@@ -71,10 +72,16 @@ func main() {
 //
 // Both roles install logTagsInterceptor so every activity's log lines carry the
 // run's WorkflowID/RunID and the web UI's run-detail log panel can find them
-// (#303).
+// (#303), then activityLogInterceptor so every activity emits start/end lines
+// stamped with the build version and worker identity. Order matters:
+// activityLogInterceptor is registered second so it runs inside logTagsInterceptor
+// and its boundary lines inherit the seeded run tags.
 func workerOptions(role Role) worker.Options {
 	options := worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{&logTagsInterceptor{}},
+		Interceptors: []interceptor.WorkerInterceptor{
+			&logTagsInterceptor{},
+			newActivityLogInterceptor(role),
+		},
 	}
 
 	if role == RoleData {
@@ -144,7 +151,8 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 
 	queue := cfg.Role.taskQueue()
 
-	slog.Info("starting worker", "role", string(cfg.Role), "task_queue", queue)
+	slog.Info("starting worker",
+		"role", string(cfg.Role), "task_queue", queue, "version", buildinfo.ToolVersion())
 
 	options := workerOptions(cfg.Role)
 
