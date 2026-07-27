@@ -102,6 +102,12 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newReportActivities(cfg.StagingDir, cfg.RecoveryBinariesDir, cfg.RecoverySourcesDir))
 	w.RegisterActivity(newDeliverActivities())
 
+	// Staging cleanup reclaims the run's staged bulk data on exit. It runs here
+	// because the staged bytes live on this worker's staging volume, and it shares
+	// the same staging root Prepare, Write, and Report were constructed with
+	// (SPEC §4.3).
+	w.RegisterActivity(newCleanupActivities(cfg.StagingDir))
+
 	// The per-disc optical burn/verify activities run here too: the burners are
 	// attached to the storage host and the recovery ISO is staged beside the run's
 	// tree (SPEC §10). They are stateless — every per-disc parameter (device,

@@ -72,6 +72,14 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 		state.loaded = loaded
 		state.lastCompletedPhase = PhaseLoad
 
+		// Record the set's barcodes cumulatively: loaded is overwritten by the next
+		// set, but every tape mounted here leaves barcode-keyed staging entries the
+		// run must reclaim on exit (SPEC §4.3). Recorded at load rather than at
+		// write so a tape that fails mid-write is still cleaned up.
+		for _, loadedTape := range loaded {
+			state.mountedBarcodes = append(state.mountedBarcodes, loadedTape.Barcode)
+		}
+
 		*failingPhase = PhaseWrite
 
 		written, failed, err := writePhase(ctx, cfg, state, loaded)

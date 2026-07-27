@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -70,6 +72,13 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	report := findUpload(t, uploads, "report.pdf")
 
 	assertReportContents(t, report, backupWorkflowID, string(fixture.barcode))
+
+	// Staging cleanup (issue #333): on this successful run the staged archive
+	// slices and PAR2 recovery files are reclaimed, while the durable report
+	// survives on the data worker's staging volume (not just the Discord upload
+	// asserted above) — the retained artifact the annual disc-verification
+	// cadence and a future re-burn rely on.
+	assertStagingCleaned(t, filepath.Join(h.stagingHostDir, temporalRunID(t, temporalClient)))
 }
 
 // TestBackupEndToEnd_MultipleDriveSets drives a run whose copy count exceeds the
@@ -257,6 +266,45 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	for _, barcode := range fixture.barcodes {
 		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
 	}
+}
+
+// stagingRetainedArtifacts are the file names a run's staging directory keeps after
+// cleanup (workflows/backup's retainedRunArtifacts, duplicated here since the e2e
+// package only observes the real worker's on-disk behavior, not its internals).
+var stagingRetainedArtifacts = []string{"report.pdf", "recovery.iso", "disc-manifest.sha256"}
+
+// assertStagingCleaned asserts that a completed run's staging directory contains no
+// staged bulk data (archive slices, PAR2 recovery files) anywhere beneath it, while
+// report.pdf survives on disk — proving the data worker's staging cleanup ran
+// end-to-end, not just that Deliver received a copy over the webhook.
+func assertStagingCleaned(t *testing.T, runDir string) {
+	t.Helper()
+
+	var leftovers []string
+
+	err := filepath.WalkDir(runDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if entry.IsDir() {
+			return nil
+		}
+
+		for _, retained := range stagingRetainedArtifacts {
+			if entry.Name() == retained {
+				return nil
+			}
+		}
+
+		leftovers = append(leftovers, path)
+
+		return nil
+	})
+	require.NoError(t, err, "read run staging directory %s", runDir)
+
+	assert.Empty(t, leftovers, "no staged bulk data may survive a completed run")
+	assert.FileExists(t, filepath.Join(runDir, "report.pdf"), "the report survives cleanup on disk")
 }
 
 // findUpload returns the captured upload whose filename matches, failing if it is

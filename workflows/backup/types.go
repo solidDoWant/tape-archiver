@@ -438,6 +438,13 @@ type runState struct {
 	// phase 6). The tape path processes drive-sets one at a time, so this is the
 	// in-flight set (at most len(Drives) tapes), overwritten as each set loads.
 	loaded []LoadedTape
+	// mountedBarcodes accumulates the barcode of every tape the run loaded, across
+	// all drive-sets. It is distinct from loaded (only the in-flight set) and from
+	// written (only the tapes that wrote successfully): the Write phase derives a
+	// tape's LTFS mountpoint and work directory from its barcode as soon as it
+	// mounts, so a tape that later failed to write still left staging entries
+	// behind. Staging cleanup reads this to remove them on exit (SPEC §4.3).
+	mountedBarcodes []tape.Barcode
 	// written accumulates every tape written by the Write phase across all
 	// drive-sets (SPEC §4.3 phase 7). Each set's tapes are appended as it
 	// completes; the Report phase uses the full list (barcodes, staged index

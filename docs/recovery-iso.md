@@ -132,5 +132,11 @@ See [report.md](report.md) for the full rationale.
 - Contents are verified in tests by reading the built image back with the same pure-Go
   reader and asserting every artifact is present at its expected path with its exact
   bytes, so the test exercises the real image rather than trusting the writer.
-- The Report phase stages the image as `recovery.iso` for the Burn phase to burn; the
-  burned disc is the ISO's durable home (SPEC §10, §11).
+- The Report phase stages the image as `recovery.iso` for the Burn phase to burn. Unlike
+  the bulk staged archive slices and PAR2 files, `recovery.iso` (and its
+  `disc-manifest.sha256`) is retained on the data worker's staging volume rather than
+  reclaimed at the end of the run — it is the archived master ISO the
+  [annual disc-verification cadence](maintenance.md#recovery-disc-re-burn-and-verification-cadence)
+  reads discs back against, and the source a re-burn uses (SPEC §10, §11). See
+  [maintenance.md](maintenance.md#reclaiming-a-leaked-staging-directory) for the retention
+  and manual-reclaim story.

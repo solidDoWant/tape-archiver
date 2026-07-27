@@ -272,6 +272,19 @@ write window.
     `opticalBurn` section completes exactly as without this phase.
 11. **Deliver.** Send the PDF report to Discord via webhook (§11).
 
+On every run exit — success, failure, or cancellation — the run's staged bulk data
+(the archive slices and PAR2 recovery sets Prepare and Generate PAR2 wrote to disk,
+plus the per-tape LTFS mountpoint, work directory, and captured index the Write phase
+created) is reclaimed from the data worker's staging directory, the same way the
+source-snapshot hold from step 1 is released on every exit. `report.pdf` and, when
+optical burning is enabled, `recovery.iso`/`disc-manifest.sha256` are retained rather
+than reclaimed — they are the durable recovery artifacts, and `recovery.iso` is the
+archived master ISO the annual disc-verification cadence (§10, `docs/maintenance.md`)
+reads a burned disc back against. Retained artifacts accumulate across runs by design
+and are pruned manually, not by the run itself. A hard Terminate (as opposed to a
+cancel) skips this cleanup, the same way it skips releasing the snapshot hold; a
+leaked staging directory is harmless but reclaimed by hand (`docs/maintenance.md`).
+
 ## 5. Run configuration
 
 The run config fully and explicitly defines a backup. It is supplied as a file or as
