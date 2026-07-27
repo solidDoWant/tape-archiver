@@ -83,6 +83,10 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	env.RegisterActivity(newReportActivities(t.TempDir(), t.TempDir(), t.TempDir()))
 	env.RegisterActivity(newDeliverActivities())
 	env.RegisterActivity(&FailureActivities{})
+	// Staging cleanup is deferred from Backup on every exit path; register it with
+	// a real staging root so it runs to completion rather than logging a dispatch
+	// error on every workflow-orchestration test.
+	env.RegisterActivity(newCleanupActivities(t.TempDir()))
 
 	return env
 }

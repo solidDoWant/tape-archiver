@@ -147,6 +147,24 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 		return Result{}, fmt.Errorf("install %s query handler: %w", CurrentPauseQuery, queryErr)
 	}
 
+	// Reclaim the run's staged bulk data on every exit path — success, failure, and
+	// cancellation (SPEC §4.3). The staged tree is a complete second copy of
+	// everything the run archives, so leaving it behind grows the staging dataset by
+	// roughly a full backup per run until it fills and fails a later run mid-Prepare.
+	//
+	// It is armed here, before the first phase, rather than after Prepare succeeds:
+	// Prepare writes slices to disk as it goes, so a run that dies partway through it
+	// has already staged bytes — precisely the case that strands the most data.
+	// cleanupStaging removes only paths derived from this run (its own run-id
+	// directory and its own tapes' barcodes), tolerates paths that were never
+	// created, runs on a disconnected context, and never propagates an error, so
+	// arming it ahead of any staging is safe on every exit path.
+	//
+	// Deferred before the failure-alert defer below so it runs *after* it (defers
+	// unwind last-in-first-out): the alert reports the run's own outcome and must not
+	// wait on cleanup, and cleanup must not be able to influence what the alert says.
+	defer cleanupStaging(ctx, state)
+
 	// failingPhase names the phase in flight so the deferred failure alert can
 	// report where the run failed. It is the last phase started; on success the
 	// deferred handler is a no-op because err is nil.

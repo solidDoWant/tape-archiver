@@ -130,6 +130,49 @@ very protection this feature provides.
 
 ---
 
+## Reclaiming a leaked staging directory
+
+Prepare stages a complete second copy of everything a run archives — encrypted archive
+slices plus their PAR2 recovery sets — under `TAPE_STAGING_DIR` on the data worker (SPEC
+§4.3, §14). That staged tree is reclaimed **automatically on every run exit**: success,
+failure, or cancellation. What survives is deliberately small and durable: `report.pdf`,
+and — when [optical burning](configuration.md#opticalburn) is enabled — `recovery.iso`
+and `disc-manifest.sha256`, the same master ISO the
+[annual disc-verification cadence](#recovery-disc-re-burn-and-verification-cadence)
+checks a burned disc against. Those retained artifacts accumulate across runs by
+design; they are not pruned automatically — treat them as an operator-managed archive of
+past runs' reports and master ISOs, and delete old ones by hand once you no longer need
+them.
+
+A hard **Terminate** of a run (as opposed to a cancel) skips the workflow's cleanup — the
+same way it can leave a source-snapshot hold behind — so it leaves the run's full staged
+tree in place. A leaked staging directory is harmless (a future run stages under its own
+run-id subdirectory and never collides with it) but it keeps consuming space on the pool
+until removed. It is fully observable and clearable by hand:
+
+1. **Identify runs no longer active** by comparing the subdirectories under
+   `TAPE_STAGING_DIR` (each named for a Temporal run id) against Temporal — any
+   subdirectory whose run id is not `Running` is safe to inspect.
+2. **Remove the run's staged bulk data**, keeping the recovery artifacts if you still
+   want them:
+
+   ```
+   find /mnt/bulk-pool-01/archive/.tape-staging/<run-id> -mindepth 1 \
+     ! -name report.pdf ! -name recovery.iso ! -name disc-manifest.sha256 -delete
+   ```
+
+   or remove the run's directory entirely (recovery artifacts included) once you no
+   longer need its report or master ISO:
+
+   ```
+   rm -rf /mnt/bulk-pool-01/archive/.tape-staging/<run-id>
+   ```
+
+Only reclaim a directory whose run has truly ended — removing an in-flight run's staging
+tree destroys work the Write phase has not yet read onto tape.
+
+---
+
 ## Barcode label convention
 
 The library-read **barcode is the canonical physical tape ID** (SPEC §6): the SCSI volume
