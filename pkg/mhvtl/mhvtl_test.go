@@ -150,6 +150,237 @@ func TestMirrorSurfacesDaemonLookupFailure(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrDaemonNotFound))
 }
 
+// writeConf writes an mhvtl.conf containing body into dir and returns dir.
+func writeConf(t *testing.T, dir, body string) string {
+	t.Helper()
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, mhvtlConfFile), []byte(body), 0o644))
+
+	return dir
+}
+
+// TestMirrorTakesTheMediaHomeFromMhvtlConf is the contract this exists for: media
+// go where the host says mhvtl keeps them, not where the code was compiled to
+// guess. A worker that guesses creates a full set of volumes somewhere vtllibrary
+// is not looking, reports success, and leaves the run to die later at Load.
+func TestMirrorTakesTheMediaHomeFromMhvtlConf(t *testing.T) {
+	t.Parallel()
+
+	homeDir := t.TempDir()
+	configDir := writeConf(t, t.TempDir(),
+		"# mhvtl settings\nCAPACITY=500\nMHVTL_HOME_PATH="+homeDir+"\n")
+
+	gotHome := ""
+
+	r := New(WithConfigDir(configDir))
+	r.makeMedia = func(_ context.Context, _, home string) error { gotHome = home; return nil }
+	r.findDaemon = func(int) (int, error) { return 1, nil }
+	r.signal = func(int) error { return nil }
+
+	require.NoError(t, r.Mirror(t.Context(), inventory(
+		tape.StorageElement{Address: 1, Full: true, Barcode: "X"})))
+
+	assert.Equal(t, homeDir, gotHome)
+}
+
+// TestMirrorPrefersAnExplicitHomeDir checks WithHomeDir still wins, so a caller
+// that knows better than mhvtl.conf is not overridden by it.
+func TestMirrorPrefersAnExplicitHomeDir(t *testing.T) {
+	t.Parallel()
+
+	pinned := t.TempDir()
+	configDir := writeConf(t, t.TempDir(), "MHVTL_HOME_PATH="+t.TempDir()+"\n")
+
+	gotHome := ""
+
+	r := New(WithConfigDir(configDir), WithHomeDir(pinned))
+	r.makeMedia = func(_ context.Context, _, home string) error { gotHome = home; return nil }
+	r.findDaemon = func(int) (int, error) { return 1, nil }
+	r.signal = func(int) error { return nil }
+
+	require.NoError(t, r.Mirror(t.Context(), inventory(
+		tape.StorageElement{Address: 1, Full: true, Barcode: "X"})))
+
+	assert.Equal(t, pinned, gotHome)
+}
+
+// TestMirrorRefusesAnUnusableMediaHome checks every way the home can be unusable
+// stops the reprovision before it writes anything. Failing loudly here is the
+// whole point: the alternative is a mirror that claims success against media that
+// are not where the library will look for them.
+func TestMirrorRefusesAnUnusableMediaHome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// setup returns the config dir and the WithHomeDir override ("" for none).
+		setup     func(t *testing.T) (configDir, homeDir string)
+		wantError string
+	}{
+		{
+			name: "no mhvtl.conf at all",
+			setup: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				return t.TempDir(), ""
+			},
+			wantError: "read",
+		},
+		{
+			name: "mhvtl.conf declares no media home",
+			setup: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				return writeConf(t, t.TempDir(), "CAPACITY=500\n"), ""
+			},
+			wantError: "declares no MHVTL_HOME_PATH",
+		},
+		{
+			name: "the declared media home does not exist",
+			setup: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				return writeConf(t, t.TempDir(),
+					"MHVTL_HOME_PATH="+filepath.Join(t.TempDir(), "absent")+"\n"), ""
+			},
+			wantError: "stat the mhvtl media home",
+		},
+		{
+			name: "the declared media home is a file",
+			setup: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				file := filepath.Join(t.TempDir(), "not-a-dir")
+				require.NoError(t, os.WriteFile(file, nil, 0o644))
+
+				return writeConf(t, t.TempDir(), "MHVTL_HOME_PATH="+file+"\n"), ""
+			},
+			wantError: "is not a directory",
+		},
+		{
+			name: "the declared media home needs shell expansion",
+			setup: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				return writeConf(t, t.TempDir(), "MHVTL_HOME_PATH=$HOME/mhvtl\n"), ""
+			},
+			wantError: "does not expand",
+		},
+		{
+			name: "an explicit media home that does not exist",
+			setup: func(t *testing.T) (string, string) {
+				t.Helper()
+
+				return t.TempDir(), filepath.Join(t.TempDir(), "absent")
+			},
+			wantError: "stat the mhvtl media home",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			configDir, homeDir := test.setup(t)
+
+			opts := []Option{WithConfigDir(configDir)}
+			if homeDir != "" {
+				opts = append(opts, WithHomeDir(homeDir))
+			}
+
+			mediaMade, signalled := false, false
+
+			r := New(opts...)
+			r.makeMedia = func(context.Context, string, string) error { mediaMade = true; return nil }
+			r.findDaemon = func(int) (int, error) { return 1, nil }
+			r.signal = func(int) error { signalled = true; return nil }
+
+			err := r.Mirror(t.Context(), inventory(
+				tape.StorageElement{Address: 1, Full: true, Barcode: "X"}))
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.wantError)
+			assert.False(t, mediaMade, "no media may be created against an unusable home")
+			assert.False(t, signalled, "the daemon must not be signalled")
+
+			// Nothing may be written either: an aborted mirror leaves the library's
+			// existing contents alone rather than half-rewritten.
+			_, err = os.Stat(filepath.Join(configDir, "library_contents.10"))
+			assert.True(t, os.IsNotExist(err), "library_contents must not have been rewritten")
+		})
+	}
+}
+
+// TestReadHomePathParsesConfLikeShellSourcingWould checks the parse matches how
+// mhvtl itself reads the file — it sources it — so a conf that works for
+// make_vtl_media resolves to the same path here.
+func TestReadHomePathParsesConfLikeShellSourcingWould(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		conf string
+		want string
+	}{
+		{
+			name: "a plain assignment",
+			conf: "MHVTL_HOME_PATH=/srv/mhvtl\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "indented and surrounded by other settings",
+			conf: "CAPACITY=500\n  MHVTL_HOME_PATH=/srv/mhvtl\nVERBOSE=0\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "a quoted value",
+			conf: "MHVTL_HOME_PATH=\"/srv/mhvtl\"\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "a trailing comment",
+			conf: "MHVTL_HOME_PATH=/srv/mhvtl # on the bulk pool\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "a commented-out assignment is ignored",
+			conf: "#MHVTL_HOME_PATH=/opt/mhvtl\nMHVTL_HOME_PATH=/srv/mhvtl\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "the last assignment wins, as sourcing would leave it",
+			conf: "MHVTL_HOME_PATH=/opt/mhvtl\nMHVTL_HOME_PATH=/srv/mhvtl\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "an exported assignment",
+			conf: "export MHVTL_HOME_PATH=/srv/mhvtl\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "a similarly named setting is not mistaken for it",
+			conf: "MHVTL_HOME_PATH_OLD=/opt/mhvtl\nMHVTL_HOME_PATH=/srv/mhvtl\n",
+			want: "/srv/mhvtl",
+		},
+		{
+			name: "a file with no trailing newline",
+			conf: "MHVTL_HOME_PATH=/srv/mhvtl",
+			want: "/srv/mhvtl",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := readHomePath(filepath.Join(writeConf(t, t.TempDir(), test.conf), mhvtlConfFile))
+
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
 // TestMirrorSurfacesMediaFailure checks a failed make_vtl_media aborts before the
 // daemon is signalled, so the library is never reloaded onto media that does not
 // exist.

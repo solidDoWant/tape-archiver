@@ -40,13 +40,26 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// Default locations and identifiers, matching mhvtl's own conventions
-// (MHVTL_HOME_PATH in /etc/mhvtl/mhvtl.conf) and the library ID this project
-// configures in device.conf.
+// Default locations and identifiers, matching mhvtl's own conventions and the
+// library ID this project configures in device.conf.
+//
+// There is deliberately no default media home. Where mhvtl keeps its volumes is a
+// per-host decision — this project's storage host puts them on the bulk pool,
+// because a dry run writes real volumes and would otherwise fill the root disk —
+// and mhvtl.conf is where a host declares it. Compiling in a guess produced a
+// worker that created a full set of media somewhere the library was not looking
+// (issue #335), so the path is read from mhvtl.conf instead; see resolveHomeDir.
 const (
 	DefaultConfigDir = "/etc/mhvtl"
-	DefaultHomeDir   = "/opt/mhvtl"
 	DefaultLibraryID = 10
+)
+
+// mhvtlConfFile is mhvtl's own settings file within the config directory, and
+// homePathKey the shell assignment in it that names the media home. make_vtl_media
+// reads the same key from the same file (its CONFIG_FILE, redirected by -C).
+const (
+	mhvtlConfFile = "mhvtl.conf"
+	homePathKey   = "MHVTL_HOME_PATH"
 )
 
 // reloadPollInterval and reloadTimeout bound the wait for vtllibrary to finish
@@ -61,6 +74,7 @@ const (
 // The zero value is not usable; use New.
 type Reprovisioner struct {
 	configDir string
+	// homeDir pins the media home; empty means resolve it from mhvtl.conf.
 	homeDir   string
 	libraryID int
 	// makeMedia runs make_vtl_media; overridable in tests.
@@ -78,17 +92,18 @@ type Option func(*Reprovisioner)
 // WithConfigDir overrides the mhvtl config directory (default DefaultConfigDir).
 func WithConfigDir(dir string) Option { return func(r *Reprovisioner) { r.configDir = dir } }
 
-// WithHomeDir overrides the mhvtl media home (default DefaultHomeDir).
+// WithHomeDir pins the mhvtl media home instead of reading it from mhvtl.conf.
 func WithHomeDir(dir string) Option { return func(r *Reprovisioner) { r.homeDir = dir } }
 
 // WithLibraryID overrides the mhvtl library ID (default DefaultLibraryID).
 func WithLibraryID(id int) Option { return func(r *Reprovisioner) { r.libraryID = id } }
 
-// New builds a Reprovisioner with mhvtl's default paths, overridable by opts.
+// New builds a Reprovisioner with mhvtl's default paths, overridable by opts. The
+// media home is left unset and resolved from mhvtl.conf at Mirror time unless
+// WithHomeDir pins it.
 func New(opts ...Option) *Reprovisioner {
 	r := &Reprovisioner{
 		configDir:  DefaultConfigDir,
-		homeDir:    DefaultHomeDir,
 		libraryID:  DefaultLibraryID,
 		makeMedia:  runMakeVTLMedia,
 		signal:     func(pid int) error { return syscall.Kill(pid, syscall.SIGHUP) },
@@ -113,6 +128,14 @@ func New(opts ...Option) *Reprovisioner {
 // occupancy is the property that actually decides whether a run can find the
 // blanks it was configured to use, which is the failure this exists to surface.
 func (r *Reprovisioner) Mirror(ctx context.Context, source tape.Inventory) error {
+	// Resolve the media home before touching anything: a home that cannot be
+	// resolved makes the whole reprovision pointless, and failing first leaves the
+	// library's existing contents intact rather than half-rewritten.
+	homeDir, err := r.resolveHomeDir()
+	if err != nil {
+		return err
+	}
+
 	contents := RenderLibraryContents(source)
 
 	path := r.contentsPath()
@@ -121,10 +144,10 @@ func (r *Reprovisioner) Mirror(ctx context.Context, source tape.Inventory) error
 	}
 
 	slog.InfoContext(ctx, "mhvtl: wrote mirrored library contents",
-		"path", path, "occupiedSlots", countFull(source))
+		"path", path, "occupiedSlots", countFull(source), "mediaHome", homeDir)
 
-	if err := r.makeMedia(ctx, r.configDir, r.homeDir); err != nil {
-		return fmt.Errorf("regenerate mhvtl media: %w", err)
+	if err := r.makeMedia(ctx, r.configDir, homeDir); err != nil {
+		return fmt.Errorf("regenerate mhvtl media under %s: %w", homeDir, err)
 	}
 
 	pid, err := r.findDaemon(r.libraryID)
@@ -144,6 +167,97 @@ func (r *Reprovisioner) Mirror(ctx context.Context, source tape.Inventory) error
 // contentsPath is the library_contents file for this library ID.
 func (r *Reprovisioner) contentsPath() string {
 	return filepath.Join(r.configDir, "library_contents."+strconv.Itoa(r.libraryID))
+}
+
+// confPath is mhvtl's own settings file within the config directory.
+func (r *Reprovisioner) confPath() string {
+	return filepath.Join(r.configDir, mhvtlConfFile)
+}
+
+// resolveHomeDir returns the directory mhvtl keeps its media in: the pinned one if
+// WithHomeDir set it, otherwise MHVTL_HOME_PATH from mhvtl.conf.
+//
+// It insists the directory already exists. The worker runs in a container and
+// reaches the media home through a bind mount, so a missing directory means the
+// mount is absent or the declared path is wrong — and creating it would produce
+// exactly the failure this resolution exists to prevent: a full set of media
+// written somewhere vtllibrary is not looking, a mirror that reports success, and
+// a run that dies later at Load with slots that should have held tapes.
+func (r *Reprovisioner) resolveHomeDir() (string, error) {
+	homeDir := r.homeDir
+	source := "the configured media home"
+
+	if homeDir == "" {
+		var err error
+
+		homeDir, err = readHomePath(r.confPath())
+		if err != nil {
+			return "", err
+		}
+
+		source = homePathKey + " in " + r.confPath()
+	}
+
+	info, err := os.Stat(homeDir)
+	if err != nil {
+		return "", fmt.Errorf("stat the mhvtl media home %s (%s): %w", homeDir, source, err)
+	}
+
+	if !info.IsDir() {
+		return "", fmt.Errorf("the mhvtl media home %s (%s) is not a directory", homeDir, source)
+	}
+
+	return homeDir, nil
+}
+
+// readHomePath extracts MHVTL_HOME_PATH from an mhvtl.conf. The file is a shell
+// fragment mhvtl sources, so this reads it the way sourcing would: assignments may
+// be indented or exported, '#' starts a comment, the value may be quoted, and a
+// later assignment wins over an earlier one.
+//
+// A value containing '$' is rejected rather than passed through, because expanding
+// it would mean interpreting the surrounding shell — and a path that silently
+// keeps a literal '$var' in it is the same class of bug as guessing the path.
+func readHomePath(confPath string) (string, error) {
+	contents, err := os.ReadFile(confPath)
+	if err != nil {
+		return "", fmt.Errorf("read %s to find the mhvtl media home (%s): %w", confPath, homePathKey, err)
+	}
+
+	found := ""
+
+	for line := range strings.Lines(string(contents)) {
+		if comment := strings.IndexByte(line, '#'); comment >= 0 {
+			line = line[:comment]
+		}
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+
+		key = strings.TrimSpace(key)
+		if rest, exported := strings.CutPrefix(key, "export "); exported {
+			key = strings.TrimSpace(rest)
+		}
+
+		if key != homePathKey {
+			continue
+		}
+
+		found = strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+
+	if found == "" {
+		return "", fmt.Errorf("%s declares no %s, so there is nowhere to write mhvtl media", confPath, homePathKey)
+	}
+
+	if strings.Contains(found, "$") {
+		return "", fmt.Errorf("%s sets %s to %q, which this does not expand; set a literal path",
+			confPath, homePathKey, found)
+	}
+
+	return found, nil
 }
 
 // WaitReady blocks until the changer answers with the mirrored slot occupancy,
@@ -211,14 +325,17 @@ func RenderLibraryContents(source tape.Inventory) string {
 	return b.String()
 }
 
-// runMakeVTLMedia creates any media named by library_contents that does not
-// already exist. mhvtl refuses to load a barcode with no backing media file, so
-// mirroring a real library's barcodes requires materialising them here.
+// runMakeVTLMedia creates the media named by library_contents. mhvtl refuses to
+// load a barcode with no backing media file, so mirroring a real library's
+// barcodes requires materialising them here.
+//
+// -c (--create-dir, mkdir the home) is deliberately NOT passed: the home is
+// resolved and checked by resolveHomeDir, and letting make_vtl_media conjure a
+// missing one is what turned a wrong path into a silent success (issue #335).
 func runMakeVTLMedia(ctx context.Context, configDir, homeDir string) error {
 	cmd := exec.CommandContext(ctx, "make_vtl_media",
-		"-H", homeDir,
-		"-C", configDir,
-		"-c", // create media for every barcode in library_contents
+		"-H", homeDir, // write media here, not wherever mhvtl.conf's default points
+		"-C", configDir, // read device.conf and mhvtl.conf from here
 		"-f", // overwrite stale media from a previous run, so tapes start blank
 	)
 

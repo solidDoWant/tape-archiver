@@ -56,11 +56,21 @@ ExecStartPre=-/usr/bin/docker rm -f tape-archiver-data-worker
 #
 #   * /dev/mhvtl<id> control devices — char major 236, minor = the daemon queue
 #     ID in /etc/mhvtl/device.conf (10 = library, 11/12 = drives).
-#   * /etc/mhvtl and the media home (MHVTL_HOME_PATH in /etc/mhvtl/mhvtl.conf,
-#     conventionally /opt/mhvtl) bind-mounted read-write, so the worker can
+#   * /etc/mhvtl and the media home bind-mounted read-write, so the worker can
 #     rewrite library_contents.<id> and regenerate media with make_vtl_media.
 #     That tooling is BUNDLED IN THE IMAGE (nix/data-worker-image.nix) — no
 #     mhvtl userspace, and no version/path coupling, is required on the host.
+#     The media home is NOT hardcoded here: it is whatever MHVTL_HOME_PATH in
+#     /etc/mhvtl/mhvtl.conf says, which is a per-host choice (this project's
+#     storage host puts it on the bulk pool, since a dry run writes real volumes
+#     and would otherwise fill the root disk). The ExecStartPre below reads that
+#     file the same way mhvtl's own tooling does — by sourcing it — and mounts
+#     the result at the same path inside the container, which is the path the
+#     worker will resolve from the same mhvtl.conf (pkg/mhvtl). Mounting a
+#     guessed path instead produced a worker that wrote a full set of media into
+#     its own ephemeral filesystem and reported success (issue #335).
+#     If the media home already sits under another bind mount (the bulk pool,
+#     say), this extra mount is redundant but harmless.
 #   * --pid=host, so the worker can send SIGHUP to the host's vtllibrary daemon.
 #     SIGHUP makes vtllibrary re-read library_contents.<id> in place
 #     (rereadconfig() in usr/cmd/vtllibrary.c). The daemon is NOT restarted and
@@ -91,7 +101,8 @@ ExecStartPre=/bin/sh -c 'D=/run/tape-archiver-data-worker; mkdir -p "$D"; F=""; 
       done; \
       F="$F --pid=host"; \
       F="$F --mount type=bind,source=/etc/mhvtl,target=/etc/mhvtl"; \
-      F="$F --mount type=bind,source=/opt/mhvtl,target=/opt/mhvtl"; \
+      H=$(. /etc/mhvtl/mhvtl.conf >/dev/null 2>&1; echo "$MHVTL_HOME_PATH"); \
+      [ -d "$H" ] && F="$F --mount type=bind,source=$H,target=$H"; \
     fi; \
     echo "MHVTL_DEVICE_FLAGS=$F" > "$D/mhvtl.env"'
 

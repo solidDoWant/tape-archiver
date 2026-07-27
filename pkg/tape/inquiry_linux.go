@@ -109,7 +109,7 @@ func scsiInquiry(ctx context.Context, f *os.File, evpd bool, page byte) ([]byte,
 		timeout:        timeoutMs(ctx, inquiryTimeout),
 	}
 
-	if err := sgCommand(f, &hdr, cdb, sense, buf, "INQUIRY"); err != nil {
+	if err := sgCommand(ctx, f, &hdr, cdb, sense, buf, "INQUIRY"); err != nil {
 		return nil, err
 	}
 
