@@ -12,10 +12,12 @@
 # Requires:
 #   - zpool / zfs in PATH (from the devShell's zfsUserspace)
 #   - a loadable ZFS kernel module for the running kernel. Inside 'nix develop'
-#     the flake builds a version-matched module and exports $ZFS_MODULES, which
-#     this script depmods into a temp tree and loads; otherwise (or when the
-#     flake build does not match the running kernel) it falls back to the host's
-#     own module via `modprobe zfs` (e.g. the storage host's DKMS build).
+#     the flake builds one and exports $ZFS_MODULES, which this script depmods
+#     into a temp tree and loads. When that build is for a different kernel than
+#     the one running, a matching module is built from the booted system's own
+#     nixpkgs (see zfs_modules_for_running_kernel); failing that, it falls back
+#     to the host's own module via `modprobe zfs` (e.g. the storage host's DKMS
+#     build).
 #   - sudo access (loading a kernel module and creating a pool are privileged;
 #     this is inherent to ZFS and cannot be granted by the flake)
 #
@@ -59,13 +61,62 @@ done
 # Kernel module
 # ---------------------------------------------------------------------------
 
-# load_zfs_module loads ZFS into the running kernel. It prefers the flake-built,
-# version-matched module exposed at $ZFS_MODULES (built against the kernel the
-# dev VM boots): ZFS is a multi-module dependency graph (spl, zfs, ...), so it
-# must be loaded via modprobe, which needs a modules.dep. depmod cannot write
-# into the read-only nix store, so the module tree is copied into a temp dir,
-# depmod'd there, and loaded with `modprobe -d`. When $ZFS_MODULES is unset or
-# built for a different kernel, it falls back to the host's own module.
+# zfs_modules_for_running_kernel prints a module tree holding a ZFS build for the
+# running kernel, building one when $ZFS_MODULES does not have it.
+#
+# This is the same skew mhvtl-up.sh handles, from the same cause: $ZFS_MODULES is
+# built against pkgs.linuxPackages from THIS flake's nixpkgs pin, which is the
+# running kernel only on a machine booted from the same pin. The flake tracks
+# nixpkgs-unstable while dev VMs come from NixOS release channels, so they drift.
+#
+# Unlike mhvtl there is a host fallback (`modprobe zfs`), but a NixOS host only
+# has one if it was configured with boot.extraModulePackages, so on a stock dev VM
+# the fallback finds nothing. The booted system records the nixpkgs revision it
+# came from, which by construction holds a linux matching uname -r — so the module
+# is rebuilt from that revision. Only the kernel's -dev output is needed and it
+# comes from the binary cache, so this fetches rather than compiles a kernel.
+zfs_modules_for_running_kernel() {
+  local kver rev out
+  kver="$(uname -r)"
+
+  if [ -n "${ZFS_MODULES:-}" ] && [ -d "${ZFS_MODULES}/lib/modules/${kver}" ]; then
+    echo "$ZFS_MODULES"
+    return 0
+  fi
+
+  command -v nixos-version > /dev/null 2>&1 || return 1
+
+  rev="$(nixos-version --json | sed -n 's/.*"nixpkgsRevision":"\([0-9a-f]\{40\}\)".*/\1/p')"
+  [ -n "$rev" ] || return 1
+
+  echo "==> \$ZFS_MODULES is not built for the running kernel (${kver});" >&2
+  echo "    building a matching ZFS module from the booted system's nixpkgs..." >&2
+
+  # kernelModuleAttribute picks the module matching that revision's zfs userspace
+  # (e.g. "zfs_2_4"), exactly as flake.nix does for its own pin.
+  out="$(nix build --impure --no-link --print-out-paths --expr "
+    let
+      pkgs = import (builtins.fetchTarball
+        \"https://github.com/NixOS/nixpkgs/archive/${rev}.tar.gz\")
+        { system = builtins.currentSystem; };
+    in
+    pkgs.linuxPackages.\${pkgs.zfs.kernelModuleAttribute}
+  ")" || return 1
+
+  if [ ! -d "$out/lib/modules/${kver}" ]; then
+    echo "error: the rebuilt ZFS module is not for ${kver}" >&2
+    return 1
+  fi
+
+  echo "$out"
+}
+
+# load_zfs_module loads ZFS into the running kernel, using the module tree
+# zfs_modules_for_running_kernel resolves. ZFS is a multi-module dependency graph
+# (spl, zfs, ...), so it must be loaded via modprobe, which needs a modules.dep.
+# depmod cannot write into the read-only nix store, so the module tree is copied
+# into a temp dir, depmod'd there, and loaded with `modprobe -d`. When no matching
+# tree can be produced, it falls back to the host's own module.
 load_zfs_module() {
   # Probe sysfs, not `lsmod | grep -q`: under `set -o pipefail` that pipeline
   # can die of SIGPIPE (grep -q exits on first match, lsmod is killed mid-write)
@@ -76,12 +127,13 @@ load_zfs_module() {
     return 0
   fi
 
-  local kver src tmp
+  local kver src tmp modules
   kver="$(uname -r)"
-  src="${ZFS_MODULES:-}/lib/modules/${kver}"
+  modules="$(zfs_modules_for_running_kernel)" || modules=""
+  src="${modules}/lib/modules/${kver}"
 
-  if [ -n "${ZFS_MODULES:-}" ] && [ -d "$src" ]; then
-    echo "==> Loading flake-built ZFS module for ${kver}..."
+  if [ -n "$modules" ] && [ -d "$src" ]; then
+    echo "==> Loading ZFS module for ${kver}..."
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
     mkdir -p "$tmp/lib/modules/${kver}"
@@ -98,7 +150,7 @@ load_zfs_module() {
     if sudo modprobe -d "$tmp" zfs; then
       return 0
     fi
-    echo "==> flake module failed to load; falling back to host module..." >&2
+    echo "==> module failed to load; falling back to host module..." >&2
   fi
 
   echo "==> Loading host ZFS module via modprobe..."
