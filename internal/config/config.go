@@ -141,6 +141,24 @@ type Library struct {
 	// SPEC §4.3 step 6); with true, the run logs a prominent warning naming the tape
 	// and proceeds to overwrite it. The overwrite is recorded in the run's PDF report.
 	AllowNonBlankTapes bool `json:"allowNonBlankTapes,omitempty"`
+	// MirrorSourceChanger names the REAL library changer whose slot inventory the
+	// virtual (mhvtl) library in Changer should be made to mirror before the tape
+	// path runs. It is set only on dry runs, by runsubmit.ApplyDryRun, which
+	// records the changer the run would really have targeted just before it
+	// redirects Changer to the mhvtl node — the one point where both devices are
+	// known. Empty on every real run, which is what gates the reprovision off.
+	//
+	// The point is fidelity: a dry run is only a rehearsal if it meets the same
+	// conditions the real run would. With the virtual library holding a full
+	// complement of blanks while the real one is nearly empty, a dry run passes
+	// and the real run then fails on an empty slot. Mirroring makes that failure
+	// surface in the rehearsal instead.
+	//
+	// It authorizes no destructive SCSI. The reprovision only rewrites mhvtl's own
+	// library_contents/media and signals its own daemon, so it cannot affect the
+	// real library it reads from — which is why an explicit device name is safe
+	// here where a blanket "reset the library" flag would not be.
+	MirrorSourceChanger string `json:"mirrorSourceChanger,omitempty"`
 }
 
 // EffectiveIOWaitTimeout returns the configured operator I/O-station wait, or

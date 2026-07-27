@@ -47,6 +47,54 @@ ExecStartPre=/bin/mount --make-rshared /mnt/bulk-pool-01
 # Clear any leftover container from an unclean stop (ignore failure if none).
 ExecStartPre=-/usr/bin/docker rm -f tape-archiver-data-worker
 
+# --- Dry-run (mhvtl virtual library) support — OPTIONAL ----------------------
+# A dry run exercises the full tape path against the mhvtl virtual library
+# instead of the real one (docs/tapectl.md). So that a dry run is a true
+# rehearsal, the worker makes the virtual library mirror the real one before the
+# tape path runs; that needs three things beyond the virtual library's own SCSI
+# nodes:
+#
+#   * /dev/mhvtl<id> control devices — char major 236, minor = the daemon queue
+#     ID in /etc/mhvtl/device.conf (10 = library, 11/12 = drives).
+#   * /etc/mhvtl and the media home (MHVTL_HOME_PATH in /etc/mhvtl/mhvtl.conf,
+#     conventionally /opt/mhvtl) bind-mounted read-write, so the worker can
+#     rewrite library_contents.<id> and regenerate media with make_vtl_media.
+#     That tooling is BUNDLED IN THE IMAGE (nix/data-worker-image.nix) — no
+#     mhvtl userspace, and no version/path coupling, is required on the host.
+#   * --pid=host, so the worker can send SIGHUP to the host's vtllibrary daemon.
+#     SIGHUP makes vtllibrary re-read library_contents.<id> in place
+#     (rereadconfig() in usr/cmd/vtllibrary.c). The daemon is NOT restarted and
+#     the kernel module is NOT reloaded, so /dev/sch*, /dev/st*, and /dev/sg*
+#     keep their numbers and this container's --device passthrough stays valid.
+#     Reloading the module instead would invalidate the passed-through nodes,
+#     which are mknod'd into the container by major:minor at start.
+#
+# Nothing here can touch a real library: the reprovision only rewrites mhvtl's
+# own config/media and signals its own daemon — it issues no destructive SCSI.
+#
+# All of it is optional. The flags stay empty on a host with no mhvtl, and
+# dry-run submissions already fail closed unless the MHVTL_* env vars are set.
+# Verify the virtual library's node numbers on THIS host with `lsscsi -g`; like
+# the real ones they are assigned by discovery order. Prefer stable udev
+# symlinks if the host defines them.
+#
+# NOTE: ExecStart references this as unbraced $MHVTL_DEVICE_FLAGS deliberately —
+# systemd word-splits $VAR into separate arguments but passes ${VAR} as a single
+# one, so the braced form would hand docker one giant unparseable argument (and
+# an empty value must expand to zero arguments, not one empty one).
+EnvironmentFile=-/run/tape-archiver-data-worker/mhvtl.env
+ExecStartPre=/bin/sh -c 'D=/run/tape-archiver-data-worker; mkdir -p "$D"; F=""; \
+    if [ -e /dev/mhvtl10 ]; then \
+      for d in /dev/mhvtl10 /dev/mhvtl11 /dev/mhvtl12 \
+               /dev/sch2 /dev/nst2 /dev/nst3 /dev/sg22 /dev/sg23 /dev/sg24; do \
+        [ -e "$d" ] && F="$F --device $d"; \
+      done; \
+      F="$F --pid=host"; \
+      F="$F --mount type=bind,source=/etc/mhvtl,target=/etc/mhvtl"; \
+      F="$F --mount type=bind,source=/opt/mhvtl,target=/opt/mhvtl"; \
+    fi; \
+    echo "MHVTL_DEVICE_FLAGS=$F" > "$D/mhvtl.env"'
+
 # Device passthrough (SPEC §4.1): both drives' non-rewinding nodes, the changer,
 # and the drives' generic SCSI (/dev/sg*) nodes for raw SG_IO. Verify the sg*
 # numbers on THIS host with `lsscsi -g` — they are assigned by discovery order
@@ -70,6 +118,7 @@ ExecStart=/usr/bin/docker run --rm --name tape-archiver-data-worker \
     --cap-add SYS_ADMIN \
     --cap-add SYS_RAWIO \
     --mount type=bind,source=/mnt/bulk-pool-01,target=/mnt/bulk-pool-01,bind-propagation=rslave \
+    $MHVTL_DEVICE_FLAGS \
     ${TAPE_ARCHIVER_IMAGE}
 
 # Graceful shutdown: SIGTERM lets the worker stop polling and drain its in-flight

@@ -76,6 +76,10 @@ func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
 	w.RegisterActivity(newGeneratePAR2Activities())
 	w.RegisterActivity(newVerifyActivities())
+	// Dry runs only: makes the virtual library mirror the real one before the
+	// tape path, so the rehearsal meets the real library's slot conditions. The
+	// workflow skips it entirely unless Library.MirrorSourceChanger is set.
+	w.RegisterActivity(newMirrorActivities())
 	w.RegisterActivity(newLoadActivities())
 
 	// FormatTape, WriteTree, and FinalizeTape share a registry so a live

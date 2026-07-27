@@ -64,6 +64,43 @@ func TestApplyDryRun(t *testing.T) {
 		assert.Equal(t, []string{"/dev/nst0", "/dev/nst1"}, cfg.Library.Drives)
 	})
 
+	t.Run("records the real changer as the mirror source", func(t *testing.T) {
+		cfg := parseConfig(t, validConfigJSON)
+
+		env := map[string]string{
+			MHVTLChangerEnv: "/dev/sch9",
+			MHVTLDrive0Env:  "/dev/nst8",
+			MHVTLDrive1Env:  "/dev/nst9",
+		}
+
+		require.NoError(t, ApplyDryRun(cfg, func(name string) string { return env[name] }, &bytes.Buffer{}))
+
+		// The run now targets the virtual library, but remembers the real one so
+		// the data worker can mirror its slot inventory and the rehearsal meets
+		// the conditions the real run would have met.
+		assert.Equal(t, "/dev/sch9", cfg.Library.Changer)
+		assert.Equal(t, "/dev/sch0", cfg.Library.MirrorSourceChanger,
+			"the real changer must be recorded before it is overwritten")
+	})
+
+	t.Run("records no mirror source when already targeting the virtual library", func(t *testing.T) {
+		cfg := parseConfig(t, validConfigJSON)
+		// A dev deployment whose configured library IS the mhvtl one: there is no
+		// real library to mirror from, so mirroring must stay off rather than
+		// pointlessly mirror the virtual library onto itself.
+		cfg.Library.Changer = "/dev/sch9"
+
+		env := map[string]string{
+			MHVTLChangerEnv: "/dev/sch9",
+			MHVTLDrive0Env:  "/dev/nst8",
+			MHVTLDrive1Env:  "/dev/nst9",
+		}
+
+		require.NoError(t, ApplyDryRun(cfg, func(name string) string { return env[name] }, &bytes.Buffer{}))
+
+		assert.Empty(t, cfg.Library.MirrorSourceChanger)
+	})
+
 	t.Run("errors naming exactly the missing variable(s)", func(t *testing.T) {
 		cfg := parseConfig(t, validConfigJSON)
 

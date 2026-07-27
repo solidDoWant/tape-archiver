@@ -90,6 +90,8 @@ as the project is implemented; keep this list current):
   Helm charts (`deploy/charts/`); no cluster required.
 - `make temporal-up` / `make temporal-down` — local Temporal for integration tests.
 - `make mhvtl-up` / `make mhvtl-down` — virtual tape library for tests/dry-run.
+  `make mhvtl-reset` (down+up) restores a pristine library — all 47 tapes blank and
+  back in their home slots — undoing a prior session's slot moves or non-blank tapes.
 - `make zpool-up` / `make zpool-down` — ephemeral file-backed ZFS pool for `pkg/zfs`
   integration tests. The flake builds a version-matched ZFS kernel module
   (`$ZFS_MODULES`); `zpool-up` loads it at runtime (needs `sudo`), falling back to

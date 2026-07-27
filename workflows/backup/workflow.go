@@ -240,6 +240,14 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 func runTapePath(ctx workflow.Context, cfg config.Config, state *runState, failingPhase *string) error {
 	*failingPhase = PhaseLoad
 
+	// Dry runs only: make the virtual library mirror the real one before anything
+	// reconciles against its contents, so the rehearsal meets the real library's
+	// slot conditions rather than whatever the virtual library happened to hold.
+	// A no-op on a real run (see runMirrorLibrary).
+	if err := runMirrorLibrary(ctx, cfg); err != nil {
+		return err
+	}
+
 	sets, err := planDriveSets(state.plan, cfg.Library.Drives, cfg.Library.BlankSlots)
 	if err != nil {
 		return err

@@ -89,11 +89,12 @@ func TestRegisterData(t *testing.T) {
 	})
 
 	// The data worker hosts no workflow; it only registers the bulk-data phase
-	// activities: Resolve data, Hold, Prepare, Generate PAR2, Verify, Load, Write
-	// (WriteActivities + TeardownActivities sharing a registry), WriteHealth,
-	// Eject, Report, Deliver, and the per-disc optical Burn/Verify.
+	// activities: Resolve data, Hold, Prepare, Generate PAR2, Verify, MirrorLibrary
+	// (dry runs only), Load, Write (WriteActivities + TeardownActivities sharing a
+	// registry), WriteHealth, Eject, Report, Deliver, and the per-disc optical
+	// Burn/Verify.
 	assert.Empty(t, rw.workflows)
-	assert.Len(t, rw.activities, 13)
+	assert.Len(t, rw.activities, 14)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
 		"the data worker must register the Resolve data activity")
 	assert.True(t, hasActivity[*HoldActivities](rw.activities),
@@ -104,6 +105,9 @@ func TestRegisterData(t *testing.T) {
 		"the data worker must register the Generate PAR2 activity")
 	assert.True(t, hasActivity[*VerifyActivities](rw.activities),
 		"the data worker must register the Verify activity")
+	assert.True(t, hasActivity[*MirrorActivities](rw.activities),
+		"the data worker must register the MirrorLibrary activity so a dry run can "+
+			"mirror the real library onto the virtual one")
 	assert.True(t, hasActivity[*LoadActivities](rw.activities),
 		"the data worker must register the Load activity")
 	assert.True(t, hasActivity[*WriteActivities](rw.activities),

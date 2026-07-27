@@ -500,6 +500,17 @@ mhvtl-up: ## Start the mhvtl virtual tape library (2 drives, 47 storage + 3 I/O 
 mhvtl-down: ## Stop the mhvtl virtual tape library and unload the kernel module.
 	@$(PROJECT_DIR)/scripts/mhvtl-down.sh
 
+.PHONY: mhvtl-reset
+# Full down+up so every tape is recreated blank (make_vtl_media -f) and the
+# changer reloads library_contents — i.e. all 47 tapes returned to their home
+# slots. Unlike mhvtl-up (a no-op when the module is already loaded, so it can
+# never undo a prior session's slot moves or non-blank tapes), this always
+# rebuilds the library from scratch. If mhvtl-down fails (module wedged/in use),
+# Make aborts before mhvtl-up rather than silently no-op'ing onto stale state.
+mhvtl-reset: ## Reset the mhvtl virtual library to a pristine state: all 47 tapes blank and back in their home slots.
+	@$(PROJECT_DIR)/scripts/mhvtl-down.sh
+	@$(PROJECT_DIR)/scripts/mhvtl-up.sh
+
 .PHONY: zpool-up
 zpool-up: ## Create an ephemeral file-backed ZFS pool for integration tests.
 	@$(PROJECT_DIR)/scripts/zpool-up.sh
@@ -551,12 +562,24 @@ web-dev-observability-down: ## Stop the web-dev-only VictoriaLogs/VictoriaMetric
 	$(WEB_DEV_OBS_COMPOSE) down -v --remove-orphans
 
 .PHONY: web-dev
-# Depends on temporal-up/mhvtl-up directly (not web-dev-up.sh calling `make`
+# Depends on temporal-up/mhvtl-reset directly (not web-dev-up.sh calling `make`
 # itself), the same pattern test-integration/test-e2e already use, so Make's
 # own dependency graph — not ad hoc shell — decides what needs bringing up.
 # recovery-binaries provides the real static age/par2/zstd/tar the data
 # worker's Report phase requires (nix build .#recoveryBinaries, cached after
 # the first run).
+#
+# mhvtl-reset (not mhvtl-up) so every session starts with a pristine library —
+# all 47 tapes blank and home — regardless of what a prior session's runs left
+# behind (tapes moved into drives, tapes written non-blank) or whether a
+# crash/SIGKILL skipped web-dev-down's mhvtl teardown. A plain mhvtl-up no-ops
+# when the module is still loaded, so it could not undo that stale state, which
+# is exactly what left a submitted run failing on empty/non-blank selected slots.
+# Safe here because the reset runs as a prerequisite, before any worker or seed
+# run is in flight (contrast zpool-up below, which is intentionally NOT a
+# prerequisite because it would blow away in-flight snapshot state on a restart).
+# Between runs within a live session, `make mhvtl-reset` restores the library by
+# hand.
 #
 # Deliberately NOT a zpool-up (or web-dev-observability-up) prerequisite
 # here, unlike temporal-up/mhvtl-up: zpool-up.sh destroys and recreates the
@@ -571,7 +594,7 @@ web-dev-observability-down: ## Stop the web-dev-only VictoriaLogs/VictoriaMetric
 # comment above) but the same conclusion: web-dev-up.sh instead calls
 # zpool-up.sh and the observability compose stack directly, each only when
 # needed/in the right order.
-web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed $(BIN_DIR)/webdevdiscord recovery-binaries temporal-up mhvtl-up ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics + a local OIDC provider + a fake Discord webhook + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
+web-dev: $(BIN_DIR)/web $(BIN_DIR)/worker $(BIN_DIR)/webdevoidc $(BIN_DIR)/webdevseed $(BIN_DIR)/webdevdiscord recovery-binaries temporal-up mhvtl-reset ## One-command local web UI: dev Temporal + mhvtl + ZFS pool + VictoriaLogs/VictoriaMetrics + a local OIDC provider + a fake Discord webhook + control/data workers, seeded with sample dry-runs, cmd/web in the foreground. Interrupting (Ctrl+C/SIGINT or SIGTERM) runs the full web-dev-down teardown before exiting — see docs/web-ui.md's "Local development".
 	@BIN_DIR=$(BIN_DIR) WEB_DEV_STATE_DIR=$(WEB_DEV_STATE_DIR) $(PROJECT_DIR)/scripts/web-dev-up.sh
 
 .PHONY: web-dev-down

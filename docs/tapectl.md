@@ -92,6 +92,39 @@ exports them.
 | `MHVTL_DRIVE0_DEV` | yes | First `mhvtl` tape drive node (e.g. `/dev/nst0`). |
 | `MHVTL_DRIVE1_DEV` | yes | Second `mhvtl` tape drive node (e.g. `/dev/nst1`). |
 
+#### Library mirroring under `--dry-run`
+
+A dry run is only a rehearsal if it meets the conditions the real run would. So, alongside
+the device redirect, `--dry-run` records the changer the run *would* have targeted in
+`library.mirrorSourceChanger` — the one point where both the real and virtual devices are
+known. Before the tape path runs, the data worker reads that real library's slot inventory
+and rewrites the virtual library to match: every slot occupied there is occupied here under
+the same barcode, and every empty slot stays empty.
+
+Without this the two libraries drift apart, and the drift hides exactly the problems a dry
+run exists to find: a virtual library stocked with a full complement of blanks passes a
+rehearsal that the real library — short of blanks, or with tapes left in drives by an
+earlier run — would fail. Expect a mirrored dry run to be **stricter** than an unmirrored
+one for this reason.
+
+The mirror only ever *reads* the real library (`READ ELEMENT STATUS`). Every change lands
+on `mhvtl`'s own `library_contents`/media and its own daemon, so it cannot disturb real
+media. It is skipped entirely when `library.mirrorSourceChanger` is empty — which is always
+the case on a real run, and also on a dev deployment whose configured library already *is*
+the `mhvtl` one (there is nothing to mirror from).
+
+Two fidelity limits are deliberate. Media are recreated **blank**: element status reports
+which slots hold a tape but not whether it has data, and establishing that would mean
+loading and mounting every tape. And drives and the I/O station start **empty**, since a
+rehearsal begins with tapes at rest and the Load phase is what moves them. Slot occupancy
+is the property that decides whether a run can find its configured blanks, which is the
+failure this exists to surface.
+
+The data worker needs the `mhvtl` control devices, `/etc/mhvtl` + the media home
+bind-mounted, and the host PID namespace to signal `vtllibrary`; see the reference unit in
+`deploy/data-worker/`. The `make_vtl_media` tooling is bundled in the data-worker image, so
+nothing `mhvtl`-related need be installed on the host.
+
 #### Optical burning under `--dry-run`
 
 `--dry-run` **disables optical burning**: it removes the `delivery.opticalBurn` section

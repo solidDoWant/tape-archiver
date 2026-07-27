@@ -165,6 +165,9 @@
         },
         "allowNonBlankTapes": {
           "type": "boolean"
+        },
+        "mirrorSourceChanger": {
+          "type": "string"
         }
       },
       "additionalProperties": false,

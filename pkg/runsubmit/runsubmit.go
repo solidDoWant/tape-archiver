@@ -105,6 +105,16 @@ func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writ
 		return &MissingMHVTLEnvError{Missing: missing}
 	}
 
+	// Record the real changer before redirecting, so the data worker can make the
+	// virtual library mirror it and the rehearsal meets the same slot conditions
+	// the real run would (see config.Library.MirrorSourceChanger). This is the one
+	// place both the real and virtual devices are known. Skipped when the config
+	// already targets the mhvtl changer (a dev deployment with no real library),
+	// where there is nothing to mirror from.
+	if cfg.Library.Changer != "" && cfg.Library.Changer != changer {
+		cfg.Library.MirrorSourceChanger = cfg.Library.Changer
+	}
+
 	cfg.Library.Changer = changer
 	cfg.Library.Drives = []string{drive0, drive1}
 

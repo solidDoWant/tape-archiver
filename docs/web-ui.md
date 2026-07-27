@@ -540,8 +540,11 @@ in sync.
 Everything above assumes a real deployment (a real Temporal cluster, a real identity
 provider, a real tape library). For iterating on the UI itself, `make web-dev` brings up
 a complete local stand-in with one command: dev Temporal, `mhvtl`, and an ephemeral
-ZFS test pool (reusing the existing `temporal-up`/`mhvtl-up`/`zpool-up` targets and
-scripts unchanged), a local VictoriaLogs + VictoriaMetrics stack fed by the dev workers'
+ZFS test pool (reusing the existing `temporal-up`/`zpool-up` targets and scripts
+unchanged, and `mhvtl-reset` for the library — a full down+up so every session starts
+with all 47 tapes blank and back in their home slots, even after a crash/SIGKILL
+skipped the previous teardown; between runs in a live session, `make mhvtl-reset`
+restores the library by hand), a local VictoriaLogs + VictoriaMetrics stack fed by the dev workers'
 own logs/metrics, a local OIDC provider, a local fake Discord webhook receiver, real
 control and data workers, and `cmd/web`
 itself — with a few sample dry-run backups submitted automatically so the

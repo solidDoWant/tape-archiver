@@ -87,7 +87,7 @@
         # the disc (issue #73, SPEC §2/§10). streamLayeredImage emits a script
         # that streams the tarball into `docker load` (see `make build-images`).
         dataWorkerImage = pkgs.callPackage ./nix/data-worker-image.nix {
-          inherit worker ltfs recoveryBinaries;
+          inherit worker ltfs recoveryBinaries mhvtlUserspace;
           inherit (pkgs) pkgsStatic;
           nixpkgsRev = nixpkgs.shortRev or "dirty";
         };
