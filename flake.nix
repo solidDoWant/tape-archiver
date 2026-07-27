@@ -51,10 +51,14 @@
         # are IBM (issue #12, SPEC §16).
         ltfs = pkgs.callPackage ./nix/ltfs.nix { };
 
-        # Kernel module built against the same kernel that NixOS boots by
-        # default (pkgs.linuxPackages).  The VM's configuration.nix sets
-        # kernelPackages = pkgs.linuxPackages, so the .ko produced here
-        # matches the running kernel.
+        # Kernel module built against this pin's default kernel
+        # (pkgs.linuxPackages). That is the running kernel only on a machine
+        # booted from the same nixpkgs — a dev VM whose configuration.nix sets
+        # kernelPackages = pkgs.linuxPackages. It is NOT the running kernel on a
+        # host built from a NixOS release channel while this flake tracks
+        # nixpkgs-unstable, and insmod rejects the mismatch. mhvtl-up.sh detects
+        # that and rebuilds this same derivation against the booted system's own
+        # nixpkgs revision, so nothing here needs to guess which kernel is right.
         mhvtlKernel = pkgs.linuxPackages.callPackage ./nix/mhvtl-kernel.nix { };
 
         # ZFS userspace tools (zpool, zfs, zdb) and the matching kernel module,

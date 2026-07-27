@@ -2,7 +2,9 @@
 # mhvtl-up.sh — start the mhvtl virtual tape library.
 #
 # Requires:
-#   - $MHVTL_KO set to the built mhvtl.ko path (set automatically by `nix develop`)
+#   - $MHVTL_KO set to the built mhvtl.ko path (set automatically by `nix develop`).
+#     When that module was built for a different kernel than the one running, this
+#     script builds a matching one instead — see mhvtl_ko_for_running_kernel.
 #   - vtllibrary, vtltape, vtlcmd, make_vtl_media, mktape in PATH (from devShell)
 #   - sg_raw in PATH (sg3_utils, from devShell) for the readiness probe
 #   - sudo access for module loading and device permission changes
@@ -15,6 +17,10 @@ set -euo pipefail
 
 MHVTL_CONFIG_DIR="${MHVTL_CONFIG_DIR:-/etc/mhvtl}"
 MHVTL_HOME_DIR="${MHVTL_HOME_DIR:-/opt/mhvtl}"
+
+# Repo root, so the module rebuild can find nix/mhvtl-kernel.nix regardless of
+# the working directory the script was invoked from.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Library/drive IDs match the device.conf below.
 LIBRARY_ID=10
@@ -57,13 +63,81 @@ fi
 # Kernel modules
 # ---------------------------------------------------------------------------
 
+# mhvtl_ko_for_running_kernel prints the path of an mhvtl.ko whose vermagic
+# matches the running kernel, building one first if $MHVTL_KO does not.
+#
+# $MHVTL_KO is built against pkgs.linuxPackages from THIS flake's nixpkgs pin,
+# which is only the running kernel on a machine booted from the same pin. The
+# flake tracks nixpkgs-unstable while dev VMs are built from NixOS release
+# channels, so the two drift apart as a matter of course; insmod then rejects the
+# module with the singularly unhelpful "Invalid module format". Unlike ZFS —
+# where zpool-up.sh can fall back to a distro or DKMS build — nothing ships
+# mhvtl, so the fallback has to build one.
+#
+# The booted system records the exact nixpkgs it came from, so the module is
+# rebuilt from that revision's kernel package set: same source, same patch,
+# right vermagic. Only the kernel's -dev output is needed and it comes from the
+# binary cache, so this fetches rather than compiles a kernel. It does need
+# network access the first time; afterwards the result is a store hit.
+mhvtl_ko_for_running_kernel() {
+  local kver rev out ko
+  kver="$(uname -r)"
+
+  case "$MHVTL_KO" in
+    */lib/modules/"$kver"/*)
+      echo "$MHVTL_KO"
+      return 0
+      ;;
+  esac
+
+  echo "==> \$MHVTL_KO is not built for the running kernel (${kver});" >&2
+  echo "    building a matching mhvtl module from the booted system's nixpkgs..." >&2
+
+  if ! command -v nixos-version > /dev/null 2>&1; then
+    echo "error: cannot determine which nixpkgs built the running kernel" >&2
+    echo "       (nixos-version not found — this fallback assumes a NixOS host)." >&2
+    return 1
+  fi
+
+  # nixos-version --json reports the full nixpkgs revision the system was built
+  # from, which is exactly the package set holding a 'linux' matching uname -r.
+  rev="$(nixos-version --json | sed -n 's/.*"nixpkgsRevision":"\([0-9a-f]\{40\}\)".*/\1/p')"
+  if [ -z "$rev" ]; then
+    echo "error: could not read nixpkgsRevision from 'nixos-version --json'" >&2
+    return 1
+  fi
+
+  out="$(nix build --impure --no-link --print-out-paths --expr "
+    let
+      pkgs = import (builtins.fetchTarball
+        \"https://github.com/NixOS/nixpkgs/archive/${rev}.tar.gz\")
+        { system = builtins.currentSystem; };
+    in
+    pkgs.linuxPackages.callPackage ${REPO_ROOT}/nix/mhvtl-kernel.nix { }
+  ")" || return 1
+
+  ko="$out/lib/modules/${kver}/kernel/drivers/scsi/mhvtl.ko"
+  if [ ! -f "$ko" ]; then
+    echo "error: the rebuilt module is not for ${kver}: no $ko" >&2
+    echo "       (the booted kernel and its nixpkgs revision disagree)" >&2
+    return 1
+  fi
+
+  echo "$ko"
+}
+
 echo "==> Loading kernel modules..."
 sudo modprobe st
 sudo modprobe ch
 # sg backs the SCSI generic nodes (/dev/sg*) used by sg_logs, sg_turs, and the
 # SG_IO blank check.
 sudo modprobe sg
-sudo insmod "$MHVTL_KO"
+
+MHVTL_KO_RUNNING="$(mhvtl_ko_for_running_kernel)" || {
+  echo "error: no mhvtl kernel module available for $(uname -r)." >&2
+  exit 1
+}
+sudo insmod "$MHVTL_KO_RUNNING"
 
 # ---------------------------------------------------------------------------
 # /etc/mhvtl config
