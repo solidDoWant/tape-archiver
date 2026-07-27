@@ -245,11 +245,12 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 			return nil, err
 		}
 
-		estimate, err := a.estimate(ctx, archive, overhead, par2)
+		logical, estimate, err := a.estimate(ctx, archive, overhead, par2)
 		if err != nil {
 			return nil, fmt.Errorf("estimate sources[%d]: %w", index, err)
 		}
 
+		archive.LogicalBytes = logical
 		archive.EstimatedBytes = estimate
 
 		if estimate > capacity {
@@ -461,21 +462,21 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 	}, nil
 }
 
-// estimate returns the feasibility estimate for an archive: the summed
-// logicalreferenced of its snapshots inflated by the overhead factor and PAR2 %.
-func (a *ResolveDataActivities) estimate(ctx context.Context, archive ResolvedArchive, overhead, par2 float64) (int64, error) {
-	var logical int64
-
+// estimate returns an archive's summed logicalreferenced and the feasibility
+// estimate derived from it — that same sum inflated by the overhead factor and
+// PAR2 %. The un-inflated sum is returned too because Prepare reports its
+// progress against the source bytes it reads, not against the inflated estimate.
+func (a *ResolveDataActivities) estimate(ctx context.Context, archive ResolvedArchive, overhead, par2 float64) (logical, estimate int64, err error) {
 	for _, snapshot := range archive.Snapshots {
 		referenced, err := a.pool.LogicalReferenced(ctx, snapshot.ZFSPath)
 		if err != nil {
-			return 0, fmt.Errorf("read logicalreferenced for %s: %w", snapshot.ZFSPath, err)
+			return 0, 0, fmt.Errorf("read logicalreferenced for %s: %w", snapshot.ZFSPath, err)
 		}
 
 		logical += referenced
 	}
 
-	return feasibilityEstimate(logical, overhead, par2), nil
+	return logical, feasibilityEstimate(logical, overhead, par2), nil
 }
 
 // compressionEnabled reports whether the Prepare phase should zstd-compress a

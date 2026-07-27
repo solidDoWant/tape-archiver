@@ -38,6 +38,11 @@ type ResolvedArchive struct {
 	// one tape before real work; it is never used as the authoritative plan, which
 	// is the measured Prepare size.
 	EstimatedBytes int64
+	// LogicalBytes is the same measurement before any inflation: the summed
+	// logicalreferenced of Snapshots. It is the denominator the Prepare phase
+	// reports progress against — the source bytes that phase has to read — and,
+	// like EstimatedBytes, is never used as the authoritative plan.
+	LogicalBytes int64
 }
 
 // ResolvedSnapshot is one ZFS snapshot within a ResolvedArchive, with the

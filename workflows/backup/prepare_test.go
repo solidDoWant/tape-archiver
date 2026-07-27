@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,7 +99,7 @@ func TestPrepareArchivePipeline(t *testing.T) {
 				SliceSizeBytes: smallSlice,
 			}
 
-			staged, err := activities.prepare(t.Context(), stagingDir, input)
+			staged, err := activities.prepare(t.Context(), stagingDir, input, nil)
 			require.NoError(t, err)
 
 			require.Len(t, staged, 1)
@@ -181,7 +182,7 @@ func TestPrepareGroupArchive(t *testing.T) {
 		SliceSizeBytes: 1 << 20,
 	}
 
-	staged, err := activities.prepare(t.Context(), t.TempDir(), input)
+	staged, err := activities.prepare(t.Context(), t.TempDir(), input, nil)
 	require.NoError(t, err)
 	require.Len(t, staged, 1)
 
@@ -233,7 +234,7 @@ func TestPrepareGroupArchiveDuplicateMember(t *testing.T) {
 		SliceSizeBytes: 1 << 20,
 	}
 
-	staged, err := activities.prepare(t.Context(), t.TempDir(), input)
+	staged, err := activities.prepare(t.Context(), t.TempDir(), input, nil)
 	require.Error(t, err, "colliding group members must fail Prepare before any tape is written")
 	assert.Contains(t, err.Error(), "shared-pvc", "the error must identify the colliding member subdirectory")
 	assert.Contains(t, err.Error(), "sources[0]", "the error must identify the failing archive")
@@ -270,7 +271,7 @@ func TestPrepareMultipleArchives(t *testing.T) {
 		SliceSizeBytes: 1 << 20,
 	}
 
-	staged, err := activities.prepare(t.Context(), stagingDir, input)
+	staged, err := activities.prepare(t.Context(), stagingDir, input, nil)
 	require.NoError(t, err)
 	require.Len(t, staged, 2)
 
@@ -302,7 +303,7 @@ func TestPrepareLocatorError(t *testing.T) {
 		SliceSizeBytes: 1 << 20,
 	}
 
-	_, err := activities.prepare(t.Context(), t.TempDir(), input)
+	_, err := activities.prepare(t.Context(), t.TempDir(), input, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sources[3]")
 }
@@ -353,7 +354,7 @@ func TestPrepareInvalidConfig(t *testing.T) {
 				SliceSizeBytes: test.sliceSize,
 			}
 
-			_, err := activities.prepare(t.Context(), t.TempDir(), input)
+			_, err := activities.prepare(t.Context(), t.TempDir(), input, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.wantErr)
 		})
@@ -376,6 +377,193 @@ func TestPrepareArchivesRequiresStagingDir(t *testing.T) {
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
 	assert.True(t, appErr.NonRetryable(), "unconfigured staging root must be non-retryable")
+}
+
+// TestPrepareProgressTracker verifies the progress tracker's snapshot: the
+// archive counts, the in-flight archive and its stage, the byte-weighted overall
+// percentage, and the ETA projected from the byte rate — using an injected clock
+// so the ETA is deterministic.
+func TestPrepareProgressTracker(t *testing.T) {
+	t.Parallel()
+
+	// A controllable clock so the byte-rate ETA is deterministic.
+	current := time.Unix(0, 0)
+	clock := func() time.Time { return current }
+	advance := func(elapsed time.Duration) { current = current.Add(elapsed) }
+
+	// Two archives of 100 and 300 source bytes (400 total), so overall progress is
+	// genuinely byte-weighted rather than a per-archive count.
+	archives := []ResolvedArchive{
+		{SourceIndex: 3, Label: "first", LogicalBytes: 100},
+		{SourceIndex: 7, Label: "second", LogicalBytes: 300},
+	}
+
+	tracker := newPrepareProgressTracker(archives, clock)
+
+	// Nothing started yet: only the totals are set, and there is no ETA to project.
+	assert.Equal(t, PrepareProgress{TotalArchives: 2, TotalSourceBytes: 400}, tracker.snapshot())
+
+	// First archive streaming, half its 100 source bytes read after 10s: overall is
+	// 50/400 = 12.5%, and the ETA projects the remaining 350 bytes at 50 bytes /
+	// 10s = 70s.
+	tracker.startArchive(3, "first", 100)
+	tracker.addSourceBytes(30)
+	tracker.addSourceBytes(20)
+	advance(10 * time.Second)
+
+	assert.Equal(t, PrepareProgress{
+		TotalArchives:          2,
+		CurrentSourceIndex:     3,
+		CurrentLabel:           "first",
+		CurrentStage:           prepareStageStreaming,
+		CurrentArchivePercent:  50,
+		SourceBytesRead:        50,
+		TotalSourceBytes:       400,
+		OverallPercent:         12.5,
+		EstimatedTimeRemaining: 70 * time.Second,
+	}, tracker.snapshot())
+
+	// The checksum pass reads no source bytes, so its slice counter is what shows
+	// the archive is still progressing.
+	tracker.addSourceBytes(50)
+	tracker.startChecksums(4)
+	tracker.finishSlice()
+
+	got := tracker.snapshot()
+	assert.Equal(t, prepareStageChecksumming, got.CurrentStage)
+	assert.Equal(t, 1, got.ChecksummedSlices)
+	assert.Equal(t, 4, got.TotalSlices)
+	assert.Equal(t, 100.0, got.CurrentArchivePercent, "every source byte of the archive has been read")
+
+	// Finishing folds the archive's source bytes into the completed total and
+	// clears the in-flight slot, so no bytes are double-counted between archives.
+	tracker.finishArchive()
+
+	got = tracker.snapshot()
+	assert.Equal(t, 1, got.CompletedArchives)
+	assert.Zero(t, got.CurrentSourceIndex, "the in-flight slot clears between archives")
+	assert.Empty(t, got.CurrentStage, "no stage is reported between archives")
+	assert.Equal(t, 25.0, got.OverallPercent, "100 of 400 source bytes are done")
+
+	// Second archive done: every source byte is accounted for, so overall is 100%
+	// and no time remains. Tar headers and padding push the read count past the
+	// archive's logical size, which must not push the phase past 100%.
+	tracker.startArchive(7, "second", 300)
+	tracker.addSourceBytes(320)
+
+	assert.Equal(t, 100.0, tracker.snapshot().CurrentArchivePercent, "an over-read clamps to 100%")
+
+	tracker.finishArchive()
+
+	got = tracker.snapshot()
+	assert.Equal(t, 2, got.CompletedArchives)
+	assert.Equal(t, 100.0, got.OverallPercent)
+	assert.Equal(t, int64(400), got.SourceBytesRead)
+	assert.Zero(t, got.EstimatedTimeRemaining, "no time remains once every archive is staged")
+
+	// The mutating methods no-op on a nil tracker rather than panicking — the seam
+	// that lets prepare run without a heartbeat in tests.
+	var nilTracker *prepareProgressTracker
+
+	assert.NotPanics(t, func() {
+		nilTracker.startArchive(1, "none", 100)
+		nilTracker.addSourceBytes(10)
+		nilTracker.startChecksums(2)
+		nilTracker.finishSlice()
+		nilTracker.finishArchive()
+	})
+
+	var sink bytes.Buffer
+	assert.Same(t, &sink, nilTracker.countingWriter(&sink), "a nil tracker must not wrap the tar stage")
+}
+
+// TestPrepareProgressMessage verifies the periodic progress line carries the
+// numbers inline. The web log panel projects only a log record's message text, so
+// a detail left solely in the structured attributes would be invisible there.
+func TestPrepareProgressMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		progress PrepareProgress
+		want     string
+	}{
+		{
+			name:     "before the first archive starts",
+			progress: PrepareProgress{TotalArchives: 3, TotalSourceBytes: 400},
+			want:     "prepare: progress 0.0% overall (0/3 archives staged)",
+		},
+		{
+			name: "streaming an archive, with an ETA",
+			progress: PrepareProgress{
+				TotalArchives: 3, CompletedArchives: 1,
+				CurrentSourceIndex: 1, CurrentLabel: "db", CurrentStage: prepareStageStreaming,
+				CurrentArchivePercent: 42.5, OverallPercent: 61.3,
+				EstimatedTimeRemaining: 90 * time.Minute,
+			},
+			want: `prepare: progress 61.3% overall (1/3 archives staged, streaming "db" at 42.5%), eta 1h30m0s`,
+		},
+		{
+			name: "checksumming an archive's slices",
+			progress: PrepareProgress{
+				TotalArchives: 3, CompletedArchives: 1,
+				CurrentSourceIndex: 1, CurrentLabel: "db", CurrentStage: prepareStageChecksumming,
+				CurrentArchivePercent: 100, ChecksummedSlices: 3, TotalSlices: 12,
+				OverallPercent: 66.6,
+			},
+			want: `prepare: progress 66.6% overall (1/3 archives staged, checksumming "db" slice 3/12)`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, test.want, prepareProgressMessage(test.progress))
+		})
+	}
+}
+
+// TestPrepareReportsProgress verifies the activity body advances the progress
+// tracker as it stages real archives through the full pipeline, ending with every
+// archive counted complete, all source bytes done, and no time remaining.
+func TestPrepareReportsProgress(t *testing.T) {
+	t.Parallel()
+
+	_, recipient := generateKeypair(t)
+
+	dirZero := writeTree(t, map[string]string{"zero.txt": strings.Repeat("zero", 500)})
+	dirOne := writeTree(t, map[string]string{"one.txt": strings.Repeat("one!", 500)})
+
+	// LogicalBytes stands in for the summed logicalreferenced Resolve records; the
+	// tar stage reads at least the file contents, so the tracker must reach 100%.
+	archives := []ResolvedArchive{
+		{SourceIndex: 0, Label: "zero", LogicalBytes: 2000, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/zero@snap"}}},
+		{SourceIndex: 1, Label: "one", LogicalBytes: 2000, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/one@snap"}}},
+	}
+
+	activities := &PrepareActivities{
+		stagingRoot: t.TempDir(),
+		locator:     fakeLocator{dirs: map[string]string{"pool/zero@snap": dirZero, "pool/one@snap": dirOne}},
+	}
+
+	input := PrepareInput{
+		Config:         config.Config{Encryption: config.Encryption{Recipients: []string{recipient}}},
+		Archives:       archives,
+		SliceSizeBytes: smallSlice,
+	}
+
+	tracker := newPrepareProgressTracker(archives, time.Now)
+
+	staged, err := activities.prepare(t.Context(), t.TempDir(), input, tracker)
+	require.NoError(t, err)
+	require.Len(t, staged, len(archives))
+
+	got := tracker.snapshot()
+	assert.Equal(t, len(archives), got.TotalArchives)
+	assert.Equal(t, len(archives), got.CompletedArchives, "every archive must be counted complete")
+	assert.Equal(t, 100.0, got.OverallPercent, "all source bytes are done once every archive is staged")
+	assert.Zero(t, got.EstimatedTimeRemaining, "no time remains once the phase is done")
 }
 
 // writeTree creates a temp directory populated with the given relative-path →
