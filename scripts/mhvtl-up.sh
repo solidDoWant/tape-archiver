@@ -72,8 +72,11 @@ sudo insmod "$MHVTL_KO"
 echo "==> Writing /etc/mhvtl config..."
 sudo mkdir -p "$MHVTL_CONFIG_DIR"
 
-sudo tee "$MHVTL_CONFIG_DIR/mhvtl.conf" > /dev/null << 'EOF'
-MHVTL_HOME_PATH=/opt/mhvtl
+# MHVTL_HOME_PATH must name the directory this script actually populates: it is
+# what mhvtl's own tooling and the worker (pkg/mhvtl) both read to find the media,
+# so a stale literal here would send them looking in the wrong place.
+sudo tee "$MHVTL_CONFIG_DIR/mhvtl.conf" > /dev/null << EOF
+MHVTL_HOME_PATH=$MHVTL_HOME_DIR
 CAPACITY=500
 VERBOSE=0
 VTL_DEBUG=0
@@ -81,7 +84,7 @@ EOF
 
 # device.conf: library 10 (changer) + 2 LTO-6 drives (11, 12).
 # NAA bytes are arbitrary but must be unique per device.
-sudo tee "$MHVTL_CONFIG_DIR/device.conf" > /dev/null << 'EOF'
+sudo tee "$MHVTL_CONFIG_DIR/device.conf" > /dev/null << EOF
 VERSION: 5
 
 Library: 10 CHANNEL: 00 TARGET: 00 LUN: 00
@@ -89,7 +92,7 @@ Library: 10 CHANNEL: 00 TARGET: 00 LUN: 00
  Product identification: L700
  Unit serial number: XYZZY_A
  NAA: 10:22:33:44:ab:00:00:00
- Home directory: /opt/mhvtl
+ Home directory: $MHVTL_HOME_DIR
  PERSIST: False
  Backoff: 400
 # fifo: /var/tmp/mhvtl

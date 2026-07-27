@@ -125,6 +125,15 @@ bind-mounted, and the host PID namespace to signal `vtllibrary`; see the referen
 `deploy/data-worker/`. The `make_vtl_media` tooling is bundled in the data-worker image, so
 nothing `mhvtl`-related need be installed on the host.
 
+The media home is read from `MHVTL_HOME_PATH` in `/etc/mhvtl/mhvtl.conf` — the same place
+`mhvtl`'s own tooling reads it — and must be bind-mounted at that same path inside the
+container. Nothing is compiled in, so a host is free to keep its virtual volumes wherever
+suits it (this project's storage host puts them on the bulk pool, since a dry run writes
+real volumes and would otherwise fill the root disk). A media home that `mhvtl.conf` does
+not declare, or that is not mounted, **fails the mirror outright** rather than being
+created: media written somewhere `vtllibrary` is not looking would produce a mirror that
+reports success and a run that dies later at Load.
+
 #### Optical burning under `--dry-run`
 
 `--dry-run` **disables optical burning**: it removes the `delivery.opticalBurn` section

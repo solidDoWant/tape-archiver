@@ -67,6 +67,31 @@ const (
 	changerReadTimeout = 60 * time.Second
 )
 
+// senseKeyUnitAttention is the SCSI sense key for a UNIT ATTENTION: a condition
+// the target queues per initiator after a state change and clears by the act of
+// reporting it.
+const senseKeyUnitAttention = 0x06
+
+// unitAttentionAttempts / unitAttentionRetryDelay bound the retry that absorbs a
+// transient UNIT ATTENTION, mirroring runSgLogs (logpage.go) for the SG_IO path.
+//
+// A target queues a UNIT ATTENTION for each initiator after a state change — a
+// library re-inventory, a magazine or door access, a bus reset — and reports it on
+// that initiator's next command. The command is terminated WITHOUT being
+// performed, and reporting clears the condition, so re-issuing it succeeds. That
+// "not performed" guarantee is what makes the retry safe for MOVE MEDIUM as well
+// as for the status reads: the robot did not move.
+//
+// The condition stays queued until something reads it, so the first command a run
+// issues to a given device is the likeliest to draw one — however long the device
+// has sat idle. That is how a self-clearing transient killed a whole run once the
+// dry-run library mirror became the first code to talk to the real changer
+// (issue #335).
+const (
+	unitAttentionAttempts   = 5
+	unitAttentionRetryDelay = 500 * time.Millisecond
+)
+
 // scsiChangerClassDir is the sysfs class directory for SCSI media changers,
 // paralleling scsiTapeClassDir/scsiGenericClassDir in drive_linux.go.
 const scsiChangerClassDir = "/sys/class/scsi_changer"
@@ -294,7 +319,7 @@ func scsiModeSense6(ctx context.Context, f *os.File, page byte) ([]byte, error) 
 		timeout:        timeoutMs(ctx, changerReadTimeout),
 	}
 
-	if err := sgCommand(f, &hdr, cdb, sense, buf, "MODE SENSE(6)"); err != nil {
+	if err := sgCommand(ctx, f, &hdr, cdb, sense, buf, "MODE SENSE(6)"); err != nil {
 		return nil, err
 	}
 
@@ -331,7 +356,7 @@ func scsiReadElementStatus(ctx context.Context, f *os.File) ([]byte, error) {
 		timeout:        timeoutMs(ctx, changerReadTimeout),
 	}
 
-	if err := sgCommand(f, &hdr, cdb, sense, buf, "READ ELEMENT STATUS"); err != nil {
+	if err := sgCommand(ctx, f, &hdr, cdb, sense, buf, "READ ELEMENT STATUS"); err != nil {
 		return nil, err
 	}
 
@@ -364,31 +389,73 @@ func scsiMoveMedium(ctx context.Context, f *os.File, transport, src, dst int) er
 		timeout:        timeoutMs(ctx, moveMediumTimeout),
 	}
 
-	return sgCommand(f, &hdr, cdb, sense, nil, fmt.Sprintf("MOVE MEDIUM (src=%d dst=%d)", src, dst))
+	return sgCommand(ctx, f, &hdr, cdb, sense, nil, fmt.Sprintf("MOVE MEDIUM (src=%d dst=%d)", src, dst))
 }
 
 // sgCommand runs one SG_IO command and turns a transport failure or CHECK
 // CONDITION into a descriptive error naming the SCSI sense. dxferBuf is the data
 // buffer to keep alive (nil for non-data commands). It is the package's shared
 // SG_IO runner, used by the changer commands here and by INQUIRY (inquiry_linux.go).
-func sgCommand(f *os.File, hdr *sgIOHdr, cdb, sense, dxferBuf []byte, name string) error {
-	err := sgIoctl(f.Fd(), hdr)
+//
+// A UNIT ATTENTION is retried rather than reported, since it says only that the
+// target had something to tell this initiator, not that the command cannot be
+// performed (see unitAttentionAttempts). Every other CHECK CONDITION fails at
+// once. Re-issuing overwrites hdr's result fields and the caller's data buffer, so
+// a caller reading them after a retried command sees the successful attempt.
+func sgCommand(ctx context.Context, f *os.File, hdr *sgIOHdr, cdb, sense, dxferBuf []byte, name string) error {
+	return retryUnitAttention(ctx, unitAttentionRetryDelay, func() (bool, error) {
+		err := sgIoctl(f.Fd(), hdr)
 
-	runtime.KeepAlive(cdb)
-	runtime.KeepAlive(sense)
-	runtime.KeepAlive(dxferBuf)
+		runtime.KeepAlive(cdb)
+		runtime.KeepAlive(sense)
+		runtime.KeepAlive(dxferBuf)
 
-	if err != nil {
-		return fmt.Errorf("SG_IO %s on %s: %w", name, f.Name(), err)
-	}
+		if err != nil {
+			return false, fmt.Errorf("SG_IO %s on %s: %w", name, f.Name(), err)
+		}
 
-	if hdr.status != 0 || hdr.hostStatus != 0 || hdr.driverStatus != 0 {
+		if hdr.status == 0 && hdr.hostStatus == 0 && hdr.driverStatus == 0 {
+			return false, nil
+		}
+
 		key, asc, ascq, _ := parseSense(sense[:hdr.sbLenWr])
 
-		return fmt.Errorf("%s on %s failed (status=0x%02x host=0x%x driver=0x%x "+
-			"sense_key=0x%02x asc=0x%02x ascq=0x%02x)",
+		return key == senseKeyUnitAttention, fmt.Errorf(
+			"%s on %s failed (status=0x%02x host=0x%x driver=0x%x "+
+				"sense_key=0x%02x asc=0x%02x ascq=0x%02x)",
 			name, f.Name(), hdr.status, hdr.hostStatus, hdr.driverStatus, key, asc, ascq)
+	})
+}
+
+// retryUnitAttention runs issue until it succeeds, fails for any reason other than
+// a UNIT ATTENTION, or exhausts unitAttentionAttempts, pausing delay between
+// attempts. issue reports whether the error it returns was a UNIT ATTENTION, and
+// is expected to re-issue the same command each time.
+//
+// The last attempt's error is returned unwrapped, so a target genuinely stuck
+// reporting UNIT ATTENTION still surfaces the sense rather than a retry-shaped
+// error hiding it.
+func retryUnitAttention(ctx context.Context, delay time.Duration, issue func() (unitAttention bool, err error)) error {
+	var err error
+
+	for attempt := 0; attempt < unitAttentionAttempts; attempt++ {
+		var unitAttention bool
+
+		unitAttention, err = issue()
+		if err == nil || !unitAttention {
+			return err
+		}
+
+		if attempt == unitAttentionAttempts-1 {
+			break
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w while retrying after a UNIT ATTENTION: %w", ctx.Err(), err)
+		case <-time.After(delay):
+		}
 	}
 
-	return nil
+	return err
 }
