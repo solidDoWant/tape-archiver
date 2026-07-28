@@ -286,14 +286,30 @@ type MeasureWriteHealthInput struct {
 	FloorKnown bool
 }
 
-// MeasureWriteHealth scrapes the drive's log pages after the write window closed and
-// returns the tape's write-health verdict, also recording it to Prometheus. It is
-// read-only and idempotent, so it is safely retriable. It is observational only: a
-// log-page scrape failure is logged and treated as empty (no repositions, no
-// TapeAlert flags) rather than failing — the throughput, which needs no hardware, is
-// still reported. It therefore returns a nil error on the normal path so a
-// measurement problem never fails the run.
-func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input MeasureWriteHealthInput) (WriteHealth, error) {
+// TapeMeasurement is what the post-write scrape records for one physical tape:
+// its observational write health, and the LTO generation of the medium itself.
+//
+// Both are read from the drive in the same window, while the tape is still
+// loaded. The medium generation cannot be read later — by the time the Report
+// phase runs the tape has been unloaded and exported (SPEC §4.3 phases 8-9), and
+// an empty drive describes no medium (issue #340).
+type TapeMeasurement struct {
+	// Health is the tape's observational write-health verdict.
+	Health WriteHealth
+	// MediaGeneration is the LTO generation of the tape itself (e.g. "LTO-5"),
+	// which is what a recoverer needs a drive for — not the generation of the
+	// drive that wrote it. It is "unknown" when it could not be read.
+	MediaGeneration string
+}
+
+// MeasureWriteHealth scrapes the drive after the write window closed and returns the
+// tape's write-health verdict and the loaded medium's LTO generation, also recording
+// the health to Prometheus. It is read-only and idempotent, so it is safely
+// retriable. It is observational only: a scrape failure is logged and degraded (empty
+// log pages, an unknown generation) rather than failing — the throughput, which needs
+// no hardware, is still reported. It therefore returns a nil error on the normal path
+// so a measurement problem never fails the run.
+func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input MeasureWriteHealthInput) (TapeMeasurement, error) {
 	logs, err := tape.NewLogPageReader(input.Device).ReadLogPages(ctx)
 	if err != nil {
 		slog.WarnContext(ctx, "write-health: could not read drive log pages; reporting throughput only",
@@ -306,11 +322,18 @@ func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input Me
 
 	a.metrics.record(string(input.Barcode), health)
 
+	generation, err := tape.MediumGeneration(ctx, input.Device)
+	if err != nil {
+		slog.WarnContext(ctx, "write-health: could not read the medium's generation; the report will not name one",
+			"device", input.Device, "barcode", input.Barcode, "error", err)
+	}
+
 	slog.InfoContext(ctx, "write-health: measured tape write performance",
 		"barcode", input.Barcode, "throughputMBps", health.ThroughputMBps,
 		"floorMBps", health.FloorMBps, "floorKnown", health.FloorKnown, "belowFloor", health.BelowFloor,
 		"repositions", health.Repositions, "repositionsMeasured", health.RepositionsMeasured,
-		"tapeAlertFlags", len(health.TapeAlertFlags), "healthy", health.Healthy())
+		"tapeAlertFlags", len(health.TapeAlertFlags), "healthy", health.Healthy(),
+		"mediaGeneration", generation)
 
-	return health, nil
+	return TapeMeasurement{Health: health, MediaGeneration: generation}, nil
 }

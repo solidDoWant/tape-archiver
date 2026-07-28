@@ -209,7 +209,7 @@ func TestMeasureWriteHealthReportsThroughputWhenScrapeFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	health, err := activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
+	measurement, err := activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
 		Device:       "/dev/does-not-exist",
 		Barcode:      "TAPE0001L6",
 		BytesWritten: 6_000_000_000,
@@ -219,11 +219,19 @@ func TestMeasureWriteHealthReportsThroughputWhenScrapeFails(t *testing.T) {
 	})
 
 	require.NoError(t, err, "a scrape failure must not fail the run")
+
+	health := measurement.Health
 	assert.True(t, health.Measured)
 	assert.InDelta(t, 100.0, health.ThroughputMBps, 0.01)
 	assert.False(t, health.BelowFloor)
 	assert.Equal(t, int64(0), health.Repositions, "a failed scrape reports zero repositions")
 	assert.Empty(t, health.TapeAlertFlags)
+
+	// The medium's generation is read from the same drive, so it fails here too.
+	// It degrades to "unknown" rather than guessing, and without failing the run
+	// (issue #340).
+	assert.Equal(t, "unknown", measurement.MediaGeneration,
+		"an unreadable medium generation must be reported as unknown, not guessed")
 }
 
 // TestMeasureWriteHealthRecordsMetrics asserts the throughput, below-floor,

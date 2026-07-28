@@ -70,6 +70,12 @@ type Archive struct {
 	MemberVolumes []string
 	// SourceSnapshots lists the source snapshot(s) the archive was built from.
 	SourceSnapshots []string
+	// Compressed is whether this archive's tar was zstd-compressed before
+	// encryption. Compression is configured per source, so it is recorded per
+	// archive: it tells a recoverer whether a zstd step stands between the
+	// decrypted stream and the tar, rather than leaving them to identify the
+	// format from its magic bytes.
+	Compressed bool
 	// Files are the on-tape files for this archive, each with its size and
 	// SHA-256 checksum.
 	Files []ArchiveFile
@@ -160,13 +166,22 @@ type BuildParams struct {
 	// PAR2Redundancy is the PAR2 redundancy policy as rendered (e.g. "10%" or
 	// "fill-to-capacity").
 	PAR2Redundancy string
+	// TapeGeneration is the LTO generation of the media themselves, e.g. "LTO-5" —
+	// the fact a future recoverer actually needs, because it determines which
+	// drives can read the tape. It is deliberately not the writing drive's
+	// generation: an LTO-6 drive writes LTO-5 media, and read compatibility is
+	// bounded (an LTO-8 drive reads neither LTO-6 nor LTO-5), so naming the drive
+	// would send a recoverer after hardware that cannot read these tapes. It reads
+	// "mixed" when a run's tapes are not all one generation, and "unknown" when it
+	// could not be read from the media.
+	TapeGeneration string
 	// DriveModel is the tape drive product model, e.g. "IBM ULT3580-HH8".
 	DriveModel string
-	// DriveGeneration spells out the LTO generation required to read the tape —
-	// the fact a future recoverer actually needs, e.g.
-	// "LTO-8 (reads LTO-7/8; LTO-9 also reads LTO-8)". The source host's device
-	// node is deliberately omitted: it is runtime state of the writing machine
-	// and is meaningless on the (different) recovery hardware.
+	// DriveGeneration is the generation of the drive that wrote the tapes,
+	// recorded as provenance alongside its model and serial. What a recoverer
+	// needs is TapeGeneration. The source host's device node is deliberately
+	// omitted: it is runtime state of the writing machine and is meaningless on
+	// the (different) recovery hardware.
 	DriveGeneration string
 	// DriveSerial is the drive unit serial number, recorded as provenance.
 	DriveSerial string
@@ -480,6 +495,7 @@ func (d *doc) archive(archive Archive) {
 
 	d.kv("Member volumes", joinOrNone(archive.MemberVolumes), false)
 	d.kv("Source snapshots", joinOrNone(archive.SourceSnapshots), false)
+	d.kv("Compression", compressionLabel(archive.Compressed), false)
 	d.pdf.Ln(1.5)
 
 	d.filesTable(archive.Files)
@@ -603,7 +619,7 @@ func (d *doc) writeHealthSection(m Manifest) {
 	d.pdf.SetFont(fontBody, "I", 9)
 	d.text(colMuted)
 	d.pdf.MultiCell(contentW, 5,
-		d.tr("Observational only (SPEC §2 principle 2): sustained throughput vs. the speed-matching floor, drive repositions, and TapeAlert flags. A flagged tape was still written successfully."),
+		d.tr("Observational only: sustained throughput vs. the speed-matching floor, drive repositions, and TapeAlert flags. A flagged tape was still written successfully."),
 		"", "L", false)
 	d.pdf.Ln(1.5)
 
@@ -714,7 +730,10 @@ func (d *doc) buildSection(m Manifest) {
 	d.kv("ltfs version", build.LTFSVersion, false)
 	d.kv("Slice size", fmt.Sprintf("%s bytes (%s)", groupDigits(build.SliceSize), humanSize(build.SliceSize)), false)
 	d.kv("PAR2 redundancy", build.PAR2Redundancy, false)
-	d.kv("Drive model", build.DriveModel, false)
+	// The tape's own generation leads the hardware rows: it is the one a recoverer
+	// acts on when choosing a drive. The drive rows below it are provenance.
+	d.kv("Tape generation (needed to read)", build.TapeGeneration, false)
+	d.kv("Drive model (wrote the tapes)", build.DriveModel, false)
 	d.kv("Drive generation", build.DriveGeneration, false)
 	d.kv("Drive serial", build.DriveSerial, true)
 	d.kv("Library model", build.LibraryModel, false)
@@ -728,7 +747,7 @@ func (d *doc) identitySection(m Manifest) {
 	d.pdf.SetFont(fontBody, "I", 9)
 	d.text(colMuted)
 	d.pdf.MultiCell(contentW, 5,
-		d.tr("Included deliberately for key escrow (SPEC §7). Anyone holding this report can decrypt the archives — store and dispose of it accordingly."),
+		d.tr("Included deliberately, so this report alone is enough to decrypt the archives with no other key store. Anyone holding it can decrypt them — store and dispose of it accordingly."),
 		"", "L", false)
 	d.pdf.Ln(2)
 
@@ -976,6 +995,17 @@ func joinOrNone(items []string) string {
 	}
 
 	return strings.Join(items, ", ")
+}
+
+// compressionLabel renders an archive's compression so the recovery steps are
+// unambiguous: it names the tool the recoverer needs, or states plainly that the
+// decrypted stream is already a tar.
+func compressionLabel(compressed bool) string {
+	if compressed {
+		return "zstd (decompress with zstd -d before untarring)"
+	}
+
+	return "none (the decrypted stream is already a tar)"
 }
 
 // groupDigits formats n in base 10 with thousands separators, e.g. 1073741824

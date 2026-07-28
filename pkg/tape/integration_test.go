@@ -271,3 +271,52 @@ func TestLogPages(t *testing.T) {
 	assert.True(t, result.RepositionsMeasured, "the LTO-6 drive supports page 0x30, so repositions must be measured, not silently zero")
 	assert.Zero(t, result.Repositions, "a fresh virtual drive should not have back-hitched")
 }
+
+// TestMediumGeneration reads the loaded medium's LTO generation from a real
+// drive. It is the generation of the tape, not of the drive: what a recoverer
+// needs a drive for (issue #340). The library's media are LTO-6 cartridges, so a
+// loaded tape must read back as LTO-6 — and an empty drive, which describes no
+// medium at all, must fail rather than name a generation.
+func TestMediumGeneration(t *testing.T) {
+	testutil.SkipIfMhvtlUnavailable(t)
+
+	sgDev := testutil.Drive0SgDev(t)
+	if _, err := os.Stat(sgDev); err != nil {
+		t.Skipf("sg device %s not available: %v (set %s to override)", sgDev, err, testutil.EnvDrive0SgDev)
+	}
+
+	changer := tape.NewChanger(testutil.ChangerDev(t))
+
+	inv, err := changer.Inventory(t.Context())
+	require.NoError(t, err, "inventory")
+	require.GreaterOrEqual(t, len(inv.Drives), 1)
+	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
+
+	// An empty drive carries no medium, so no generation can be claimed for one.
+	_, err = tape.MediumGeneration(t.Context(), sgDev)
+	require.Error(t, err, "an empty drive must not report a medium generation")
+
+	// Slot index 3 is loaded and unloaded here only, never written, so this test
+	// leaves the library as it found it (see TestBlankCheck on slot choice).
+	const generationSlotIndex = 3
+	require.GreaterOrEqual(t, len(inv.Slots), generationSlotIndex+1,
+		"need at least %d storage slots", generationSlotIndex+1)
+
+	slot := inv.Slots[generationSlotIndex]
+	driveAddr := inv.Drives[0].Address
+
+	require.NoError(t, changer.Load(t.Context(), slot.Address, driveAddr), "load")
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+		defer cancel()
+
+		_ = changer.Unload(ctx, slot.Address, driveAddr)
+	})
+
+	testutil.SkipIfDriveNotReady(t, testutil.Drive0Dev(t))
+
+	generation, err := tape.MediumGeneration(t.Context(), sgDev)
+	require.NoError(t, err, "MediumGeneration")
+	assert.Equal(t, "LTO-6", generation, "the library's media are LTO-6 cartridges")
+}

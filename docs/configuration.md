@@ -270,6 +270,19 @@ real secrets):
 Delivery of the run's PDF report to Discord on success. The recovery ISO travels on its
 burned disc (SPEC §10), so the report is the single delivered artifact.
 
+The report is posted with a short summary message naming the run, how much was archived,
+and the tapes written, so the channel reads as a run history without opening every
+attachment:
+
+```
+📼 **Backup complete**
+**Run:** `019fa67f-6e01-7752-b1b6-e1d2b7530cf5`
+**Archived:** 2 archives (13.9 GB)
+**Tapes:** JCY631L5, JCY632L5
+
+The attached report is this run's recovery index — print it and store it with the tapes.
+```
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `webhookUrl` | `string` | yes | Discord incoming webhook URL for success delivery. On success the PDF report is uploaded here. |

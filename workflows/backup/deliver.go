@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -58,6 +59,10 @@ type DeliverInput struct {
 	WebhookURL string
 	// ReportPath is the staged PDF report to upload.
 	ReportPath string
+	// Summary is the short message posted alongside the report, so the upload
+	// reads as a run notification rather than a bare unlabelled attachment.
+	// Empty posts the attachment with no message.
+	Summary string
 }
 
 // DeliverResult records the identity of the Discord message the report was posted
@@ -97,7 +102,7 @@ func (a *DeliverActivities) Deliver(ctx context.Context, input DeliverInput) (*D
 	if err := withActivityHeartbeat(ctx, func() error {
 		var sendErr error
 
-		posted, sendErr = client.SendFile(ctx, input.ReportPath)
+		posted, sendErr = client.SendFile(ctx, input.ReportPath, input.Summary)
 
 		return sendErr
 	}); err != nil {
@@ -157,6 +162,81 @@ func classifyDeliverError(err error) error {
 	return err
 }
 
+// deliverySummary composes the short message posted with the report. Without it
+// the report arrives in Discord as an unlabelled PDF attachment, which says
+// nothing about which run produced it or what it covers.
+//
+// It answers the questions someone reading the channel actually has: which run
+// this is, what was archived, and onto which tapes — so the channel doubles as a
+// scannable history without opening every PDF. Everything here is already in the
+// report; this is a summary, not a second source of truth.
+func deliverySummary(runID string, state *runState) string {
+	var (
+		archives int64
+		bytes    int64
+	)
+
+	for _, staged := range state.staged {
+		archives++
+		bytes += staged.SizeBytes
+	}
+
+	barcodes := make([]string, 0, len(state.written))
+	for _, written := range state.written {
+		barcodes = append(barcodes, string(written.Barcode))
+	}
+
+	lines := []string{
+		"📼 **Backup complete**",
+		fmt.Sprintf("**Run:** `%s`", runID),
+		fmt.Sprintf("**Archived:** %d %s (%s)", archives, plural(archives, "archive"), humanBytes(bytes)),
+	}
+
+	if len(barcodes) > 0 {
+		lines = append(lines, fmt.Sprintf("**Tapes:** %s", strings.Join(barcodes, ", ")))
+	}
+
+	lines = append(lines, "",
+		"The attached report is this run's recovery index — print it and store it with the tapes.")
+
+	return strings.Join(lines, "\n")
+}
+
+// plural renders a count's noun, so a one-archive run does not read "1 archives".
+func plural(count int64, noun string) string {
+	if count == 1 {
+		return noun
+	}
+
+	return noun + "s"
+}
+
+// humanBytes renders a byte count in decimal units (the units drive and media
+// capacities are quoted in), e.g. "13.9 GB".
+func humanBytes(bytes int64) string {
+	const unit = 1000
+
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+
+	value := float64(bytes)
+	units := []string{"kB", "MB", "GB", "TB", "PB"}
+
+	var suffix string
+
+	for _, u := range units {
+		value /= unit
+		suffix = u
+
+		if value < unit {
+			break
+		}
+	}
+
+	return fmt.Sprintf("%.1f %s", value, suffix)
+}
+
 // deliverPhase orchestrates the Deliver phase (SPEC §4.3 phase 11): it runs the
 // data-side Deliver activity with the webhook target and the report path the Report
 // phase recorded in runState.
@@ -179,6 +259,7 @@ func deliverPhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	input := DeliverInput{
 		WebhookURL: cfg.Delivery.WebhookURL,
 		ReportPath: state.reportPath,
+		Summary:    deliverySummary(workflow.GetInfo(ctx).WorkflowExecution.RunID, state),
 	}
 
 	// The result (the posted message's identity) is captured in workflow history

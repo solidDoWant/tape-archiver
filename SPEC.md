@@ -441,15 +441,30 @@ the reason compression is enabled by default, and an argument for sizing PAR2 ge
 ## 9. Report (PDF)
 
 Produced by the data worker (§4.1: its inputs — staged files, pinned tool versions,
-recovery binaries, captured LTFS indexes — all live there). Contains, at minimum: run
-id and date; full contents
-manifest (archives, member volumes, source snapshots, sizes, SHA-256 checksums);
+recovery binaries, captured LTFS indexes — all live there). Contains, at minimum: the
+**run id** (the run's own identifier, not the fixed `backup` workflow id every run
+shares — §4.2 — so a printed report names the one run it describes) and date; full
+contents manifest (archives, member volumes, source snapshots, per-archive compression,
+sizes, SHA-256 checksums);
 which physical tape(s) (by barcode/label) hold what (annotating any tape written over a
 non-blank tape under `library.allowNonBlankTapes`, §4.3 step 6); per-tape **write health** (§14);
 how the tapes were built (tool
-version, `age`/`par2`/`ltfs` versions, slice size, PAR2 redundancy, drive/library
-identifiers); the **age private identity**; and the recovery procedure. Intended to be
-printed and laminated as the durable offline index for the run.
+version, `age`/`par2`/`ltfs` versions, slice size, PAR2 redundancy, the **LTO generation
+of the media** and the drive/library identifiers); the **age private identity**; and the
+recovery procedure. Intended to be printed and laminated as the durable offline index for
+the run.
+
+The generation a recoverer needs is the **tape's**, not the writing drive's: an LTO-6
+drive writes LTO-5 media, and LTO read compatibility is bounded (an LTO-8 drive reads
+neither LTO-6 nor LTO-5 media), so the drive's generation would point at hardware that
+cannot read the tapes. It is therefore read from each medium's SCSI density code during
+that tape's write window (§4.3 phase 7), the only point at which the medium is loaded —
+by the Report phase the tapes are unloaded and exported. Like write health it is
+observational: an unreadable generation renders as `unknown` and never fails a run.
+
+Everything the report says must be actionable by someone holding only the printout and
+the tapes: its instructions name the devices and options they must actually pass, and it
+cites no document internal to this project, which such a reader has no way to obtain.
 
 ## 10. Recovery ISO (optical)
 

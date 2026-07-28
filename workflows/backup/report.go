@@ -82,9 +82,15 @@ report.pdf (and in the "Encryption key" section of this text's PDF). The full
 procedure — index-loss recovery and failure handling — is in recovery-procedure.md
 on this disc.
 
-1.  Load a tape into a standalone LTO drive of the generation named in the report's
-    build parameters (a newer generation that can read it also works).
-2.  Mount the tape's LTFS volume read-only:  ltfs -o ro <mountpoint>
+1.  Load a tape into a standalone LTO drive that can read the tape generation named
+    in the report's build parameters. An LTO drive reads its own generation and the
+    one before it; LTO-7 and earlier also read two generations back. A newer drive is
+    therefore not automatically enough — an LTO-8 drive, for instance, reads neither
+    LTO-6 nor LTO-5 media.
+2.  Mount the tape's LTFS volume read-only. LTFS addresses the drive by its SCSI
+    generic node (/dev/sgN — "lsscsi -g" lists it beside each tape drive); the
+    /dev/nstN tape node does not work here:
+        ltfs -o ro -o devname=/dev/sgN <mountpoint>
     If the on-tape LTFS index is damaged, see recovery-procedure.md (ltfsck
     --deep-recovery, or the captured ltfs-index/<barcode>.schema extents).
 3.  Copy the tape's files to disk into a directory named for the tape's barcode
@@ -110,12 +116,15 @@ on this disc.
         cat <barcode>/archives/NNN-<label>/archive.000 <barcode>/archives/NNN-<label>/archive.001 ... > archive.age
 6.  Decrypt with the escrowed identity (save it to identity.txt first):
         bin/age -d -i identity.txt -o archive.tar.zst archive.age
-7.  If the archive was compressed, decompress it:
+7.  The contents manifest records, per archive, whether it was compressed. If this
+    one was, decompress it:
         bin/zstd -d archive.tar.zst -o archive.tar
-    (An archive stored uncompressed is already a tar after step 6.)
+    (An archive the manifest records as uncompressed is already a tar after step 6.)
 8.  Unpack the tar:
         bin/tar -xf archive.tar
-    A snapshot group unpacks to one subdirectory per member volume.
+    An archive holding several member volumes unpacks to one subdirectory per volume.
+    A single-volume archive unpacks that volume's own contents directly, with no
+    wrapping directory — the report's contents manifest names its member volume.
 9.  Repeat for every archive on every tape listed in the report.`
 
 // ReportActivities hosts the data-side Report activity. stagingRoot is where the
@@ -477,7 +486,11 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 			Directory:       archiveDirName(staged.SourceIndex, resolved.Label),
 			MemberVolumes:   memberVolumes(resolved),
 			SourceSnapshots: sourceSnapshots(resolved),
-			Files:           archiveFiles(staged, par2ByIndex[staged.SourceIndex]),
+			// Compression is per source (config.Source.Compression), so the
+			// recoverer is told per archive whether a zstd step stands between the
+			// decrypted stream and the tar (issue #340).
+			Compressed: resolved.Compression,
+			Files:      archiveFiles(staged, par2ByIndex[staged.SourceIndex]),
 		})
 	}
 
@@ -487,7 +500,7 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 		Archives:          archives,
 		Tapes:             reportTapes(input, nameByIndex),
 		Discs:             reportDiscs(input.Discs),
-		Build:             buildParams(input.Config, input.SliceSizeBytes, device),
+		Build:             buildParams(input.Config, input.SliceSizeBytes, device, input.Written),
 		AgeIdentity:       input.Config.Encryption.Identity,
 		RecoveryProcedure: recoveryProcedure,
 	}
@@ -632,7 +645,7 @@ func reportWriteHealth(health WriteHealth) *report.WriteHealth {
 // versions from the committed build info, the run's derived slice size
 // (DeriveSliceSize; issue #324) and PAR2 policy from the run config, and the
 // best-effort drive/library identifiers.
-func buildParams(cfg config.Config, sliceSizeBytes int64, device deviceIdentity) report.BuildParams {
+func buildParams(cfg config.Config, sliceSizeBytes int64, device deviceIdentity, written []WrittenTape) report.BuildParams {
 	return report.BuildParams{
 		ToolVersion:     buildinfo.ToolVersion(),
 		AgeVersion:      buildinfo.AgeVersion(),
@@ -640,11 +653,42 @@ func buildParams(cfg config.Config, sliceSizeBytes int64, device deviceIdentity)
 		LTFSVersion:     buildinfo.LTFSVersion(),
 		SliceSize:       sliceSizeBytes,
 		PAR2Redundancy:  redundancyPolicy(cfg.Redundancy),
+		TapeGeneration:  tapeGeneration(written),
 		DriveModel:      device.driveModel,
 		DriveGeneration: device.driveGeneration,
 		DriveSerial:     device.driveSerial,
 		LibraryModel:    device.libraryModel,
 	}
+}
+
+// tapeGeneration reduces the run's per-tape media generations, each read from the
+// medium during its write window, to the single value the report names as the
+// generation a recoverer needs a drive for.
+//
+// A run's tapes are normally all one generation, which is reported as is. Tapes of
+// different generations render as "mixed" rather than picking one, since naming a
+// single generation would be wrong for some of the tapes it covers. A generation
+// that could not be read renders as "unknown" — never guessed from the writing
+// drive, which may be a newer generation than the media it wrote (issue #340).
+func tapeGeneration(written []WrittenTape) string {
+	generation := ""
+
+	for _, tape := range written {
+		switch {
+		case tape.MediaGeneration == "" || tape.MediaGeneration == unknownIdentity:
+			return unknownIdentity
+		case generation == "":
+			generation = tape.MediaGeneration
+		case generation != tape.MediaGeneration:
+			return "mixed"
+		}
+	}
+
+	if generation == "" {
+		return unknownIdentity
+	}
+
+	return generation
 }
 
 // redundancyPolicy renders the run's PAR2 policy for the report: the fixed target
@@ -805,10 +849,16 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 // date come from the workflow (deterministic) so the artifact is stamped
 // identically across retries and across the two renders. Discs is left empty; the
 // re-render sets it from the burned discs.
+//
+// RunID is the execution's run id, not its workflow id: the workflow id is the
+// constant WorkflowID ("backup") for every run, so stamping it would label every
+// report ever printed identically, and the report is the durable offline index for
+// one specific run. The run id is also what names the run's staging directory and
+// what tapectl and the web UI identify a run by.
 func reportInput(ctx workflow.Context, cfg config.Config, state *runState) ReportInput {
 	return ReportInput{
 		Config:         cfg,
-		RunID:          workflow.GetInfo(ctx).WorkflowExecution.ID,
+		RunID:          workflow.GetInfo(ctx).WorkflowExecution.RunID,
 		Date:           state.reportDate,
 		SliceSizeBytes: state.sliceSizeBytes,
 		Resolved:       state.resolved,

@@ -677,12 +677,12 @@ func TestRunTapePathWriteHealthRetryBounded(t *testing.T) {
 	// rather than the Temporal-default unlimited (which would stall the finished
 	// write phase until the session timeout).
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
-		func(context.Context, MeasureWriteHealthInput) (WriteHealth, error) {
+		func(context.Context, MeasureWriteHealthInput) (TapeMeasurement, error) {
 			mu.Lock()
 			healthAttempts++
 			mu.Unlock()
 
-			return WriteHealth{}, fmt.Errorf("simulated hung scrape: measure write health timed out")
+			return TapeMeasurement{}, fmt.Errorf("simulated hung scrape: measure write health timed out")
 		})
 
 	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)

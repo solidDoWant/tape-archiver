@@ -22,6 +22,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
 // uploadRecorder is an httptest handler that records the base filename of each
@@ -423,4 +424,68 @@ func TestDeliverFailureAlertNamesDeliver(t *testing.T) {
 	// The failure alert names the Deliver phase.
 	assert.Equal(t, PhaseDeliver, captured.Phase)
 	assert.NotEmpty(t, captured.RunID)
+}
+
+// TestDeliverySummary asserts the message posted with the report names the run and
+// what it covers. Without it the report lands in Discord as an unlabelled PDF, so
+// the channel says nothing about which run produced it or what is on the tapes
+// until someone opens the attachment.
+func TestDeliverySummary(t *testing.T) {
+	t.Parallel()
+
+	state := &runState{
+		staged: []StagedArchive{
+			{SourceIndex: 0, SizeBytes: 13_911_341_280},
+			{SourceIndex: 1, SizeBytes: 332_412},
+		},
+		written: []WrittenTape{
+			{Barcode: tape.Barcode("JCY631L5")},
+			{Barcode: tape.Barcode("JCY632L5")},
+		},
+	}
+
+	summary := deliverySummary("019fa67f-6e01-7752-b1b6-e1d2b7530cf5", state)
+
+	assert.Contains(t, summary, "019fa67f-6e01-7752-b1b6-e1d2b7530cf5",
+		"the message must name the run, so a reader can find it without opening the PDF")
+	assert.Contains(t, summary, "2 archives")
+	assert.Contains(t, summary, "13.9 GB", "the message must say how much was archived")
+	assert.Contains(t, summary, "JCY631L5")
+	assert.Contains(t, summary, "JCY632L5", "the message must name every tape written")
+
+	// Discord's content limit; the message is short by construction but must
+	// never be at risk of rejection for length.
+	assert.Less(t, len(summary), 2000)
+}
+
+// TestDeliverySummaryPluralizesOneArchive covers the single-archive run, which is
+// the common case for this project and must not read "1 archives".
+func TestDeliverySummaryPluralizesOneArchive(t *testing.T) {
+	t.Parallel()
+
+	summary := deliverySummary("run-1", &runState{
+		staged:  []StagedArchive{{SourceIndex: 0, SizeBytes: 1_500_000}},
+		written: []WrittenTape{{Barcode: tape.Barcode("TAPE01L6")}},
+	})
+
+	assert.Contains(t, summary, "1 archive (1.5 MB)")
+}
+
+// TestHumanBytes pins the sizes the delivery message renders, in the decimal units
+// tape and drive capacities are quoted in.
+func TestHumanBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := map[int64]string{
+		0:                 "0 B",
+		999:               "999 B",
+		1_000:             "1.0 kB",
+		1_500_000:         "1.5 MB",
+		13_911_341_280:    "13.9 GB",
+		2_500_000_000_000: "2.5 TB",
+	}
+
+	for bytes, want := range tests {
+		assert.Equalf(t, want, humanBytes(bytes), "humanBytes(%d)", bytes)
+	}
 }

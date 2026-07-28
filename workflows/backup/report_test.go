@@ -1,9 +1,12 @@
 package backup
 
 import (
+	"archive/tar"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/pkg/archive"
 	"github.com/solidDoWant/tape-archiver/pkg/optical"
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
@@ -328,6 +332,145 @@ func TestBuildSHA256Manifest(t *testing.T) {
 	assert.Contains(t, text, "cc  TAPE02L6/archives/000-archive/archive.par2")
 	// Sorted output.
 	assert.True(t, sortedStrings(lines), "manifest lines must be sorted")
+}
+
+// TestTapeGeneration pins issue #340: the report names the generation of the
+// media, because that is what decides which drive can read them. It is read from
+// each tape while loaded, never inferred from the drive that wrote them — an
+// LTO-6 drive writes LTO-5 media, and an LTO-8 drive can read neither.
+func TestTapeGeneration(t *testing.T) {
+	t.Parallel()
+
+	writtenTape := func(generation string) WrittenTape {
+		return WrittenTape{MediaGeneration: generation}
+	}
+
+	tests := map[string]struct {
+		written []WrittenTape
+		want    string
+	}{
+		"all tapes one generation": {
+			written: []WrittenTape{writtenTape("LTO-5"), writtenTape("LTO-5")},
+			want:    "LTO-5",
+		},
+		// Naming one generation would be wrong for the other tapes it covers.
+		"generations differ": {
+			written: []WrittenTape{writtenTape("LTO-5"), writtenTape("LTO-6")},
+			want:    "mixed",
+		},
+		// A tape whose medium could not be read makes the run's answer unknown
+		// rather than letting the readable tapes speak for it.
+		"one tape unreadable": {
+			written: []WrittenTape{writtenTape("LTO-5"), writtenTape("unknown")},
+			want:    "unknown",
+		},
+		"never measured": {
+			written: []WrittenTape{writtenTape("")},
+			want:    "unknown",
+		},
+		"no tapes": {want: "unknown"},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, test.want, tapeGeneration(test.written))
+		})
+	}
+}
+
+// TestManifestCarriesPerArchiveCompression pins issue #340: compression is a
+// per-source setting (config.Source.Compression), and the report is what tells a
+// recoverer whether a zstd step stands between the decrypted stream and the tar.
+// Each archive therefore carries its own source's answer, not a run-wide guess.
+func TestManifestCarriesPerArchiveCompression(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]bool{"compressed": true, "uncompressed": false}
+
+	for name, compression := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			input := reportTestInput(t)
+			input.Resolved[0].Compression = compression
+
+			manifest := buildReportManifest(input, deviceIdentity{})
+
+			require.Len(t, manifest.Archives, 1)
+			assert.Equal(t, compression, manifest.Archives[0].Compressed,
+				"the archive must report its own source's compression setting")
+		})
+	}
+}
+
+// TestRecoveryProcedureMountStepNamesADevice pins issue #340: the printed LTFS
+// mount step must name the drive to mount. "ltfs -o ro <mountpoint>" on its own
+// opens no device — it fails with "Cannot open device" — which strands a recoverer
+// at the very first tape read, so the step carries -o devname= and says which node
+// to use. LTFS's sg backend needs the SCSI generic node; the /dev/nstN tape node
+// fails the read with an SG_IO error.
+func TestRecoveryProcedureMountStepNamesADevice(t *testing.T) {
+	t.Parallel()
+
+	assert.Contains(t, recoveryProcedure, "ltfs -o ro -o devname=/dev/sgN <mountpoint>",
+		"the mount step must name the device LTFS is to open")
+	assert.Contains(t, recoveryProcedure, "lsscsi -g",
+		"the mount step must say how to find the drive's sg node")
+}
+
+// TestRecoveryProcedureUnpackStepMatchesTheTar pins issue #340: step 8 tells a
+// recoverer what an unpacked archive looks like, so the printed text and the tar
+// the run actually writes (tarMembers) must agree. A multi-volume archive unpacks
+// to one subdirectory per member volume; a single-volume archive unpacks its
+// contents with no wrapping directory.
+func TestRecoveryProcedureUnpackStepMatchesTheTar(t *testing.T) {
+	t.Parallel()
+
+	member := func(subdir, file string) archive.Member {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, file), []byte("contents"), 0o644))
+
+		return archive.Member{Subdir: subdir, Dir: dir}
+	}
+
+	entries := func(members ...archive.Member) []string {
+		var buf bytes.Buffer
+
+		require.NoError(t, tarMembers(t.Context(), &buf, members))
+
+		var names []string
+
+		reader := tar.NewReader(&buf)
+
+		for {
+			header, err := reader.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			require.NoError(t, err)
+
+			names = append(names, header.Name)
+		}
+
+		return names
+	}
+
+	// A single member: its contents sit at the archive root, with no volume
+	// directory wrapping them.
+	single := entries(member("volume-a", "only.txt"))
+	assert.Contains(t, single, "only.txt")
+
+	for _, name := range single {
+		assert.NotContains(t, name, "volume-a/",
+			"a single-volume archive must unpack with no wrapping volume directory")
+	}
+
+	// Two members: every entry sits under its own member subdirectory.
+	group := entries(member("volume-a", "a.txt"), member("volume-b", "b.txt"))
+	assert.Contains(t, group, "volume-a/a.txt")
+	assert.Contains(t, group, "volume-b/b.txt")
 }
 
 // TestRecoveryProcedureSHA256Layout proves the recovery instructions' verification

@@ -25,6 +25,9 @@ func completeManifest() report.Manifest {
 				Name:            "k8s-group-photos",
 				MemberVolumes:   []string{"pvc-photos-raw", "pvc-photos-thumbs"},
 				SourceSnapshots: []string{"bulk-pool-01/photos@snap-20260629"},
+				// Compressed, matching its .tar.zst.age file names; zfs-media below
+				// is uncompressed, so the fixture covers both renderings.
+				Compressed: true,
 				Files: []report.ArchiveFile{
 					{
 						Name:   "photos.tar.zst.age.000",
@@ -81,14 +84,17 @@ func completeManifest() report.Manifest {
 			},
 		},
 		Build: report.BuildParams{
-			ToolVersion:     "tape-archiver v1.2.3",
-			AgeVersion:      "age 1.3.1",
-			Par2Version:     "par2cmdline-turbo 1.1.0",
-			LTFSVersion:     "ltfs 2.5.0",
-			SliceSize:       268435456,
-			PAR2Redundancy:  "fill-to-capacity",
+			ToolVersion:    "tape-archiver v1.2.3",
+			AgeVersion:     "age 1.3.1",
+			Par2Version:    "par2cmdline-turbo 1.1.0",
+			LTFSVersion:    "ltfs 2.5.0",
+			SliceSize:      268435456,
+			PAR2Redundancy: "fill-to-capacity",
+			// LTO-7 media written by an LTO-8 drive: the two differ, which is the
+			// case the report has to get right (issue #340).
+			TapeGeneration:  "LTO-7",
 			DriveModel:      "IBM ULT3580-HH8",
-			DriveGeneration: "LTO-8 (reads LTO-7/8; LTO-9 also reads LTO-8)",
+			DriveGeneration: "LTO-8",
 			DriveSerial:     "10WT0A1B2C",
 			LibraryModel:    "Quantum Scalar i3",
 		},
@@ -287,7 +293,8 @@ func TestBuildContainsEverySpec9Field(t *testing.T) {
 		{name: "slice size", value: "268,435,456"},
 		{name: "par2 redundancy", value: "fill-to-capacity"},
 		{name: "drive model", value: "IBM ULT3580-HH8"},
-		{name: "drive generation", value: "reads LTO-7/8"},
+		{name: "tape generation", value: "LTO-7"},
+		{name: "drive generation", value: "LTO-8"},
 		{name: "drive serial", value: "10WT0A1B2C"},
 		{name: "library model", value: "Quantum Scalar i3"},
 		{name: "age private identity", value: manifest.AgeIdentity},
@@ -306,6 +313,60 @@ func TestBuildContainsEverySpec9Field(t *testing.T) {
 			assert.Contains(t, extracted, stripWhitespace(test.value),
 				"extracted PDF text is missing the %s field", test.name)
 		})
+	}
+}
+
+// TestBuildNamesTheTapeGenerationToRead pins issue #340: what a recoverer needs is
+// the generation of the media, since that decides which drives can read them. The
+// writing drive's generation is provenance and can differ — an LTO-6 drive writes
+// LTO-5 media — so the two are rendered as distinct, separately labelled facts.
+func TestBuildNamesTheTapeGenerationToRead(t *testing.T) {
+	t.Parallel()
+
+	manifest := completeManifest()
+	require.NotEqual(t, manifest.Build.TapeGeneration, manifest.Build.DriveGeneration,
+		"fixture: the media and the drive that wrote them are different generations")
+
+	extracted := stripWhitespace(extractText(t, manifest))
+
+	assert.Contains(t, extracted, stripWhitespace("Tape generation (needed to read)"),
+		"the report must label which generation is the one needed to read the tape")
+	assert.Contains(t, extracted, stripWhitespace("Drive model (wrote the tapes)"),
+		"the drive rows must read as provenance, not as the drive a recoverer needs")
+}
+
+// TestBuildRecordsCompressionPerArchive pins issue #340: compression is configured
+// per source, and the recovery steps differ by it (a compressed archive needs a
+// zstd pass between decryption and untarring). Without it in the report a recoverer
+// is left identifying the format from the decrypted stream's magic bytes, so each
+// archive states its own answer.
+func TestBuildRecordsCompressionPerArchive(t *testing.T) {
+	t.Parallel()
+
+	manifest := completeManifest()
+	require.True(t, manifest.Archives[0].Compressed, "fixture: first archive is compressed")
+	require.False(t, manifest.Archives[1].Compressed, "fixture: second archive is uncompressed")
+
+	extracted := stripWhitespace(extractText(t, manifest))
+
+	assert.Contains(t, extracted, stripWhitespace("zstd"),
+		"a compressed archive must name the tool needed to decompress it")
+	assert.Contains(t, extracted, stripWhitespace("none (the decrypted stream is already a tar)"),
+		"an uncompressed archive must say so, so no zstd step is attempted")
+}
+
+// TestBuildCitesNoInternalDocument pins issue #340: the report is read by whoever
+// holds the printout, decades from now, with no access to this project's
+// repository. Citing an internal document ("SPEC §7") points that reader at
+// something they cannot obtain, so every note states its point on its own terms.
+func TestBuildCitesNoInternalDocument(t *testing.T) {
+	t.Parallel()
+
+	extracted := extractText(t, completeManifest())
+
+	for _, citation := range []string{"SPEC", "§"} {
+		assert.NotContains(t, extracted, citation,
+			"the report must not cite an internal document the reader cannot obtain")
 	}
 }
 

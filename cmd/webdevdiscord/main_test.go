@@ -31,7 +31,7 @@ func TestHandler_DriveTheRealWebhookClient(t *testing.T) {
 	t.Run("SendFile returns a resolvable posted-message identity", func(t *testing.T) {
 		path := writeTempFile(t, "sample report body")
 
-		posted, err := client.SendFile(t.Context(), path)
+		posted, err := client.SendFile(t.Context(), path, "")
 		require.NoError(t, err)
 		require.NotNil(t, posted, "the report deep-link needs a message identity")
 		assert.Equal(t, "channel-1", posted.ChannelID)
@@ -41,11 +41,11 @@ func TestHandler_DriveTheRealWebhookClient(t *testing.T) {
 	t.Run("each SendFile yields a distinct message id", func(t *testing.T) {
 		path := writeTempFile(t, "another report")
 
-		first, err := client.SendFile(t.Context(), path)
+		first, err := client.SendFile(t.Context(), path, "")
 		require.NoError(t, err)
 		require.NotNil(t, first)
 
-		second, err := client.SendFile(t.Context(), path)
+		second, err := client.SendFile(t.Context(), path, "")
 		require.NoError(t, err)
 		require.NotNil(t, second)
 
@@ -74,7 +74,7 @@ func TestHandler_RejectEndpoint(t *testing.T) {
 	t.Run("report upload is rejected with a non-retryable status", func(t *testing.T) {
 		path := writeTempFile(t, "report that will be rejected")
 
-		posted, err := client.SendFile(t.Context(), path)
+		posted, err := client.SendFile(t.Context(), path, "")
 		require.Error(t, err)
 		assert.Nil(t, posted)
 

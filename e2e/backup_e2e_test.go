@@ -71,7 +71,7 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 
 	report := findUpload(t, uploads, "report.pdf")
 
-	assertReportContents(t, report, backupWorkflowID, string(fixture.barcode))
+	assertReportContents(t, report, temporalRunID(t, temporalClient), string(fixture.barcode))
 
 	// Staging cleanup (issue #333): on this successful run the staged archive
 	// slices and PAR2 recovery files are reclaimed, while the durable report
@@ -131,7 +131,7 @@ func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 	// Both physical copies were written across the two drive-sets, so the report
 	// lists both tape barcodes.
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
-	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
+	assert.Contains(t, report, temporalRunID(t, temporalClient), "report must name the run ID")
 
 	for _, barcode := range fixture.barcodes {
 		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
@@ -261,7 +261,7 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
-	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
+	assert.Contains(t, report, temporalRunID(t, temporalClient), "report must name the run ID")
 
 	for _, barcode := range fixture.barcodes {
 		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
@@ -335,12 +335,16 @@ func uploadNames(uploads []upload) []string {
 // assertReportContents parses the delivered PDF and asserts it carries the run
 // ID, the archive manifest (a PAR2 recovery-set file name), the tape barcode, and
 // the age private identity (AC2).
-func assertReportContents(t *testing.T, reportPDF []byte, workflowID, barcode string) {
+//
+// runID is the execution's run id, not the constant backupWorkflowID: the report
+// is the durable index for one specific run, so it must carry the identifier that
+// distinguishes this run from every other (issue #340).
+func assertReportContents(t *testing.T, reportPDF []byte, runID, barcode string) {
 	t.Helper()
 
 	report := extractPDFText(t, reportPDF)
 
-	assert.Contains(t, report, workflowID, "report must name the run ID")
+	assert.Contains(t, report, runID, "report must name the run ID")
 	assert.Contains(t, report, barcode, "report must list the tape barcode")
 	assert.Contains(t, report, "AGE-SECRET-KEY", "report must embed the age private identity for escrow")
 	assert.Contains(t, report, ".par2", "report manifest must list the PAR2 recovery-set files")
