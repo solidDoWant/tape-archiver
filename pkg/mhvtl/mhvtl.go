@@ -150,6 +150,10 @@ func (r *Reprovisioner) Mirror(ctx context.Context, source tape.Inventory) error
 		return fmt.Errorf("regenerate mhvtl media under %s: %w", homeDir, err)
 	}
 
+	if err := verifyMedia(homeDir, source); err != nil {
+		return err
+	}
+
 	pid, err := r.findDaemon(r.libraryID)
 	if err != nil {
 		return err
@@ -345,6 +349,48 @@ func runMakeVTLMedia(ctx context.Context, configDir, homeDir string) error {
 	}
 
 	return nil
+}
+
+// mamFile is the per-volume file vtllibrary opens to identify a cartridge
+// (get_cart_type in usr/cmd/vtllibrary.c) and vtltape opens to mount it. Its
+// absence is exactly what a barcode with no backing media looks like to mhvtl.
+const mamFile = "mam"
+
+// verifyMedia insists that every barcode the mirror just published has backing
+// media under homeDir, and names the ones that do not.
+//
+// make_vtl_media's exit status does not carry this. It is a shell script that
+// finds the libraries and their barcodes with awk, so on a PATH without awk both
+// loops iterate over nothing, no media are created, and the script still exits 0
+// (issue #339). Nothing downstream notices either: vtllibrary derives element
+// status from library_contents alone, so WaitReady sees the mirrored slots and
+// the changer reports tapes that cannot be mounted. The run then dies at Load
+// with a MOVE MEDIUM hardware error naming a slot that looks perfectly occupied.
+//
+// So the invariant Load depends on is checked where it is established, against
+// mhvtl's own on-disk layout rather than a tool's return code.
+func verifyMedia(homeDir string, source tape.Inventory) error {
+	barcodes := occupiedBarcodes(source)
+
+	var missing []string
+
+	for _, barcode := range barcodes {
+		if _, err := os.Stat(filepath.Join(homeDir, barcode, mamFile)); err != nil {
+			missing = append(missing, barcode)
+		}
+	}
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	sort.Strings(missing)
+
+	return fmt.Errorf(
+		"make_vtl_media reported success but left %d of %d mirrored barcodes with no media under %s "+
+			"(expected %s/<barcode>/%s): %s; it exits 0 when the tools it shells out to are missing, "+
+			"so check that awk is on its PATH",
+		len(missing), len(barcodes), homeDir, homeDir, mamFile, strings.Join(missing, ", "))
 }
 
 // findVTLLibraryPID locates the running vtllibrary daemon for libraryID by

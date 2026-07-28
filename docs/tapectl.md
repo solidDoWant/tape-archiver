@@ -134,6 +134,12 @@ not declare, or that is not mounted, **fails the mirror outright** rather than b
 created: media written somewhere `vtllibrary` is not looking would produce a mirror that
 reports success and a run that dies later at Load.
 
+For the same reason the mirror checks its own work: after regenerating the media it
+confirms every mirrored barcode has a volume under the media home, and fails naming the
+ones that do not. `make_vtl_media` exits 0 whether or not it created anything, and
+`vtllibrary` derives slot occupancy from `library_contents` alone — so without this check a
+library reports tapes that cannot be mounted.
+
 #### Optical burning under `--dry-run`
 
 `--dry-run` **disables optical burning**: it removes the `delivery.opticalBurn` section

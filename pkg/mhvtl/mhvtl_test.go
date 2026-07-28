@@ -19,6 +19,33 @@ func inventory(slots ...tape.StorageElement) tape.Inventory {
 	return tape.Inventory{Slots: slots}
 }
 
+// materialiseMedia does to homeDir what a working make_vtl_media does: give every
+// barcode in source a volume directory holding the mam file mhvtl identifies and
+// mounts a cartridge by. Stubbing the media step without this models a
+// make_vtl_media that reports success and creates nothing — the real defect, not
+// the normal case.
+func materialiseMedia(t *testing.T, homeDir string, source tape.Inventory) {
+	t.Helper()
+
+	for _, barcode := range occupiedBarcodes(source) {
+		dir := filepath.Join(homeDir, barcode)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, mamFile), nil, 0o644))
+	}
+}
+
+// makeMediaFor returns a makeMedia stub that materialises source's volumes into
+// whichever home Mirror resolves.
+func makeMediaFor(t *testing.T, source tape.Inventory) func(context.Context, string, string) error {
+	t.Helper()
+
+	return func(_ context.Context, _, homeDir string) error {
+		materialiseMedia(t, homeDir, source)
+
+		return nil
+	}
+}
+
 // TestRenderLibraryContentsMirrorsOccupancy is the core fidelity contract: the
 // rendered file must reproduce the source library's slot occupancy exactly —
 // occupied slots keep their barcode, empty slots stay empty — because that is
@@ -92,8 +119,13 @@ func TestMirrorWritesContentsRegeneratesMediaAndSignals(t *testing.T) {
 		signaledPID int
 	)
 
+	source := inventory(
+		tape.StorageElement{Address: 1, Full: true, Barcode: "REAL01L6"},
+		tape.StorageElement{Address: 2, Full: false},
+	)
+
 	r := New(WithConfigDir(configDir), WithHomeDir(homeDir), WithLibraryID(42))
-	r.makeMedia = func(_ context.Context, gotConfig, gotHome string) error {
+	r.makeMedia = func(ctx context.Context, gotConfig, gotHome string) error {
 		order = append(order, "makeMedia")
 
 		assert.Equal(t, configDir, gotConfig)
@@ -102,7 +134,7 @@ func TestMirrorWritesContentsRegeneratesMediaAndSignals(t *testing.T) {
 		// whatever library_contents names.
 		contentsAt = "written-before-makeMedia"
 
-		return nil
+		return makeMediaFor(t, source)(ctx, gotConfig, gotHome)
 	}
 	r.findDaemon = func(id int) (int, error) {
 		assert.Equal(t, 42, id, "must look up the daemon for the configured library ID")
@@ -116,10 +148,7 @@ func TestMirrorWritesContentsRegeneratesMediaAndSignals(t *testing.T) {
 		return nil
 	}
 
-	err := r.Mirror(t.Context(), inventory(
-		tape.StorageElement{Address: 1, Full: true, Barcode: "REAL01L6"},
-		tape.StorageElement{Address: 2, Full: false},
-	))
+	err := r.Mirror(t.Context(), source)
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"makeMedia", "signal"}, order,
@@ -140,11 +169,13 @@ func TestMirrorWritesContentsRegeneratesMediaAndSignals(t *testing.T) {
 func TestMirrorSurfacesDaemonLookupFailure(t *testing.T) {
 	t.Parallel()
 
+	source := inventory(tape.StorageElement{Address: 1, Full: true, Barcode: "X"})
+
 	r := New(WithConfigDir(t.TempDir()), WithHomeDir(t.TempDir()))
-	r.makeMedia = func(context.Context, string, string) error { return nil }
+	r.makeMedia = makeMediaFor(t, source)
 	r.findDaemon = func(int) (int, error) { return 0, ErrDaemonNotFound }
 
-	err := r.Mirror(t.Context(), inventory(tape.StorageElement{Address: 1, Full: true, Barcode: "X"}))
+	err := r.Mirror(t.Context(), source)
 
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrDaemonNotFound))
@@ -170,15 +201,19 @@ func TestMirrorTakesTheMediaHomeFromMhvtlConf(t *testing.T) {
 	configDir := writeConf(t, t.TempDir(),
 		"# mhvtl settings\nCAPACITY=500\nMHVTL_HOME_PATH="+homeDir+"\n")
 
+	source := inventory(tape.StorageElement{Address: 1, Full: true, Barcode: "X"})
 	gotHome := ""
 
 	r := New(WithConfigDir(configDir))
-	r.makeMedia = func(_ context.Context, _, home string) error { gotHome = home; return nil }
+	r.makeMedia = func(ctx context.Context, configDir, home string) error {
+		gotHome = home
+
+		return makeMediaFor(t, source)(ctx, configDir, home)
+	}
 	r.findDaemon = func(int) (int, error) { return 1, nil }
 	r.signal = func(int) error { return nil }
 
-	require.NoError(t, r.Mirror(t.Context(), inventory(
-		tape.StorageElement{Address: 1, Full: true, Barcode: "X"})))
+	require.NoError(t, r.Mirror(t.Context(), source))
 
 	assert.Equal(t, homeDir, gotHome)
 }
@@ -191,15 +226,19 @@ func TestMirrorPrefersAnExplicitHomeDir(t *testing.T) {
 	pinned := t.TempDir()
 	configDir := writeConf(t, t.TempDir(), "MHVTL_HOME_PATH="+t.TempDir()+"\n")
 
+	source := inventory(tape.StorageElement{Address: 1, Full: true, Barcode: "X"})
 	gotHome := ""
 
 	r := New(WithConfigDir(configDir), WithHomeDir(pinned))
-	r.makeMedia = func(_ context.Context, _, home string) error { gotHome = home; return nil }
+	r.makeMedia = func(ctx context.Context, configDir, home string) error {
+		gotHome = home
+
+		return makeMediaFor(t, source)(ctx, configDir, home)
+	}
 	r.findDaemon = func(int) (int, error) { return 1, nil }
 	r.signal = func(int) error { return nil }
 
-	require.NoError(t, r.Mirror(t.Context(), inventory(
-		tape.StorageElement{Address: 1, Full: true, Barcode: "X"})))
+	require.NoError(t, r.Mirror(t.Context(), source))
 
 	assert.Equal(t, pinned, gotHome)
 }
@@ -399,4 +438,86 @@ func TestMirrorSurfacesMediaFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "regenerate mhvtl media")
 	assert.False(t, signalled, "the daemon must not be signalled after a media failure")
+}
+
+// TestMirrorRefusesBarcodesWithNoMedia is the contract that closes the gap a
+// zero exit status left open: make_vtl_media can report success and create
+// nothing (no awk on its PATH, and both of its loops iterate over an empty list),
+// and mhvtl cannot tell the difference until a tape is mounted — vtllibrary
+// derives element status from library_contents alone, so the changer cheerfully
+// reports tapes that will fail to load. The mirror must not hand that library on.
+func TestMirrorRefusesBarcodesWithNoMedia(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// made are the barcodes make_vtl_media actually materialised.
+		made []string
+		// wantMissing are the barcodes the error must name, "" for none.
+		wantMissing []string
+	}{
+		{
+			name:        "no media at all",
+			made:        nil,
+			wantMissing: []string{"AAA01L6", "BBB02L6"},
+		},
+		{
+			name:        "media for only some barcodes",
+			made:        []string{"BBB02L6"},
+			wantMissing: []string{"AAA01L6"},
+		},
+		{
+			name: "media for every barcode",
+			made: []string{"AAA01L6", "BBB02L6"},
+		},
+	}
+
+	source := inventory(
+		tape.StorageElement{Address: 1, Full: true, Barcode: "AAA01L6"},
+		tape.StorageElement{Address: 2, Full: false},
+		tape.StorageElement{Address: 3, Full: true, Barcode: "BBB02L6"},
+	)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			homeDir := t.TempDir()
+			signalled := false
+
+			r := New(WithConfigDir(t.TempDir()), WithHomeDir(homeDir))
+			r.makeMedia = func(context.Context, string, string) error {
+				made := make([]tape.StorageElement, 0, len(test.made))
+				for index, barcode := range test.made {
+					made = append(made, tape.StorageElement{
+						Address: index + 1, Full: true, Barcode: tape.Barcode(barcode),
+					})
+				}
+
+				materialiseMedia(t, homeDir, inventory(made...))
+
+				return nil
+			}
+			r.findDaemon = func(int) (int, error) { return 1, nil }
+			r.signal = func(int) error { signalled = true; return nil }
+
+			err := r.Mirror(t.Context(), source)
+
+			if test.wantMissing == nil {
+				require.NoError(t, err)
+				assert.True(t, signalled, "a fully materialised mirror must reload the daemon")
+
+				return
+			}
+
+			require.Error(t, err)
+			assert.False(t, signalled,
+				"the daemon must not be reloaded onto barcodes with no backing media")
+
+			for _, barcode := range test.wantMissing {
+				assert.Contains(t, err.Error(), barcode,
+					"the error must name the barcode an operator has to go looking for")
+			}
+		})
+	}
 }

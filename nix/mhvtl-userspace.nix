@@ -6,7 +6,11 @@
   stdenv,
   fetchFromGitHub,
   autoPatchelfHook,
+  makeWrapper,
   zlib,
+  gawk,
+  coreutils,
+  util-linux,
 }:
 stdenv.mkDerivation (finalAttrs: {
   pname = "mhvtl";
@@ -19,8 +23,29 @@ stdenv.mkDerivation (finalAttrs: {
     hash = "sha256-L6suy9PZZvPcDFyD/G/v4IGZr/+obnpqqXldzlBJHFQ=";
   };
 
-  nativeBuildInputs = [ autoPatchelfHook ];
+  nativeBuildInputs = [
+    autoPatchelfHook
+    makeWrapper
+  ];
   buildInputs = [ zlib ];
+
+  # make_vtl_media is a shell script, not a binary: it shells out to awk to find
+  # the libraries in device.conf and the barcodes in library_contents.<id>, to
+  # sort/rm/mkdir/chmod for the media tree, to getopt for its own arguments, and
+  # to mktape for each volume. None of that is declared anywhere, and it fails
+  # open — with no awk on PATH both of its loops iterate over an empty list, so
+  # it creates nothing and still exits 0 (issue #339).
+  #
+  # The dependency belongs to this derivation rather than to whatever consumes
+  # it. The dev shell happened to satisfy it and the data-worker image did not,
+  # which is precisely the drift a wrapper removes: the script now carries its
+  # own PATH, so it behaves identically wherever it is bundled. $out/bin is on
+  # it too, because find_mktape_path locates mktape by scanning PATH.
+  makeVTLMediaPath = lib.makeBinPath [
+    gawk
+    coreutils
+    util-linux
+  ];
 
   buildPhase = ''
     runHook preBuild
@@ -56,6 +81,9 @@ stdenv.mkDerivation (finalAttrs: {
       install -m 755 "usr/bin/$bin" "$out/bin/$bin"
     done
     ln -s dump_tape "$out/bin/preload_tape"
+
+    wrapProgram "$out/bin/make_vtl_media" \
+      --prefix PATH : "$out/bin:${finalAttrs.makeVTLMediaPath}"
 
     # Config templates (for reference / scripting)
     mkdir -p "$out/share/mhvtl"
