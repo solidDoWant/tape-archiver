@@ -171,7 +171,7 @@ func TestSendFile(t *testing.T) {
 			}
 
 			client := webhook.New(url)
-			message, err := client.SendFile(t.Context(), path)
+			message, err := client.SendFile(t.Context(), path, "")
 			assertError(t, err)
 
 			if !test.expectHit {
@@ -477,7 +477,7 @@ func TestSendFileBoundedByContextNotFixedTimeout(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), serverDelay*5)
 		defer cancel()
 
-		_, err := client.SendFile(ctx, path)
+		_, err := client.SendFile(ctx, path, "")
 		require.NoError(t, err)
 	})
 
@@ -485,7 +485,7 @@ func TestSendFileBoundedByContextNotFixedTimeout(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), serverDelay/4)
 		defer cancel()
 
-		_, err := client.SendFile(ctx, path)
+		_, err := client.SendFile(ctx, path, "")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
 	})
@@ -613,6 +613,65 @@ func TestStatusErrorRetryable(t *testing.T) {
 
 			statusErr := &webhook.StatusError{Code: test.code}
 			assert.Equal(t, test.wantRetryable, statusErr.Retryable())
+		})
+	}
+}
+
+// TestSendFileCarriesMessageContent asserts the report upload posts its message
+// alongside the attachment, so the report arrives in Discord as a labelled run
+// notification instead of a bare PDF with no context. Discord takes the message
+// fields of a multipart upload in the payload_json part, so the content must
+// travel there and not as a bare form field.
+func TestSendFileCarriesMessageContent(t *testing.T) {
+	t.Parallel()
+
+	const reportBytes = "report pdf bytes"
+
+	const summary = "📼 **Backup complete**\n**Run:** `019fa67f`"
+
+	tests := map[string]struct {
+		content     string
+		wantPayload bool
+	}{
+		"with a summary": {content: summary, wantPayload: true},
+		// An empty summary posts the attachment on its own rather than an empty
+		// message, which Discord would reject.
+		"without a summary": {content: "", wantPayload: false},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var body []byte
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ = io.ReadAll(r.Body)
+
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"id":"1","channel_id":"2"}`)
+			}))
+			t.Cleanup(server.Close)
+
+			path := filepath.Join(t.TempDir(), "report.pdf")
+			require.NoError(t, os.WriteFile(path, []byte(reportBytes), 0o600))
+
+			_, err := webhook.New(server.URL).SendFile(t.Context(), path, test.content)
+			require.NoError(t, err)
+
+			assert.Contains(t, string(body), reportBytes, "the report itself must still be uploaded")
+
+			if !test.wantPayload {
+				assert.NotContains(t, string(body), "payload_json",
+					"an empty summary must not post an empty message")
+
+				return
+			}
+
+			assert.Contains(t, string(body), `name="payload_json"`,
+				"the message must travel in the multipart payload_json part")
+			assert.Contains(t, string(body), "Backup complete",
+				"the posted message must carry the summary text")
 		})
 	}
 }

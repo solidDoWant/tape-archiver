@@ -287,6 +287,11 @@ type WrittenTape struct {
 	// (sustained throughput, repositions, TapeAlert flags), taken after the write
 	// window closed. It never affects run success (SPEC §2 principle 2, §14).
 	WriteHealth WriteHealth
+	// MediaGeneration is the LTO generation of the tape itself (e.g. "LTO-5"),
+	// read from the medium while it was still loaded. The report names it as the
+	// generation a recoverer needs a drive for; it is empty or "unknown" when the
+	// medium could not be read (SPEC §9, issue #340).
+	MediaGeneration string
 	// OverwroteNonBlank is true when this tape was non-blank at load and written
 	// over because the run set Library.AllowNonBlankTapes. The run report records
 	// it so the deliberate overwrite is observable (SPEC §9).

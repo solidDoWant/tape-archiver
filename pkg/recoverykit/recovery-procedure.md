@@ -200,19 +200,21 @@ file** out of an archive:
    bin/age -d -i identity.txt -o /scratch/archive.tar.zst /scratch/archive.age
    ```
 
-7. **Decompress** if the source was stored compressed. Whether it was is not
-   recorded anywhere, so let the bytes decide: run the command below. `bin/zstd -d`
-   fails cleanly on input that is not a zstd stream, so if it errors the archive
-   was never compressed — the `/scratch/archive.tar.zst` from step 6 is already
-   the `tar`; rename it to `/scratch/archive.tar` and continue with step 8:
+7. **Decompress** if the archive was stored compressed. `report.pdf`'s contents
+   manifest records this per archive (compression is a per-source setting), so read
+   it there. If you have no report, let the bytes decide: run the command below.
+   `bin/zstd -d` fails cleanly on input that is not a zstd stream, so if it errors
+   the archive was never compressed — the `/scratch/archive.tar.zst` from step 6 is
+   already the `tar`; rename it to `/scratch/archive.tar` and continue with step 8:
 
    ```
    bin/zstd -d /scratch/archive.tar.zst -o /scratch/archive.tar
    ```
 
 8. **Extract the specific file** you need (omit the path to extract everything).
-   A `VolumeGroupSnapshot` archive unpacks to one subdirectory per member
-   volume:
+   An archive holding several member volumes — a `VolumeGroupSnapshot` — unpacks to
+   one subdirectory per member volume. An archive of a single volume unpacks that
+   volume's own contents directly, with no wrapping directory:
 
    ```
    bin/tar -xf /scratch/archive.tar path/inside/the/archive

@@ -9,10 +9,15 @@ embedded in the recovery ISO.
 
 The report contains, at minimum:
 
-- **Run** — run id and date.
+- **Run** — the run id and date. The run id is the run's own identifier — the one
+  `tapectl` and the web UI show for that run — not the fixed `backup` workflow id every
+  run shares, so a printed report always names the single run it describes.
 - **Contents manifest** — every archive, with its on-tape directory
-  (`archives/NNN-<label>/`), member volumes, source snapshots, and per-file sizes and
-  SHA-256 checksums.
+  (`archives/NNN-<label>/`), member volumes, source snapshots, whether the archive is
+  compressed, and per-file sizes and SHA-256 checksums. Compression is configured per
+  source ([`sources[].compression`](configuration.md)), so it is recorded per archive:
+  it tells a recoverer whether a `zstd` step stands between the decrypted stream and the
+  tar, rather than leaving them to identify the format from its magic bytes.
 - **Tapes** — which physical tape (by barcode/label) holds what. A tape that was written
   over a non-blank tape (because the run set [`library.allowNonBlankTapes`](configuration.md))
   is annotated here as `[Overwrote a non-blank tape]`, so a deliberate, irreversible
@@ -26,11 +31,19 @@ The report contains, at minimum:
 - **Write health** — per-tape, observational write-health from the run's tape-write
   window (see below).
 - **Build parameters** — how the tapes were built: tool version, `age`/`par2`/`ltfs`
-  versions, slice size, PAR2 redundancy, and the drive/library identifiers. The drive is
-  recorded as its model, the **LTO generation required to read the tape** (the fact a
-  future recoverer actually needs), and its serial; the library model is recorded as
-  provenance only. The source host's device node is deliberately omitted — it is runtime
-  state of the writing machine and is meaningless on the (different) recovery hardware.
+  versions, slice size, PAR2 redundancy, and the tape/drive/library identifiers. The
+  **tape generation needed to read the tape** is the generation of the media themselves
+  (e.g. `LTO-5`), read from each cartridge's SCSI density code during its write window —
+  the only point at which the medium is loaded, since the Report phase runs after the
+  tapes are unloaded. That is the fact a future recoverer actually needs, and it is
+  deliberately not the writing drive's generation: an LTO-6 drive writes LTO-5 media, and
+  LTO read compatibility is bounded (an LTO-8 drive reads neither LTO-6 nor LTO-5), so
+  naming the drive would send a recoverer after hardware that cannot read these tapes. It
+  renders `mixed` when a run's tapes are not all one generation and `unknown` when the
+  medium could not be read. The drive's model, generation, and serial follow as
+  provenance — what wrote the tapes — as does the library model. The source host's device
+  node is deliberately omitted; it is runtime state of the writing machine and is
+  meaningless on the (different) recovery hardware.
 - **age private identity** — the decryption secret (see below).
 - **Recovery procedure** — the human-readable, step-by-step recovery text.
 

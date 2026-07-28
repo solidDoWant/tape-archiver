@@ -655,10 +655,10 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 	}
 
 	type driveResult struct {
-		loadedIdx int
-		indexPath string
-		health    WriteHealth
-		err       error
+		loadedIdx   int
+		indexPath   string
+		measurement TapeMeasurement
+		err         error
 	}
 
 	// The speed-matching floor is a property of the tape generation being written,
@@ -727,11 +727,13 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 			}
 
 			res.indexPath = indexPath
-			// Measure write-health after the window closed (unmount and the
-			// deferred index sync have settled). This is observational only
-			// (SPEC §2 principle 2): a measurement failure is logged and the tape
-			// is still recorded as written — it never fails the run.
-			res.health = measureWriteHealth(gctx, lt, archives, workflow.Now(gctx).Sub(writeStart), floorMBps, floorKnown)
+			// Measure the tape after the window closed (unmount and the deferred
+			// index sync have settled) but while it is still loaded — the only
+			// point the medium's own generation can be read. This is
+			// observational only (SPEC §2 principle 2): a measurement failure is
+			// logged and the tape is still recorded as written — it never fails
+			// the run.
+			res.measurement = measureWriteHealth(gctx, lt, archives, workflow.Now(gctx).Sub(writeStart), floorMBps, floorKnown)
 
 			ch.Send(gctx, res)
 		})
@@ -761,7 +763,8 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 				CopyIndex:         lt.CopyIndex,
 				SourceSlot:        lt.SourceSlot,
 				IndexXMLPath:      res.indexPath,
-				WriteHealth:       res.health,
+				WriteHealth:       res.measurement.Health,
+				MediaGeneration:   res.measurement.MediaGeneration,
 				OverwroteNonBlank: lt.OverwroteNonBlank,
 			})
 		}
@@ -776,7 +779,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 // where its SCSI generic node lives. Because write-health never gates a run (SPEC §2
 // principle 2, §14), a measurement failure is logged and reported as unmeasured
 // rather than propagated.
-func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWriteArchive, elapsed time.Duration, floorMBps float64, floorKnown bool) WriteHealth {
+func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWriteArchive, elapsed time.Duration, floorMBps float64, floorKnown bool) TapeMeasurement {
 	// Bound the retries to a single attempt: without a RetryPolicy the server
 	// default is unlimited, so a scrape that *hangs* (rather than fails fast —
 	// MeasureWriteHealth already absorbs a fast ReadLogPages error and returns
@@ -795,7 +798,7 @@ func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWri
 
 	var acts *WriteHealthActivities
 
-	var health WriteHealth
+	var measurement TapeMeasurement
 	if err := workflow.ExecuteActivity(healthCtx, acts.MeasureWriteHealth, MeasureWriteHealthInput{
 		Device:       lt.SGDevice,
 		Barcode:      lt.Barcode,
@@ -803,14 +806,14 @@ func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWri
 		Elapsed:      elapsed,
 		FloorMBps:    floorMBps,
 		FloorKnown:   floorKnown,
-	}).Get(healthCtx, &health); err != nil {
-		workflow.GetLogger(gctx).Warn("write-health measurement failed; tape recorded without it",
+	}).Get(healthCtx, &measurement); err != nil {
+		workflow.GetLogger(gctx).Warn("tape measurement failed; tape recorded without it",
 			"drive", lt.DriveIndex, "barcode", lt.Barcode, "error", err)
 
-		return WriteHealth{}
+		return TapeMeasurement{}
 	}
 
-	return health
+	return measurement
 }
 
 // tapeWrittenBytes sums every byte physically copied to the tape inside the

@@ -208,7 +208,7 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
-	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
+	assert.Contains(t, report, temporalRunID(t, temporalClient), "report must name the run ID")
 
 	for _, barcode := range fixture.barcodes {
 		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
@@ -323,6 +323,6 @@ func TestControlWorkerMultipleReplicas(t *testing.T) {
 	require.Len(t, uploads, 1, "exactly one report is delivered — no duplicate from the second worker")
 
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
-	assert.Contains(t, report, backupWorkflowID, "report must name the run ID")
+	assert.Contains(t, report, temporalRunID(t, temporalClient), "report must name the run ID")
 	assert.Contains(t, report, string(fixture.barcode), "report must list the tape barcode")
 }

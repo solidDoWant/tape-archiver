@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 
@@ -169,6 +170,41 @@ func TestBackupRunsAllPhasesInOrder(t *testing.T) {
 	var result Result
 	require.NoError(t, env.GetWorkflowResult(&result))
 	require.Equal(t, orderedPhases, result.CompletedPhases)
+}
+
+// TestReportIsStampedWithTheRunID pins issue #340: the report is the durable
+// offline index for one specific run, so it carries the execution's run id. Every
+// run submits under the same workflow id (WorkflowID, the singleton "backup", SPEC
+// §4.2), so stamping that instead would label every report ever printed
+// identically and leave a shelf of printouts indistinguishable.
+func TestReportIsStampedWithTheRunID(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+	// Submit under the real singleton workflow id so the assertion below is the
+	// production case, not an artifact of the test environment's default id.
+	env.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: WorkflowID, TaskQueue: TaskQueue})
+	expectResolveEmpty(env)
+
+	var captured ReportInput
+
+	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
+		Return(func(_ context.Context, input ReportInput) (ReportOutput, error) {
+			captured = input
+
+			return ReportOutput{}, nil
+		})
+	env.OnActivity((&DeliverActivities{}).Deliver, mock.Anything, mock.Anything).
+		Return(&DeliverResult{}, nil)
+
+	env.ExecuteWorkflow(Backup, validBackupConfig())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	assert.NotEmpty(t, captured.RunID, "the report must be stamped with the run's identity")
+	assert.NotEqual(t, WorkflowID, captured.RunID,
+		"the report must carry the per-run run id, not the workflow id every run shares")
 }
 
 func TestLastCompletedPhaseQuery(t *testing.T) {

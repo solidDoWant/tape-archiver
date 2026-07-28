@@ -143,17 +143,19 @@ type PostedMessage struct {
 
 // SendFile uploads the file at path to the webhook as a multipart attachment
 // (Discord's files[0] form field), posting with ?wait=true so Discord returns the
-// created message. It returns the posted message's identity on an HTTP 2xx
-// response and a non-nil error if the file cannot be read or the endpoint returns
-// a non-2xx status. When the client's URL is empty, SendFile is a no-op and
-// returns (nil, nil).
+// created message. content is posted as the message text alongside the
+// attachment, so the upload reads as a notification rather than a bare file; an
+// empty content posts the attachment on its own. It returns the posted message's
+// identity on an HTTP 2xx response and a non-nil error if the file cannot be read
+// or the endpoint returns a non-2xx status. When the client's URL is empty,
+// SendFile is a no-op and returns (nil, nil).
 //
 // The returned *PostedMessage is best-effort and orthogonal to delivery success:
 // a nil error always means the report was delivered. If the 2xx response body
 // cannot be parsed (an unexpected Discord response), SendFile returns (nil, nil) —
 // delivered, identity unknown — rather than failing the upload, so a missing
 // deep-link never costs the run its report.
-func (c *Client) SendFile(ctx context.Context, path string) (*PostedMessage, error) {
+func (c *Client) SendFile(ctx context.Context, path, content string) (*PostedMessage, error) {
 	if c.url == "" {
 		return nil, nil
 	}
@@ -167,6 +169,19 @@ func (c *Client) SendFile(ctx context.Context, path string) (*PostedMessage, err
 	var body bytes.Buffer
 
 	writer := multipart.NewWriter(&body)
+
+	// Discord takes the message fields of a multipart upload as a JSON document
+	// in the payload_json part, beside the file parts.
+	if content != "" {
+		payload, err := json.Marshal(Message{Content: truncate(content, maxContentLength)})
+		if err != nil {
+			return nil, fmt.Errorf("webhook: encoding message: %w", err)
+		}
+
+		if err := writer.WriteField("payload_json", string(payload)); err != nil {
+			return nil, fmt.Errorf("webhook: writing message field: %w", err)
+		}
+	}
 
 	part, err := writer.CreateFormFile("files[0]", filepath.Base(path))
 	if err != nil {
