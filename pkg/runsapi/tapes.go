@@ -442,9 +442,16 @@ func tapeOutcomeFor(activities []activityRecord, tape backup.LoadedTape) TapeOut
 	}
 
 	if record, ok := activityByBarcode(activities, "MeasureWriteHealth", barcode); ok && record.Completed {
-		var health backup.WriteHealth
-		if err := decodePayloads(record.Result, &health); err == nil {
-			outcome.WriteHealth = toWriteHealthInfo(health)
+		// The activity's result is a backup.TapeMeasurement, which wraps the
+		// verdict in a Health field alongside MediaGeneration — not a bare
+		// backup.WriteHealth. Decoding the payload straight into WriteHealth
+		// does not error (JSON simply ignores the unrecognised Health and
+		// MediaGeneration keys); it silently yields the zero value, so every
+		// written tape reported Measured=false and a 0 MB/s throughput despite
+		// a real measurement sitting in the history (issue #338).
+		var measurement backup.TapeMeasurement
+		if err := decodePayloads(record.Result, &measurement); err == nil {
+			outcome.WriteHealth = toWriteHealthInfo(measurement.Health)
 		}
 	}
 
