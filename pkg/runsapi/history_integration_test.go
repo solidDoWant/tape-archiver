@@ -184,20 +184,18 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	submitBody, err := json.Marshal(map[string]interface{}{"config": json.RawMessage(configJSON), "dryRun": true})
 	require.NoError(t, err)
 
-	// Submit through the API's own dry-run path; tolerate a still-closing
-	// leftover singleton run from a sibling test by retrying.
-	var runID string
+	// Submit through the API's own dry-run path. The singleton is freed first
+	// and the submission is then made exactly once: POST /api/runs starts runs
+	// with a FAIL conflict policy, so retrying it against an incumbent cannot
+	// make progress — the old 60s retry loop here reported a held singleton as
+	// the contentless "dry-run submission never started" (issue #338).
+	freeBackupSingleton(t, t.Context(), temporalClient)
 
-	require.Eventually(t, func() bool {
-		status, body := postRun(t, server.URL, submitBody)
-		if status != http.StatusCreated {
-			return false
-		}
+	status, submitted, raw := postRun(t, server.URL, submitBody)
+	require.Equal(t, http.StatusCreated, status, "dry-run submission failed: %s", raw)
 
-		runID = body.RunID
-
-		return runID != ""
-	}, 60*time.Second, time.Second, "dry-run submission never started")
+	runID := submitted.RunID
+	require.NotEmpty(t, runID, "dry-run submission returned no run ID: %s", raw)
 
 	// Wait for the real run to complete. The full pipeline against mhvtl
 	// (tar → age → PAR2 → verify → mkltfs → LTFS write → eject → report →
