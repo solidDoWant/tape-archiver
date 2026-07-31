@@ -307,10 +307,17 @@ func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	finalize2 := b.scheduled(t, "FinalizeTape", struct{ Barcode string }{"GOODTAPE01"})
 	b.completed(t, finalize2, "/staging/GOODTAPE01/index.xml")
 
+	// The real activity completes with a backup.TapeMeasurement wrapping the
+	// verdict, not a bare WriteHealth — a fixture that encodes the bare struct
+	// agrees with a decoder that reads the bare struct, so both can be wrong
+	// together (issue #338).
 	health2 := b.scheduled(t, "MeasureWriteHealth", struct{ Barcode string }{"GOODTAPE01"})
-	b.completed(t, health2, backup.WriteHealth{
-		Measured: true, ThroughputMBps: 140, FloorMBps: 50, FloorKnown: true,
-		RepositionsMeasured: true,
+	b.completed(t, health2, backup.TapeMeasurement{
+		Health: backup.WriteHealth{
+			Measured: true, ThroughputMBps: 140, FloorMBps: 50, FloorKnown: true,
+			RepositionsMeasured: true,
+		},
+		MediaGeneration: "LTO-6",
 	})
 
 	eject := b.scheduled(t, "Eject", nil)
@@ -887,10 +894,11 @@ func TestDeriveTapeOutcomesUnmeasuredWriteHealth(t *testing.T) {
 	b.completed(t, finalize, "/staging/UNMEASURED01/index.xml")
 
 	// The measurement could not be taken: the activity completes with the
-	// zero WriteHealth (Measured false), exactly what measureWriteHealth
-	// (session.go) records when the activity fails or the scrape hangs.
+	// zero TapeMeasurement (Health.Measured false), exactly what
+	// measureWriteHealth (session.go) records when the activity fails or the
+	// scrape hangs.
 	health := b.scheduled(t, "MeasureWriteHealth", struct{ Barcode string }{"UNMEASURED01"})
-	b.completed(t, health, backup.WriteHealth{})
+	b.completed(t, health, backup.TapeMeasurement{})
 
 	b.runCompleted()
 

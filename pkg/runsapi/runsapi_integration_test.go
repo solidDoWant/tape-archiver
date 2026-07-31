@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -477,9 +478,17 @@ func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 }
 
-// postRun POSTs body to serverURL+"/api/runs" and returns the status code and
-// decoded body.
-func postRun(t *testing.T, serverURL string, body []byte) (int, runsapi.SubmitRunResponse) {
+// postRun POSTs body to serverURL+"/api/runs" and returns the status code, the
+// decoded body, and the raw response body.
+//
+// The raw body is returned because a non-201 decodes into an empty
+// SubmitRunResponse, discarding the server's own explanation: the singleton
+// guard's 409, for instance, names the workflow and run ID holding the ID, and
+// runsapi passes 4xx messages through to the client verbatim
+// (clientFacingMessage). Callers must put it in their failure message —
+// asserting on the status alone produces a failure that says nothing about why
+// the submission was refused (issue #338).
+func postRun(t *testing.T, serverURL string, body []byte) (int, runsapi.SubmitRunResponse, string) {
 	t.Helper()
 
 	resp, err := http.Post(serverURL+"/api/runs", "application/json", bytes.NewReader(body))
@@ -494,7 +503,58 @@ func postRun(t *testing.T, serverURL string, body []byte) (int, runsapi.SubmitRu
 
 	_ = json.Unmarshal(raw, &submitBody)
 
-	return resp.StatusCode, submitBody
+	return resp.StatusCode, submitBody, strings.TrimSpace(string(raw))
+}
+
+// freeBackupSingleton makes the singleton `backup` workflow ID available for a
+// submission that goes through the real API, which starts runs with a FAIL
+// conflict policy (pkg/runsubmit.StartOptions) and so cannot displace an
+// incumbent the way this package's other tests do with TERMINATE_EXISTING.
+//
+// A run that is genuinely still closing is waited out. A run that is merely
+// stranded is not: as traced on issue #338, an orphaned stub run left by an
+// earlier package (cmd/tapectl) gets adopted by the next worker to poll the
+// shared `control` queue, executed part-way as a real backup, and abandoned
+// RUNNING with no worker — a state no amount of waiting resolves. Terminating it
+// is what the sibling tests' TERMINATE_EXISTING already does implicitly; doing it
+// explicitly here lets the leak be logged rather than silently absorbed, so a
+// future regression is still visible in the test output.
+func freeBackupSingleton(t *testing.T, ctx context.Context, temporalClient client.Client) {
+	t.Helper()
+
+	// Give a legitimately-closing run time to finish on its own before
+	// concluding it is stranded.
+	const grace = 15 * time.Second
+
+	deadline := time.Now().Add(grace)
+
+	for {
+		description, err := temporalClient.DescribeWorkflowExecution(ctx, backup.WorkflowID, "")
+		if err != nil {
+			// No such workflow: the ID has never been used, or its history has
+			// aged out. Either way it is free.
+			return
+		}
+
+		info := description.GetWorkflowExecutionInfo()
+		if info.GetStatus() != enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Logf("issue #338: singleton %q still RUNNING as run %s (started %s) after %s;"+
+				" terminating it so this test can submit through the real API",
+				backup.WorkflowID, info.GetExecution().GetRunId(), info.GetStartTime().AsTime(), grace)
+
+			require.NoError(t, temporalClient.TerminateWorkflow(ctx, backup.WorkflowID, "",
+				"tape-archiver integration tests: reclaiming the singleton workflow ID from a stranded run"),
+				"terminating the stranded singleton run must succeed")
+
+			return
+		}
+
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // TestSubmitRunAgainstRealTemporal exercises POST /api/runs against a real
@@ -543,25 +603,21 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 
 	submitBody := []byte(`{"config": ` + validSubmitConfigJSON + `}`)
 
-	// Start the first run. Tolerate a still-closing run from a previous test
-	// by retrying until the singleton ID is free.
-	var firstRunID string
+	// Start the first run. Free the singleton first, then submit once:
+	// retrying a FAIL-policy submit against an incumbent cannot make progress
+	// on its own (issue #338).
+	freeBackupSingleton(t, ctx, temporalClient)
 
-	require.Eventually(t, func() bool {
-		status, body := postRun(t, server.URL, submitBody)
-		if status != http.StatusCreated {
-			return false
-		}
+	firstStatus, firstBody, firstRaw := postRun(t, server.URL, submitBody)
+	require.Equal(t, http.StatusCreated, firstStatus, "first submission failed: %s", firstRaw)
 
-		firstRunID = body.RunID
-
-		return firstRunID != ""
-	}, 30*time.Second, 250*time.Millisecond, "first submission never started")
+	firstRunID := firstBody.RunID
+	require.NotEmpty(t, firstRunID, "first submission returned no run ID: %s", firstRaw)
 
 	// A second concurrent submission is refused with 409, not a 500 and not
 	// a silent replace of the in-progress run.
-	status, _ := postRun(t, server.URL, submitBody)
-	assert.Equal(t, http.StatusConflict, status, "second concurrent submission must be refused with 409")
+	status, _, raw := postRun(t, server.URL, submitBody)
+	assert.Equal(t, http.StatusConflict, status, "second concurrent submission must be refused with 409: %s", raw)
 
 	// GET /api/runs/{runID} still reports the first run as RUNNING — the
 	// refused second submission left it untouched.
@@ -584,18 +640,23 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 		return detail.Status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING.String()
 	}, 30*time.Second, 250*time.Millisecond, "the first run must still be running after the refused second submission")
 
-	// Finish the first run so the singleton ID frees up.
+	// Finish the first run and wait for it to actually close. Awaiting the
+	// closure rather than retrying the submission until it happens to be
+	// accepted is what makes the next step's failure meaningful: a FAIL-policy
+	// submit that is refused here is refused for a reason worth reading, not
+	// because the incumbent had not drained yet.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
+	require.NoError(t, temporalClient.GetWorkflow(ctx, backup.WorkflowID, firstRunID).Get(ctx, nil),
+		"the first run must close so the singleton workflow ID frees up")
 
 	// Once the first run has closed, a fresh submission succeeds again.
-	var thirdRunID string
+	thirdStatus, thirdBody, thirdRaw := postRun(t, server.URL, submitBody)
+	require.Equal(t, http.StatusCreated, thirdStatus,
+		"a new submission after the first run closed failed: %s", thirdRaw)
 
-	require.Eventually(t, func() bool {
-		status, body := postRun(t, server.URL, submitBody)
-		thirdRunID = body.RunID
-
-		return status == http.StatusCreated && body.RunID != "" && body.RunID != firstRunID
-	}, 30*time.Second, 250*time.Millisecond, "a new submission did not succeed after the first run closed")
+	thirdRunID := thirdBody.RunID
+	require.NotEmpty(t, thirdRunID, "the new submission returned no run ID: %s", thirdRaw)
+	assert.NotEqual(t, firstRunID, thirdRunID, "a fresh submission must start a new execution")
 
 	// Unblock the run started by the post-close check and wait for it to
 	// actually complete while the stub worker is still polling. This is the

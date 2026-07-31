@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
@@ -110,8 +112,13 @@ func TestRunThenStatus(t *testing.T) {
 		return strings.Contains(output, "Running") && strings.Contains(output, stubPhase)
 	}, 30*time.Second, 250*time.Millisecond, "status did not report a running workflow and its phase")
 
-	// Unblock the stub so it completes rather than lingering past the test.
+	// Unblock the stub and wait for it to actually complete while this test's
+	// worker is still polling. Signalling alone is not enough: the deferred
+	// backupWorker.Stop below runs first, so a merely-signalled run is left
+	// with the signal durably recorded and no poller to process it — see
+	// awaitBackupSingletonClosed's doc comment for what that leaks into.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, workflowID, "", stubFinishSignal, nil))
+	awaitBackupSingletonClosed(t, ctx, temporalClient)
 }
 
 // TestConcurrentRunGuard exercises the singleton concurrency guard against a
@@ -167,6 +174,50 @@ func TestConcurrentRunGuard(t *testing.T) {
 		return submitRun(ctx, []string{"--config", configPath}, &bytes.Buffer{}) == nil
 	}, 30*time.Second, 250*time.Millisecond, "new run did not start after the first completed")
 
-	// Unblock the run started by the AC2 check so it does not linger.
+	// Unblock the run started by the AC2 check and wait for it to actually
+	// close. This is the last test in cmd/tapectl — the first package in the
+	// `-p 1` suite to drive the singleton — so a run leaked here is never
+	// drained by a later test in this package and survives into the rest of
+	// the suite (issue #338).
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backupWorkflowID, "", stubFinishSignal, nil))
+	awaitBackupSingletonClosed(t, ctx, temporalClient)
+}
+
+// awaitBackupSingletonClosed blocks until the current execution of the
+// singleton `backup` workflow has closed, failing the test if it has not within
+// a bounded window.
+//
+// Every test here signals its stub run to finish, but the signal only frees the
+// singleton workflow ID if a worker is still polling to receive it, and
+// `defer backupWorker.Stop()` runs before any t.Cleanup. A signalled-but-unawaited
+// run therefore leaves the ID occupied with the signal durably recorded and
+// nothing left to act on it.
+//
+// That is not a self-correcting condition. Traced on issue #338: the orphan is
+// picked up by the *next* process to poll the shared `control` queue, which in
+// the full suite is cmd/worker's test binary. Because it registers the real
+// Backup workflow under the same type name, it adopts the orphan and starts
+// executing it as a genuine backup — real Prepare activities (ResolveK8sSources,
+// ResolveAndCheck) ran against this test's non-dry-run config — then exits
+// mid-activity, stranding the run RUNNING with no worker anywhere. Every later
+// submission against the singleton is refused 409 until something terminates it,
+// which is what made pkg/runsapi's TestHistoryEndpointsAgainstRealDryRun burn its
+// full 60s submission window in every full `make test-integration`.
+//
+// cmd/web's integration tests (PR #300) and pkg/runsapi's
+// TestSubmitRunAgainstRealTemporal already close this the same way.
+func awaitBackupSingletonClosed(t *testing.T, ctx context.Context, temporalClient client.Client) {
+	t.Helper()
+
+	// Bounded so a stub that never completes fails here, naming the singleton,
+	// rather than hanging until `go test`'s own global timeout kills the whole
+	// binary with no indication of which test was stuck.
+	waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	// An empty run ID resolves to the workflow ID's current execution, which is
+	// exactly the run the finish signal above was addressed to.
+	require.NoError(t, temporalClient.GetWorkflow(waitCtx, backupWorkflowID, "").Get(waitCtx, nil),
+		"the stub run %q must complete so the singleton workflow ID is free for later tests and packages",
+		backupWorkflowID)
 }
