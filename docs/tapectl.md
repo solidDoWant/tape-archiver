@@ -107,24 +107,24 @@ rehearsal that the real library — short of blanks, or with tapes left in drive
 earlier run — would fail. Expect a mirrored dry run to be **stricter** than an unmirrored
 one for this reason.
 
-The mirror only ever *reads* the real library (`READ ELEMENT STATUS`). Every change lands
-on `mhvtl`'s own `library_contents`/media and its own daemon, so it cannot disturb real
-media. It is skipped entirely when `library.mirrorSourceChanger` is empty — which is always
-the case on a real run, and also on a dev deployment whose configured library already *is*
-the `mhvtl` one (there is nothing to mirror from).
+The mirror only ever *reads* the real library (`READ ELEMENT STATUS`). It rearranges the
+virtual library while its daemons keep running: drives are unloaded, unwanted tapes leave
+through the virtual I/O station, the mirrored volumes are recreated blank, and missing
+barcodes are inserted through the I/O station and moved to their slots. The `mhvtl` daemons
+are never restarted or signalled. The mirror then checks the virtual library reports exactly
+the mirrored slots with empty drives and I/O station, and fails naming anything that differs.
+It is skipped entirely when `library.mirrorSourceChanger` is empty — which is always the
+case on a real run, and also on a dev deployment whose configured library already *is* the
+`mhvtl` one (there is nothing to mirror from).
 
-Two fidelity limits are deliberate. Media are recreated **blank**: element status reports
-which slots hold a tape but not whether it has data, and establishing that would mean
-loading and mounting every tape. And drives and the I/O station start **empty**, since a
-rehearsal begins with tapes at rest and the Load phase is what moves them. Slot occupancy
-is the property that decides whether a run can find its configured blanks, which is the
-failure this exists to surface.
+Media are recreated **blank**: element status reports which slots hold a tape but not
+whether it has data. Slot occupancy is the property that decides whether a run can find its
+configured blanks, which is the failure this exists to surface.
 
-The data worker needs the `mhvtl` control devices, `/etc/mhvtl` + the media home
-bind-mounted, and the host PID namespace to signal `vtllibrary`; see the reference unit in
-`deploy/data-worker/`. The `make_vtl_media` tooling is bundled in the data-worker image, so
-nothing `mhvtl`-related need be installed on the host.
-
+The data worker needs the `mhvtl` device nodes, `/etc/mhvtl` and the media home
+bind-mounted, and the host IPC namespace (`--ipc=host`) to reach the daemons' message
+queue; see the reference unit in `deploy/data-worker/`. The `mhvtl` tooling is bundled in
+the data-worker image, so nothing `mhvtl`-related need be installed on the host.
 The media home is read from `MHVTL_HOME_PATH` in `/etc/mhvtl/mhvtl.conf` — the same place
 `mhvtl`'s own tooling reads it — and must be bind-mounted at that same path inside the
 container. Nothing is compiled in, so a host is free to keep its virtual volumes wherever

@@ -20,8 +20,15 @@ out-of-band; treat this as the template.
 
 ## What the unit encodes (SPEC §4.1)
 
-- **Device passthrough:** `/dev/nst0`, `/dev/nst1`, `/dev/sch0`, the drives' `/dev/sg*`
-  nodes, `/dev/zfs`, and `/dev/fuse`.
+- **Device passthrough:** the real library's nodes listed in `REQUIRED_DEVICES` (drives'
+  `/dev/nst*`, `/dev/sch0`, their `/dev/sg*` nodes), `/dev/zfs` and `/dev/fuse`. A missing
+  node fails the start with a message naming it, and `StartLimitBurst` puts the unit in
+  `failed` instead of restarting forever.
+- **Optional mhvtl passthrough** for dry runs, only when the whole virtual library is present
+  (a partial one is logged and skipped), with `--ipc=host` so the dry-run mirror can talk to
+  the `mhvtl` daemons. After restarting `mhvtl`, check `systemctl status vtltape@11
+  vtltape@12` and `lsscsi -g`: `vtltape@.service` uses `KillMode=none`, so an old daemon can
+  survive a stop and make its replacement exit, leaving a one-drive virtual library.
 - **Capabilities:** `SYS_ADMIN` (LTFS is FUSE-based) and `SYS_RAWIO` (raw SCSI via SG_IO —
   the changer, `sg_raw`, and LTFS need it).
 - **Pool bind mount** of `/mnt/bulk-pool-01` with `rslave` propagation, plus an
@@ -38,8 +45,7 @@ out-of-band; treat this as the template.
 1. Load the pinned image into the host's Docker daemon (from `make build-images`) and note
    its content-anchored tag (short nixpkgs revision or release version).
 2. Edit `tape-archiver-data-worker.service` and set `TAPE_ARCHIVER_IMAGE` to that exact
-   tag. Confirm the drives' `/dev/sg*` node numbers on this host with `lsscsi -g` and
-   adjust the `--device /dev/sg*` lines to match.
+   tag, and set `REQUIRED_DEVICES` to this host's real tape nodes (`lsscsi -g`).
 3. Install the config:
    ```sh
    sudo install -D -m640 data-worker.env.example /etc/tape-archiver/data-worker.env
