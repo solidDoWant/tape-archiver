@@ -350,7 +350,16 @@ func loadWrittenTape(t *testing.T, changer *tape.Changer, inv tape.Inventory, ba
 
 	for _, slot := range current.IOSlots {
 		if slot.Full && slot.Barcode == barcode {
-			source = slot.Address
+			// Load only takes storage slots, so bring it back in first.
+			for _, storage := range current.Slots {
+				if !storage.Full {
+					require.NoError(t, changer.Transfer(t.Context(), slot.Address, storage.Address), "move the written tape out of the I/O station")
+
+					source = storage.Address
+
+					break
+				}
+			}
 		}
 	}
 

@@ -40,10 +40,15 @@ var ltoDensityCodes = map[byte]string{
 // drive can read neither, so reporting the writing drive's generation would send a
 // recoverer after the wrong hardware (issue #340).
 //
-// It must be called while the medium is loaded — an empty drive has no medium to
-// describe. An unrecognized density code yields unknownGeneration rather than an
+// An empty drive has no medium to describe, and some drives (mhvtl among them)
+// keep reporting the last medium's density after an unload, so the drive must
+// first answer TEST UNIT READY. An unrecognized density code yields unknownGeneration rather than an
 // error, so a medium this table does not know is still reported honestly.
 func MediumGeneration(ctx context.Context, sgDevice string) (string, error) {
+	if err := testUnitReady(ctx, sgDevice); err != nil {
+		return unknownGeneration, fmt.Errorf("drive %s has no ready medium: %w", sgDevice, err)
+	}
+
 	// --raw emits the MODE SENSE response verbatim, so the density code is read
 	// at its fixed offset in the SCSI structure. sg_modes' decoded text carries
 	// the same value but its layout varies across sg3-utils releases, and unlike
