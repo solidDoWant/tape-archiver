@@ -4,12 +4,18 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	commonpb "go.temporal.io/api/common/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
+
+	"github.com/solidDoWant/tape-archiver/pkg/runsubmit"
 )
 
 // envFor returns a getenv serving vmURL for VICTORIAMETRICS_URL only.
@@ -383,4 +389,70 @@ func TestParseRangePoint(t *testing.T) {
 
 	_, ok = parseRangePoint([]json.RawMessage{[]byte(`1700000000`)})
 	assert.False(t, ok, "a malformed pair must not be reported as a valid point")
+}
+
+// TestDriveMetricsQueriesMatchRunKind: a dry run's virtual tapes reuse real
+// barcodes, so each run must read only series of its own kind (#412).
+func TestDriveMetricsQueriesMatchRunKind(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		dryRun  bool
+		matcher string
+	}{
+		{name: "real run", matcher: `dry_run!="true"`},
+		{name: "dry run", dryRun: true, matcher: `dry_run="true"`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+				events := buildSuccessfulRunHistory(t)
+
+				payload, err := converter.GetDefaultDataConverter().ToPayload(test.dryRun)
+				require.NoError(t, err)
+
+				events[0].GetWorkflowExecutionStartedEventAttributes().Memo = &commonpb.Memo{
+					Fields: map[string]*commonpb.Payload{runsubmit.MemoKeyDryRun: payload},
+				}
+
+				return &fakeHistoryIterator{events: events}
+			}}
+
+			var (
+				mu      sync.Mutex
+				queries []string
+			)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+
+				queries = append(queries, r.FormValue("query"))
+				mu.Unlock()
+
+				w.Header().Set("Content-Type", "application/json")
+				assert.NoError(t, json.NewEncoder(w).Encode(vmResponse{Status: "success"}))
+			}))
+			defer server.Close()
+
+			handler := newMux(newHandler(fake, envFor(server.URL)))
+
+			require.Equal(t, http.StatusOK,
+				doJSON(t, handler, http.MethodGet, "/api/runs/run-1/metrics/drives", nil).Code)
+			require.Equal(t, http.StatusOK,
+				doJSON(t, handler, http.MethodGet, "/api/runs/run-1/metrics/drives/GOODTAPE01/history", nil).Code)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			require.Len(t, queries, 2)
+
+			for _, query := range queries {
+				assert.Contains(t, query, test.matcher)
+			}
+		})
+	}
 }

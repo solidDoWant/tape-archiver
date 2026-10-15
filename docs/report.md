@@ -95,11 +95,14 @@ A tape that carries no measurement (e.g. a virtual/dry-run tape, which does not 
 real throughput) renders as `not measured`.
 
 The same per-tape values are also exported as Prometheus gauges on the data worker's
-`/metrics` endpoint, labelled by `barcode`: `tape_archiver_write_throughput_mbps`,
+`/metrics` endpoint, labelled by `barcode` and `dry_run` (`true`/`false`):
+`tape_archiver_write_throughput_mbps`,
 `tape_archiver_write_repositions`, `tape_archiver_write_tapealert_flags`, and
 `tape_archiver_write_below_floor`. For a write too small to measure, no
 `tape_archiver_write_throughput_mbps` sample is exported for that barcode (any earlier
-one is removed) and `tape_archiver_write_below_floor` is `0`.
+one is removed) and `tape_archiver_write_below_floor` is `0`. A dry run mirrors the real
+library, so its virtual tapes carry real barcodes: alert on `dry_run="false"`, so a
+rehearsal never fires on, or overwrites, a real tape's reading.
 
 ## The age private identity is included on purpose
 

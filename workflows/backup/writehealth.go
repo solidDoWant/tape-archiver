@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -116,6 +117,10 @@ func tapeAlertLabel(flag tape.TapeAlertFlag) string {
 	return fmt.Sprintf("flag %d", flag.Number)
 }
 
+// writeHealthLabels split dry runs from real ones: a dry run mirrors the real
+// library, so its virtual tapes carry real barcodes (#412).
+var writeHealthLabels = []string{"barcode", "dry_run"}
+
 // writeHealthMetrics holds the per-barcode gauges; nil means metrics are off.
 type writeHealthMetrics struct {
 	throughput  *prometheus.GaugeVec
@@ -136,25 +141,25 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 			Subsystem: "write",
 			Name:      "throughput_mbps",
 			Help:      "Sustained write throughput while streaming the staged tree to the mounted tape, in MB/s (bytes written to tape (slices + PAR2) / copy duration). Unset when the write was too small to measure.",
-		}, []string{"barcode"}),
+		}, writeHealthLabels),
 		repositions: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "repositions",
 			Help:      "Drive reposition (back-hitch) count (total_suspended_writes) from SCSI Tape usage log page 0x30. Only exported when the counter was measured (drive supports the page).",
-		}, []string{"barcode"}),
+		}, writeHealthLabels),
 		tapeAlerts: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "tapealert_flags",
 			Help:      "Number of active TapeAlert flags from SCSI log page 0x2e.",
-		}, []string{"barcode"}),
+		}, writeHealthLabels),
 		belowFloor: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "below_floor",
 			Help:      "1 when the measured throughput was below the tape generation's speed-matching floor, else 0 (including a write too small to measure). Unset when the generation has no known floor.",
-		}, []string{"barcode"}),
+		}, writeHealthLabels),
 	}
 
 	for _, collector := range []prometheus.Collector{
@@ -169,12 +174,12 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 }
 
 // record sets one tape's gauges; a no-op on nil or an unmeasured tape.
-func (m *writeHealthMetrics) record(barcode string, health WriteHealth) {
+func (m *writeHealthMetrics) record(barcode string, dryRun bool, health WriteHealth) {
 	if m == nil || !health.Measured {
 		return
 	}
 
-	labels := prometheus.Labels{"barcode": barcode}
+	labels := prometheus.Labels{"barcode": barcode, "dry_run": strconv.FormatBool(dryRun)}
 
 	// Deleted rather than zeroed so a stale reading for the barcode never lingers.
 	if health.ThroughputUnmeasurable {
@@ -234,6 +239,8 @@ type MeasureWriteHealthInput struct {
 	Elapsed    time.Duration
 	FloorMBps  float64
 	FloorKnown bool
+	// DryRun labels the gauges so a rehearsal never overwrites a real tape's.
+	DryRun bool
 }
 
 // TapeMeasurement is the post-write scrape of one tape. The medium generation
@@ -259,7 +266,7 @@ func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input Me
 
 	health := evaluateWriteHealth(input.BytesWritten, input.Elapsed, logs, input.FloorMBps, input.FloorKnown)
 
-	a.metrics.record(string(input.Barcode), health)
+	a.metrics.record(string(input.Barcode), input.DryRun, health)
 
 	generation, err := tape.MediumGeneration(ctx, input.Device)
 	if err != nil {

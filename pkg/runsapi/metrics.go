@@ -146,7 +146,7 @@ func (h *handler) getRunDriveMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Anchor to the run's window so a finished run never reads a later reuse of the tape.
-	samples, err := queryDriveSamples(ctx, vmURL, barcodes, metricQueryWindow(history, time.Now()))
+	samples, err := queryDriveSamples(ctx, vmURL, barcodes, dryRunFromMemo(history.StartMemo), metricQueryWindow(history, time.Now()))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("query VictoriaMetrics: %w", err))
 
@@ -220,7 +220,7 @@ func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Reque
 	end := metricQueryWindow(history, time.Now())
 	start := end.Add(-sparklineStep * (sparklinePoints - 1))
 
-	points, err := queryDriveRange(ctx, vmURL, metricName, barcode, start, end, sparklineStep)
+	points, err := queryDriveRange(ctx, vmURL, metricName, barcode, dryRunFromMemo(history.StartMemo), start, end, sparklineStep)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("query VictoriaMetrics range: %w", err))
 
@@ -390,8 +390,8 @@ func writePhaseEnd(history runHistory) (time.Time, bool) {
 }
 
 // queryDriveSamples reads all gauges for all barcodes in one instant query at `at`.
-func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string, at time.Time) (map[string]driveSample, error) {
-	promql := fmt.Sprintf(`{__name__=~%q,barcode=~%q}`, metricNameAlternation, barcodeRegex(barcodes))
+func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string, dryRun bool, at time.Time) (map[string]driveSample, error) {
+	promql := fmt.Sprintf(`{__name__=~%q,barcode=~%q,%s}`, metricNameAlternation, barcodeRegex(barcodes), dryRunMatcher(dryRun))
 
 	values := url.Values{"query": {promql}}
 	if !at.IsZero() {
@@ -465,8 +465,8 @@ func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string, a
 }
 
 // queryDriveRange issues a range query for one metric/barcode over [start, end].
-func queryDriveRange(ctx context.Context, baseURL, metricName, barcode string, start, end time.Time, step time.Duration) ([]MetricPoint, error) {
-	promql := fmt.Sprintf(`%s{barcode=%q}`, metricName, barcode)
+func queryDriveRange(ctx context.Context, baseURL, metricName, barcode string, dryRun bool, start, end time.Time, step time.Duration) ([]MetricPoint, error) {
+	promql := fmt.Sprintf(`%s{barcode=%q,%s}`, metricName, barcode, dryRunMatcher(dryRun))
 
 	values := url.Values{
 		"query": {promql},
@@ -569,4 +569,15 @@ func parseRangePoint(raw []json.RawMessage) (MetricPoint, bool) {
 	}
 
 	return MetricPoint{Time: time.Unix(int64(timestamp), 0).UTC(), Value: parsed}, true
+}
+
+// dryRunMatcher selects the series written by a run of the same kind: a dry run
+// reuses real barcodes (#412). Series recorded before the label existed have
+// none, so a real run matches them too.
+func dryRunMatcher(dryRun bool) string {
+	if dryRun {
+		return `dry_run="true"`
+	}
+
+	return `dry_run!="true"`
 }
