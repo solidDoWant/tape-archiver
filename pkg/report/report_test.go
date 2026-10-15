@@ -350,9 +350,10 @@ func TestBuildWriteHealthSection(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		health   *report.WriteHealth
-		contains []string
+		name        string
+		health      *report.WriteHealth
+		contains    []string
+		notContains []string
 	}{
 		{
 			name:     "healthy",
@@ -390,6 +391,19 @@ func TestBuildWriteHealthSection(t *testing.T) {
 			health:   nil,
 			contains: []string{"not measured"},
 		},
+		{
+			// Too little data to judge streaming (#409): no 0.0 rate, no verdict.
+			name:        "throughput not measurable",
+			health:      &report.WriteHealth{ThroughputUnmeasurable: true, FloorMBps: 40, FloorKnown: true, RepositionsMeasured: true, Healthy: true},
+			contains:    []string{"not measurable", "too little data", "healthy"},
+			notContains: []string{"0.0", "below floor"},
+		},
+		{
+			name:        "throughput not measurable with floor unknown",
+			health:      &report.WriteHealth{ThroughputUnmeasurable: true, RepositionsMeasured: true},
+			contains:    []string{"too little data", "floor unknown"},
+			notContains: []string{"0.0"},
+		},
 	}
 
 	for _, test := range tests {
@@ -401,6 +415,11 @@ func TestBuildWriteHealthSection(t *testing.T) {
 			for _, want := range test.contains {
 				assert.Contains(t, extracted, stripWhitespace(want),
 					"write-health %q state should render %q", test.name, want)
+			}
+
+			for _, unwanted := range test.notContains {
+				assert.NotContains(t, extracted, stripWhitespace(unwanted),
+					"write-health %q state must not render %q", test.name, unwanted)
 			}
 		})
 	}

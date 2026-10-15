@@ -1,5 +1,6 @@
 import { useId } from 'react'
 import { IconSpinner, IconWarning } from './icons'
+import { throughputUnmeasurableText } from './writeHealth'
 
 // DriveGaugeStatus is the four states issue #275 requires: "loading" while
 // the first fetch is in flight, "unavailable" when VictoriaMetrics is
@@ -22,6 +23,8 @@ export interface DriveGaugeProps {
   repositions?: number
   tapeAlertFlagCount?: number
   belowFloor?: boolean
+  // throughputUnmeasurable: the write was too small to judge streaming.
+  throughputUnmeasurable?: boolean
 }
 
 // ringDiameterPx matches the design's 48-52px per-drive circular gauge
@@ -60,6 +63,7 @@ function DriveGauge({
   repositions,
   tapeAlertFlagCount,
   belowFloor,
+  throughputUnmeasurable,
 }: DriveGaugeProps) {
   const labelId = useId()
 
@@ -107,6 +111,10 @@ function DriveGauge({
           <p className="mt-0.5 text-text-faint">Metrics unavailable</p>
         ) : status === 'loading' ? (
           <p className="mt-0.5 text-text-faint">Loading drive metrics…</p>
+        ) : throughputUnmeasurable ? (
+          // Measured, but too little data to judge streaming (#409): no
+          // throughput gauge is exported, which must not read as "not yet".
+          <p className="mt-0.5 font-mono text-text-dim">{throughputUnmeasurableText}</p>
         ) : !hasReading ? (
           // "No measurement yet" — deliberately NOT "not writing":
           // hasData:false also covers a tape currently mid-write, since

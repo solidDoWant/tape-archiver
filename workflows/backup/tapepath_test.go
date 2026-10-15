@@ -176,7 +176,7 @@ func TestRunTapePathPassesAllowNonBlankTapes(t *testing.T) {
 				})
 
 			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
-			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
 			env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 				"/stage/indexes/tape.xml", nil)
 			env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
@@ -230,11 +230,11 @@ func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
 	var closeOnce sync.Once
 
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(
-		func(ctx context.Context, _ WriteTreeInput) error {
+		func(ctx context.Context, _ WriteTreeInput) (WriteTreeResult, error) {
 			closeOnce.Do(func() { close(writeInFlight) })
 			<-ctx.Done()
 
-			return ctx.Err()
+			return WriteTreeResult{}, ctx.Err()
 		})
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		"/stage/indexes/tape.xml", nil)
@@ -297,12 +297,12 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(
-		func(_ context.Context, input WriteTreeInput) error {
+		func(_ context.Context, input WriteTreeInput) (WriteTreeResult, error) {
 			mu.Lock()
 			writeArchives[[2]int{input.TapeIndex, input.CopyIndex}] = input.Archives
 			mu.Unlock()
 
-			return nil
+			return WriteTreeResult{}, nil
 		})
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		"/stage/indexes/tape.xml", nil)
@@ -402,7 +402,7 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
 		fmt.Errorf("simulated format failure"))
-	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
@@ -483,7 +483,7 @@ func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
 	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
 
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
 
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, _ FinalizeInput) (string, error) {
@@ -547,7 +547,7 @@ func TestRunTapePathTeardownRetryBounded(t *testing.T) {
 	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
 
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
@@ -613,7 +613,7 @@ func TestRunTapePathWriteHealthRetryBounded(t *testing.T) {
 	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
 
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		"/stage/indexes/tape.xml", nil)
 
@@ -696,7 +696,7 @@ func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 			return nil
 		})
 
-	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		"/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
@@ -800,12 +800,12 @@ func TestRunTapePathRejectsBadBarcodesBeforeMount(t *testing.T) {
 					return nil
 				})
 			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(
-				func(_ context.Context, _ WriteTreeInput) error {
+				func(_ context.Context, _ WriteTreeInput) (WriteTreeResult, error) {
 					mu.Lock()
 					writeCalls++
 					mu.Unlock()
 
-					return nil
+					return WriteTreeResult{}, nil
 				})
 
 			plan, staged, par2 := seededPlan(1, 2)
@@ -831,6 +831,75 @@ func TestRunTapePathRejectsBadBarcodesBeforeMount(t *testing.T) {
 
 			assert.Zero(t, formatCalls, "no tape may be formatted before barcode validation")
 			assert.Zero(t, writeCalls, "no LTFS volume may be mounted/written before barcode validation")
+		})
+	}
+}
+
+// TestRunTapePathWriteHealthTimesStreamOnly: the elapsed MeasureWriteHealth
+// receives is WriteTree's streaming-copy duration, not the window through
+// FinalizeTape, whose mount and index write swamp a small write (issue #409).
+func TestRunTapePathWriteHealthTimesStreamOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		written     WriteTreeResult
+		wantElapsed time.Duration
+	}{
+		{name: "stream duration", written: WriteTreeResult{StreamDuration: 97 * time.Minute}, wantElapsed: 97 * time.Minute},
+		// A WriteTree recorded before #409 decodes as the zero result.
+		{name: "pre-#409 result", written: WriteTreeResult{}, wantElapsed: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := newTapePathEnv(t)
+
+			var (
+				mu           sync.Mutex
+				loadSetSizes []int
+				elapsed      []time.Duration
+			)
+
+			mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
+
+			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(test.written, nil)
+			// A slow finalize models the unmount-time index write.
+			env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
+				func(context.Context, FinalizeInput) (string, error) {
+					time.Sleep(50 * time.Millisecond)
+
+					return "/stage/indexes/tape.xml", nil
+				})
+			env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input MeasureWriteHealthInput) (TapeMeasurement, error) {
+					mu.Lock()
+
+					elapsed = append(elapsed, input.Elapsed)
+					mu.Unlock()
+
+					return TapeMeasurement{}, nil
+				})
+			env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+
+			plan, staged, par2 := seededPlan(1, 1)
+
+			env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+				Cfg: tapePathConfig(1, 1, 1), Plan: plan, Staged: staged, PAR2: par2,
+			})
+
+			require.True(t, env.IsWorkflowCompleted())
+			require.NoError(t, env.GetWorkflowError())
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			assert.Equal(t, []time.Duration{test.wantElapsed}, elapsed,
+				"write health must be timed by WriteTree's stream duration only")
 		})
 	}
 }

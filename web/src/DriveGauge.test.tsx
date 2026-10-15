@@ -26,6 +26,16 @@ describe('DriveGauge', () => {
     expect(screen.getByText(/TA0001L6/)).toBeInTheDocument()
   })
 
+  it('says a write too small to judge is not measurable rather than "no measurement yet" (issue #409)', () => {
+    render(
+      <DriveGauge driveIndex={0} barcode="SMALL01L5" status="live" repositions={0} tapeAlertFlagCount={0} belowFloor={false} throughputUnmeasurable />,
+    )
+
+    expect(screen.getByText('MB/s not measurable (too little data)')).toBeInTheDocument()
+    expect(screen.queryByText(/no measurement yet/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/below speed-matching floor/i)).not.toBeInTheDocument()
+  })
+
   it('shows a live reading with rate, floor, and repositions', () => {
     render(
       <DriveGauge

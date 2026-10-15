@@ -60,10 +60,10 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 	}), "FormatTape")
 
 	// Empty archive list: WriteTree only mounts and writes an empty manifest.
-	require.NoError(t, acts.WriteTree(t.Context(), WriteTreeInput{
+	require.NoError(t, writeTreeErr(acts.WriteTree(t.Context(), WriteTreeInput{
 		Device:  sgDev,
 		Barcode: barcode,
-	}), "WriteTree")
+	})), "WriteTree")
 
 	mount, ok := registry.Get(sgDev)
 	require.True(t, ok, "WriteTree must park mount in registry")
@@ -100,10 +100,10 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 		"index must name the volume by barcode")
 
 	// Re-mount to confirm the sentinel survived the retry.
-	require.NoError(t, acts.WriteTree(t.Context(), WriteTreeInput{
+	require.NoError(t, writeTreeErr(acts.WriteTree(t.Context(), WriteTreeInput{
 		Device:  sgDev,
 		Barcode: barcode,
-	}), "re-mount WriteTree must succeed")
+	})), "re-mount WriteTree must succeed")
 
 	remountMount, remountOK := registry.Get(sgDev)
 	require.True(t, remountOK, "re-mount WriteTree must park mount in registry")
@@ -114,4 +114,9 @@ func TestSessionSplitWriteWithFinalizeRetry(t *testing.T) {
 
 	_, finalErr := acts.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev, Barcode: barcode})
 	assert.NoError(t, finalErr, "final FinalizeTape on re-mount must succeed")
+}
+
+// writeTreeErr drops WriteTree's result for call sites that only check the error.
+func writeTreeErr(_ WriteTreeResult, err error) error {
+	return err
 }

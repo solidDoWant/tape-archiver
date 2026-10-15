@@ -663,7 +663,9 @@ modified to pass — the code is fixed instead.
   LTO-6)** continuously, with no back-hitch. This is enforced by design (everything is
   staged before writing) and **measured on every run**: after each tape's write window
   closes, the run records that tape's sustained write throughput (bytes written to tape
-  — archive slices + PAR2 recovery files — ÷ write-window elapsed), its
+  — archive slices + PAR2 recovery files — ÷ the time spent copying the staged tree to
+  the mounted LTFS volume, excluding the mount and the unmount-time index write, which
+  are fixed overheads unrelated to streaming), its
   reposition/back-hitch count (`total_suspended_writes` from the SCSI Tape usage log page
   `0x30`, LTO-5/6), and any
   TapeAlert flags (log page `0x2e`) in the PDF report (§9) and as Prometheus gauges, and
@@ -672,7 +674,10 @@ modified to pass — the code is fixed instead.
   speed-matching range), derived from the configured native capacity — LTO-5 40, LTO-6
   ~50, LTO-7 100, LTO-8 112, LTO-9 180 MB/s (nominal published minimum speed-matching
   rates); a capacity that maps to no known generation reports throughput without a
-  below-floor verdict rather than judging against a guessed value. This is
+  below-floor verdict rather than judging against a guessed value. A tape that received
+  less than 1 GB reports its throughput as **not measurable** (LTFS's write cache and
+  the drive buffer absorb a write that small, so its rate cannot show streaming): no
+  rate, no below-floor verdict, and no unhealthy mark for throughput alone. This is
   **observational only** — it never fails or gates a run — so principle 2 can be
   evaluated against the real workload before any gating is considered.
 - **Bound write concurrency to the drive count.** The Write phase writes at most one

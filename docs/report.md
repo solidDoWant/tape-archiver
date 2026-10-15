@@ -60,11 +60,18 @@ successfully.
 
 Each tape row records:
 
-- **Throughput (MB/s)** — sustained write throughput over the write window, computed as
-  the total bytes written to the tape (archive slices + PAR2 recovery files, in decimal
-  MB) divided by the write-window elapsed time. Both slices and PAR2 are copied inside
-  the measured window, so counting every written byte matches the numerator to the
-  denominator and reflects the drive's actual sustained rate.
+- **Throughput (MB/s)** — sustained write throughput while streaming, computed as the
+  total bytes written to the tape (archive slices + PAR2 recovery files, in decimal MB)
+  divided by the time spent copying the staged tree to the mounted LTFS volume. The
+  LTFS mount, the per-tape manifest, and the unmount-time index write are excluded:
+  they are a fixed overhead (about a minute on LTO-5) that says nothing about whether
+  the drive streamed. Both slices and PAR2 are copied inside the timed copy, so counting
+  every written byte matches the numerator to the denominator. A tape that received
+  less than 1 GB renders `not measurable` instead of a rate, with the status note
+  `throughput not measurable (too little data)`: LTFS's write cache and the drive's
+  buffer absorb a write that small before the tape catches up, so its rate cannot
+  show streaming. No below-floor verdict is made for it, and it is not marked
+  unhealthy for throughput alone (repositions and TapeAlert flags are still judged).
 - **Floor** — the speed-matching floor the throughput is compared against. It is a
   property of the **tape generation being written** (the write format determines the
   drive's speed-matching range), derived from the configured native capacity
@@ -90,7 +97,9 @@ real throughput) renders as `not measured`.
 The same per-tape values are also exported as Prometheus gauges on the data worker's
 `/metrics` endpoint, labelled by `barcode`: `tape_archiver_write_throughput_mbps`,
 `tape_archiver_write_repositions`, `tape_archiver_write_tapealert_flags`, and
-`tape_archiver_write_below_floor`.
+`tape_archiver_write_below_floor`. For a write too small to measure, no
+`tape_archiver_write_throughput_mbps` sample is exported for that barcode (any earlier
+one is removed) and `tape_archiver_write_below_floor` is `0`.
 
 ## The age private identity is included on purpose
 

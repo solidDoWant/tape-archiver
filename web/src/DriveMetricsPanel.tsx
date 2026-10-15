@@ -3,6 +3,7 @@ import { apiFetch, ApiError } from './api'
 import DriveGauge from './DriveGauge'
 import WriteRateSparkline, { type MetricPoint, type SparklineStatus } from './WriteRateSparkline'
 import { IconWarning } from './icons'
+import { throughputUnmeasurableText } from './writeHealth'
 
 // DriveMetric mirrors pkg/runsapi.DriveMetric's JSON shape (GET
 // /api/runs/{runID}/metrics/drives).
@@ -19,6 +20,7 @@ interface DriveMetric {
   belowFloor?: boolean
   floorMBps?: number
   floorKnown: boolean
+  throughputUnmeasurable?: boolean
 }
 
 interface DriveMetricsResponse {
@@ -38,6 +40,8 @@ interface DriveMetricHistoryResponse {
 interface WriteHealthInfo {
   measured: boolean
   throughputMBps: number
+  // Absent on runs recorded before issue #409.
+  throughputUnmeasurable?: boolean
   floorMBps?: number
   floorKnown: boolean
   belowFloor: boolean
@@ -283,6 +287,7 @@ function DriveMetricCard({ runId, drive, pollIntervalMs }: { runId: string; driv
         repositions={drive.repositions}
         tapeAlertFlagCount={drive.tapeAlertFlagCount}
         belowFloor={drive.belowFloor}
+        throughputUnmeasurable={drive.throughputUnmeasurable}
       />
 
       <div className="min-w-0 flex-1">
@@ -369,7 +374,9 @@ function FinalTapeCard({ tape }: { tape: TapeOutcome }) {
 
       {health?.measured ? (
         <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono">
-          {typeof health.throughputMBps === 'number' ? (
+          {health.throughputUnmeasurable ? (
+            <span className="text-text-dim">{throughputUnmeasurableText}</span>
+          ) : typeof health.throughputMBps === 'number' ? (
             <span className="text-[13px] font-semibold text-text">{health.throughputMBps.toFixed(0)} MB/s</span>
           ) : null}
           {health.floorKnown && health.floorMBps !== undefined ? (

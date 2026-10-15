@@ -34,14 +34,17 @@ type WriteHealthInfo struct {
 	// Measured is false when no measurement could be taken; the other fields
 	// are then zero placeholders, so "unmeasured" is distinguishable from
 	// "unhealthy".
-	Measured            bool     `json:"measured"`
-	ThroughputMBps      float64  `json:"throughputMBps"`
-	FloorMBps           float64  `json:"floorMBps,omitempty"`
-	FloorKnown          bool     `json:"floorKnown"`
-	BelowFloor          bool     `json:"belowFloor"`
-	Repositions         int64    `json:"repositions,omitempty"`
-	RepositionsMeasured bool     `json:"repositionsMeasured"`
-	TapeAlertFlags      []string `json:"tapeAlertFlags,omitempty"`
+	Measured       bool    `json:"measured"`
+	ThroughputMBps float64 `json:"throughputMBps"`
+	// ThroughputUnmeasurable marks a write too small to judge streaming;
+	// throughputMBps is then a zero placeholder, not a reading.
+	ThroughputUnmeasurable bool     `json:"throughputUnmeasurable"`
+	FloorMBps              float64  `json:"floorMBps,omitempty"`
+	FloorKnown             bool     `json:"floorKnown"`
+	BelowFloor             bool     `json:"belowFloor"`
+	Repositions            int64    `json:"repositions,omitempty"`
+	RepositionsMeasured    bool     `json:"repositionsMeasured"`
+	TapeAlertFlags         []string `json:"tapeAlertFlags,omitempty"`
 	// Healthy is backup.WriteHealth.Healthy(), pre-computed; always false when
 	// Measured is false.
 	Healthy bool `json:"healthy"`
@@ -49,15 +52,16 @@ type WriteHealthInfo struct {
 
 func toWriteHealthInfo(health backup.WriteHealth) *WriteHealthInfo {
 	return &WriteHealthInfo{
-		Measured:            health.Measured,
-		ThroughputMBps:      health.ThroughputMBps,
-		FloorMBps:           health.FloorMBps,
-		FloorKnown:          health.FloorKnown,
-		BelowFloor:          health.BelowFloor,
-		Repositions:         health.Repositions,
-		RepositionsMeasured: health.RepositionsMeasured,
-		TapeAlertFlags:      health.TapeAlertFlags,
-		Healthy:             health.Healthy(),
+		Measured:               health.Measured,
+		ThroughputMBps:         health.ThroughputMBps,
+		ThroughputUnmeasurable: health.ThroughputUnmeasurable,
+		FloorMBps:              health.FloorMBps,
+		FloorKnown:             health.FloorKnown,
+		BelowFloor:             health.BelowFloor,
+		Repositions:            health.Repositions,
+		RepositionsMeasured:    health.RepositionsMeasured,
+		TapeAlertFlags:         health.TapeAlertFlags,
+		Healthy:                health.Healthy(),
 	}
 }
 

@@ -817,11 +817,15 @@ still in progress, or it ended first). A Load/Write-failure retry loads a fresh 
 (a different physical tape), so the failed tape and its replacement each appear as
 their own entry (SPEC §4.3's bounded blast radius, visible per tape). `writeHealth`,
 when present, is the tape's observational write-health verdict (SPEC §14):
-`{"measured", "throughputMBps", "floorMBps", "floorKnown", "belowFloor",
-"repositions", "repositionsMeasured", "tapeAlertFlags", "healthy"}` — `measured:
-false` means the measurement could not be taken at all (the run still succeeds; every
-other field is then a zero placeholder), so an unmeasured tape is distinguishable
-from one measured and found unhealthy (`healthy` is `false` in both cases).
+`{"measured", "throughputMBps", "throughputUnmeasurable", "floorMBps", "floorKnown",
+"belowFloor", "repositions", "repositionsMeasured", "tapeAlertFlags", "healthy"}` —
+`measured: false` means the measurement could not be taken at all (the run still
+succeeds; every other field is then a zero placeholder), so an unmeasured tape is
+distinguishable from one measured and found unhealthy (`healthy` is `false` in both
+cases). `throughputUnmeasurable: true` means the write was too small (under 1 GB) for
+its rate to say whether the drive streamed: `throughputMBps` is then a zero
+placeholder, `belowFloor` is `false`, and the tape is not marked unhealthy for
+throughput alone. Runs recorded before this field existed report it as `false`.
 
 `GET /api/runs/{runID}/delivery` returns `{"runId": "...", "messageUrl": "..."}` —
 the Discord jump-to-message deep-link
@@ -885,9 +889,12 @@ readings shown on an old run's page.
 one entry per tape barcode the run has loaded (same set `GET /api/runs/{runID}/tapes`
 derives), each `{"barcode", "tapeIndex", "copyIndex", "driveIndex", "result",
 "hasData", "throughputMBps", "repositions", "tapeAlertFlagCount", "belowFloor",
-"floorMBps", "floorKnown"}`. `hasData: false` means VictoriaMetrics has no sample for
-this barcode yet (not yet measured — still writing, or the run never reached
-`MeasureWriteHealth` for it), distinguishable from an actual zero/false reading.
+"floorMBps", "floorKnown", "throughputUnmeasurable"}`. `hasData: false` means
+VictoriaMetrics has no sample for this barcode yet (not yet measured — still writing,
+or the run never reached `MeasureWriteHealth` for it), distinguishable from an actual
+zero/false reading. `throughputUnmeasurable` comes from the run's own history: the
+write was too small to judge, so no throughput gauge is exported for the barcode
+(`throughputMBps` is absent) and `belowFloor` is `false`.
 `floorMBps`/`floorKnown` are the tape's speed-matching floor from the run's own history
 (the floor is a static, generation-derived constant, not its own gauge). An empty
 `drives` list (`200`, not an error) means the run has not loaded any tape yet.

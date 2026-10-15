@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import TapesPage from './TapesPage'
 import { RouterProvider } from './router'
@@ -112,6 +112,70 @@ describe('TapesPage', () => {
 
     const runLink = screen.getByRole('link', { name: 'run-1' })
     expect(runLink).toHaveAttribute('href', '/runs/run-1')
+  })
+
+  it('shows a write too small to judge as not measurable, never as 0 MB/s (issue #409)', async () => {
+    const outcome = (barcode: string, runId: string, writeHealth: Record<string, unknown>) => ({
+      barcode,
+      tapeIndex: 0,
+      copyIndex: 0,
+      driveIndex: 0,
+      slot: 1,
+      result: 'written',
+      runId,
+      runStartTime: '2026-07-01T00:00:00Z',
+      runStatus: 'Completed',
+      writeHealth,
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          tapes: [
+            outcome('SMALL01L5', 'run-new', {
+              measured: true,
+              throughputMBps: 0,
+              throughputUnmeasurable: true,
+              floorMBps: 40,
+              floorKnown: true,
+              belowFloor: false,
+              repositions: 0,
+              repositionsMeasured: true,
+              healthy: true,
+            }),
+            // Recorded before #409: no throughputUnmeasurable field, renders as before.
+            outcome('OLDRUN01L5', 'run-old', {
+              measured: true,
+              throughputMBps: 0.02,
+              floorMBps: 40,
+              floorKnown: true,
+              belowFloor: true,
+              repositions: 0,
+              repositionsMeasured: true,
+              healthy: false,
+            }),
+          ],
+        }),
+      ),
+    )
+
+    renderTapesPage()
+
+    await waitFor(() => {
+      expect(screen.getByRole('table')).toBeInTheDocument()
+    })
+
+    const smallRow = screen.getByText('SMALL01L5').closest('tr')!
+    expect(within(smallRow).getByText('MB/s not measurable (too little data)')).toBeInTheDocument()
+    expect(within(smallRow).queryByText('0 MB/s')).not.toBeInTheDocument()
+    expect(within(smallRow).queryByText(/below floor/i)).not.toBeInTheDocument()
+    expect(within(smallRow).getByText('healthy')).toBeInTheDocument()
+
+    const oldRow = screen.getByText('OLDRUN01L5').closest('tr')!
+    expect(within(oldRow).getByText('0 MB/s')).toBeInTheDocument()
+    expect(within(oldRow).getByText(/below floor/i)).toBeInTheDocument()
+    expect(within(oldRow).queryByText(/not measurable/i)).not.toBeInTheDocument()
   })
 
   it('does not crash on a measured tape whose throughput/floor fields are missing', async () => {

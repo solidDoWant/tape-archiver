@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { apiFetch, ApiError, describeNetworkError } from './api'
 import { IconWarning } from './icons'
+import { throughputUnmeasurableText } from './writeHealth'
 
 // WriteHealth/TapeOutcome mirror pkg/runsapi's GET /api/runs/{runID}/tapes
 // JSON shapes (tapes.go) — the same contract DriveMetricsPanel.tsx's terminal
@@ -9,6 +10,8 @@ import { IconWarning } from './icons'
 // of the same fields (slot, copy/tape index — occupancy, not throughput).
 interface WriteHealth {
   belowFloor: boolean
+  // Absent on runs recorded before issue #409.
+  throughputUnmeasurable?: boolean
   tapeAlertFlags?: string[]
   measured: boolean
 }
@@ -157,6 +160,10 @@ function TapesSection({ runId, terminal }: TapesSectionProps) {
               <IconWarning className="h-3 w-3" />
               below floor
             </span>
+          ) : null}
+
+          {tape.writeHealth?.measured && tape.writeHealth.throughputUnmeasurable ? (
+            <span className="font-mono text-[11px] text-text-faint">{throughputUnmeasurableText}</span>
           ) : null}
 
           {tape.writeHealth?.measured && (tape.writeHealth.tapeAlertFlags?.length ?? 0) > 0 ? (
