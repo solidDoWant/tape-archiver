@@ -69,7 +69,7 @@ buildGoModule {
   # (this one differs from worker's because dropping cmd/worker and cmd/tapectl
   # from the store copy shrinks the vendored set to what cmd/web + the shared
   # packages actually import).
-  vendorHash = "sha256-LHu3GtnUDy/AGPxzxLhwjCfSAdf9/vPgn8ZC7kQIVpw=";
+  vendorHash = "sha256-IymodVI/SYEarVQ88futphou7cUA8J9Wed/7pqiDWMw=";
 
   # Replace the gitignored (or, in a from-scratch checkout, placeholder-only)
   # cmd/web/dist with the hermetically-built frontend before compiling, so

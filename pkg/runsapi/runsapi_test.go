@@ -156,6 +156,9 @@ type fakeWorkflowRun struct {
 
 func (f fakeWorkflowRun) GetID() string    { return f.workflowID }
 func (f fakeWorkflowRun) GetRunID() string { return f.runID }
+
+// GetFirstExecutionRunID: a fake run is its own single-execution chain.
+func (f fakeWorkflowRun) GetFirstExecutionRunID() string { return f.runID }
 func (f fakeWorkflowRun) Get(context.Context, interface{}) error {
 	return nil
 }
