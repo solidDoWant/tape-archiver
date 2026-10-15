@@ -580,10 +580,13 @@ func (a *Authenticator) handleBuildInfo(w http.ResponseWriter, r *http.Request) 
 
 // sanitizeRedirectPath restricts a post-login redirect to a same-origin path,
 // else "/". It rejects "//host" and any backslash, which browsers normalize
-// to "/", making "/\host" an equivalent open redirect.
+// to "/", making "/\host" an equivalent open redirect. It also rejects ASCII
+// control characters: browsers strip tab, CR and LF, so "/\t/host" becomes
+// "//host" (issue #383).
 func sanitizeRedirectPath(path string) string {
 	if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") ||
-		strings.ContainsRune(path, '\\') {
+		strings.ContainsRune(path, '\\') ||
+		strings.ContainsFunc(path, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return "/"
 	}
 

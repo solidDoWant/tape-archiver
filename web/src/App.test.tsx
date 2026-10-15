@@ -418,6 +418,22 @@ describe('App shell (authenticated)', () => {
 
     await settle()
   })
+
+  // Issue #383: browsers strip tab/CR/LF, turning "/\t/x" into "//x".
+  it('sends a control-character redirect to "/" when already signed in', async () => {
+    window.history.pushState({}, '', '/login?redirect=/%09/x')
+    const origin = window.location.origin
+
+    stubApi()
+    render(<App />)
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe('/')
+    })
+    expect(window.location.origin).toBe(origin)
+
+    await settle()
+  })
 })
 
 describe('App auth gating (unauthenticated)', () => {

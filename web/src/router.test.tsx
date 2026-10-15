@@ -108,6 +108,13 @@ describe('sanitizeRedirectPath', () => {
     expect(sanitizeRedirectPath('/login/?redirect=%2Flogin')).toBe('/')
   })
 
+  it('rejects ASCII control characters, which browsers strip from URLs', () => {
+    for (const char of ['\t', '\n', '\r', '\u0000', '\u001f', '\u007f']) {
+      expect(sanitizeRedirectPath(`/${char}/evil.example`)).toBe('/')
+    }
+    expect(sanitizeRedirectPath('/runs/abc?tab=logs')).toBe('/runs/abc?tab=logs')
+  })
+
   it('preserves a path that merely starts with login', () => {
     expect(sanitizeRedirectPath('/login-help')).toBe('/login-help')
   })
