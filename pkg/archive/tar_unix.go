@@ -72,3 +72,13 @@ func seekDataRegions(file *os.File, size int64) ([]sparseRegion, error) {
 
 	return regions, nil
 }
+
+// deviceOf returns the device number of the filesystem holding info's file.
+func deviceOf(info fs.FileInfo) (dev uint64, ok bool) {
+	stat, statOK := info.Sys().(*syscall.Stat_t)
+	if !statOK {
+		return 0, false
+	}
+
+	return uint64(stat.Dev), true
+}

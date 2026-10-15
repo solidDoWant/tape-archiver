@@ -14,3 +14,7 @@ func hardlinkID(info fs.FileInfo) (id fileID, ok bool) {
 func sparseDataRegions(file *os.File, size int64) (regions []sparseRegion, sparse bool, err error) {
 	return nil, false, nil
 }
+
+func deviceOf(info fs.FileInfo) (dev uint64, ok bool) {
+	return 0, false
+}
