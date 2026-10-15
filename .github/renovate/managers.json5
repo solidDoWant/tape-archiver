@@ -1,0 +1,15 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  description: "Regex managers for refs the built-in managers miss",
+  customManagers: [
+    {
+      customType: "regex",
+      description: "KEDA chart the e2e harness installs (needs >= 2.17 for the Temporal scaler)",
+      managerFilePatterns: ["/^e2e/harness_test\\.go$/"],
+      matchStrings: ["kedaChartVersion\\s*=\\s*\"(?<currentValue>[^\"]+)\""],
+      depNameTemplate: "keda",
+      datasourceTemplate: "helm",
+      registryUrlTemplate: "https://kedacore.github.io/charts",
+    },
+  ],
+}

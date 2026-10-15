@@ -1,0 +1,61 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  description: "Approval gates, version holds and reminders for what Renovate can't regenerate",
+  packageRules: [
+    {
+      description: "Major updates wait for a Dependency Dashboard checkbox",
+      matchUpdateTypes: ["major"],
+      dependencyDashboardApproval: true,
+    },
+    {
+      description: "No digest pins: flake.lock already pins nixpkgs, and a preset ref can't carry both tag and SHA",
+      matchManagers: ["nix", "renovate-config"],
+      pinDigests: false,
+    },
+    {
+      description: "The Go toolchain comes from nixpkgs (flake.lock); a go/toolchain bump past it breaks the Nix build",
+      matchManagers: ["gomod"],
+      matchDepTypes: ["golang", "toolchain"],
+      enabled: false,
+    },
+    {
+      description: "nixpkgs pins age/par2cmdline-turbo/zstd/tar/xorriso for both the image and the recovery disc (SPEC §4.1/§10)",
+      matchManagers: ["nix"],
+      matchUpdateTypes: ["lockFileMaintenance"],
+      addLabels: ["recovery-disc"],
+      prBodyNotes: [
+        "⚠️ Recovery-disc parity: this moves the tool versions shipped on the recovery disc. Check the age/par2/zstd/tar changelogs for format compatibility, refresh the Nix hashes (`make update-dependencies` hash step) and run the full test suite before merging. `@playwright/test` must match the new `playwright-driver`.",
+      ],
+    },
+    // Renovate can't run nix: these fixed-output hashes go stale with the lockfiles.
+    {
+      description: "Go deps change the vendorHash in nix/worker.nix and nix/web.nix",
+      matchManagers: ["gomod"],
+      prBodyNotes: [
+        "⚠️ Refresh `vendorHash` in `nix/worker.nix` and `nix/web.nix` before merging: set it to `lib.fakeHash` and take `got:` from `nix build .#worker` / `.#web`.",
+      ],
+    },
+    {
+      description: "npm deps change the npmDepsHash in nix/web-frontend.nix",
+      matchManagers: ["npm"],
+      prBodyNotes: [
+        "⚠️ Refresh `npmDepsHash` in `nix/web-frontend.nix` before merging: set it to `lib.fakeHash` and take `got:` from `nix build .#webFrontend`.",
+      ],
+    },
+    {
+      description: "Browsers come from nixpkgs playwright-driver, built for one @playwright/test version",
+      matchManagers: ["npm"],
+      matchPackageNames: ["@playwright/test"],
+      dependencyDashboardApproval: true,
+      prBodyNotes: [
+        "⚠️ Merge only when this matches `playwright-driver` in the locked nixpkgs (`nix eval --raw nixpkgs#playwright-driver.version`).",
+      ],
+    },
+    {
+      description: "VictoriaLogs tags carry an optional -victorialogs suffix",
+      matchDatasources: ["docker"],
+      matchPackageNames: ["victoriametrics/victoria-logs"],
+      versioning: "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)(?:-victorialogs)?$",
+    },
+  ],
+}
