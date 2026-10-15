@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -101,7 +102,7 @@ func (c *Client) Send(ctx context.Context, msg Message) error {
 		return fmt.Errorf("webhook: marshalling message: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
+	req, err := c.newRequest(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("webhook: creating request: %w", err)
 	}
@@ -163,7 +164,7 @@ func (c *Client) SendFile(ctx context.Context, path, content string) (*PostedMes
 		return nil, fmt.Errorf("webhook: finalizing multipart body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, withWait(c.url), &body)
+	req, err := c.newRequest(ctx, http.MethodPost, withWait(c.url), &body)
 	if err != nil {
 		return nil, fmt.Errorf("webhook: creating request: %w", err)
 	}
@@ -196,7 +197,7 @@ func (c *Client) FetchWebhookGuild(ctx context.Context) (string, error) {
 		return "", nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	req, err := c.newRequest(ctx, http.MethodGet, c.url, nil)
 	if err != nil {
 		return "", fmt.Errorf("webhook: creating request: %w", err)
 	}
@@ -384,11 +385,63 @@ func (e *StatusError) Retryable() bool {
 	return e.Code == http.StatusTooManyRequests || (e.Code >= 500 && e.Code <= 599)
 }
 
+// redactedPath replaces the webhook URL's path, which embeds the auth token.
+const redactedPath = "/REDACTED"
+
+// redactedError carries a message with the webhook token removed. It unwraps to
+// the transport cause, past the *url.Error that holds the full URL, so timeout
+// and cancellation checks still work.
+type redactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+
+func (e *redactedError) Unwrap() error { return e.cause }
+
+// redact strips the webhook token from err (issue #381): net/http's *url.Error
+// quotes the full request URL, and the token is in its path, which net/http
+// does not scrub.
+func (c *Client) redact(err error) error {
+	msg := err.Error()
+
+	if parsed, parseErr := url.Parse(c.url); parseErr == nil {
+		for _, path := range []string{parsed.EscapedPath(), parsed.Path} {
+			if len(path) > 1 {
+				msg = strings.ReplaceAll(msg, path, redactedPath)
+			}
+		}
+	} else {
+		msg = strings.ReplaceAll(msg, c.url, "REDACTED-WEBHOOK-URL")
+	}
+
+	cause := errors.Unwrap(err)
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		cause = urlErr.Err
+	}
+
+	return &redactedError{msg: msg, cause: cause}
+}
+
+// newRequest is http.NewRequestWithContext with its error redacted: a URL parse
+// error quotes the whole URL.
+func (c *Client) newRequest(ctx context.Context, method, target string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, target, body)
+	if err != nil {
+		return nil, c.redact(err)
+	}
+
+	return req, nil
+}
+
 // do sends req, returning *StatusError for a non-2xx status.
 func (c *Client) do(req *http.Request) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("webhook: sending request: %w", err)
+		return c.redact(fmt.Errorf("webhook: sending request: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -403,7 +456,7 @@ func (c *Client) do(req *http.Request) error {
 func (c *Client) doReturningBody(req *http.Request) ([]byte, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("webhook: sending request: %w", err)
+		return nil, c.redact(fmt.Errorf("webhook: sending request: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 

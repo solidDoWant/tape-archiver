@@ -668,3 +668,107 @@ func TestWithDryRunPrefixesAlerts(t *testing.T) {
 		assert.Equal(t, dryRun, strings.HasPrefix(got.Content, webhook.DryRunPrefix), "dryRun=%v: %q", dryRun, got.Content)
 	}
 }
+
+// webhookToken is the secret path segment of a Discord webhook URL.
+const webhookToken = "SECRETTOKEN"
+
+// refusedWebhookURL returns a webhook URL nothing listens on.
+func refusedWebhookURL(t *testing.T) string {
+	t.Helper()
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+
+	return server.URL + "/api/webhooks/123/" + webhookToken
+}
+
+// TestTransportErrorsRedactToken (issue #381): transport errors never carry the
+// token in the URL path, but still say what failed.
+func TestTransportErrorsRedactToken(t *testing.T) {
+	release := make(chan struct{})
+	hung := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	t.Cleanup(hung.Close)
+	t.Cleanup(func() { close(release) })
+
+	reportPath := filepath.Join(t.TempDir(), "report.pdf")
+	require.NoError(t, os.WriteFile(reportPath, []byte("%PDF"), 0o600))
+
+	calls := map[string]func(ctx context.Context, client *webhook.Client) error{
+		"send": func(ctx context.Context, client *webhook.Client) error {
+			return client.Send(ctx, webhook.Message{Content: "hi"})
+		},
+		"send file": func(ctx context.Context, client *webhook.Client) error {
+			_, err := client.SendFile(ctx, reportPath, "report")
+			return err
+		},
+		"fetch guild": func(ctx context.Context, client *webhook.Client) error {
+			_, err := client.FetchWebhookGuild(ctx)
+			return err
+		},
+	}
+
+	tests := []struct {
+		name    string
+		url     string
+		timeout time.Duration
+		want    string
+		wantIs  error
+	}{
+		{name: "connection refused", url: refusedWebhookURL(t), want: "connection refused"},
+		{
+			name:    "timeout",
+			url:     hung.URL + "/api/webhooks/123/" + webhookToken,
+			timeout: 50 * time.Millisecond,
+			want:    "deadline exceeded",
+			wantIs:  context.DeadlineExceeded,
+		},
+		{name: "unparseable URL", url: "http://[::1/api/webhooks/123/" + webhookToken, want: "creating request"},
+	}
+
+	for _, test := range tests {
+		for callName, call := range calls {
+			t.Run(test.name+"/"+callName, func(t *testing.T) {
+				ctx := t.Context()
+
+				if test.timeout != 0 {
+					var cancel context.CancelFunc
+
+					ctx, cancel = context.WithTimeout(ctx, test.timeout)
+					defer cancel()
+				}
+
+				err := call(ctx, webhook.New(test.url))
+				require.Error(t, err)
+				assert.NotContains(t, err.Error(), webhookToken)
+				assert.Contains(t, err.Error(), test.want)
+
+				if test.wantIs != nil {
+					assert.ErrorIs(t, err, test.wantIs)
+				}
+			})
+		}
+	}
+}
+
+// TestAlertDeliveryLogsRedactToken (issue #381): a failed alert's log line never
+// carries the token. Mutates the global slog default, so not parallel.
+func TestAlertDeliveryLogsRedactToken(t *testing.T) {
+	original := slog.Default()
+
+	t.Cleanup(func() { slog.SetDefault(original) })
+
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+
+	client := webhook.New(refusedWebhookURL(t))
+	client.SendFailure(t.Context(), "run-1", "Write", assert.AnError)
+	client.SendOperatorPause(t.Context(), "run-1", []string{"A00001L9"}, 1)
+	client.SendWritePathPause(t.Context(), "run-1", "Write", []string{"A00001L9"}, []int{1}, "boom")
+	client.SendBurnPause(t.Context(), "run-1", []string{"/dev/sr0"}, "boom")
+
+	logged := logs.String()
+	assert.Equal(t, 4, strings.Count(logged, "connection refused"))
+	assert.NotContains(t, logged, webhookToken)
+}
