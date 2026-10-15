@@ -538,9 +538,11 @@ There are two distinct Discord notification paths:
 successful run the data worker delivers the PDF report to the Discord webhook named in
 the run config (§5 Delivery) — from the data worker, where it was built (§4.1). The
 recovery ISO travels on its burned disc (§10); the report is the single uploaded
-artifact, which keeps the upload comfortably within the webhook's ~25 MB limit. The
-report upload is bounded by the Deliver activity's timeout (the request context), not by
-a fixed client-wide HTTP timeout, so a multi-megabyte report can upload over a slow
+artifact, which keeps the upload comfortably within the webhook's ~25 MB limit. Its
+summary message names any written tape with a concrete write-health problem (§14:
+TapeAlert flags, below-floor throughput, repositions), so a degraded tape is visible
+without opening the report. The report upload is bounded by the Deliver activity's
+timeout (the request context), not by a fixed client-wide HTTP timeout, so a multi-megabyte report can upload over a slow
 uplink for the full activity budget rather than being aborted after a few seconds. A
 transient upload failure (a 429 rate-limit or a 5xx, or a transport blip) is retried a
 bounded number of times so a brief outage still delivers; a deterministic rejection (a

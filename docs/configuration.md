@@ -283,9 +283,12 @@ attachment:
 **Run:** `019fa67f-6e01-7752-b1b6-e1d2b7530cf5`
 **Archived:** 2 archives (13.9 GB)
 **Tapes:** JCY631L5, JCY632L5
+⚠️ **Write health:** JCY632L5 (TapeAlert 49: Diminished native capacity)
 
 The attached report is this run's recovery index — print it and store it with the tapes.
 ```
+
+The **Write health** line appears only when a written tape has a concrete problem: active TapeAlert flags, throughput below the speed-matching floor, or repositions (back-hitches). Tapes whose health could not be judged are covered by the report alone (see [report.md](report.md)).
 
 A dry run says so instead: the message opens with "🧪 **Dry run complete** — a rehearsal against the virtual library; no real tapes were written", lists **Virtual tapes**, and says the report must not be filed with any tapes. Every failure and pause alert for a dry run is prefixed with "🧪 **[DRY RUN — virtual library, no real tapes]**", so an operator never acts on the real library because of a rehearsal.
 

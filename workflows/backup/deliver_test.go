@@ -491,3 +491,65 @@ func TestDeliverySummaryLabelsADryRun(t *testing.T) {
 	assert.Contains(t, real, "Backup complete")
 	assert.NotContains(t, real, "Dry run")
 }
+
+// TestDeliverySummaryNamesUnhealthyTapes: a tape with a concrete write-health
+// problem is called out in the message, not only in the PDF.
+func TestDeliverySummaryNamesUnhealthyTapes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		health  WriteHealth
+		want    string
+		healthy bool
+	}{
+		{
+			name:   "tapealert",
+			health: WriteHealth{Measured: true, TapeAlertFlags: []string{"49: Diminished native capacity"}},
+			want:   "⚠️ **Write health:** JCY632L5 (TapeAlert 49: Diminished native capacity)",
+		},
+		{
+			name:   "below floor",
+			health: WriteHealth{Measured: true, ThroughputMBps: 12.34, FloorMBps: 40, FloorKnown: true, BelowFloor: true},
+			want:   "⚠️ **Write health:** JCY632L5 (12.3 MB/s, below the 40 MB/s floor)",
+		},
+		{
+			name:   "repositions",
+			health: WriteHealth{Measured: true, Repositions: 1, RepositionsMeasured: true},
+			want:   "⚠️ **Write health:** JCY632L5 (1 reposition)",
+		},
+		{
+			name:    "healthy",
+			health:  WriteHealth{Measured: true, ThroughputMBps: 120, FloorMBps: 40, FloorKnown: true, RepositionsMeasured: true},
+			healthy: true,
+		},
+		{
+			name:    "not measured",
+			health:  WriteHealth{},
+			healthy: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			summary := deliverySummary("run-1", &runState{
+				staged: []StagedArchive{{SourceIndex: 0, SizeBytes: 1_500_000}},
+				written: []WrittenTape{
+					{Barcode: tape.Barcode("JCY632L5"), WriteHealth: test.health},
+					{Barcode: tape.Barcode("JCY631L5"), WriteHealth: WriteHealth{Measured: true, RepositionsMeasured: true}},
+				},
+			}, false)
+
+			if test.healthy {
+				assert.NotContains(t, summary, "Write health")
+
+				return
+			}
+
+			assert.Contains(t, summary, test.want)
+			assert.NotContains(t, summary, "JCY631L5 (", "a healthy tape must not be listed")
+		})
+	}
+}

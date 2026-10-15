@@ -148,6 +148,10 @@ func deliverySummary(runID string, state *runState, dryRun bool) string {
 		lines = append(lines, fmt.Sprintf("**%s:** %s", tapesLabel, strings.Join(barcodes, ", ")))
 	}
 
+	if problems := writeHealthProblems(state.written); len(problems) > 0 {
+		lines = append(lines, "⚠️ **Write health:** "+strings.Join(problems, "; "))
+	}
+
 	if dryRun {
 		lines = append(lines, "", "The attached report is from a rehearsal — do not file it with any tapes.")
 	} else {
@@ -156,6 +160,39 @@ func deliverySummary(runID string, state *runState, dryRun bool) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// writeHealthProblems names each written tape with a concrete write-health
+// problem (TapeAlert flags, below-floor throughput, repositions). Tapes that
+// could not be judged are left to the report.
+func writeHealthProblems(tapes []WrittenTape) []string {
+	var problems []string
+
+	for _, writtenTape := range tapes {
+		health := writtenTape.WriteHealth
+		if !health.Measured {
+			continue
+		}
+
+		var issues []string
+		if len(health.TapeAlertFlags) > 0 {
+			issues = append(issues, "TapeAlert "+strings.Join(health.TapeAlertFlags, ", "))
+		}
+
+		if health.BelowFloor {
+			issues = append(issues, fmt.Sprintf("%.1f MB/s, below the %.0f MB/s floor", health.ThroughputMBps, health.FloorMBps))
+		}
+
+		if health.RepositionsMeasured && health.Repositions > 0 {
+			issues = append(issues, fmt.Sprintf("%d %s", health.Repositions, plural(health.Repositions, "reposition")))
+		}
+
+		if len(issues) > 0 {
+			problems = append(problems, fmt.Sprintf("%s (%s)", writtenTape.Barcode, strings.Join(issues, ", ")))
+		}
+	}
+
+	return problems
 }
 
 // plural renders a count's noun, so a one-archive run does not read "1 archives".
