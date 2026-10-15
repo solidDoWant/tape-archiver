@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -22,6 +23,13 @@ import (
 const (
 	resolveControlTimeout = 5 * time.Minute
 	resolveDataTimeout    = 10 * time.Minute
+
+	// resolveMaxAttempts bounds retries: Temporal's default is unlimited, so a
+	// deterministic failure would never fail the run or fire the alert (#385).
+	resolveMaxAttempts = 3
+
+	// resolveInfeasibleErrorType marks a source that cannot fit one tape.
+	resolveInfeasibleErrorType = "resolve-infeasible"
 )
 
 // snapshotResolver is the seam *k8ssnap.Resolver satisfies, injected for tests.
@@ -203,11 +211,11 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 		archive.EstimatedBytes = estimate
 
 		if estimate > capacity {
-			return nil, fmt.Errorf(
+			return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
 				"sources[%d] estimated size %d bytes exceeds one tape's usable capacity %d bytes "+
 					"(native %d less the LTFS reserve Pack enforces)",
 				index, estimate, capacity, cfg.Library.TapeCapacityBytes,
-			)
+			), resolveInfeasibleErrorType, nil)
 		}
 
 		resolved = append(resolved, archive)
@@ -403,6 +411,7 @@ func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	controlCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           TaskQueue,
 		StartToCloseTimeout: resolveControlTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: resolveMaxAttempts},
 	})
 
 	var control *ResolveControlActivities
@@ -415,6 +424,7 @@ func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: resolveDataTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: resolveMaxAttempts},
 	})
 
 	var data *ResolveDataActivities

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -29,6 +30,10 @@ const (
 	// generatePAR2Timeout is generous: parity is computed over the full staged
 	// tree, potentially terabytes.
 	generatePAR2Timeout = 24 * time.Hour
+
+	// generatePAR2MaxAttempts bounds retries so a deterministic failure fails the
+	// run; a heartbeat timeout from a worker restart is still retried (#385).
+	generatePAR2MaxAttempts = 3
 
 	// par2SetName is the index file name; par2 writes "archive.vol*.par2" beside it.
 	par2SetName = "archive.par2"
@@ -454,6 +459,7 @@ func generatePAR2Phase(ctx workflow.Context, cfg config.Config, state *runState)
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: generatePAR2Timeout,
 		HeartbeatTimeout:    activityHeartbeatTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: generatePAR2MaxAttempts},
 	})
 
 	var activities *GeneratePAR2Activities
