@@ -1,12 +1,6 @@
-// Command gen captures the versions of the external tools tape-archiver shells
-// out to and writes them as a Go source file for package buildinfo. It is run by
-// `go generate ./internal/buildinfo` (equivalently `make generate-versions`) in
-// the dev shell, where the pinned tools are on PATH.
-//
-// Each tool is queried with `<tool> --version`; the first non-empty output line
-// is recorded verbatim (no per-tool parsing, so a new tool needs no new code). A
-// tool that cannot be executed is a hard error, so a regeneration never silently
-// commits blank versions — the committed file always reflects real binaries.
+// Command gen writes the pinned external tools' versions as Go source for
+// package buildinfo. A tool that cannot be run is a hard error, so blank
+// versions are never committed.
 package main
 
 import (
@@ -20,9 +14,6 @@ import (
 	"strings"
 )
 
-// tools is the set of external binaries whose versions the report records. The
-// key is the map key package buildinfo reads; args is the version-query
-// invocation.
 var tools = []struct {
 	name string
 	args []string
@@ -64,10 +55,8 @@ func main() {
 	}
 }
 
-// captureVersion runs `name args...` and returns the first non-empty output line
-// verbatim. Some tools print their version to stderr and/or exit non-zero for a
-// version query, so output is read from both streams and a non-zero exit is not
-// itself an error — only a tool that produces no output (or cannot start) is.
+// captureVersion returns the first non-empty output line. Some tools print the
+// version to stderr or exit non-zero, so only empty output is an error.
 func captureVersion(name string, args []string) (string, error) {
 	out, runErr := exec.Command(name, args...).CombinedOutput()
 
@@ -84,8 +73,6 @@ func captureVersion(name string, args []string) (string, error) {
 	return "", fmt.Errorf("%s produced no version output", name)
 }
 
-// render builds the generated Go source from the captured versions, formatted
-// with gofmt. Keys are emitted in sorted order so regeneration is deterministic.
 func render(versions map[string]string) ([]byte, error) {
 	names := make([]string, 0, len(versions))
 	for name := range versions {

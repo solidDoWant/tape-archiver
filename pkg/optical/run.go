@@ -7,15 +7,8 @@ import (
 	"strings"
 )
 
-// runXorriso runs xorriso with args, returning its combined stdout+stderr. On a
-// non-zero exit it returns the output alongside an error wrapping the command and
-// the trimmed output (matching pkg/ltfs's error style). The output is returned
-// even on success so callers that parse xorriso's report (State) can read it; it
-// is also returned on error so the caller can inspect a partial report.
-//
-// xorriso writes its progress and media report to stderr and exits non-zero only
-// on a real failure, so combining the streams captures the full report either
-// way.
+// runXorriso runs xorriso and returns its combined output, also on error. The
+// streams are combined because xorriso writes its media report to stderr.
 func runXorriso(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, xorrisoBin, args...)
 

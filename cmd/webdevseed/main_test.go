@@ -33,15 +33,11 @@ func TestBuildSeedConfig(t *testing.T) {
 	assert.Equal(t, testIdentity, cfg.Encryption.Identity)
 	assert.Empty(t, cfg.Delivery.WebhookURL, "an unset webhook must leave delivery a no-op (empty WebhookURL)")
 
-	// The config must be structurally valid on its own (before runsubmit.ApplyDryRun
-	// rewrites the placeholder changer/drives) — an invalid seed config would be a
-	// bug in buildSeedConfig, not something ApplyDryRun/Submit should ever surface.
+	// Must be valid even before ApplyDryRun replaces the placeholders.
 	assert.NoError(t, cfg.Validate())
 }
 
 func TestBuildSeedConfig_threadsWebhookURL(t *testing.T) {
-	// `make web-dev` passes the local fake Discord receiver's URL so seeded runs
-	// deliver a report and the "Discord report ↗" deep-link renders locally.
 	const webhookURL = "http://127.0.0.1:9997/webhook/dev"
 
 	cfg := buildSeedConfig(testSource, testRecipient, testIdentity, 21, webhookURL)
@@ -120,11 +116,8 @@ func TestEnvNonNegativeInt(t *testing.T) {
 	}
 }
 
-// fakeSubmitClient is a hand-rolled fake of runsubmit.TemporalClient (mirroring
-// pkg/runsubmit's own test double of the same interface), driving
-// submitWithRetry's logic without a real Temporal connection: it returns a
-// WorkflowExecutionAlreadyStarted conflict for the first conflictsBeforeSuccess
-// calls, then succeeds.
+// fakeSubmitClient returns an AlreadyStarted conflict for the first
+// conflictsBeforeSuccess calls, then succeeds.
 type fakeSubmitClient struct {
 	conflictsBeforeSuccess int
 	calls                  int
@@ -211,9 +204,7 @@ func TestSubmitWithRetry(t *testing.T) {
 	})
 }
 
-// conflictOnceThenOtherErrorClient always fails with a plain (non-conflict)
-// error, verifying submitWithRetry does not retry an error that is not a
-// singleton conflict.
+// conflictOnceThenOtherErrorClient always fails with a non-conflict error.
 type conflictOnceThenOtherErrorClient struct {
 	calls int
 }
@@ -224,8 +215,6 @@ func (f *conflictOnceThenOtherErrorClient) ExecuteWorkflow(_ context.Context, _ 
 	return nil, errors.New("connection refused")
 }
 
-// restoreRetryWait resets the package-level submitRetryWait var to its
-// production default after a test overrides it.
 func restoreRetryWait(t *testing.T) {
 	t.Helper()
 
@@ -292,6 +281,4 @@ func TestEnvInt(t *testing.T) {
 	}
 }
 
-// Compile-time sanity check that config.Config from buildSeedConfig is the
-// type submitWithRetry/runsubmit.Submit actually expect.
 var _ = func() *config.Config { return buildSeedConfig("", "", "", 0, "") }

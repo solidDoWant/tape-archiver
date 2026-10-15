@@ -18,9 +18,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 )
 
-// requireTemporalAddress skips the test unless a Temporal server is reachable
-// at TEMPORAL_ADDRESS. The make test-integration target arranges this via
-// temporal-up before invoking the suite.
 func requireTemporalAddress(t *testing.T) {
 	t.Helper()
 
@@ -29,9 +26,8 @@ func requireTemporalAddress(t *testing.T) {
 	}
 }
 
-// isolateTemporalConfig points TEMPORAL_CONFIG_FILE at a fresh empty TOML file
-// so envconfig does not pick up a stray ~/.config/temporalio/temporal.toml on
-// the host, mirroring pkg/temporalclient's integration tests.
+// isolateTemporalConfig keeps envconfig from reading a stray host
+// ~/.config/temporalio/temporal.toml.
 func isolateTemporalConfig(t *testing.T) {
 	t.Helper()
 
@@ -41,7 +37,6 @@ func isolateTemporalConfig(t *testing.T) {
 	t.Setenv("TEMPORAL_PROFILE", "")
 }
 
-// freeAddr returns a local TCP address with an available port.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 
@@ -54,9 +49,6 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-// scrapeStatus performs a GET against the given /metrics address and reports
-// whether it returned HTTP 200, draining the body. A connection error yields
-// (0, err) so callers can distinguish "endpoint down" from "scraped".
 func scrapeStatus(t *testing.T, addr string) (int, error) {
 	t.Helper()
 
@@ -75,11 +67,8 @@ func scrapeStatus(t *testing.T, addr string) (int, error) {
 	return response.StatusCode, nil
 }
 
-// TestRunWaitsForFinalScrapeBeforeShutdown covers AC3: with the metrics endpoint
-// enabled and a positive scrape-wait timeout, run() keeps /metrics scrapeable
-// after the worker drains and only returns once Prometheus performs a final
-// scrape — well before the (generous) timeout would elapse. This proves the
-// documented final-scrape wait is actually wired into run().
+// TestRunWaitsForFinalScrapeBeforeShutdown: after draining, run() keeps /metrics
+// up and returns only once a final scrape lands, well before the timeout.
 func TestRunWaitsForFinalScrapeBeforeShutdown(t *testing.T) {
 	requireTemporalAddress(t)
 	isolateTemporalConfig(t)
@@ -88,11 +77,8 @@ func TestRunWaitsForFinalScrapeBeforeShutdown(t *testing.T) {
 
 	t.Setenv("ROLE", string(RoleControl))
 	t.Setenv("METRICS_ADDR", metricsAddr)
-	// A generous scrape-wait timeout: the test must release run() via a scrape,
-	// not by hitting this bound. If the wait were not wired in, run() would
-	// return immediately after drain instead of blocking for the scrape.
+	// The test must release run() via a scrape, not by hitting this bound.
 	t.Setenv("METRICS_SCRAPE_WAIT_TIMEOUT", "30s")
-	// Disable the health server so it does not contend for a fixed port.
 	t.Setenv("HEALTH_ADDR", "")
 
 	interruptCh := make(chan interface{})
@@ -100,31 +86,23 @@ func TestRunWaitsForFinalScrapeBeforeShutdown(t *testing.T) {
 
 	go func() { runErr <- run(t.Context(), interruptCh) }()
 
-	// Wait until the worker is registered and /metrics is serving.
 	require.Eventually(t, func() bool {
 		status, err := scrapeStatus(t, metricsAddr)
 
 		return err == nil && status == http.StatusOK
 	}, 30*time.Second, 250*time.Millisecond, "metrics endpoint did not come up")
 
-	// Trigger graceful drain. After the worker drains, run() must block in the
-	// final-scrape wait with /metrics still up rather than returning.
 	close(interruptCh)
 
-	// The worker should not have returned yet: it is waiting for a final scrape.
-	// (A brief settle avoids racing the drain; run() may still be mid-drain,
-	// which is also "not returned".)
+	// run() must now block in the final-scrape wait.
 	select {
 	case err := <-runErr:
 		t.Fatalf("run returned before any post-drain scrape; final-scrape wait not wired: err=%v", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	// Repeatedly scrape /metrics. WaitForScrape drains any tick buffered before
-	// it began blocking, so a single pre-block scrape may not satisfy it; the
-	// loop guarantees a scrape lands after run() enters the wait. Each scrape
-	// returning 200 also proves the endpoint stays up through the shutdown
-	// window. run() must then return promptly, far under the 30s timeout.
+	// Scrape repeatedly: WaitForScrape discards ticks buffered before it began
+	// blocking, so one pre-block scrape may not satisfy it.
 	deadline := time.Now().Add(10 * time.Second)
 
 	for {
@@ -146,11 +124,7 @@ func TestRunWaitsForFinalScrapeBeforeShutdown(t *testing.T) {
 	}
 }
 
-// TestRunRegistersWorkerOnTaskQueue starts the worker for each role and asserts
-// that a poller appears on the matching task queue — the observable behavior
-// behind "the Temporal UI shows the worker as registered on the correct task
-// queue". Disabling the metrics endpoint keeps the two role workers from
-// racing for the same listen address.
+// TestRunRegistersWorkerOnTaskQueue asserts each role's worker polls its queue.
 func TestRunRegistersWorkerOnTaskQueue(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -168,20 +142,14 @@ func TestRunRegistersWorkerOnTaskQueue(t *testing.T) {
 
 			t.Setenv("ROLE", string(test.role))
 			t.Setenv("METRICS_ADDR", "")
-			// Disable the health server too, so sequential subtests do not
-			// contend for the default health port.
 			t.Setenv("HEALTH_ADDR", "")
 
-			// interruptCh stands in for worker.InterruptCh: closing it drives
-			// the same run-phase drain a SIGTERM would, without signalling the
-			// test process.
+			// Closing interruptCh drives the same drain a SIGTERM would.
 			interruptCh := make(chan interface{})
 			runErr := make(chan error, 1)
 
 			go func() { runErr <- run(t.Context(), interruptCh) }()
 
-			// A separate client probes the task queue the worker should be
-			// polling. New performs its own startup health check.
 			probe, shutdown, err := temporalclient.New(t.Context(), nil)
 			require.NoError(t, err)
 
@@ -196,7 +164,6 @@ func TestRunRegistersWorkerOnTaskQueue(t *testing.T) {
 				return len(resp.GetPollers()) > 0
 			}, 30*time.Second, 250*time.Millisecond, "worker did not register a poller on the %q task queue", test.queue)
 
-			// Trigger graceful drain and confirm run returns without error.
 			close(interruptCh)
 
 			select {

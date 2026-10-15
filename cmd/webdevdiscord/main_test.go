@@ -11,11 +11,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/webhook"
 )
 
-// TestHandler_DriveTheRealWebhookClient exercises the fake receiver through the
-// real pkg/webhook.Client — the exact component that talks to it in production
-// — so the test fails if the mock ever stops satisfying the contract
-// SendFile/Send/FetchWebhookGuild depend on. Per CLAUDE.md's testing style it
-// drives the public interface, never the handler's internals.
+// TestHandler_DriveTheRealWebhookClient drives the fake through the real
+// pkg/webhook.Client so it fails if the fake stops satisfying its contract.
 func TestHandler_DriveTheRealWebhookClient(t *testing.T) {
 	server := httptest.NewServer(newHandler("guild-1", "channel-1"))
 	defer server.Close()
@@ -53,18 +50,13 @@ func TestHandler_DriveTheRealWebhookClient(t *testing.T) {
 	})
 
 	t.Run("Send (a no-wait alert) succeeds", func(t *testing.T) {
-		// A non-2xx would surface as an error here; the fake answers 204.
 		err := client.Send(t.Context(), webhook.Message{Content: "run paused"})
 		require.NoError(t, err)
 	})
 }
 
-// TestHandler_RejectEndpoint covers the deliberately-failing delivery path: a
-// report upload to a "reject" webhook must fail with a NON-retryable status, so
-// the Deliver phase (workflows/backup/deliver.go) fails the run on the first
-// attempt — this is exactly what makes webdevseed's seeded-to-fail runs fail.
-// The no-wait failure alert on the same endpoint must still succeed, so the
-// failed run's SPEC §11 alert still lands.
+// TestHandler_RejectEndpoint checks that a report upload to a "reject" webhook
+// fails non-retryably (so Deliver fails the run) while the alert still lands.
 func TestHandler_RejectEndpoint(t *testing.T) {
 	server := httptest.NewServer(newHandler("guild-1", "channel-1"))
 	defer server.Close()

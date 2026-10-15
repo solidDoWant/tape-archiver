@@ -12,18 +12,12 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// phaseUnavailable is printed for the last completed phase when the workflow
-// does not answer the phase query — e.g. no worker is currently polling, or the
-// workflow predates the query handler. The execution status is still reported.
+// phaseUnavailable is printed when the phase query fails, e.g. no worker is
+// polling.
 const phaseUnavailable = "unavailable"
 
-// phaseNone is printed when the workflow answers the phase query but no phase
-// has completed yet.
 const phaseNone = "none"
 
-// showStatus implements `tapectl status`. It prints the backup run's current
-// execution status and the name of its last completed phase. Runs are a singleton
-// (backupWorkflowID, SPEC §4.2), so it takes no arguments.
 func showStatus(ctx context.Context, args []string, out io.Writer) error {
 	if err := requireNoArgs("status", args); err != nil {
 		return err
@@ -54,10 +48,8 @@ func showStatus(ctx context.Context, args []string, out io.Writer) error {
 	return err
 }
 
-// queryLastCompletedPhase asks the workflow for its last completed phase via the
-// agreed query. A query failure is not fatal — the workflow may have no worker
-// polling or may predate the handler — so it returns a sentinel rather than an
-// error, letting status still report the execution state.
+// queryLastCompletedPhase returns a sentinel rather than an error on query
+// failure so status can still report the execution state.
 func queryLastCompletedPhase(ctx context.Context, temporalClient client.Client, workflowID string) string {
 	response, err := temporalClient.QueryWorkflow(ctx, workflowID, "", backup.LastCompletedPhaseQuery)
 	if err != nil {
@@ -76,9 +68,6 @@ func queryLastCompletedPhase(ctx context.Context, temporalClient client.Client, 
 	return phase
 }
 
-// formatStatus renders a Temporal execution status enum as a human-readable
-// label. The SDK enum's String already yields a friendly CamelCase form
-// (e.g. "Running", "ContinuedAsNew").
 func formatStatus(status enumspb.WorkflowExecutionStatus) string {
 	return status.String()
 }

@@ -9,11 +9,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// abortRun implements `tapectl abort`. It sends the OperatorAbortSignal to the
-// backup run paused because a Load or Write failed for one drive-set (SPEC §4.3):
-// rather than swapping in fresh blanks and resuming, the operator ends the run in a
-// defined, reported state with no further tapes written. Runs are a singleton
-// (backupWorkflowID, SPEC §4.2), so it takes no arguments.
+// abortRun implements `tapectl abort`, ending a run paused on a Load/Write
+// failure in a reported state with no further tapes written (SPEC §4.3).
 func abortRun(ctx context.Context, args []string, out io.Writer) error {
 	if err := requireNoArgs("abort", args); err != nil {
 		return err

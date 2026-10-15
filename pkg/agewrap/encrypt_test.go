@@ -15,7 +15,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/agewrap"
 )
 
-// ageHeader is the start of every age file (the v1 format intro line).
 var ageHeader = []byte("age-encryption.org/v1")
 
 func TestEncryptRoundTrip(t *testing.T) {
@@ -29,8 +28,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 		{name: "multiple recipients", recipients: 3},
 	}
 
-	// A mix of compressible runs and varied bytes, large enough to exercise the
-	// streaming path through the age subprocess (multiple AEAD chunks).
+	// Large enough to span multiple AEAD chunks.
 	payload := make([]byte, 1<<16)
 	for index := range payload {
 		payload[index] = byte((index / 64) % 256)
@@ -54,8 +52,6 @@ func TestEncryptRoundTrip(t *testing.T) {
 
 			assert.Equal(t, ageHeader, encrypted.Bytes()[:len(ageHeader)], "output must be an age file")
 
-			// Each recipient's identity must independently decrypt to the exact
-			// original bytes, using the same age binary a recoverer would use.
 			for _, identity := range identities {
 				roundTripped := decryptWithAge(t, encrypted.Bytes(), identity)
 				assert.Equal(t, payload, roundTripped)
@@ -67,8 +63,7 @@ func TestEncryptRoundTrip(t *testing.T) {
 func TestEncryptRejectsNonPostQuantumRecipient(t *testing.T) {
 	t.Parallel()
 
-	// A valid, well-formed X25519-only recipient (age1…, not age1pq1…). It must
-	// be rejected by validation before age is ever invoked (SPEC §7).
+	// A valid X25519-only recipient, which SPEC §7 forbids.
 	const x25519Recipient = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"
 
 	tests := []struct {
@@ -104,8 +99,6 @@ func TestEncryptContextCancelled(t *testing.T) {
 	require.Error(t, err)
 }
 
-// generateRecipient returns just the public recipient of a fresh post-quantum
-// keypair, for tests that do not need to decrypt.
 func generateRecipient(t *testing.T) string {
 	t.Helper()
 
@@ -114,9 +107,6 @@ func generateRecipient(t *testing.T) string {
 	return recipient
 }
 
-// generateKeypair generates a fresh age post-quantum keypair with the real
-// age-keygen binary and returns the path to the identity file and the
-// corresponding recipient string.
 func generateKeypair(t *testing.T) (identityPath, recipient string) {
 	t.Helper()
 
@@ -133,7 +123,6 @@ func generateKeypair(t *testing.T) (identityPath, recipient string) {
 	contents, err := os.ReadFile(identityPath)
 	require.NoError(t, err)
 
-	// age-keygen records the recipient in a "# public key: age1pq1…" comment.
 	const marker = "# public key: "
 
 	for _, line := range strings.Split(string(contents), "\n") {
@@ -150,8 +139,6 @@ func generateKeypair(t *testing.T) (identityPath, recipient string) {
 	return identityPath, recipient
 }
 
-// decryptWithAge decrypts data with the given identity file by invoking the
-// bundled age binary — the same tool a recoverer uses.
 func decryptWithAge(t *testing.T, data []byte, identityPath string) []byte {
 	t.Helper()
 

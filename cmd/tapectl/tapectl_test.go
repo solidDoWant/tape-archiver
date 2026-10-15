@@ -25,8 +25,7 @@ const validConfigJSON = `{
   "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
 }`
 
-// opticalBurnConfigJSON is validConfigJSON with optical burning enabled, naming a
-// real burner device. A dry-run must never leave this device in the submitted config.
+// opticalBurnConfigJSON names a real burner, which a dry-run must drop.
 const opticalBurnConfigJSON = `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 2,
@@ -39,7 +38,6 @@ const opticalBurnConfigJSON = `{
   }
 }`
 
-// writeConfig writes content to a temp file and returns its path.
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 
@@ -70,8 +68,7 @@ func TestBuildSubmission(t *testing.T) {
 }
 
 func TestBuildSubmissionDryRun(t *testing.T) {
-	// AC1: a dry-run with no MHVTL_* set must fail closed rather than fall back
-	// to device nodes that are byte-identical to the real library.
+	// Must fail closed rather than fall back to the real library's devices.
 	t.Run("errors and submits nothing when env unset", func(t *testing.T) {
 		withGetenv(t, func(string) string { return "" })
 
@@ -85,8 +82,6 @@ func TestBuildSubmissionDryRun(t *testing.T) {
 		assert.Contains(t, message, mhvtlDrive1Env)
 	})
 
-	// AC1: the error names exactly which variable(s) are missing so the operator
-	// can fix it, and it must not silently proceed on a partial override.
 	t.Run("errors naming the single missing variable", func(t *testing.T) {
 		env := map[string]string{
 			mhvtlChangerEnv: "/dev/sch9",
@@ -122,11 +117,7 @@ func TestBuildSubmissionDryRun(t *testing.T) {
 		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, cfg.Library.Drives)
 	})
 
-	// AC1: a dry-run must never leave delivery.opticalBurn pointing at the real
-	// burner. mhvtl has no virtual optical burner, so the section is neutralized so
-	// the burn phase is a no-op and no original burner device survives the override.
-	// AC2: the submission is still accepted (non-nil, valid) and burning being off
-	// lets the run reach a defined end state rather than driving real hardware.
+	// mhvtl has no virtual burner, so a dry-run must not drive the real one.
 	t.Run("disables optical burning and drops the real burner device", func(t *testing.T) {
 		env := map[string]string{
 			mhvtlChangerEnv: "/dev/sch9",
@@ -141,21 +132,15 @@ func TestBuildSubmissionDryRun(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 
-		// Burning is neutralized: Enabled() is false and no device from the original
-		// opticalBurn.drives ("/dev/sr0") survives into the submitted config.
 		assert.False(t, cfg.Delivery.OpticalBurn.Enabled())
 		assert.Nil(t, cfg.Delivery.OpticalBurn)
 
-		// The tape path is still redirected to the mhvtl nodes — a config that
-		// configures burning remains dry-runnable for its tape path.
 		assert.Equal(t, "/dev/sch9", cfg.Library.Changer)
 		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, cfg.Library.Drives)
 
-		// The operator is told burning was skipped (not silent).
 		assert.Contains(t, warnings.String(), "optical burning disabled")
 	})
 
-	// A dry-run of a config that does not configure burning emits no advisory.
 	t.Run("no optical-burn advisory when burning is not configured", func(t *testing.T) {
 		env := map[string]string{
 			mhvtlChangerEnv: "/dev/sch9",
@@ -173,22 +158,17 @@ func TestBuildSubmissionDryRun(t *testing.T) {
 	})
 }
 
-// TestParseRunArgsRejectsID guards the removal of the --id flag: with the
-// singleton workflow ID there is no way to submit under a distinct ID.
 func TestParseRunArgsRejectsID(t *testing.T) {
 	_, err := parseRunArgs([]string{"--config", "run.json", "--id", "my-run"})
 	require.Error(t, err)
 }
 
-// TestParseRunArgsRejectsStrayPositional covers AC2: a stray positional
-// argument must be rejected naming the unexpected argument. Go's flag package
-// stops at the first positional, so without this guard a trailing --dry-run is
-// silently dropped and a real run is submitted where a test was intended.
+// TestParseRunArgsRejectsStrayPositional guards against a trailing --dry-run
+// being silently dropped after a stray positional.
 func TestParseRunArgsRejectsStrayPositional(t *testing.T) {
 	options, err := parseRunArgs([]string{"--config", "run.json", "backup", "--dry-run"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "backup")
-	// The dropped --dry-run must not have been silently honored.
 	assert.False(t, options.dryRun)
 }
 
@@ -204,10 +184,7 @@ func TestTranslateSubmitError(t *testing.T) {
 		assert.Contains(t, message, backupWorkflowID)
 		assert.Contains(t, message, "run-abc")
 
-		// AC3: the suggested inspection command must execute successfully when
-		// copy-pasted verbatim. `tapectl status` takes no arguments
-		// (requireNoArgs), so the suggestion must be bare `tapectl status` and
-		// must not append the workflow ID as an argument.
+		// The suggested command must work when copy-pasted verbatim.
 		assert.Contains(t, message, "`tapectl status`")
 		assert.NotContains(t, message, "tapectl status "+backupWorkflowID)
 		require.NoError(t, requireNoArgs("status", suggestedStatusArgs(message)))
@@ -233,9 +210,6 @@ func TestRequireTemporalAddress(t *testing.T) {
 	}))
 }
 
-// TestSubmitRunMissingTemporalAddress exercises the full run path with a valid
-// config but no TEMPORAL_ADDRESS: it must fail with a descriptive error and
-// never attempt a connection.
 func TestSubmitRunMissingTemporalAddress(t *testing.T) {
 	withGetenv(t, func(string) string { return "" })
 
@@ -244,9 +218,6 @@ func TestSubmitRunMissingTemporalAddress(t *testing.T) {
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }
 
-// TestRequireNoArgs covers the singleton subcommands' argument handling: they take
-// no arguments (every run is the singleton backupWorkflowID), so no args is valid
-// and any positional argument is rejected.
 func TestRequireNoArgs(t *testing.T) {
 	require.NoError(t, requireNoArgs("status", nil))
 	require.NoError(t, requireNoArgs("resume", nil))
@@ -262,9 +233,6 @@ func TestRequireNoArgs(t *testing.T) {
 	assert.Contains(t, err.Error(), "takes no arguments")
 }
 
-// TestResumeRunMissingTemporalAddress exercises the resume path with no
-// TEMPORAL_ADDRESS: it must fail with a descriptive error and never attempt a
-// connection.
 func TestResumeRunMissingTemporalAddress(t *testing.T) {
 	withGetenv(t, func(string) string { return "" })
 
@@ -273,9 +241,6 @@ func TestResumeRunMissingTemporalAddress(t *testing.T) {
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }
 
-// TestAbortRunMissingTemporalAddress exercises the abort path with no
-// TEMPORAL_ADDRESS: it must fail with a descriptive error and never attempt a
-// connection.
 func TestAbortRunMissingTemporalAddress(t *testing.T) {
 	withGetenv(t, func(string) string { return "" })
 
@@ -284,9 +249,6 @@ func TestAbortRunMissingTemporalAddress(t *testing.T) {
 	assert.Contains(t, err.Error(), "TEMPORAL_ADDRESS")
 }
 
-// TestCancelRunMissingTemporalAddress exercises the cancel path with no
-// TEMPORAL_ADDRESS: it must fail with a descriptive error and never attempt a
-// connection.
 func TestCancelRunMissingTemporalAddress(t *testing.T) {
 	withGetenv(t, func(string) string { return "" })
 
@@ -326,11 +288,8 @@ func TestDispatchHelp(t *testing.T) {
 	assert.True(t, strings.Contains(out.String(), "tapectl"))
 }
 
-// suggestedStatusArgs extracts the arguments of the backticked `tapectl status`
-// command embedded in an error message and returns the tokens after
-// `tapectl status`. It lets a test feed the tool's own suggestion straight into
-// requireNoArgs, proving the copy-pasted command parses (AC3). If the message
-// contains no backticked `tapectl status` command it returns nil.
+// suggestedStatusArgs returns the arguments of the backticked `tapectl status`
+// command in message, or nil if there is none.
 func suggestedStatusArgs(message string) []string {
 	const prefix = "`tapectl status"
 
@@ -349,7 +308,6 @@ func suggestedStatusArgs(message string) []string {
 	return strings.Fields(rest[:end])
 }
 
-// withGetenv swaps the package getenv for the duration of a test.
 func withGetenv(t *testing.T, fn func(string) string) {
 	t.Helper()
 
@@ -359,7 +317,6 @@ func withGetenv(t *testing.T, fn func(string) string) {
 	t.Cleanup(func() { getenv = original })
 }
 
-// withWarnOut redirects dry-run advisories to a buffer for the duration of a test.
 func withWarnOut(t *testing.T) *bytes.Buffer {
 	t.Helper()
 

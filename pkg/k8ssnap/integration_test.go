@@ -12,9 +12,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/k8ssnap"
 )
 
-// newResolverOrSkip builds a Resolver against the ambient cluster, skipping the
-// test when no kubeconfig/in-cluster config is available or the cluster cannot be
-// reached (issue #13 AC6).
+// newResolverOrSkip builds a Resolver for the ambient cluster, skipping when
+// none is reachable (issue #13 AC6).
 func newResolverOrSkip(t *testing.T) *k8ssnap.Resolver {
 	t.Helper()
 
@@ -23,8 +22,7 @@ func newResolverOrSkip(t *testing.T) *k8ssnap.Resolver {
 		t.Skipf("no Kubernetes config available (%s); skipping", err)
 	}
 
-	// A cluster-wide list with an impossible selector is a cheap liveness probe:
-	// it succeeds (empty) when the API is reachable and errors when it is not.
+	// An impossible selector is a cheap API liveness probe.
 	if _, err := client.ListVolumeSnapshots(t.Context(), "", "tape-archiver.test/unreachable=1"); err != nil {
 		t.Skipf("Kubernetes cluster not reachable (%s); skipping", err)
 	}
@@ -32,9 +30,7 @@ func newResolverOrSkip(t *testing.T) *k8ssnap.Resolver {
 	return k8ssnap.NewResolver(client, testutil.K8sDatasetParent(t))
 }
 
-// TestResolveIntegration resolves a real VolumeSnapshot (named by TAPE_K8S_SNAPSHOT
-// in TAPE_K8S_NAMESPACE) to its democratic-csi ZFS snapshot path. It skips when no
-// cluster is reachable or no snapshot is configured.
+// TestResolveIntegration resolves TAPE_K8S_SNAPSHOT in TAPE_K8S_NAMESPACE.
 func TestResolveIntegration(t *testing.T) {
 	resolver := newResolverOrSkip(t)
 
@@ -55,9 +51,7 @@ func TestResolveIntegration(t *testing.T) {
 		"resolved snapshot name should follow the democratic-csi convention")
 }
 
-// TestResolveGroupIntegration resolves all VolumeSnapshots matching
-// TAPE_K8S_LABEL_SELECTOR into a group. It skips when no cluster is reachable or no
-// selector is configured.
+// TestResolveGroupIntegration resolves TAPE_K8S_LABEL_SELECTOR into a group.
 func TestResolveGroupIntegration(t *testing.T) {
 	resolver := newResolverOrSkip(t)
 

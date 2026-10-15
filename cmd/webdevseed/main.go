@@ -1,44 +1,15 @@
-// Command webdevseed submits a handful of sample dry-run backups against the
-// local dev stack `make web-dev` brings up (issue #265), so a developer
-// opening the web UI immediately has something to look at in History rather
-// than an empty list. It is dev tooling only — never built into a shipped
-// image or run in CI (see the Non-Goals in issue #265).
+// Command webdevseed submits a few sample dry-run backups against the local
+// `make web-dev` stack so the web UI's History is not empty. Dev tooling only.
 //
-// Most seeded runs succeed, but WEBDEVSEED_FAIL_COUNT of them (default
-// defaultFailCount) are seeded to fail — they deliver their report to the fake
-// receiver's reject endpoint (WEBDEVSEED_FAIL_WEBHOOK_URL), which 4xx's the
-// upload, so the run fails terminally at Deliver (a deterministic, non-retryable
-// rejection — workflows/backup/deliver.go). That gives the failed-run UI (the
-// history table's failed rows, the run detail page's error console + failure
-// hero) and the SPEC §11 failure-alert path something to exercise locally too,
-// not just green runs. A rejected delivery (bounded Deliver retry) is used
-// rather than an earlier failure because earlier phases retry under the
-// server-default unlimited policy and would wedge the run "Running" forever
-// instead of failing. See run for the mix.
+// The first WEBDEVSEED_FAIL_COUNT runs deliver their report to the fake
+// receiver's reject endpoint so they fail terminally at Deliver. Deliver is the
+// failure lever because its retry is bounded; earlier phases retry forever and
+// would wedge the run "Running".
 //
-// It reuses the one shared submit path (pkg/runsubmit.Submit/.ApplyDryRun —
-// the same functions `tapectl run --dry-run` and `POST /api/runs` call) and a
-// real `age-keygen -pq` post-quantum keypair (the same pattern
-// e2e/harness_test.go's generateTestKeypair and
-// workflows/backup/e2e_integration_test.go use), submitting a
-// config.Config sourced from the ZFS snapshot scripts/zpool-up.sh creates.
-//
-// Backup runs are a Temporal singleton (SPEC §4.2 — workflow ID always
-// "backup"), so seeding cannot submit several at once: this loops
-// sequentially, submitting one, blocking on its completion via
-// client.WorkflowRun.Get, then submitting the next. scripts/web-dev-up.sh
-// runs this in the background (not before starting cmd/web in the
-// foreground) precisely because of that serial cost — a developer should not
-// wait several minutes of real mhvtl writes before `make web-dev` hands back
-// a prompt; History fills in progressively instead.
-//
-// Seed configs set library.allowNonBlankTapes so repeat invocations (`make
-// web-dev` run again against an already-up stack, per issue #265 AC3) can
-// keep reusing the same small pool of mhvtl storage slots indefinitely
-// without needing any cross-invocation state to track which slots are
-// still blank — these are disposable dev archives, not real backups, so
-// reclaiming them deliberately (the same opt-out a real operator can use,
-// CLAUDE.md's "Hardware and Safety") is the simplest correct choice.
+// Backup runs are a Temporal singleton (workflow ID "backup"), so runs are
+// submitted serially. Seed configs set allowNonBlankTapes so repeat invocations
+// can reuse the same small pool of mhvtl slots without cross-run state; these
+// are disposable dev archives.
 package main
 
 import (
@@ -67,11 +38,7 @@ const (
 	defaultPerRunTimeout = 8 * time.Minute
 	maxSubmitAttempts    = 8 // ~2 minutes of retrying a singleton conflict (at submitRetryWait apart) before giving up this iteration
 
-	// slotPoolStart/slotPoolSize pick a small, fixed range of mhvtl storage
-	// slots for seed runs, deliberately away from 0-2, which existing
-	// integration tests (workflows/backup/*_integration_test.go) hardcode —
-	// see the package doc comment for why reuse across invocations is safe
-	// (allowNonBlankTapes) rather than needing to avoid collisions here too.
+	// Seed slots stay away from 0-2, which integration tests hardcode.
 	slotPoolStart = 20
 	slotPoolSize  = 3
 
@@ -79,10 +46,7 @@ const (
 	redundancyPercent = 10.0
 )
 
-// submitRetryWait is how long submitWithRetry waits between attempts while
-// the singleton backup workflow is occupied. A package-level var (not a
-// const) so tests can shrink it and exercise the give-up-after-maxSubmitAttempts
-// path without a slow real-time test.
+// submitRetryWait is a var so tests can shrink it.
 var submitRetryWait = 15 * time.Second
 
 func main() {
@@ -98,11 +62,6 @@ func run(ctx context.Context, getenv func(string) string) error {
 		return err
 	}
 
-	// WEBDEVSEED_FAIL_COUNT: how many of the seeded runs should be deliberately
-	// failing ones (default defaultFailCount; 0 disables). Seeding a mix gives
-	// the dashboard's history table, the failed-run detail view (error console +
-	// failure hero), and the failure-alert webhook path something to exercise
-	// locally, not just green runs. Clamped to count.
 	failCount, err := envNonNegativeInt(getenv, "WEBDEVSEED_FAIL_COUNT", defaultFailCount)
 	if err != nil {
 		return err
@@ -114,20 +73,10 @@ func run(ctx context.Context, getenv func(string) string) error {
 
 	source := envOr(getenv, "WEBDEVSEED_SOURCE", defaultSource)
 
-	// WEBDEVSEED_WEBHOOK_URL points seeded runs' report delivery at the local
-	// fake Discord receiver (cmd/webdevdiscord, wired by scripts/web-dev-up.sh)
-	// so the web UI's "Discord report ↗" deep-link renders locally. Unset (any
-	// context other than web-dev) leaves delivery a no-op — see buildSeedConfig.
+	// Unset leaves report delivery a no-op.
 	webhookURL := getenv("WEBDEVSEED_WEBHOOK_URL")
 
-	// WEBDEVSEED_FAIL_WEBHOOK_URL is the fake receiver's reject endpoint: it 4xx's
-	// the report upload, which the Deliver phase treats as a deterministic,
-	// non-retryable rejection (workflows/backup/deliver.go), so a run pointed at
-	// it fails terminally at Deliver — a real Failed run in History — while its
-	// SPEC §11 failure alert (a separate no-wait POST) still lands. This is the
-	// failure lever precisely because Deliver's retry is bounded; an earlier
-	// phase like Resolve retries under the server-default unlimited policy and
-	// would wedge the run "Running" forever instead of failing.
+	// The reject endpoint 4xx's the upload, failing the run terminally at Deliver.
 	failWebhookURL := getenv("WEBDEVSEED_FAIL_WEBHOOK_URL")
 	failCount = effectiveFailCount(failCount, failWebhookURL)
 
@@ -145,10 +94,8 @@ func run(ctx context.Context, getenv func(string) string) error {
 	for i := range count {
 		slot := slotPoolStart + i%slotPoolSize
 
-		// The first failCount runs deliver to the reject endpoint, so they run the
-		// full pipeline and then fail terminally at Deliver. Failures go first so
-		// the most-recent run — the dashboard's idle "last run" summary — stays a
-		// success; the failed ones are one click away in the history table.
+		// Failures go first so the most recent run (the dashboard's "last run")
+		// is a success.
 		expectFailure := i < failCount
 
 		runWebhookURL := webhookURL
@@ -183,8 +130,6 @@ func run(ctx context.Context, getenv func(string) string) error {
 		cancel()
 
 		if getErr != nil {
-			// A failure is the intended outcome for the seeded-to-fail runs; either
-			// way the run is recorded and visible in History.
 			outcome := "finished with an error"
 			if expectFailure {
 				outcome = "failed as intended"
@@ -207,12 +152,8 @@ func run(ctx context.Context, getenv func(string) string) error {
 	return nil
 }
 
-// effectiveFailCount drops the seeded-failure count to 0 when no reject webhook
-// is configured (WEBDEVSEED_FAIL_WEBHOOK_URL unset — e.g. the seeder run outside
-// `make web-dev`): without it there is no way to make a run fail cleanly, so
-// rather than silently produce all-successful runs under a non-zero count, it
-// disables the failures and logs why. failCount is already clamped to the run
-// count by the caller.
+// effectiveFailCount returns 0 (and logs why) when no reject webhook is
+// configured, since there is then no clean way to make a run fail.
 func effectiveFailCount(failCount int, failWebhookURL string) int {
 	if failCount > 0 && failWebhookURL == "" {
 		fmt.Println("webdevseed: WEBDEVSEED_FAIL_COUNT is set but WEBDEVSEED_FAIL_WEBHOOK_URL is not; seeding no failing runs")
@@ -223,18 +164,12 @@ func effectiveFailCount(failCount int, failWebhookURL string) int {
 	return failCount
 }
 
-// submitWithRetry submits cfg, retrying while the singleton backup workflow
-// is occupied by a still-running run (a real WorkflowExecutionAlreadyStarted
-// conflict — the same one pkg/runsapi maps to 409) rather than failing
-// immediately, since a previous `make web-dev` invocation's own seeding (or a
-// developer's own ad hoc submission through the browser) may still be
-// in flight. Gives up after maxSubmitAttempts and returns the last error.
+// submitWithRetry submits cfg, retrying while the singleton backup workflow is
+// still occupied by an earlier run.
 func submitWithRetry(ctx context.Context, temporalClient runsubmit.TemporalClient, cfg *config.Config) (client.WorkflowRun, error) {
 	var lastErr error
 
 	for attempt := range maxSubmitAttempts {
-		// The seeder only ever submits dry-runs (ApplyDryRun above), so the
-		// memo is always true.
 		submittedRun, err := runsubmit.Submit(ctx, temporalClient, cfg, true)
 		if err == nil {
 			return submittedRun, nil
@@ -259,15 +194,8 @@ func submitWithRetry(ctx context.Context, temporalClient runsubmit.TemporalClien
 	return nil, fmt.Errorf("a backup run stayed active through %d retries: %w", maxSubmitAttempts, lastErr)
 }
 
-// buildSeedConfig builds a config.Config for one sample dry-run: a single ZFS
-// source, one copy, small redundancy slicing, and the given delivery webhook.
-// webhookURL is empty in most contexts (an empty WebhookURL is documented
-// pkg/webhook no-op behavior — see pkg/webhook/webhook.go — so seeding makes no
-// network call); `make web-dev` points it at the local fake Discord receiver
-// (cmd/webdevdiscord) so a seeded run actually delivers its report and the web
-// UI's "Discord report ↗" deep-link renders locally. Library.Changer/Drives are
-// placeholders overwritten unconditionally by runsubmit.ApplyDryRun; only
-// BlankSlots and AllowNonBlankTapes matter here.
+// buildSeedConfig builds the config for one sample dry-run. Changer/Drives are
+// placeholders that runsubmit.ApplyDryRun overwrites.
 func buildSeedConfig(source, recipient, identity string, slot int, webhookURL string) *config.Config {
 	return &config.Config{
 		Sources: []config.Source{
@@ -294,12 +222,8 @@ func buildSeedConfig(source, recipient, identity string, slot int, webhookURL st
 	}
 }
 
-// generateKeypair shells out to `age-keygen -pq` for a real post-quantum
-// identity/recipient pair, the same way e2e/harness_test.go's
-// generateTestKeypair and workflows/backup/e2e_integration_test.go's do —
-// there is no Go-side keypair generator, only a from-identity recipient
-// derivation (pkg/agewrap.RecipientFromIdentity), which needs a keypair to
-// derive from in the first place.
+// generateKeypair shells out to `age-keygen -pq`; there is no Go-side
+// post-quantum keypair generator.
 func generateKeypair(ctx context.Context) (identity, recipient string, err error) {
 	dir, err := os.MkdirTemp("", "webdevseed-age-*")
 	if err != nil {
@@ -330,8 +254,6 @@ func generateKeypair(ctx context.Context) (identity, recipient string, err error
 
 func ptrFloat(v float64) *float64 { return &v }
 
-// envOr reads the named environment variable, returning fallback when unset
-// or empty.
 func envOr(getenv func(string) string, name, fallback string) string {
 	if value := getenv(name); value != "" {
 		return value
@@ -340,9 +262,7 @@ func envOr(getenv func(string) string, name, fallback string) string {
 	return fallback
 }
 
-// envInt reads the named environment variable as an integer, returning
-// fallback when unset or empty, and an error when set but not a valid
-// positive integer.
+// envInt parses a positive integer env var, returning fallback when unset.
 func envInt(getenv func(string) string, name string, fallback int) (int, error) {
 	raw := getenv(name)
 	if raw == "" {
@@ -357,10 +277,7 @@ func envInt(getenv func(string) string, name string, fallback int) (int, error) 
 	return value, nil
 }
 
-// envNonNegativeInt is envInt's variant that also accepts 0, for a count where
-// zero is meaningful (WEBDEVSEED_FAIL_COUNT=0 seeds no failing runs). It returns
-// fallback when unset or empty, and an error when set but not a valid
-// non-negative integer.
+// envNonNegativeInt is envInt but also accepts 0.
 func envNonNegativeInt(getenv func(string) string, name string, fallback int) (int, error) {
 	raw := getenv(name)
 	if raw == "" {

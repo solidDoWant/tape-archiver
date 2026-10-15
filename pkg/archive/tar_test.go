@@ -16,8 +16,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/archive"
 )
 
-// entry is a normalized snapshot of one filesystem entry, used to compare the
-// extracted tree against the source.
 type entry struct {
 	mode    os.FileMode // type bits and permission bits
 	content []byte      // regular files only
@@ -94,9 +92,6 @@ func TestTar(t *testing.T) {
 	}
 }
 
-// TestTarCancelled confirms Tar honors context cancellation rather than walking
-// and copying the whole tree regardless. Mid-file cancellation is provided by
-// the same per-read wrapper covered in TestSplitCancelledMidSlice.
 func TestTarCancelled(t *testing.T) {
 	t.Parallel()
 
@@ -110,9 +105,6 @@ func TestTarCancelled(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-// TestTarMembers verifies a multi-member tar places each member's contents under
-// its own subdirectory, preserving an empty member directory, so a snapshot group
-// archives with one subdirectory per member volume (SPEC §5).
 func TestTarMembers(t *testing.T) {
 	t.Parallel()
 
@@ -123,7 +115,6 @@ func TestTarMembers(t *testing.T) {
 	dirB := t.TempDir()
 	writeFile(t, filepath.Join(dirB, "data.txt"), []byte("volume b"))
 
-	// An empty member must still produce its subdirectory entry.
 	dirEmpty := t.TempDir()
 
 	members := []archive.Member{
@@ -149,11 +140,6 @@ func TestTarMembers(t *testing.T) {
 	assert.True(t, got["pvc-empty"].mode.IsDir())
 }
 
-// TestTarMembersDuplicateSubdir verifies TarMembers rejects a member set whose
-// Subdir values would collide on extraction — standard tar is last-entry-wins, so
-// two members under one path silently drop the earlier member's files at restore.
-// The guard must name the colliding subdirectory and must not write a partial
-// archive (AC1).
 func TestTarMembersDuplicateSubdir(t *testing.T) {
 	t.Parallel()
 
@@ -176,14 +162,9 @@ func TestTarMembersDuplicateSubdir(t *testing.T) {
 	assert.Contains(t, err.Error(), dirA, "the error must name the first colliding member's source")
 	assert.Contains(t, err.Error(), dirB, "the error must name the second colliding member's source")
 
-	// The guard runs before any bytes are written, so no partial archive escapes:
-	// neither member's tree may appear on the writer.
 	assert.Empty(t, buf.Bytes(), "a rejected member set must not write any archive bytes")
 }
 
-// TestTarMembersInvalidSubdir verifies the single-path-element Subdir contract is
-// enforced: an empty Subdir or one containing a slash is rejected before any
-// bytes are written (AC1, secondary).
 func TestTarMembersInvalidSubdir(t *testing.T) {
 	t.Parallel()
 
@@ -211,7 +192,6 @@ func TestTarMembersInvalidSubdir(t *testing.T) {
 	}
 }
 
-// writeFile writes content to path, creating parent directories as needed.
 func writeFile(t *testing.T, path string, content []byte) {
 	t.Helper()
 
@@ -219,8 +199,6 @@ func writeFile(t *testing.T, path string, content []byte) {
 	require.NoError(t, os.WriteFile(path, content, 0o644))
 }
 
-// snapshot walks dir and returns a map of relative path to a normalized entry,
-// so two trees can be compared for structure, contents, and modes.
 func snapshot(t *testing.T, dir string) map[string]entry {
 	t.Helper()
 
@@ -259,7 +237,6 @@ func snapshot(t *testing.T, dir string) map[string]entry {
 	return result
 }
 
-// extractTar reads a tar stream from r and writes its entries under dest.
 func extractTar(t *testing.T, r io.Reader, dest string) {
 	t.Helper()
 
@@ -293,8 +270,6 @@ func extractTar(t *testing.T, r io.Reader, dest string) {
 	}
 }
 
-// extractRegular writes a single regular-file entry, copying its contents from
-// the tar reader and applying its mode.
 func extractRegular(t *testing.T, reader *tar.Reader, target string, mode os.FileMode) {
 	t.Helper()
 

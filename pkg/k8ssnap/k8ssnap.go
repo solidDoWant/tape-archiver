@@ -1,14 +1,6 @@
-// Package k8ssnap resolves Kubernetes VolumeSnapshot and snapshot-group
-// references to democratic-csi ZFS snapshot paths, and guards their referential
-// integrity against the pool before any data is staged.
-//
-// Resolution follows the SPEC.md §16 ownership split. The control worker calls
-// Resolve/ResolveGroup, which read VolumeSnapshot objects from the
-// snapshot.storage.k8s.io API group, follow each to its bound
-// VolumeSnapshotContent, and turn the CSI snapshotHandle into an absolute ZFS
-// snapshot path. The data worker — where the pool is reachable — then calls Verify
-// to confirm the resolved snapshot exists and is democratic-csi-managed. No pool
-// access happens during resolution; no k8s access happens during verification.
+// Package k8ssnap resolves Kubernetes VolumeSnapshots to democratic-csi ZFS
+// snapshot paths. Per SPEC.md §16 the control worker resolves (no pool access)
+// and the data worker verifies against the pool (no k8s access).
 package k8ssnap
 
 import (
@@ -18,20 +10,15 @@ import (
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
-// Ref identifies the VolumeSnapshot(s) to resolve. Exactly one of Name or
-// LabelSelector is used: Name targets a single snapshot in Namespace;
-// LabelSelector selects a group, with an empty Namespace meaning cluster-wide. It
-// mirrors the run-config K8sRef without coupling this package to internal/config.
+// Ref identifies a single snapshot (Name) or a group (LabelSelector; empty
+// Namespace means cluster-wide).
 type Ref struct {
 	Namespace     string
 	Name          string
 	LabelSelector string
 }
 
-// Snapshot is a resolved VolumeSnapshot mapped to its democratic-csi ZFS location
-// and k8s provenance. Dataset is the absolute ZFS dataset path and SnapshotName the
-// ZFS snapshot short name; together (via ZFSPath) they form the @-snapshot tar
-// source.
+// Snapshot is a resolved VolumeSnapshot with its ZFS location and k8s provenance.
 type Snapshot struct {
 	Namespace      string // namespace of the source VolumeSnapshot
 	VolumeSnapshot string // VolumeSnapshot object name
@@ -46,16 +33,12 @@ func (s Snapshot) ZFSPath() string {
 	return s.Dataset + "@" + s.SnapshotName
 }
 
-// Group is a set of resolved snapshots archived together as a single tar, one
-// subdirectory per member volume (SPEC.md §5).
+// Group is a set of snapshots archived as one tar, one subdirectory per volume (SPEC.md §5).
 type Group struct {
 	Members []Snapshot
 }
 
-// SnapshotClient reads VolumeSnapshot and VolumeSnapshotContent objects from the
-// snapshot.storage.k8s.io API group. It is the seam between this package and the
-// typed external-snapshotter clientset, letting resolution be unit-tested without
-// a live cluster.
+// SnapshotClient reads VolumeSnapshot and VolumeSnapshotContent objects.
 type SnapshotClient interface {
 	GetVolumeSnapshot(ctx context.Context, namespace, name string) (*snapshotv1.VolumeSnapshot, error)
 	GetVolumeSnapshotContent(ctx context.Context, name string) (*snapshotv1.VolumeSnapshotContent, error)
@@ -68,20 +51,14 @@ type Resolver struct {
 	datasetParent string
 }
 
-// NewResolver returns a Resolver reading snapshots through client and resolving
-// handles against datasetParent — democratic-csi's datasetParentName (e.g.
-// bulk-pool-01/k8s/democratic-csi/nfs/pvcs), which is stripped from the
-// snapshotHandle and so must be prepended to rebuild the absolute path. An empty
-// datasetParent treats the handle's volume component as already absolute.
+// NewResolver returns a Resolver; datasetParent is democratic-csi's
+// datasetParentName, which the snapshotHandle omits.
 func NewResolver(client SnapshotClient, datasetParent string) *Resolver {
 	return &Resolver{client: client, datasetParent: datasetParent}
 }
 
-// Resolve resolves a single VolumeSnapshot (ref.Namespace + ref.Name) to its
-// democratic-csi ZFS snapshot. It reads the VolumeSnapshot, follows its bound
-// VolumeSnapshotContent to the CSI snapshotHandle, and parses that into the ZFS
-// dataset and snapshot name (SPEC.md §4.3 phase 1). It does not touch the pool —
-// use Verify on the data side to confirm the snapshot exists and is managed.
+// Resolve resolves one VolumeSnapshot to its ZFS snapshot without touching the
+// pool; use Verify on the data side.
 func (r *Resolver) Resolve(ctx context.Context, ref Ref) (Snapshot, error) {
 	volumeSnapshot, err := r.client.GetVolumeSnapshot(ctx, ref.Namespace, ref.Name)
 	if err != nil {
@@ -91,14 +68,9 @@ func (r *Resolver) Resolve(ctx context.Context, ref Ref) (Snapshot, error) {
 	return r.resolveSnapshot(ctx, volumeSnapshot)
 }
 
-// ResolveGroup resolves every VolumeSnapshot matching ref.LabelSelector into a
-// Group with one member per snapshot. An empty ref.Namespace selects across all
-// namespaces (SPEC.md §5; issue #13 AC2). Each match must resolve, so a single
-// failure fails the group. A selector that matches zero VolumeSnapshots is an
-// error, not an empty group: a zero-member group has no meaningful archive, and
-// silently backing up nothing would violate the no-silent-data-loss invariant
-// (SPEC.md §2). Failing here, in Resolve (SPEC.md §4.3 phase 1), aborts the run
-// before any data is staged or written to tape.
+// ResolveGroup resolves every VolumeSnapshot matching ref.LabelSelector. Any
+// member failure fails the group, and zero matches is an error so a run never
+// silently backs up nothing (SPEC.md §2).
 func (r *Resolver) ResolveGroup(ctx context.Context, ref Ref) (Group, error) {
 	volumeSnapshots, err := r.client.ListVolumeSnapshots(ctx, ref.Namespace, ref.LabelSelector)
 	if err != nil {
@@ -125,9 +97,7 @@ func (r *Resolver) ResolveGroup(ctx context.Context, ref Ref) (Group, error) {
 	return group, nil
 }
 
-// resolveSnapshot turns a fetched VolumeSnapshot into a resolved Snapshot. It
-// requires the snapshot to be ready and bound, follows the binding to read the
-// CSI snapshotHandle, and parses that handle into the absolute ZFS path.
+// resolveSnapshot requires a ready, bound snapshot and parses its content's handle.
 func (r *Resolver) resolveSnapshot(ctx context.Context, volumeSnapshot *snapshotv1.VolumeSnapshot) (Snapshot, error) {
 	id := volumeSnapshot.Namespace + "/" + volumeSnapshot.Name
 

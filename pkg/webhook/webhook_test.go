@@ -33,8 +33,7 @@ type capture struct {
 	rawQuery    string
 }
 
-// newServer returns an httptest server that records each request into a capture
-// and responds with status. The capture is returned for assertions.
+// newServer returns an httptest server that records requests and responds with status.
 func newServer(t *testing.T, status int) (*httptest.Server, *capture) {
 	t.Helper()
 
@@ -125,8 +124,7 @@ func TestSendFile(t *testing.T) {
 			wantMessage: &webhook.PostedMessage{ID: "msg-123", ChannelID: "chan-456"},
 		},
 		{
-			// A 2xx whose body is not the expected message JSON means the report
-			// was delivered but the deep-link identity is lost: no message, no error.
+			// Delivered (2xx) but unparseable: no message, no error.
 			name:      "delivered but unparseable response yields no message and no error",
 			status:    http.StatusOK,
 			respBody:  "not json",
@@ -183,8 +181,7 @@ func TestSendFile(t *testing.T) {
 
 			require.Equal(t, int32(1), cap.hits.Load())
 
-			// The report webhook is posted with ?wait=true so Discord returns the
-			// created message object the run-overview deep-link needs (issue #306).
+			// ?wait=true makes Discord return the message for the deep-link (issue #306).
 			assert.Equal(t, "wait=true", cap.rawQuery)
 
 			mediaType, params, perr := mime.ParseMediaType(cap.contentType)
@@ -273,10 +270,8 @@ func TestSendFailurePayload(t *testing.T) {
 	assert.Contains(t, payload.Content, assert.AnError.Error())
 }
 
-// TestSendFailureMultilineErrorFenced proves a multi-line error summary (the
-// write-path failure carries the ltfs stderr dump plus one line per failed
-// tape) reaches Discord inside a fenced code block with its newlines intact,
-// rather than collapsed into an unreadable single line.
+// TestSendFailureMultilineErrorFenced checks a multi-line error arrives in a
+// fenced code block with newlines intact.
 func TestSendFailureMultilineErrorFenced(t *testing.T) {
 	t.Parallel()
 
@@ -295,7 +290,6 @@ func TestSendFailureMultilineErrorFenced(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(cap.body, &payload))
 
-	// The error must survive verbatim, newlines and all, inside a fenced block.
 	assert.Contains(t, payload.Content, "```\n"+multiline.Error()+"\n```")
 	assert.Contains(t, payload.Content, "LTFS9015W")
 }
@@ -423,10 +417,8 @@ func TestSendFailureEmptyURLNoOp(t *testing.T) {
 	assert.Equal(t, int32(0), cap.hits.Load())
 }
 
-// TestSendFailureLogsDeliveryFailure verifies that a delivery failure is logged
-// via slog and that SendFailure returns without surfacing the failure (it
-// cannot mask the caller's original error). This test mutates the global slog
-// default, so it is not run in parallel.
+// TestSendFailureLogsDeliveryFailure checks a delivery failure is logged, not
+// surfaced. Mutates the global slog default, so not parallel.
 func TestSendFailureLogsDeliveryFailure(t *testing.T) {
 	original := slog.Default()
 
@@ -438,8 +430,6 @@ func TestSendFailureLogsDeliveryFailure(t *testing.T) {
 	server, cap := newServer(t, http.StatusInternalServerError)
 
 	client := webhook.New(server.URL)
-	// SendFailure returns no value; the assertion is that it logs and does not
-	// panic, leaving the caller's original error intact.
 	client.SendFailure(t.Context(), "run-456", "Verify", assert.AnError)
 
 	require.Equal(t, int32(1), cap.hits.Load())
@@ -450,11 +440,8 @@ func TestSendFailureLogsDeliveryFailure(t *testing.T) {
 	assert.Contains(t, logged, "Verify")
 }
 
-// TestSendFileBoundedByContextNotFixedTimeout proves the upload's timeout is the
-// caller's request context (AC1), not a fixed client-wide cap: against a server
-// that delays its response, the call succeeds when the context deadline exceeds
-// the delay and fails with a deadline error when it does not. This exercises the
-// removal of the former fixed 10 s http.Client.Timeout without waiting 10 s.
+// TestSendFileBoundedByContextNotFixedTimeout checks the upload is bounded by the
+// request context, not a fixed client timeout.
 func TestSendFileBoundedByContextNotFixedTimeout(t *testing.T) {
 	t.Parallel()
 
@@ -491,11 +478,8 @@ func TestSendFileBoundedByContextNotFixedTimeout(t *testing.T) {
 	})
 }
 
-// TestAlertContentTruncatedToDiscordLimit proves an alert whose error summary
-// alone exceeds Discord's 2000-character content limit is still accepted (AC2):
-// the server receives exactly one request, the delivered content is within the
-// limit, and the actionable text (run id / resume-abort instructions) survives
-// the truncation rather than being pushed out by the giant error tail.
+// TestAlertContentTruncatedToDiscordLimit checks an oversized error is truncated
+// under Discord's limit while the run id and resume/abort text survive.
 func TestAlertContentTruncatedToDiscordLimit(t *testing.T) {
 	t.Parallel()
 
@@ -569,10 +553,7 @@ func TestSendFailureNilError(t *testing.T) {
 	assert.True(t, strings.Contains(body, "run-789"), "payload should name the run: %s", body)
 }
 
-// TestStatusErrorFromNon2xx asserts that a non-2xx webhook response surfaces as a
-// *StatusError carrying the numeric status code, so callers can classify the
-// failure's retryability without string-matching, while the message text is
-// unchanged from the previous opaque error.
+// TestStatusErrorFromNon2xx checks a non-2xx response yields a *StatusError with the code.
 func TestStatusErrorFromNon2xx(t *testing.T) {
 	t.Parallel()
 
@@ -587,9 +568,7 @@ func TestStatusErrorFromNon2xx(t *testing.T) {
 	assert.Equal(t, "webhook: unexpected status 404", statusErr.Error())
 }
 
-// TestStatusErrorRetryable pins the HTTP-domain retryability classification:
-// 429 and every 5xx are transient (retryable); every other non-2xx is a
-// deterministic permanent failure (not retryable).
+// TestStatusErrorRetryable checks 429 and 5xx are retryable and other non-2xx are not.
 func TestStatusErrorRetryable(t *testing.T) {
 	t.Parallel()
 
@@ -617,11 +596,8 @@ func TestStatusErrorRetryable(t *testing.T) {
 	}
 }
 
-// TestSendFileCarriesMessageContent asserts the report upload posts its message
-// alongside the attachment, so the report arrives in Discord as a labelled run
-// notification instead of a bare PDF with no context. Discord takes the message
-// fields of a multipart upload in the payload_json part, so the content must
-// travel there and not as a bare form field.
+// TestSendFileCarriesMessageContent checks the report upload carries its message
+// in the payload_json part.
 func TestSendFileCarriesMessageContent(t *testing.T) {
 	t.Parallel()
 
@@ -634,8 +610,7 @@ func TestSendFileCarriesMessageContent(t *testing.T) {
 		wantPayload bool
 	}{
 		"with a summary": {content: summary, wantPayload: true},
-		// An empty summary posts the attachment on its own rather than an empty
-		// message, which Discord would reject.
+		// An empty summary posts the attachment alone; Discord rejects empty content.
 		"without a summary": {content: "", wantPayload: false},
 	}
 

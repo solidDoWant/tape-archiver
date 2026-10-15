@@ -20,9 +20,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/recoverykit"
 )
 
-// sourceArchives are the fixture recovery-tool source archives staged into the
-// disc's src/, mapping each on-disc src file name to its exact bytes. They mirror
-// nix/recovery-binaries.nix's $out/src/<tool>-<version>.* naming.
+// sourceArchives mirror nix/recovery-binaries.nix's $out/src naming.
 var sourceArchives = map[string][]byte{
 	"age-1.3.1.tar.gz":  []byte("fixture age source\n"),
 	"par2-1.0.0.tar.gz": []byte("fixture par2 source\n"),
@@ -30,8 +28,6 @@ var sourceArchives = map[string][]byte{
 	"tar-1.35.tar.gz":   []byte("fixture tar source\n"),
 }
 
-// sourcesDir writes the fixture source archives into a temp directory and returns
-// its path, satisfying recoverykit.Build's requirement that the disc ship source.
 func sourcesDir(t *testing.T) string {
 	t.Helper()
 
@@ -43,8 +39,6 @@ func sourcesDir(t *testing.T) string {
 	return dir
 }
 
-// completeInput returns a valid Input with two tapes, the four recovery binaries
-// (each a statically linked ELF fixture), and the tools' source archives.
 func completeInput(t *testing.T) recoverykit.Input {
 	t.Helper()
 
@@ -65,9 +59,6 @@ func completeInput(t *testing.T) recoverykit.Input {
 	}
 }
 
-// TestBuild_RoundTrip builds an ISO from a complete input, reads it back with
-// the pure-Go reader, and asserts every supplied artifact is present at its
-// expected path with its exact bytes (acceptance criteria 1 and 2).
 func TestBuild_RoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -80,10 +71,6 @@ func TestBuild_RoundTrip(t *testing.T) {
 
 	files := readISO(t, buf.Bytes())
 
-	// The recovery procedure shipped on the disc is the embedded
-	// recovery-procedure.md (the same bytes as docs/recovery-procedure.md; the
-	// drift test proves the two are identical). Read the package copy to know
-	// what the ISO must carry.
 	procedureDoc, err := os.ReadFile("recovery-procedure.md")
 	require.NoError(t, err)
 
@@ -105,10 +92,7 @@ func TestBuild_RoundTrip(t *testing.T) {
 		assert.Equalf(t, content, got, "content mismatch for %s", name)
 	}
 
-	// The tools' source archives are staged into src/ under names the ISO writer
-	// mangles (dots become '_'); rather than duplicate the mangling here, verify
-	// them by content: every file under src/ must be one of the fixture archives
-	// and every fixture archive must appear exactly once (AC3).
+	// Source archive names are mangled by the writer, so match them by content.
 	srcFiles := make(map[string][]byte)
 
 	for name, content := range files {
@@ -135,8 +119,6 @@ func TestBuild_RoundTrip(t *testing.T) {
 		assert.Falsef(t, seenSources[matched], "source archive %s staged more than once", matched)
 		seenSources[matched] = true
 
-		// The staged src file must be recorded in the manifest at its exact
-		// read-back path with the correct digest (AC3).
 		sum := sha256.Sum256(content)
 		assert.Equalf(t, hex.EncodeToString(sum[:]), manifest[name],
 			"manifest digest mismatch for %s", name)
@@ -146,10 +128,6 @@ func TestBuild_RoundTrip(t *testing.T) {
 
 	assert.Lenf(t, files, totalFiles, "unexpected extra files in ISO: %v", keys(files))
 
-	// The returned disc-content manifest must name exactly the read-back paths of
-	// the burned disc, each with its content's SHA-256, so the Burn phase's
-	// read-back verification (pkg/optical.Verify) compares equal against the
-	// mounted disc.
 	assert.Lenf(t, manifest, totalFiles, "manifest must list exactly the on-disc files")
 
 	for name, content := range want {
@@ -158,16 +136,12 @@ func TestBuild_RoundTrip(t *testing.T) {
 			"manifest digest mismatch for %s", name)
 	}
 
-	// The manifest keys must equal the ISO's read-back paths exactly, so a
-	// verification never reports spurious missing/extra files.
 	for name := range manifest {
 		_, ok := files[name]
 		assert.Truef(t, ok, "manifest path %q is not a read-back path of the ISO", name)
 	}
 }
 
-// TestBuild_RejectsDynamicBinary proves a dynamically linked recovery binary is
-// rejected rather than silently shipped on a recovery disc that cannot run it.
 func TestBuild_RejectsDynamicBinary(t *testing.T) {
 	t.Parallel()
 
@@ -179,8 +153,6 @@ func TestBuild_RejectsDynamicBinary(t *testing.T) {
 	assert.Contains(t, err.Error(), "dynamically linked")
 }
 
-// TestBuild_RejectsNonELFBinary proves a non-ELF file in the binaries directory
-// is rejected — we cannot prove it is a usable static executable.
 func TestBuild_RejectsNonELFBinary(t *testing.T) {
 	t.Parallel()
 
@@ -192,7 +164,6 @@ func TestBuild_RejectsNonELFBinary(t *testing.T) {
 	assert.Contains(t, err.Error(), "not a valid ELF executable")
 }
 
-// TestBuild_Validation covers the missing/invalid input cases.
 func TestBuild_Validation(t *testing.T) {
 	t.Parallel()
 
@@ -224,8 +195,6 @@ func TestBuild_Validation(t *testing.T) {
 	}
 }
 
-// TestBuild_EmptyBinariesDirFails proves a binaries directory with no binaries
-// is rejected: a recovery kit without recovery tooling is useless.
 func TestBuild_EmptyBinariesDirFails(t *testing.T) {
 	t.Parallel()
 
@@ -237,13 +206,8 @@ func TestBuild_EmptyBinariesDirFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "no recovery binaries found")
 }
 
-// TestBuild_MangledBarcodeIndexesRoundTrip proves AC1: for a barcode carrying
-// characters the ISO 9660 writer mangles — an interior dot, a space, a non-d1
-// character, or more characters than the on-disc name budget allows — the tape's
-// LTFS index is found on the read-back image at exactly the path the returned
-// manifest records, so post-burn verification (pkg/optical.Verify) succeeds. It
-// reads the real image back with the pinned writer's reader, so readbackPath is
-// proven against the actual writer rather than trusted.
+// TestBuild_MangledBarcodeIndexesRoundTrip proves readbackPath against the real
+// writer for barcodes the ISO 9660 writer mangles (issue #153).
 func TestBuild_MangledBarcodeIndexesRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -271,8 +235,6 @@ func TestBuild_MangledBarcodeIndexesRoundTrip(t *testing.T) {
 
 			files := readISO(t, buf.Bytes())
 
-			// The manifest must record exactly one LTFS index backup, at the name the
-			// writer actually produced on disc.
 			var indexKey string
 
 			for key := range manifest {
@@ -284,8 +246,6 @@ func TestBuild_MangledBarcodeIndexesRoundTrip(t *testing.T) {
 
 			require.NotEmptyf(t, indexKey, "manifest records no ltfs-index entry for barcode %q", barcode)
 
-			// The index must be present on the read-back image at exactly the
-			// manifest path, with its exact bytes and matching digest.
 			got, ok := files[indexKey]
 			require.Truef(t, ok, "LTFS index for barcode %q not found at manifest path %q; read-back paths: %v", barcode, indexKey, keys(files))
 			assert.Equalf(t, index, got, "LTFS index content mismatch for barcode %q", barcode)
@@ -296,11 +256,8 @@ func TestBuild_MangledBarcodeIndexesRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBuild_RejectsMangledBarcodeCollision proves AC2: two distinct barcodes whose
-// on-disc index file names collide (here '.' and ' ' both fold toward '_', so both
-// mangle to ltfs-index/tape_01.schema) fail the build with an error naming both
-// barcodes, and no image is written — rather than silently dropping one tape's
-// index. This is broader than a case-fold collision, which the old check missed.
+// TestBuild_RejectsMangledBarcodeCollision: '.' and ' ' both fold to '_', so
+// these barcodes collide on disc and must fail the build.
 func TestBuild_RejectsMangledBarcodeCollision(t *testing.T) {
 	t.Parallel()
 
@@ -320,9 +277,6 @@ func TestBuild_RejectsMangledBarcodeCollision(t *testing.T) {
 	assert.Zerof(t, buf.Len(), "no image must be written when two barcodes collide")
 }
 
-// TestBuild_EmptySourcesDirFails proves AC3's loud-failure edge: a sources
-// directory with no archives is rejected rather than silently producing a disc
-// missing the tools' source (which SPEC §2/§10 require).
 func TestBuild_EmptySourcesDirFails(t *testing.T) {
 	t.Parallel()
 
@@ -334,10 +288,8 @@ func TestBuild_EmptySourcesDirFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "no recovery source archives found")
 }
 
-// TestRecoveryProcedureDocMatchesCanonical guards against drift: the disc ships
-// the embedded pkg/recoverykit/recovery-procedure.md, which must be byte-for-byte
-// identical to the canonical operator doc docs/recovery-procedure.md. Editing the
-// canonical doc without re-copying it (go:generate, or `cp`) fails this test.
+// TestRecoveryProcedureDocMatchesCanonical guards against the embedded copy
+// drifting from docs/recovery-procedure.md.
 func TestRecoveryProcedureDocMatchesCanonical(t *testing.T) {
 	t.Parallel()
 
@@ -352,8 +304,6 @@ func TestRecoveryProcedureDocMatchesCanonical(t *testing.T) {
 			"run `go generate ./pkg/recoverykit/` (or copy the doc) to resync")
 }
 
-// readISO opens an ISO image and returns a map of every regular file's full
-// path to its exact bytes.
 func readISO(t *testing.T, image []byte) map[string][]byte {
 	t.Helper()
 
@@ -405,18 +355,12 @@ func keys(m map[string][]byte) []string {
 	return out
 }
 
-// staticELF returns a minimal, parseable ELF64 executable with only a PT_LOAD
-// segment — no program interpreter and no shared-library dependencies, i.e.
-// statically linked.
 func staticELF() []byte { return minimalELF(elf.PT_LOAD) }
 
-// dynamicELF returns a minimal ELF64 executable carrying a PT_INTERP segment,
-// i.e. dynamically linked.
 func dynamicELF() []byte { return minimalELF(elf.PT_INTERP, elf.PT_LOAD) }
 
-// minimalELF builds a debug/elf-parseable ELF64 little-endian executable with
-// the given program-header types and no sections. It is the smallest fixture
-// that exercises the static-linkage check without needing a compiler.
+// minimalELF builds a section-less ELF64 executable with the given program
+// headers, so the linkage check is testable without a compiler.
 func minimalELF(progTypes ...elf.ProgType) []byte {
 	const (
 		ehSize    = 64

@@ -61,8 +61,7 @@ func TestParseMediaReport(t *testing.T) {
 			wantRewritable: true,
 		},
 		{
-			// Captured after burning an image to the stdio pseudo-disc: an
-			// overwriteable medium reports "is appendable" yet is rewritable.
+			// An overwriteable medium reports "is appendable" yet is rewritable.
 			name: "written overwriteable medium",
 			report: "Media current: stdio file, overwriteable\n" +
 				"Media status : is written , is appendable\n",
@@ -123,11 +122,7 @@ func TestParseMediaReport(t *testing.T) {
 	}
 }
 
-// TestBlankable covers issue #154 AC3: Blank's documented refusal of both
-// write-once AND finalized media must be enforced by the pure blankable guard, so
-// the seam's stated contract holds for any caller. It feeds a mediaInfo directly,
-// exercising the decision without real optical media (the physical write-once
-// round-trip stays in TestBlankRefusesWriteOnceMedium).
+// TestBlankable covers issue #154: Blank refuses both write-once and finalized media.
 func TestBlankable(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -152,9 +147,7 @@ func TestBlankable(t *testing.T) {
 			errSubstr: "write-once",
 		},
 		{
-			// The documentation gap the issue reports: a closed DVD-RW probes as
-			// finalized yet rewritable, so the rewritability check alone would admit
-			// it. blankable must refuse it to match the doc.
+			// A closed DVD-RW probes as finalized yet rewritable.
 			name:      "finalized rewritable is refused (issue #154)",
 			info:      mediaInfo{state: StateFinalized, rewritable: true},
 			assertErr: require.Error,
@@ -240,10 +233,7 @@ func TestParseManifest(t *testing.T) {
 	}
 }
 
-// TestVerifyTree exercises the pure disc-vs-manifest comparison against a plain
-// temp directory standing in for a mounted disc — no xorriso, mount, or burner
-// needed. This is the highest-value, most bug-prone logic (AC2), so it is unit
-// tested directly for match and every failure mode.
+// TestVerifyTree checks the disc-vs-manifest comparison against a temp directory.
 func TestVerifyTree(t *testing.T) {
 	root := t.TempDir()
 

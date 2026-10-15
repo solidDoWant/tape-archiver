@@ -13,10 +13,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/agewrap"
 )
 
-// TestRecipientFromIdentity checks that the recipient derived from a private
-// identity matches the recipient age-keygen recorded when it generated the
-// keypair — the equality the Report phase relies on to prove an escrowed identity
-// can decrypt what the recipients encrypted.
 func TestRecipientFromIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -31,8 +27,6 @@ func TestRecipientFromIdentity(t *testing.T) {
 	assert.Equal(t, recipient, derived)
 }
 
-// TestRecipientFromIdentityRejectsEmpty checks an empty or whitespace identity is
-// rejected before age-keygen is invoked.
 func TestRecipientFromIdentityRejectsEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -42,8 +36,6 @@ func TestRecipientFromIdentityRejectsEmpty(t *testing.T) {
 	}
 }
 
-// TestRecipientFromIdentityRejectsInvalid checks that a string that is not a
-// valid age identity yields an error rather than a bogus recipient.
 func TestRecipientFromIdentityRejectsInvalid(t *testing.T) {
 	t.Parallel()
 
@@ -51,13 +43,6 @@ func TestRecipientFromIdentityRejectsInvalid(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestGenerateIdentity checks that GenerateIdentity produces a post-quantum
-// identity/recipient pair, that the recipient is exactly what
-// RecipientFromIdentity independently derives from the returned identity
-// (the equality GenerateIdentity's own doc comment promises), and that the
-// identity round-trips as a valid decryption key for its recipient — the
-// same round-trip the web UI's config page relies on when it inserts the
-// generated recipient into a run config.
 func TestGenerateIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -81,10 +66,6 @@ func TestGenerateIdentity(t *testing.T) {
 	assert.Equal(t, "roundtrip", string(roundTripped))
 }
 
-// TestGenerateIdentityIsFreshEveryCall checks two calls never return the same
-// keypair — GenerateIdentity must never cache or reuse a previously generated
-// identity, matching the "displayed once, never retrievable again" semantics
-// the web UI's config page relies on.
 func TestGenerateIdentityIsFreshEveryCall(t *testing.T) {
 	t.Parallel()
 

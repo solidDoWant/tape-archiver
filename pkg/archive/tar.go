@@ -1,8 +1,5 @@
-// Package archive implements the streaming data-preparation stages of the
-// per-archive prepare pipeline (SPEC §4.3 step 2): tar the source tree, an
-// optional zstd compression pass, and splitting the resulting byte stream into
-// fixed-size slice files staged on disk. Each stage is an io stream stage so
-// they compose via io.Pipe; workflow wiring lives in a separate package.
+// Package archive implements the streaming tar, zstd, and split stages of the
+// per-archive prepare pipeline (SPEC §4.3 step 2).
 package archive
 
 import (
@@ -18,23 +15,11 @@ import (
 	"strings"
 )
 
-// Tar writes a tar archive of the contents of srcDir to w. Entry names are
-// relative to srcDir, so extracting the archive reproduces srcDir's contents
-// without the srcDir path prefix.
+// Tar streams a tar of srcDir's contents (names relative to srcDir) to w.
 //
-// The archive captures regular files, directories, and symlinks, preserving
-// their mode bits, ownership, and modification time. Hardlinked regular files
-// are stored once (the first sighting) and reproduced as tar hardlink entries;
-// sparse files are stored in GNU sparse 1.0 form so their holes are not written
-// out. File types that a portable file-by-file tar cannot carry and that hold no
-// recoverable data — sockets, devices, and named pipes (FIFOs) — are skipped
-// with a warning rather than failing the run. Extended attributes, POSIX ACLs,
-// and file capabilities are NOT captured (SPEC §6); a tar-level restore does not
-// reproduce them.
-//
-// Tar streams: it never stages the archive to disk. Filesystem-level tar (not
-// zfs send) is the deliberate, longest-lived source format (SPEC §6), and this
-// is the first stage of the per-archive prepare pipeline (SPEC §4.3).
+// Hardlinks are stored once, sparse files as GNU sparse 1.0, and sockets,
+// devices, and FIFOs are skipped with a warning. Xattrs, ACLs, and file
+// capabilities are NOT captured (SPEC §6).
 func Tar(ctx context.Context, w io.Writer, srcDir string) error {
 	writer := newTarWriter(w)
 
@@ -49,33 +34,20 @@ func Tar(ctx context.Context, w io.Writer, srcDir string) error {
 	return nil
 }
 
-// Member is one source tree packed into a multi-member tar by TarMembers. Subdir
-// is the subdirectory the member's contents appear under in the archive; Dir is
-// the source directory whose contents are read.
+// Member is one source tree packed by TarMembers.
 type Member struct {
-	// Subdir is the in-archive subdirectory for this member. It must be a single
-	// path element (no slashes); callers derive it from the member's identity
-	// (e.g. a PVC name).
+	// Subdir is the in-archive subdirectory; it must be a single path element.
 	Subdir string
-	// Dir is the source directory whose contents are tarred under Subdir/.
+	// Dir is the source directory tarred under Subdir/.
 	Dir string
 }
 
-// TarMembers writes a single tar archive to w holding every member's tree, each
-// under its own Name/ subdirectory. It is how a snapshot group is archived as one
-// tar with one subdirectory per member volume, giving cross-volume consistency
-// (SPEC §5). Each member's directory entry is emitted even when empty, so the
-// extracted layout always reproduces the member subdirectories.
-//
-// Like Tar, it streams and never stages to disk; it is the multi-member form of
-// the prepare pipeline's first stage (SPEC §4.3).
+// TarMembers streams one tar holding each member's tree under its own Subdir/,
+// archiving a snapshot group consistently (SPEC §5). Empty members still get
+// their directory entry.
 func TarMembers(ctx context.Context, w io.Writer, members []Member) error {
-	// Validate the whole member set before writing a single byte. A duplicate
-	// Subdir would produce colliding tar paths, and standard tar extraction is
-	// last-entry-wins, so the earlier member's files would be silently dropped at
-	// restore — invisible at write and verify time. Rejecting up front, before the
-	// writer emits anything, means a bad member list yields no partial archive
-	// rather than a clean-verifying archive that loses data (SPEC §5).
+	// Validate before writing: tar extraction is last-entry-wins, so a duplicate
+	// Subdir would silently drop a member at restore despite verifying cleanly.
 	if err := validateMembers(members); err != nil {
 		return err
 	}
@@ -95,13 +67,8 @@ func TarMembers(ctx context.Context, w io.Writer, members []Member) error {
 	return nil
 }
 
-// validateMembers enforces the Member.Subdir contract across the whole set
-// before any bytes are written: each Subdir must be a single non-empty path
-// element (no slashes), and no two members may share a Subdir. A violation
-// returns an error naming the offending Subdir and the member source directories
-// involved, so a caller whose name derivation collides fails loudly here rather
-// than staging a clean-verifying archive that silently drops a member's contents
-// on extraction.
+// validateMembers requires each Subdir to be a unique, non-empty, single path
+// element.
 func validateMembers(members []Member) error {
 	firstIndex := make(map[string]int, len(members))
 
@@ -124,16 +91,11 @@ func validateMembers(members []Member) error {
 	return nil
 }
 
-// tarWriter carries the shared state for writing one archive: the archive/tar
-// writer, the underlying stream (used to emit hand-rolled sparse members that
-// the standard writer cannot produce), and the archive-wide hardlink index.
 type tarWriter struct {
 	tw  *tar.Writer
-	raw io.Writer
-	// links maps an already-written file's {device, inode} identity to its
-	// in-archive name so later sightings become hardlink entries. It spans the
-	// whole archive; distinct source datasets have distinct device numbers, so
-	// links never falsely cross unrelated members.
+	raw io.Writer // for hand-rolled sparse members archive/tar cannot produce
+	// links maps written inodes to their in-archive name. Distinct datasets have
+	// distinct device numbers, so links never cross unrelated members.
 	links map[fileID]string
 }
 
@@ -145,23 +107,17 @@ func newTarWriter(w io.Writer) *tarWriter {
 	}
 }
 
-// fileID identifies an inode within a device. It is the key used to detect
-// hardlinks: two paths with the same fileID name the same on-disk file.
 type fileID struct {
 	dev uint64
 	ino uint64
 }
 
-// sparseRegion is one allocated data extent of a sparse file: length bytes of
-// real data starting at offset. The gaps between regions (and any tail up to the
-// logical size) are holes that read back as zeros.
+// sparseRegion is one allocated data extent; gaps between regions are holes.
 type sparseRegion struct {
 	offset int64
 	length int64
 }
 
-// tree walks srcDir and writes each entry with its name relative to srcDir,
-// prefixed by prefix (the member subdirectory, empty for a single tree).
 func (w *tarWriter) tree(ctx context.Context, srcDir, prefix string) error {
 	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -176,10 +132,8 @@ func (w *tarWriter) tree(ctx context.Context, srcDir, prefix string) error {
 	})
 }
 
-// writeEntry writes a single filesystem entry, with a name relative to srcDir
-// and prefixed by prefix. With no prefix the root directory itself is skipped so
-// the archive holds only its contents (Tar); with a prefix the root maps to the
-// member subdirectory entry so empty members are preserved (TarMembers).
+// writeEntry writes one entry. Without a prefix the root is skipped; with one it
+// becomes the member directory entry so empty members are preserved.
 func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix, path string, entry fs.DirEntry) error {
 	rel, err := filepath.Rel(srcDir, path)
 	if err != nil {
@@ -201,10 +155,8 @@ func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix, path string,
 
 	mode := info.Mode()
 
-	// Sockets, devices, and named pipes (FIFOs) cannot be represented by a
-	// portable file-by-file tar and carry no recoverable data. Skip them with a
-	// warning so a stale socket in a snapshot (e.g. a database datadir) does not
-	// abort the whole run.
+	// These hold no recoverable data; skip so e.g. a stale database socket does
+	// not abort the run.
 	if mode&(fs.ModeSocket|fs.ModeDevice|fs.ModeCharDevice|fs.ModeNamedPipe) != 0 {
 		slog.WarnContext(ctx, "skipping non-archivable entry",
 			"path", path, "type", mode.Type().String())
@@ -225,9 +177,6 @@ func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix, path string,
 		return err
 	}
 
-	// Use forward slashes (the tar convention) and mark directories so the
-	// extracted layout matches the source on any platform. A non-empty prefix
-	// places the entry under the member subdirectory (TarMembers).
 	name := filepath.ToSlash(rel)
 	if prefix != "" {
 		name = slashpath.Join(prefix, name)
@@ -242,10 +191,7 @@ func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix, path string,
 		return w.writeHeaderOnly(header)
 	}
 
-	// A regular file with more than one link is stored once. The first sighting
-	// records the in-archive name and writes the body; later sightings of the
-	// same inode become hardlink entries pointing at it, so the archive is not
-	// enlarged by a second full copy.
+	// Later sightings of a multiply-linked inode become hardlink entries.
 	if id, ok := hardlinkID(info); ok {
 		if target, seen := w.links[id]; seen {
 			header.Typeflag = tar.TypeLink
@@ -261,8 +207,6 @@ func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix, path string,
 	return w.writeRegularFile(ctx, header, path)
 }
 
-// writeHeaderOnly writes a header that carries no file body (directory, symlink,
-// or hardlink entry).
 func (w *tarWriter) writeHeaderOnly(header *tar.Header) error {
 	if err := w.tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("write header %s: %w", header.Name, err)
@@ -271,10 +215,6 @@ func (w *tarWriter) writeHeaderOnly(header *tar.Header) error {
 	return nil
 }
 
-// writeRegularFile writes the header and body for a regular file at path. Sparse
-// files are encoded so their holes are not written out; all other files stream
-// contiguously. It closes the file explicitly so a close error on the read side
-// is not silently dropped.
 func (w *tarWriter) writeRegularFile(ctx context.Context, header *tar.Header, path string) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -295,10 +235,8 @@ func (w *tarWriter) writeRegularFile(ctx context.Context, header *tar.Header, pa
 	return nil
 }
 
-// writeRegularBody writes header then copies file's contents. When the file is
-// sparse it is emitted as a GNU sparse 1.0 entry; otherwise the contents stream
-// contiguously. The copy honors ctx cancellation per read buffer so a single
-// large file does not block cancellation.
+// writeRegularBody emits a GNU sparse 1.0 entry for sparse files, otherwise
+// streams the contents with per-buffer cancellation.
 func (w *tarWriter) writeRegularBody(ctx context.Context, header *tar.Header, file *os.File, path string) error {
 	regions, sparse, err := sparseDataRegions(file, header.Size)
 	if err != nil {

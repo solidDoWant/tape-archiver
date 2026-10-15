@@ -12,29 +12,17 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// backupWorkflowID is the fixed workflow ID every backup run submits under —
-// an alias for backup.WorkflowID, the shared source of truth (also used by
-// pkg/runsapi to list/describe runs via Temporal visibility) — kept as a
-// local name since it is used pervasively throughout this package. It is a
-// singleton on purpose: the backup model is serial (one data worker on one
-// storage host, one disk staging area — SPEC §4.2), so all runs must be
-// mutually exclusive. Combined with the conflict/reuse policies in
-// pkg/runsubmit.StartOptions, a second run submitted while one is already
-// running is refused, while a new run after the previous one closes starts
-// normally.
+// backupWorkflowID is a singleton on purpose: the backup model is serial (one
+// data worker, one staging area — SPEC §4.2), so runs must be mutually exclusive.
 const backupWorkflowID = backup.WorkflowID
 
-// runOptions holds the parsed flags for the `run` subcommand.
 type runOptions struct {
 	configPath string
 	dryRun     bool
 }
 
-// submitRun implements `tapectl run`. It prepares the submission entirely
-// client-side (load, validate, dry-run override) so an invalid config or a
-// missing Temporal address fails before any connection is attempted, then
-// submits the backup workflow under the singleton ID (pkg/runsubmit.Submit —
-// the same submission path pkg/runsapi's POST /api/runs uses) and prints it.
+// submitRun implements `tapectl run`. Config errors fail before any Temporal
+// connection is attempted.
 func submitRun(ctx context.Context, args []string, out io.Writer) error {
 	options, err := parseRunArgs(args)
 	if err != nil {
@@ -66,7 +54,6 @@ func submitRun(ctx context.Context, args []string, out io.Writer) error {
 	return err
 }
 
-// parseRunArgs parses the `run` subcommand flags.
 func parseRunArgs(args []string) (runOptions, error) {
 	flagSet := flag.NewFlagSet("run", flag.ContinueOnError)
 
@@ -78,10 +65,8 @@ func parseRunArgs(args []string) (runOptions, error) {
 		return runOptions{}, err
 	}
 
-	// Reject stray positional arguments. Go's flag package stops parsing at the
-	// first positional, so a stray argument would silently drop any flags after
-	// it (e.g. `--config prod.json backup --dry-run` loses --dry-run and submits
-	// a real run). Fail fast naming the unexpected argument instead.
+	// The flag package stops at the first positional, so a stray argument would
+	// silently drop later flags (e.g. losing --dry-run and submitting a real run).
 	if flagSet.NArg() != 0 {
 		return runOptions{}, fmt.Errorf("tapectl run takes no positional arguments, but got %q\n\n"+
 			"Usage: tapectl run --config <file> [--dry-run]", flagSet.Arg(0))
@@ -90,10 +75,8 @@ func parseRunArgs(args []string) (runOptions, error) {
 	return options, nil
 }
 
-// buildSubmission performs every step that must happen before contacting
-// Temporal: it loads and validates the config, then applies the dry-run
-// device override (which re-validates the result itself — see
-// pkg/runsubmit.ApplyDryRun).
+// buildSubmission loads and validates the config and applies the dry-run
+// override.
 func buildSubmission(options runOptions) (*config.Config, error) {
 	if options.configPath == "" {
 		return nil, fmt.Errorf("--config is required")
@@ -113,12 +96,6 @@ func buildSubmission(options runOptions) (*config.Config, error) {
 	return cfg, nil
 }
 
-// translateSubmitError converts the error returned by ExecuteWorkflow into an
-// operator-facing message. It is a thin wrapper over
-// pkg/runsubmit.TranslateSubmitError — the same translation pkg/runsapi's
-// POST /api/runs applies — kept as a package-local name since submitRun no
-// longer needs it directly (runsubmit.Submit applies it internally) but it
-// stays useful, and tested, as a standalone entry point.
 func translateSubmitError(err error) error {
 	return runsubmit.TranslateSubmitError(err)
 }

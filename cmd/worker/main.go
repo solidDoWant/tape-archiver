@@ -1,8 +1,5 @@
-// Command worker is the Temporal worker for tape-archiver. A single binary
-// serves both roles; the ROLE environment variable selects whether it runs as
-// the control worker (Kubernetes-side: snapshot resolution, report/ISO
-// building, Discord delivery) or the data worker (storage-host-side:
-// tar/age/PAR2/checksum/LTFS/changer activities). See SPEC §4.1.
+// Command worker is the Temporal worker for tape-archiver; ROLE selects the
+// control or data worker (SPEC §4.1).
 package main
 
 import (
@@ -25,22 +22,15 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 )
 
-// defaultMetricsAddr is the /metrics listen address used when METRICS_ADDR is
-// not set. Metrics are on by default so a deployed worker is observable without
-// extra configuration; set METRICS_ADDR to "" to disable the endpoint.
+// defaultMetricsAddr applies when METRICS_ADDR is unset; "" disables /metrics.
 const defaultMetricsAddr = ":9090"
 
-// defaultHealthAddr is the /healthz + /readyz listen address used when
-// HEALTH_ADDR is not set. Health is on by default so orchestrator probes work
-// without extra configuration; set HEALTH_ADDR to "" to disable the endpoints.
-// The port is distinct from defaultMetricsAddr so health stays available even
-// when /metrics is disabled.
+// defaultHealthAddr applies when HEALTH_ADDR is unset; "" disables the probes.
+// It is a separate port so health survives /metrics being disabled.
 const defaultHealthAddr = ":8080"
 
 func main() {
-	// The healthcheck self-probe is a distinct entrypoint used by the container
-	// HEALTHCHECK: it probes the local health server and exits, never starting a
-	// Temporal worker. Dispatch it before any worker/signal setup.
+	// Container HEALTHCHECK entrypoint: probe and exit without starting a worker.
 	if len(os.Args) > 1 && os.Args[1] == healthcheckSubcommand {
 		if err := runHealthcheck(context.Background(), os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "worker: %v\n", err)
@@ -50,32 +40,22 @@ func main() {
 		return
 	}
 
-	// ctx is cancelled on SIGINT/SIGTERM so the startup phase (e.g. a hanging
-	// Temporal dial) honors shutdown signals. worker.InterruptCh, watching the
-	// same signals, drives the run phase: the SDK drains the worker when it
-	// yields. Both stem from one OS signal, so a single SIGTERM stops the
-	// process whether it arrives during startup or steady state.
+	// ctx covers startup (e.g. a hanging Temporal dial); worker.InterruptCh
+	// drives the run-phase drain. One SIGTERM stops either phase.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := run(ctx, worker.InterruptCh()); err != nil {
-		// logging.Setup may not have run yet (e.g. config parse failure), so
-		// write the fatal error directly to stderr rather than via slog.
+		// logging.Setup may not have run yet, so bypass slog.
 		fmt.Fprintf(os.Stderr, "worker: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// workerOptions returns the Temporal worker options for the given role. The
-// data worker enables session support so its write-phase activities can be
-// pinned to a single process via workflow.CreateSession (SPEC §4.3 phase 7).
-//
-// Both roles install logTagsInterceptor so every activity's log lines carry the
-// run's WorkflowID/RunID and the web UI's run-detail log panel can find them
-// (#303), then activityLogInterceptor so every activity emits start/end lines
-// stamped with the build version and worker identity. Order matters:
-// activityLogInterceptor is registered second so it runs inside logTagsInterceptor
-// and its boundary lines inherit the seeded run tags.
+// workerOptions returns the worker options for role. The data worker enables
+// sessions so write-phase activities pin to one process (SPEC §4.3 phase 7).
+// activityLogInterceptor must follow logTagsInterceptor so its lines inherit
+// the run tags (#303).
 func workerOptions(role Role) worker.Options {
 	options := worker.Options{
 		Interceptors: []interceptor.WorkerInterceptor{
@@ -91,20 +71,16 @@ func workerOptions(role Role) worker.Options {
 	return options
 }
 
-// run parses configuration, sets up logging, metrics, and the Temporal client,
-// then starts the role's worker and blocks until interruptCh yields, at which
-// point the worker drains in-flight tasks before returning. Cancelling ctx
-// aborts startup; interruptCh is injected so tests drive the run-phase drain
-// without sending a real OS signal.
+// run starts the role's worker and blocks until interruptCh yields, then drains.
+// Cancelling ctx aborts startup; interruptCh is injectable for tests.
 func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	cfg, err := parseConfig()
 	if err != nil {
 		return err
 	}
 
-	// Operational configuration (e.g. the failure webhook) is read from the
-	// environment separately from the worker's role config so it is available to
-	// the failure alert regardless of run config (SPEC §11).
+	// Read separately from the run config so the failure alert works
+	// regardless of it (SPEC §11).
 	env, err := envvar.Parse()
 	if err != nil {
 		return err
@@ -118,14 +94,10 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	}
 	defer metricsShutdown()
 
-	// SDK metrics register against the same Prometheus registry as application
-	// metrics so they share one /metrics endpoint. The registerer is nil when
-	// the metrics endpoint is disabled, which temporalclient.New treats as
-	// "SDK metrics off".
+	// A nil registerer (metrics disabled) turns SDK metrics off.
 	temporalClient, temporalShutdown, err := temporalclient.New(ctx, metricsProvider.PrometheusRegisterer())
 	if err != nil {
-		// A shutdown signal during the connect/health-check window cancels ctx
-		// and surfaces here; that is an orderly stop, not a startup failure.
+		// A shutdown signal during connect is an orderly stop.
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -134,11 +106,8 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	}
 	defer temporalShutdown()
 
-	// The health server exposes liveness (/healthz, always OK once serving) and
-	// readiness (/readyz, gated on live Temporal connectivity). Readiness re-runs
-	// CheckHealth per probe so a worker that loses its Temporal connection after
-	// startup reports not-ready without the process exiting. It is a dedicated
-	// always-on port, independent of the /metrics endpoint.
+	// Readiness re-checks Temporal per probe so a lost connection reports
+	// not-ready without exiting.
 	_, healthShutdown, err := health.NewFromEnv(defaultHealthAddr, func(ctx context.Context) error {
 		_, err := temporalClient.CheckHealth(ctx, &client.CheckHealthRequest{})
 
@@ -156,12 +125,7 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 
 	options := workerOptions(cfg.Role)
 
-	// Idle-exit (control role only): when WORKER_IDLE_EXIT_AFTER is set, drain and
-	// exit once the worker has been idle for the window so a KEDA-spawned Job scales
-	// to zero (SPEC §4.1; #113). installIdleExit adds the tracking interceptor to
-	// options and returns an interrupt channel that fires on either an OS signal or
-	// the idle trigger; when disabled it returns interruptCh unchanged. idleCtx
-	// bounds the background idle loop to the lifetime of run.
+	// Control-role idle exit lets a KEDA-spawned Job scale to zero (SPEC §4.1; #113).
 	idleCtx, cancelIdle := context.WithCancel(ctx)
 	defer cancelIdle()
 
@@ -173,22 +137,14 @@ func run(ctx context.Context, interruptCh <-chan interface{}) error {
 	w := worker.New(temporalClient, queue, options)
 	registerActivities(w, cfg.Role, env, metricsProvider.PrometheusRegisterer())
 
-	// Run blocks until workerInterruptCh delivers, then stops polling and waits for
-	// in-flight tasks to finish before returning.
 	if err := w.Run(workerInterruptCh); err != nil {
 		return fmt.Errorf("run worker on %q task queue: %w", queue, err)
 	}
 
 	slog.Info("worker stopped", "role", string(cfg.Role), "task_queue", queue)
 
-	// Give Prometheus a bounded window to collect a final scrape of
-	// end-of-lifecycle metrics before the deferred metricsShutdown() closes the
-	// /metrics server. A non-cancelled context is used deliberately: the
-	// SIGTERM-driven shutdown that got us here also cancelled ctx, and passing
-	// that cancelled context would defeat the wait. A timeout here is expected
-	// and benign (Prometheus simply did not scrape in time), so it is logged at
-	// debug rather than failing the run. WaitForScrape is a no-op when metrics
-	// are disabled or the configured timeout is non-positive.
+	// Allow a final scrape before metricsShutdown. ctx is already cancelled by
+	// SIGTERM, so a fresh context is required; a timeout is benign.
 	if err := metricsProvider.WaitForScrape(context.Background()); err != nil {
 		slog.Debug("final metrics scrape wait ended without a scrape", "error", err)
 	}

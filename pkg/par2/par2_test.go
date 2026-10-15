@@ -15,18 +15,12 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/par2"
 )
 
-// maxSourceBlocks mirrors PAR2's hard limit (SPEC §8); the recovery set must
-// never exceed it.
 const maxSourceBlocks = 32768
 
-// dataBlocksPattern extracts the source block count from `par2 verify -v`
-// output ("There are a total of N data blocks.").
 var dataBlocksPattern = regexp.MustCompile(`total of (\d+) data blocks`)
 
-// TestGenerate exercises the full recovery lifecycle through the real par2
-// binary: a recovery set is produced, par2 verifies it, its source block count
-// stays within PAR2's 32,768-block limit, and after corrupting part of one
-// slice par2 repairs it back to the exact original bytes.
+// TestGenerate exercises generate, verify, corrupt, and repair through the
+// real par2 binary.
 func TestGenerate(t *testing.T) {
 	t.Parallel()
 
@@ -34,8 +28,7 @@ func TestGenerate(t *testing.T) {
 		name              string
 		sliceSizes        []int
 		redundancyPercent int
-		// corruptBytes is the size of the region zeroed in one slice before
-		// repair; it stays well within the redundancy so repair must succeed.
+		// corruptBytes stays well within the redundancy so repair must succeed.
 		corruptBytes int
 	}{
 		{
@@ -57,8 +50,7 @@ func TestGenerate(t *testing.T) {
 			corruptBytes:      3_000,
 		},
 		{
-			// Total data large enough that the minimum 4-byte block size would
-			// blow the 32,768-block limit, forcing a larger computed block size.
+			// A 4-byte block size would blow the block limit here.
 			name:              "large total stays within block limit",
 			sliceSizes:        []int{1_500_000, 1_500_000, 1_500_000, 1_500_000},
 			redundancyPercent: 10,
@@ -78,22 +70,16 @@ func TestGenerate(t *testing.T) {
 			err := par2.Generate(t.Context(), recoverySetPath, paths, test.redundancyPercent)
 			require.NoError(t, err)
 
-			// A valid recovery set was written: the main index plus at least one
-			// volume file holding recovery blocks.
 			assert.FileExists(t, recoverySetPath)
 
 			volumes, globErr := filepath.Glob(filepath.Join(dir, "archive.vol*.par2"))
 			require.NoError(t, globErr)
 			assert.NotEmpty(t, volumes, "recovery set must contain recovery volume files")
 
-			// par2 verifies the set against the intact data, and the source block
-			// count stays within PAR2's hard limit (SPEC §8).
 			blockCount := par2Verify(t, recoverySetPath)
 			assert.LessOrEqual(t, blockCount, maxSourceBlocks,
 				"source block count must not exceed PAR2's 32,768-block limit")
 
-			// Corrupt a region of the first slice, then repair: par2 must restore
-			// the exact original bytes using only the recovery set.
 			corrupt(t, paths[0], test.corruptBytes)
 			require.NotEqual(t, originals[0], readFile(t, paths[0]),
 				"corruption must actually change the slice")
@@ -108,15 +94,12 @@ func TestGenerate(t *testing.T) {
 	}
 }
 
-// TestGenerateRejectsInvalidInput confirms Generate validates its arguments
-// before invoking par2, so no recovery set is produced for bad input.
 func TestGenerateRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		// build returns (recoverySetPath, dataFiles, redundancyPercent) for a
-		// fresh temp dir.
+		// build returns (recoverySetPath, dataFiles, redundancyPercent).
 		build func(t *testing.T, dir string) (string, []string, int)
 	}{
 		{
@@ -160,16 +143,11 @@ func TestGenerateRejectsInvalidInput(t *testing.T) {
 			err := par2.Generate(t.Context(), recoverySetPath, dataFiles, redundancy)
 			require.Error(t, err)
 
-			// No recovery set should have been produced for invalid input.
 			assert.NoFileExists(t, recoverySetPath)
 		})
 	}
 }
 
-// TestGenerateReportsProgress verifies WithProgress observes par2's completion
-// fraction: the callback fires with non-decreasing fractions within [0, 1] that
-// reach completion, and the recovery set is still produced correctly under the
-// default verbosity WithProgress selects.
 func TestGenerateReportsProgress(t *testing.T) {
 	t.Parallel()
 
@@ -211,11 +189,7 @@ func TestGenerateReportsProgress(t *testing.T) {
 	assert.GreaterOrEqual(t, fractions[len(fractions)-1], 0.99, "progress must reach completion")
 }
 
-// TestMaxOutputBytes proves par2.MaxOutputBytes is a true upper bound on the real
-// par2cmdline-turbo output across the cases that stress it: near-100% redundancy,
-// many small slices (the issue's per-slice-padding repro), few large slices, and a
-// single slice. The bound underpins the Pack phase's honest PAR2 reservation, so it
-// must never fall below what par2 actually writes (issue #148).
+// TestMaxOutputBytes proves MaxOutputBytes bounds real par2 output (issue #148).
 func TestMaxOutputBytes(t *testing.T) {
 	t.Parallel()
 
@@ -225,16 +199,12 @@ func TestMaxOutputBytes(t *testing.T) {
 		redundancyPercent int
 	}{
 		{
-			// par2's critical packets dominate at maximum redundancy; the bound must
-			// still cover them.
 			name:              "near-100 percent redundancy",
 			sliceSizes:        []int{100_000, 100_000, 100_000},
 			redundancyPercent: 100,
 		},
 		{
-			// Many small slices: every slice pads up to a block boundary and the
-			// critical set is replicated widely — the issue's 550-file repro, scaled
-			// to run quickly while keeping the same block-padding pressure.
+			// The issue's 550-file block-padding repro, scaled down.
 			name:              "many small slices",
 			sliceSizes:        repeatSizes(550, 100_000),
 			redundancyPercent: 10,
@@ -267,7 +237,6 @@ func TestMaxOutputBytes(t *testing.T) {
 
 			require.NoError(t, par2.Generate(t.Context(), recoverySetPath, paths, test.redundancyPercent))
 
-			// Measure everything par2 actually wrote: the index plus every volume.
 			matches, globErr := filepath.Glob(filepath.Join(dir, "archive*.par2"))
 			require.NoError(t, globErr)
 			require.NotEmpty(t, matches)
@@ -283,20 +252,14 @@ func TestMaxOutputBytes(t *testing.T) {
 
 			bound := par2.MaxOutputBytes(totalData, len(test.sliceSizes), test.redundancyPercent)
 
-			// The bound must never run short of the real output.
 			assert.GreaterOrEqual(t, bound, realOutput,
 				"MaxOutputBytes (%d) must be an upper bound on real par2 output (%d)", bound, realOutput)
 		})
 	}
 }
 
-// TestMaxOutputBytesTightAtScale confirms the bound stays close to the redundancy
-// percentage at LTO (terabyte) scale — where recovery packets dominate and the
-// replicated critical packets are negligible — so honest reservation costs little
-// usable capacity on a real tape (issue #148). With the ~2,000-block target the
-// per-file rounding headroom is a real fraction of the set, so the bound runs at
-// about percent × (1 + sliceCount/2,000) — here ~11.2% for a nominal 10% — rather
-// than converging on the percentage itself. It is pure arithmetic; no par2.
+// TestMaxOutputBytesTightAtScale: at terabyte scale the bound should run at
+// about percent × (1 + sliceCount/2,000), so the reservation wastes little tape.
 func TestMaxOutputBytesTightAtScale(t *testing.T) {
 	t.Parallel()
 
@@ -309,13 +272,10 @@ func TestMaxOutputBytesTightAtScale(t *testing.T) {
 	data := 6 * terabyte
 	bound := par2.MaxOutputBytes(data, sliceCount, percent)
 
-	// At 6 TB the bound sits above the nominal 10% by roughly the 200/2,000
-	// per-file headroom and no more.
 	assert.Greater(t, bound, int64(float64(data)*0.10))
 	assert.Less(t, bound, int64(float64(data)*0.115))
 }
 
-// repeatSizes returns a slice of count entries each equal to size.
 func repeatSizes(count, size int) []int {
 	sizes := make([]int, count)
 	for index := range sizes {
@@ -325,8 +285,6 @@ func repeatSizes(count, size int) []int {
 	return sizes
 }
 
-// writeSlices creates one file per size in dir, filled with varied bytes, and
-// returns the slice paths in order alongside a copy of each file's contents.
 func writeSlices(t *testing.T, dir string, sizes []int) ([]string, [][]byte) {
 	t.Helper()
 
@@ -336,8 +294,7 @@ func writeSlices(t *testing.T, dir string, sizes []int) ([]string, [][]byte) {
 	for index, size := range sizes {
 		data := make([]byte, size)
 
-		// A varied, deterministic pattern: distinct across slices and across
-		// blocks within a slice, so corruption is genuinely detectable.
+		// Distinct per block, so corruption is genuinely detectable.
 		state := uint32(index*2_654_435_761 + 1)
 		for byteIndex := range data {
 			state = state*1_664_525 + 1_013_904_223
@@ -354,8 +311,7 @@ func writeSlices(t *testing.T, dir string, sizes []int) ([]string, [][]byte) {
 	return paths, originals
 }
 
-// corrupt overwrites the first n bytes of the file at path with their bitwise
-// complement, modeling localized media decay within a single slice.
+// corrupt inverts the first n bytes, modeling localized media decay.
 func corrupt(t *testing.T, path string, n int) {
 	t.Helper()
 
@@ -369,8 +325,7 @@ func corrupt(t *testing.T, path string, n int) {
 	require.NoError(t, os.WriteFile(path, data, 0o600))
 }
 
-// par2Verify runs `par2 verify -v` on the recovery set and returns the reported
-// source block count, failing the test if verification does not succeed.
+// par2Verify returns the source block count par2 reports.
 func par2Verify(t *testing.T, recoverySetPath string) int {
 	t.Helper()
 
@@ -389,8 +344,6 @@ func par2Verify(t *testing.T, recoverySetPath string) int {
 	return blockCount
 }
 
-// par2Repair runs `par2 repair` on the recovery set, failing the test if the
-// repair does not succeed.
 func par2Repair(t *testing.T, recoverySetPath string) {
 	t.Helper()
 
@@ -410,7 +363,6 @@ func readFile(t *testing.T, path string) []byte {
 	return data
 }
 
-// pad renders a slice index as the three-digit suffix used by archive slices.
 func pad(index int) string {
 	digits := []byte{
 		byte('0' + index/100%10),

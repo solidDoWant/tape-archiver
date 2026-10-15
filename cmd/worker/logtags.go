@@ -9,24 +9,15 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
 )
 
-// Run-log attribution: the web UI's run-detail log panel filters VictoriaLogs by
-// RunID (pkg/runsapi/logs.go), but only lines emitted through the Temporal SDK's
-// context loggers carry that tag — all bulk activity/helper logging goes through
-// the process-global slog default, which knows nothing about the run. Successful
-// runs trip none of the SDK error-path loggers, so every one of their lines lands
-// untagged and the panel shows its empty state (#303).
-//
-// logTagsInterceptor closes that gap without threading a logger through every
-// call site: it seeds the activity's context with the run identity so that
-// pkg/logging's contextHandler lifts WorkflowID/RunID onto every record logged
-// with that context (i.e. every slog.*Context call in the activity and the pkg/*
-// helpers it calls). It is registered for both worker roles.
+// logTagsInterceptor seeds each activity's context with WorkflowID/RunID so
+// pkg/logging tags every slog.*Context record. Without it, activity logging via
+// the global slog default is untagged and the web UI's run log panel, which
+// filters by RunID, shows nothing for successful runs (#303).
 type logTagsInterceptor struct {
 	interceptor.WorkerInterceptorBase
 }
 
-// InterceptActivity wraps each activity execution so its context carries the run
-// identity for the duration of the call.
+// InterceptActivity wraps each activity so its context carries the run identity.
 func (logTagsInterceptor) InterceptActivity(
 	ctx context.Context,
 	next interceptor.ActivityInboundInterceptor,
@@ -36,17 +27,12 @@ func (logTagsInterceptor) InterceptActivity(
 	}
 }
 
-// logTagsActivityInterceptor seeds the run identity onto the context of a single
-// activity execution.
 type logTagsActivityInterceptor struct {
 	interceptor.ActivityInboundInterceptorBase
 }
 
-// ExecuteActivity reads the run identity from the activity info and stashes it on
-// the context passed to the activity, so downstream slog.*Context logging is
-// tagged with the same WorkflowID/RunID the SDK's own context loggers use. The
-// values match workflow.GetLogger's tags exactly (WorkflowExecution.ID/.RunID),
-// so the web UI's existing RunID filter matches these lines.
+// ExecuteActivity tags ctx with the same IDs workflow.GetLogger uses, so the web
+// UI's RunID filter matches.
 func (i *logTagsActivityInterceptor) ExecuteActivity(
 	ctx context.Context,
 	in *interceptor.ExecuteActivityInput,

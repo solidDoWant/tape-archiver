@@ -14,11 +14,8 @@ import (
 // recoveryBinaries are the recovery tools recoverykit stages into the ISO's /bin.
 var recoveryBinaries = []string{"age", "par2", "zstd", "tar"}
 
-// StaticELF returns a minimal, debug/elf-parseable ELF64 executable with only a
-// PT_LOAD segment — no program interpreter and no shared-library dependencies,
-// i.e. statically linked. It is the smallest fixture that satisfies
-// recoverykit.Build's static-linkage check without needing a compiler, so tests
-// that build a recovery ISO need no real static binaries.
+// StaticELF returns a minimal statically linked ELF64 executable (one PT_LOAD,
+// no interpreter) that passes recoverykit.Build's static-linkage check.
 func StaticELF() []byte {
 	const (
 		ehSize    = 64
@@ -65,10 +62,7 @@ func StaticELF() []byte {
 	return buf.Bytes()
 }
 
-// RecoveryBinariesDir creates a temp directory populated with the static recovery
-// binaries (age, par2, zstd, tar) as minimal static ELF fixtures and returns its
-// path. It satisfies recoverykit.Build's static-linkage requirement in tests
-// (report/ISO building) without shipping real binaries.
+// RecoveryBinariesDir returns a temp directory of StaticELF recovery-tool fixtures.
 func RecoveryBinariesDir(t *testing.T) string {
 	t.Helper()
 
@@ -81,12 +75,8 @@ func RecoveryBinariesDir(t *testing.T) string {
 	return dir
 }
 
-// RecoverySourcesDir creates a temp directory populated with a fixture upstream
-// source archive per recovery tool (named <tool>-<version>.tar.gz, mirroring
-// nix/recovery-binaries.nix's $out/src) and returns its path. It satisfies
-// recoverykit.Build's requirement that the recovery ISO ship the tools' source
-// (SPEC §2, §10) without shipping real archives; the contents are opaque bytes —
-// unlike the binaries, sources are not linkage-checked.
+// RecoverySourcesDir returns a temp directory with one opaque fixture source
+// archive per recovery tool.
 func RecoverySourcesDir(t *testing.T) string {
 	t.Helper()
 
