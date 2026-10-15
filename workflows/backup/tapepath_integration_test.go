@@ -313,9 +313,14 @@ func TestTapePathAllowNonBlankTapes(t *testing.T) {
 	require.Error(t, err, "Load must refuse a non-blank tape by default")
 	assert.Contains(t, err.Error(), "not blank", "refusal must name the non-blank cause")
 
-	// Override: the Load activity warns and proceeds, flagging the overwrite. The
-	// tape is still in the drive, so this call reconciles to a no-op load and simply
-	// re-runs the (unchanged) blank check on the same non-blank tape.
+	// The refused tape goes back to its slot rather than staying in the drive.
+	afterRefusal, err := changer.Inventory(t.Context())
+	require.NoError(t, err)
+	assert.False(t, afterRefusal.Drives[0].Loaded, "the refused tape must not be left in the drive")
+	assert.True(t, afterRefusal.Slots[slotIdx].Full, "the refused tape must be back in its slot")
+	assert.Equal(t, barcode, afterRefusal.Slots[slotIdx].Barcode)
+
+	// Override: the Load activity warns and proceeds, flagging the overwrite.
 	loaded, err := loadActs.Load(t.Context(), loadInput(true))
 	require.NoError(t, err, "Load must proceed on a non-blank tape when AllowNonBlankTapes is set")
 	require.Len(t, loaded, 1, "Load must return one LoadedTape")
