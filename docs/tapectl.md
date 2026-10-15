@@ -113,9 +113,11 @@ through the virtual I/O station, the mirrored volumes are recreated blank, and m
 barcodes are inserted through the I/O station and moved to their slots. The `mhvtl` daemons
 are never restarted or signalled. The mirror then checks the virtual library reports exactly
 the mirrored slots with empty drives and I/O station, and fails naming anything that differs.
-It is skipped entirely when `library.mirrorSourceChanger` is empty — which is always the
-case on a real run, and also on a dev deployment whose configured library already *is* the
-`mhvtl` one (there is nothing to mirror from).
+It is skipped entirely on a real run: submission discards any client-supplied
+`library.mirrorSourceChanger` (a dry run recomputes it), and the worker ignores the field on
+any run not recorded as a dry run. It is also skipped when the field is empty, as on a dev
+deployment whose configured library already *is* the `mhvtl` one (there is nothing to mirror
+from).
 
 Media are recreated **blank**: element status reports which slots hold a tape but not
 whether it has data. Slot occupancy is the property that decides whether a run can find its
