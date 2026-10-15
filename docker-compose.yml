@@ -1,6 +1,6 @@
 services:
   temporal:
-    image: temporalio/temporal:1.7.0
+    image: temporalio/temporal:1.7.0@sha256:9c5b386d86bca59ba08f32ddc4c51287351c8c616b6a8359f03e96a585e137f4
     restart: on-failure
     command:
       - server
