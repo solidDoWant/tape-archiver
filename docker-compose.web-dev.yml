@@ -31,7 +31,7 @@
 
 services:
   victorialogs:
-    image: victoriametrics/victoria-logs:v1.24.0-victorialogs
+    image: victoriametrics/victoria-logs:v1.53.0@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d
     restart: on-failure
     network_mode: host
     command:
@@ -46,7 +46,7 @@ services:
       start_period: 5s
 
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.147.0
+    image: victoriametrics/victoria-metrics:v1.154.0@sha256:4bd592341587d669b7f57d54bbb82bd21ac8675f4e24234b7703a7c0f85197d8
     restart: on-failure
     network_mode: host
     command:
@@ -75,7 +75,7 @@ services:
   # as up: vector exits on a config error, and without a healthcheck compose
   # counts a just-started (about-to-crash) container as ready.
   vector:
-    image: timberio/vector:0.44.0-alpine@sha256:e285e1543366ac306f3957c25d3aca4d2f86855ae274fa4de3522676d72fa0df
+    image: timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a
     restart: on-failure
     network_mode: host
     depends_on:
