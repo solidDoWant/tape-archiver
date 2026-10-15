@@ -43,7 +43,12 @@ ISO 9660) so the data stays recoverable decades from now (SPEC §2).
   - `bin/<name>` — the static recovery binaries `age`, `par2`, `zstd`, `tar`.
   - `src/<tool>-<version>.*` — each recovery tool's upstream **source archive**,
     so the tools can be rebuilt from source on future hardware the pinned static
-    binaries cannot run on (SPEC §2, §10).
+    binaries cannot run on (SPEC §2, §10). `age`'s archive carries its Go module
+    dependencies under `vendor/`, so it builds with only a Go toolchain and no
+    network: `GOFLAGS=-mod=vendor GOPROXY=off CGO_ENABLED=0 go build ./cmd/age`.
+  - `src/age-spec-c2sp-<rev>.md` — the age file-format specification, including
+    the `mlkem768x25519` post-quantum recipient the archives use, with the HPKE
+    documents it references (`src/draft-ietf-hpke-pq-03.txt`, `src/rfc9180.txt`).
 
 ## Prerequisites
 

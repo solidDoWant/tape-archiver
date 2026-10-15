@@ -44,6 +44,8 @@ The image holds, at these paths:
   can be rebuilt from source on future hardware the pinned static binaries do not run on.
   Unlike `bin/`, these are archives rather than executables, so they are not
   linkage-checked; the build fails loudly if the directory is empty or yields no files.
+  With the bundled set it also holds the age format spec and the HPKE documents it
+  references (see below).
 
 File names are stored as ISO 9660 level-2 identifiers (no Rock Ridge): the mount
 lowercases them, folds characters outside the identifier set to `_`, joins interior dots,
@@ -95,7 +97,13 @@ It emits two disc-staging directories, siblings under `$out`:
   files verbatim into the ISO's `src/`. These are archives,
   not executables, so they are not linkage-checked, but the build fails if the directory
   is empty — a disc that ships binaries but no source cannot rebuild the tools decades
-  out on hardware the binaries do not run on (SPEC §2).
+  out on hardware the binaries do not run on (SPEC §2). `age`'s archive includes its Go
+  module dependencies under `vendor/`, so it builds with no network
+  (`GOFLAGS=-mod=vendor GOPROXY=off go build ./cmd/age`); the derivation's install check
+  proves this on every build. The same directory also holds the age format spec
+  (`age-spec-c2sp-<rev>.md`, including the `mlkem768x25519` post-quantum recipient the
+  run uses) and the HPKE documents it builds on (`draft-ietf-hpke-pq-03.txt`,
+  `rfc9180.txt`), so a compatible decryptor can be written from the disc alone.
 
 `par2cmdline-turbo`, `zstd`, and `gnutar` are built with Nix `pkgsStatic` (musl); `age`
 is Go and links static with CGO disabled. All four are drawn from the **same pinned

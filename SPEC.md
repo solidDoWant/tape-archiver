@@ -486,7 +486,11 @@ the disc and the write path run identical tool versions (§2, §4.1). The data-w
 **bundles this set** at `/recovery/{bin,src}` (the `TAPE_RECOVERY_BINARIES_DIR` /
 `TAPE_RECOVERY_SOURCES_DIR` defaults) rather than mounting it, so the bytes a run stages
 onto the disc are the same store paths the image runs — the version match is structural,
-not an operator-populated artifact that could drift.
+not an operator-populated artifact that could drift. Every staged source builds offline:
+`age`'s archive includes its `vendor/` module tree (the derivation's install check
+rebuilds it with no network and decrypts a post-quantum file with the result), and the
+age format spec (C2SP `age.md`) plus the HPKE documents it references
+(`draft-ietf-hpke-pq-03`, RFC 9180) are staged beside the sources.
 
 **Target media: M-DISC DVD.** Its inorganic recording layer is ISO/IEC 10995-tested and
 NIST-listed for 100+ year archival life, and — unlike recordable Blu-ray, whose media
