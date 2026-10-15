@@ -216,10 +216,11 @@ test('submit a dry-run (JSON mode), watch it progress live with the phase rail, 
       // The row's LAST PHASE cell (grid column 5) must show a real phase.
       await expect(runRow.locator(':scope > span').nth(4)).not.toHaveText('—', { timeout: 60_000 })
     } else {
-      // Already terminal: the row must carry a terminal status badge and a
-      // real final phase, proving the dashboard tracked it to completion.
+      // Already terminal: the row must carry a terminal status badge, proving the
+      // dashboard tracked it to completion. A closed run's LAST PHASE cell reads
+      // "—" by design (docs/web-ui.md: no live query answers it once closed).
       await expect(runRow.getByText(/Completed|Failed/).first()).toBeVisible()
-      await expect(runRow.locator(':scope > span').nth(4)).not.toHaveText('—')
+      await expect(runRow.locator(':scope > span').nth(4)).toHaveText('—')
     }
   } finally {
     await historyPage.close()

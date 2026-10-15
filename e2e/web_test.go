@@ -65,7 +65,8 @@ const (
 	webOIDCClientID     = "tape-archiver-web-e2e"
 	webOIDCClientSecret = "web-e2e-fake-client-secret"
 
-	// webBlankSlot is the mhvtl storage slot this test blanks and uses. It
+	// webBlankSlot is the mhvtl storage slot index (into Inventory.Slots, so
+	// element address webBlankSlot+1) this test blanks and uses. It
 	// must not collide with any slot index the other e2e tests in this
 	// package use — see tape_test.go's prepareBlankTapeAt callers (2, 3, 4,
 	// 5, 6, 8, 9, 12+, 20+, 24, 26) — comfortably clear of all of them.
@@ -76,7 +77,8 @@ const (
 	// distinct from webBlankSlot above, which submit-monitor-history.spec.ts
 	// already writes to; the two specs run sequentially against the same
 	// singleton `backup` workflow (SPEC §4.2, playwright.config.ts's
-	// workers: 1), so their tapes must not collide.
+	// workers: 1), so their tapes must not collide. Like webBlankSlot it is a
+	// slot index; the spec is handed the slot's element address.
 	webFormBlankSlot = 31
 
 	// webLibrarySlotCount is the storage-slot count the deployed cmd/web
@@ -84,8 +86,8 @@ const (
 	// draw its topology-bounded blank-slot grid (issue #305/#310's
 	// SlotGridEditor — the picker numbers storage slots 1..slotCount and only
 	// lets an operator select real ones). It mirrors the mhvtl library's 47
-	// storage slots (scripts/mhvtl-up.sh), which is what makes webFormBlankSlot
-	// (31) a selectable slot in config-form-and-tapes.spec.ts. Without a
+	// storage slots (scripts/mhvtl-up.sh), which is what makes webFormBlankSlot's
+	// address a selectable slot in config-form-and-tapes.spec.ts. Without a
 	// declared topology the grid renders "not configured" and the Form-mode
 	// spec has no slot to click. The mhvtl I/O-station MAPs are separate SCSI
 	// element addresses, not storage-slot numbers 1..47, so no storage slot is
@@ -142,10 +144,10 @@ func TestWebUIEndToEnd(t *testing.T) {
 	// separate blank slot (typed directly into the page, not read from a
 	// config file) — prepareBlankTapeAt's own assertions (drive empty, slot
 	// holds a tape) are exactly the precondition check that submission
-	// needs too; only the slot number itself (not the rest of the fixture)
+	// needs too; only the slot's element address (not the rest of the fixture)
 	// is passed through, since the dry-run toggle overwrites
 	// Library.Changer/Drives server-side regardless of what the form typed.
-	prepareBlankTapeAt(t, webFormBlankSlot)
+	formFixture := prepareBlankTapeAt(t, webFormBlankSlot)
 	identity, recipient := generateTestKeypair(t)
 
 	deliveryToken := fmt.Sprintf("web-e2e-%d", time.Now().UnixNano())
@@ -305,7 +307,7 @@ func TestWebUIEndToEnd(t *testing.T) {
 		"WEB_UI_BASE_URL="+baseURL,
 		"RUN_CONFIG_PATH="+configPath,
 		"FORM_ZFS_SOURCE="+source,
-		"FORM_BLANK_SLOT="+strconv.Itoa(webFormBlankSlot),
+		"FORM_BLANK_SLOT="+strconv.Itoa(formFixture.slotAddr),
 	)
 
 	out, err := cmd.CombinedOutput()

@@ -114,7 +114,13 @@ test('submit a dry-run via the Form-mode config builder, then find its tapes on 
   await expect(page).toHaveURL(/\/tapes$/)
   await expect(page.getByText('The archiver keeps no persistent tape catalog')).toBeVisible({ timeout: 30_000 })
 
+  // This run is a dry-run, and the Tapes page hides dry-run (mhvtl) tapes
+  // until the operator opts in, so the row only appears after the toggle.
   const tapeRow = page.getByRole('row').filter({ has: page.getByRole('link', { name: runId, exact: true }) })
+  const showDryRun = page.getByLabel(/Show dry-run tapes/)
+  await expect(showDryRun).toBeVisible({ timeout: 30_000 })
+  await expect(tapeRow).toHaveCount(0)
+  await showDryRun.check()
   await expect(tapeRow).toBeVisible({ timeout: 30_000 })
   await expect(tapeRow.getByText('written', { exact: true })).toBeVisible()
   await expect(tapeRow.getByText('not measured')).toHaveCount(0)

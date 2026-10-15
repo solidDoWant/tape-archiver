@@ -50,6 +50,7 @@ import (
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
@@ -162,6 +163,18 @@ type e2eHarness struct {
 
 func TestMain(m *testing.M) {
 	if reason := checkPrerequisites(); reason != "" {
+		skipReason = reason
+		log.Printf("[e2e] skipping suite: %s", reason)
+		os.Exit(m.Run())
+	}
+
+	reason, err := probeDriveReadiness()
+	if err != nil {
+		log.Printf("[e2e] tape drive probe failed: %v", err)
+		os.Exit(1)
+	}
+
+	if reason != "" {
 		skipReason = reason
 		log.Printf("[e2e] skipping suite: %s", reason)
 		os.Exit(m.Run())
@@ -1063,4 +1076,61 @@ func execStdout(dir string, extraEnv []string, name string, args ...string) (str
 	}
 
 	return string(out), nil
+}
+
+// probeDriveReadiness decides once, before any test, whether this kernel can run
+// mhvtl's tape drive at all: it loads a tape into drive 0, waits for it to become
+// ready, and unloads it. A drive that never readies is the one environment gap
+// the suite skips on (returned as a reason); every later per-test readiness
+// wait then fails rather than skips, so a drive that wedges mid-suite cannot hide
+// behind a passing "ok". A changer that cannot load or unload is an error.
+func probeDriveReadiness() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	changer := tape.NewChanger(envOr("MHVTL_CHANGER_DEV", "/dev/sch0"))
+
+	inv, err := changer.Inventory(ctx)
+	if err != nil {
+		return "", fmt.Errorf("changer inventory: %w", err)
+	}
+
+	if len(inv.Drives) == 0 {
+		return "", fmt.Errorf("changer reports no drives")
+	}
+
+	if inv.Drives[0].Loaded {
+		return "", fmt.Errorf("drive 0 must start empty (run `make mhvtl-reset`)")
+	}
+
+	slotAddr := -1
+
+	for _, slot := range inv.Slots {
+		if slot.Full {
+			slotAddr = slot.Address
+
+			break
+		}
+	}
+
+	if slotAddr == -1 {
+		return "", fmt.Errorf("no storage slot holds a tape")
+	}
+
+	driveAddr := inv.Drives[0].Address
+	if err := changer.Load(ctx, slotAddr, driveAddr); err != nil {
+		return "", fmt.Errorf("load slot %d into drive 0: %w", slotAddr, err)
+	}
+
+	readyErr := testutil.WaitDriveReady(ctx, testutil.ResolveDrive0Dev())
+
+	if err := changer.Unload(ctx, slotAddr, driveAddr); err != nil {
+		return "", fmt.Errorf("unload drive 0 to slot %d: %w", slotAddr, err)
+	}
+
+	if readyErr != nil {
+		return fmt.Sprintf("%v (kernel/mhvtl ioctl incompatibility)", readyErr), nil
+	}
+
+	return "", nil
 }

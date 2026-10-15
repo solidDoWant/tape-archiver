@@ -98,15 +98,19 @@ test-e2e: fmt vet temporal-up mhvtl-up zpool-up ## Run the end-to-end suite: con
 	  : "through explicitly (sudo strips the rest of the environment by"; \
 	  : "default) so TestWebUIEndToEnd (e2e/web_test.go) finds the"; \
 	  : "nix-provided Chromium instead of skipping — see flake.nix's devShell."; \
+	  : "Drive nodes are NOT pinned: nst0/nst1 follow kernel probe order, so"; \
+	  : "DTE0 may be nst1; internal/testutil resolves them by SCSI address."; \
+	  : "-v so a skipped test (e.g. a drive that never became ready) is"; \
+	  : "visible instead of hiding behind a bare ok."; \
 	  sudo env \
-	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
+	    MHVTL_CHANGER_DEV=/dev/sch0 \
 	    TAPE_POOL_MOUNT=/mnt/tape-test-pool/archive TAPE_POOL_DATASET=tape_test/archive \
 	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
 	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
 	    PLAYWRIGHT_BROWSERS_PATH="$$PLAYWRIGHT_BROWSERS_PATH" \
 	    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="$$PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD" \
 	    PATH="$$PATH" HOME="$$HOME" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
-	    go test -count=1 -p 1 -timeout 40m -tags e2e ./e2e/...; \
+	    go test -v -count=1 -p 1 -timeout 40m -tags e2e ./e2e/...; \
 	}
 
 .PHONY: benchmark

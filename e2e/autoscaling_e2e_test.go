@@ -251,12 +251,13 @@ func testFailureAlertFromZero(t *testing.T, h *e2eHarness) {
 	h.submitRun(t, cfg)
 	terminateOnCleanup(t, temporalClient)
 
-	// KEDA must spawn a worker to drive the run from zero.
-	requireControlPodsAtLeast(t, h, 1, "submitting the run must scale a control worker up from zero")
-
 	// Corrupt one staged slice after Prepare so Verify's checksum recompute fails.
-	waitForPhase(t, temporalClient, backup.PhasePrepare, 4*time.Minute)
-	corruptStagedSlice(t, fmt.Sprintf("%s/%s", h.stagingHostDir, temporalRunID(t, temporalClient)))
+	// Watch from submission: a fresh worker can drive the run past Verify within
+	// the pod-count poll below.
+	corruptAfterPrepare(t, temporalClient, h.stagingHostDir, 4*time.Minute)
+
+	// KEDA must have spawned a worker to drive the run from zero.
+	requireControlPodsAtLeast(t, h, 1, "submitting the run must scale a control worker up from zero")
 
 	// The run must fail, attributed to the Verify phase.
 	err := temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, new(backup.Result))

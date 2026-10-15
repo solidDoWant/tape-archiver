@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -54,11 +55,9 @@ func TestBackupVerifyFault_NoTapeTouched(t *testing.T) {
 	h.submitRun(t, cfg)
 	terminateOnCleanup(t, temporalClient)
 
-	// Wait until Prepare has completed (its slices + recorded checksums exist on
-	// disk), then corrupt one slice before Verify recomputes it. Prepare keys the
-	// per-run staging subdirectory by the Temporal RunID (not the workflow ID).
-	waitForPhase(t, temporalClient, backup.PhasePrepare, 4*time.Minute)
-	corruptStagedSlice(t, filepath.Join(h.stagingHostDir, temporalRunID(t, temporalClient)))
+	// Once Prepare has completed (its slices + recorded checksums exist on disk),
+	// corrupt one slice before Verify recomputes it.
+	corruptAfterPrepare(t, temporalClient, h.stagingHostDir, 4*time.Minute)
 
 	// The run must fail, and the failure must be attributed to the Verify phase.
 	err := temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, new(backup.Result))
@@ -74,41 +73,47 @@ func TestBackupVerifyFault_NoTapeTouched(t *testing.T) {
 	assertTapeUntouched(t, fixture)
 }
 
-// waitForPhase polls LastCompletedPhaseQuery until the workflow reports the given
-// phase as its last completed phase (or a later data-side phase), so the caller
-// can act within the window after it.
-func waitForPhase(t *testing.T, c client.Client, phase string, timeout time.Duration) {
+// corruptAfterPrepare waits for the run's PrepareArchives activity to complete,
+// then immediately flips a byte in a staged slice so Verify's checksum recompute
+// fails. Prepare -> GeneratePAR2 -> Verify can finish in well under a second, so
+// completion is detected by long-polling the run's history (pushed by Temporal as
+// the event is recorded) rather than by polling a query, which needs a worker
+// round trip per poll and routinely missed the window.
+func corruptAfterPrepare(t *testing.T, c client.Client, stagingHostDir string, timeout time.Duration) {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
+	runID := temporalRunID(t, c)
 
-	for time.Now().Before(deadline) {
-		resp, err := c.QueryWorkflow(t.Context(), backupWorkflowID, "", backup.LastCompletedPhaseQuery)
-		if err == nil {
-			var last string
-			require.NoError(t, resp.Get(&last))
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
 
-			if last == phase {
-				return
-			}
+	activityTypes := map[int64]string{}
+	iterator := c.GetWorkflowHistory(ctx, backupWorkflowID, runID, true, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
 
-			// If we already blew past the target into Pack/PAR2, the slice still
-			// exists and is corruptible before Verify; stop waiting.
-			if last == backup.PhasePack || last == backup.PhaseGeneratePAR2 {
-				return
-			}
+	for iterator.HasNext() {
+		event, err := iterator.Next()
+		require.NoErrorf(t, err, "long-poll history of run %s for PrepareArchives completion", runID)
+
+		if attrs := event.GetActivityTaskScheduledEventAttributes(); attrs != nil {
+			activityTypes[event.GetEventId()] = attrs.GetActivityType().GetName()
 		}
 
-		time.Sleep(250 * time.Millisecond)
+		if attrs := event.GetActivityTaskCompletedEventAttributes(); attrs != nil &&
+			activityTypes[attrs.GetScheduledEventId()] == "PrepareArchives" {
+			corruptStagedSlice(t, filepath.Join(stagingHostDir, runID))
+
+			return
+		}
 	}
 
-	require.Failf(t, "phase not reached", "workflow did not complete phase %q within %s", phase, timeout)
+	require.Failf(t, "PrepareArchives never completed", "run %s closed or %s elapsed before PrepareArchives completed", runID, timeout)
 }
 
-// corruptStagedSlice flips a byte in the middle of the largest staged slice under
-// dir, preserving its size so the fault is a content (checksum) mismatch rather
-// than a truncation. PAR2 files do not exist yet at this point (a later phase),
-// so every regular file here is an archive slice.
+// corruptStagedSlice flips one byte in the middle of the largest archive slice
+// (a non-PAR2 file in a per-archive subdirectory) under dir, in place and
+// preserving its size, so the fault is a content (checksum) mismatch rather than
+// a truncation. Top-level files such as report.pdf exist only after Verify, so
+// they are never picked.
 func corruptStagedSlice(t *testing.T, dir string) {
 	t.Helper()
 
@@ -117,31 +122,32 @@ func corruptStagedSlice(t *testing.T, dir string) {
 		size   int64
 	)
 
-	require.Eventually(t, func() bool {
-		target, size = "", 0
+	_ = filepath.WalkDir(dir, func(pathName string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Dir(pathName) == dir || strings.HasSuffix(pathName, ".par2") {
+			return nil //nolint:nilerr // tolerate races with the writing worker
+		}
 
-		_ = filepath.WalkDir(dir, func(pathName string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil //nolint:nilerr // tolerate races with the writing worker
-			}
+		info, statErr := d.Info()
+		if statErr == nil && info.Size() > size {
+			target, size = pathName, info.Size()
+		}
 
-			info, statErr := d.Info()
-			if statErr == nil && info.Size() > size {
-				target, size = pathName, info.Size()
-			}
+		return nil
+	})
+	require.Positivef(t, size, "a staged slice must exist under %s once Prepare completed", dir)
 
-			return nil
-		})
-
-		return size > 0
-	}, 60*time.Second, 250*time.Millisecond, "a staged slice must appear under %s", dir)
-
-	data, err := os.ReadFile(target)
+	file, err := os.OpenFile(target, os.O_RDWR, 0)
 	require.NoError(t, err)
-	require.NotEmpty(t, data)
 
-	data[len(data)/2] ^= 0xff
-	require.NoError(t, os.WriteFile(target, data, 0o600))
+	defer func() { require.NoError(t, file.Close()) }()
+
+	middle := make([]byte, 1)
+	_, err = file.ReadAt(middle, size/2)
+	require.NoError(t, err)
+
+	middle[0] ^= 0xff
+	_, err = file.WriteAt(middle, size/2)
+	require.NoError(t, err)
 
 	t.Logf("corrupted staged slice %s (%d bytes)", target, size)
 }
