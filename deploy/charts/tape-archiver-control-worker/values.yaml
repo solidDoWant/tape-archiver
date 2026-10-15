@@ -133,6 +133,11 @@ config:
     # running without prometheus-operator CRDs installed.
     metrics:
       enabled: false
+    # metricsScrapeWaitSeconds sets METRICS_SCRAPE_WAIT_TIMEOUT: how long shutdown waits
+    # for a final Prometheus scrape. Leave null for 0 when metrics.enabled is false
+    # (nothing scrapes) or 60 when it is true. The pod's terminationGracePeriodSeconds
+    # is this plus 30.
+    metricsScrapeWaitSeconds: null
 
 # resources follows the bjw-s app-template schema. Values here are deep-merged over the
 # chart-computed controller, env vars, persistence, and podMonitor; user-supplied values take

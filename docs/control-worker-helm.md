@@ -96,6 +96,7 @@ so a forgotten `enabled` flag never silently disables mTLS or CA verification.
 | `discordFailureWebhookUrl.secretKeyRef.{name,key}` | `""` | Webhook URL from a `Secret`. Surfaced as `DISCORD_FAILURE_WEBHOOK_URL` (SPEC §11). Leave both empty to disable failure alerting. |
 | `k8sDatasetParent` | `""` | democratic-csi `datasetParentName`, prepended to a relative CSI `snapshotHandle` during k8s resolution (SPEC §3). Surfaced as `TAPE_K8S_DATASET_PARENT`. Only needed when a run names k8s sources. |
 | `metrics.enabled` | `false` | Emit a `PodMonitor` for the always-on `/metrics` endpoint (port 9090). Requires prometheus-operator CRDs. |
+| `metricsScrapeWaitSeconds` | `null` | Seconds shutdown waits for a final scrape (`METRICS_SCRAPE_WAIT_TIMEOUT`). Null means `0` when `metrics.enabled` is false and `60` when it is true. The pod's `terminationGracePeriodSeconds` is set to this plus 30, so the worker exits before the kubelet sends SIGKILL. |
 
 ### Kubernetes resources (`resources`)
 
