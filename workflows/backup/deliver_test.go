@@ -185,6 +185,25 @@ func TestDeliverReportFailureFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "deliver report")
 }
 
+// TestDeliverTransportFailureRedactsToken (issue #381): the Deliver failure,
+// which becomes the phase error in the UI, never carries the webhook token.
+func TestDeliverTransportFailureRedactsToken(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+
+	var acts DeliverActivities
+
+	_, err := acts.Deliver(t.Context(), DeliverInput{
+		WebhookURL: server.URL + "/api/webhooks/123/SECRETTOKEN",
+		ReportPath: writeReportArtifact(t),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "connection refused")
+	assert.NotContains(t, err.Error(), "SECRETTOKEN")
+}
+
 // deliverPhaseTestWorkflow drives deliverPhase.
 func deliverPhaseTestWorkflow(ctx workflow.Context, cfg config.Config) error {
 	return deliverPhase(ctx, cfg, &runState{reportPath: "/stage/report.pdf"})
