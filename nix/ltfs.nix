@@ -26,6 +26,13 @@ stdenv.mkDerivation (finalAttrs: {
     hash = "sha256-E3qMdZL7UF/phUjayxLGBLpDG9rDXzG5cFECY+tlNlM=";
   };
 
+  patches = [
+    # Upstream bug (still in 2.4.9.0): switching a drive left in append-only mode
+    # back to write-anywhere unloads the cartridge while LTFS holds PREVENT MEDIUM
+    # REMOVAL, so mkltfs fails with EDEV_MEDIUM_LOCKED on real drives.
+    ./patches/ltfs-0001-release-medium-lock-before-write-mode-unload.patch
+  ];
+
   nativeBuildInputs = [
     autoreconfHook
     pkg-config
