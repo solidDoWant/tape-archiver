@@ -100,7 +100,7 @@ const (
 	kedaNamespace    = "keda"
 	kedaRelease      = "keda"
 	kedaChartName    = "keda"
-	kedaChartVersion = "2.18.3"
+	kedaChartVersion = "2.21.0"
 	// kedaChartRepo is the KEDA chart's GitHub Pages Helm repository, used via
 	// helm's --repo flag so no global repo entry is added to the host. (KEDA also
 	// publishes an OCI chart at ghcr.io, but the Pages repo is the more broadly
