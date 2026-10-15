@@ -738,12 +738,22 @@ every `/api/*` route, an unauthenticated request is `401`.
 `GET /api/runs/{runID}/phases` returns `{"runId": "...", "phases": [...]}` with all 11
 pipeline phases (SPEC §4.3) in pipeline order — `Resolve`, `Prepare`, `Pack`,
 `Generate PAR2`, `Verify`, `Load`, `Write`, `Eject`, `Report`, `Burn`, `Deliver` —
-each `{"name", "status", "startTime", "endTime", "facts", "error"}`. `status` is one
+each `{"name", "status", "startTime", "endTime", "facts", "error", "waiting"}`. `status` is one
 of `pending`, `active` (in progress — including while paused for an operator;
 `currentPause` on `GET /api/runs/{runID}` reports the pause itself), `completed`, or
 `failed`. `startTime`/`endTime` bracket the phase's activity window and are omitted
 where unknown (a pending phase, or a phase that completed as a no-op — e.g. `Burn` on
 a run without `delivery.opticalBurn`).
+
+An `active` phase on a still-running run may also carry `waiting` — `{"activity",
+"taskQueue", "since", "stalled", "pollers"}` — when its activity has been scheduled but
+no worker has picked it up yet (read from the run's pending activities, since workflow
+history alone cannot tell a running activity from an undispatched one). `taskQueue` is
+the queue the activity waits on (e.g. `data`), `since` when it was scheduled, and
+`stalled` becomes `true` once it has waited 60 s — longer than a worker cold start
+(e.g. KEDA spawning the control worker) explains. `pollers` is the number of workers
+Temporal reports polling that queue for activities, omitted if that lookup failed. A
+phase whose activity is actually executing has no `waiting`.
 
 Because the Load/Write/Eject tape path interleaves per drive-set (SPEC §4.3 phases
 6–8), a later phase can hold real activity from an earlier drive-set while an earlier

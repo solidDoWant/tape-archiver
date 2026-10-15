@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -669,4 +671,113 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 	require.NoError(t, temporalClient.GetWorkflow(ctx, backup.WorkflowID, thirdRunID).Get(ctx, nil),
 		"stub workflow must complete so the singleton workflow ID is free for later tests")
+}
+
+// stubLoadWorkflow schedules a "Load" activity on the task queue it is given
+// and waits for it, standing in for the real workflow's Load on the data queue.
+func stubLoadWorkflow(ctx workflow.Context, dataQueue string) error {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           dataQueue,
+		StartToCloseTimeout: 5 * time.Minute,
+	})
+
+	return workflow.ExecuteActivity(ctx, "Load").Get(ctx, nil)
+}
+
+// getLoadPhase fetches GET /api/runs/{runID}/phases and returns the Load phase.
+func getLoadPhase(t *testing.T, serverURL, runID string) (runsapi.PhaseInfo, bool) {
+	t.Helper()
+
+	status, body := getJSON[runsapi.RunPhasesResponse](t, serverURL+"/api/runs/"+runID+"/phases")
+	if status != http.StatusOK {
+		return runsapi.PhaseInfo{}, false
+	}
+
+	for _, phase := range body.Phases {
+		if phase.Name == backup.PhaseLoad {
+			return phase, true
+		}
+	}
+
+	return runsapi.PhaseInfo{}, false
+}
+
+// TestPhasesWaitingForWorkerAgainstRealTemporal proves, against a real
+// Temporal, that an activity scheduled on a queue nobody polls reads as waiting
+// for a worker on that queue (with no pollers, and not yet stalled during the
+// cold-start grace), and that it reads as plainly active once a worker picks it
+// up (issue #344).
+func TestPhasesWaitingForWorkerAgainstRealTemporal(t *testing.T) {
+	requireTemporalAddress(t)
+	isolateTemporalConfig(t)
+
+	ctx := t.Context()
+
+	temporalClient, shutdown, err := temporalclient.New(ctx, nil)
+	require.NoError(t, err)
+
+	defer shutdown()
+
+	// Unique queues keep this run away from any other worker on the host.
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
+	controlQueue := "runsapi-344-control-" + suffix
+	dataQueue := "runsapi-344-data-" + suffix
+
+	controlWorker := worker.New(temporalClient, controlQueue, worker.Options{})
+	controlWorker.RegisterWorkflowWithOptions(stubLoadWorkflow, workflow.RegisterOptions{Name: backup.WorkflowType})
+	require.NoError(t, controlWorker.Start())
+
+	defer controlWorker.Stop()
+
+	run, err := temporalClient.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+		ID:                       backup.WorkflowID,
+		TaskQueue:                controlQueue,
+		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_TERMINATE_EXISTING,
+	}, backup.WorkflowType, dataQueue)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = temporalClient.TerminateWorkflow(context.WithoutCancel(ctx), backup.WorkflowID, run.GetRunID(), "test cleanup")
+	})
+
+	server := httptest.NewServer(runsapi.New(temporalClient))
+	defer server.Close()
+
+	require.Eventually(t, func() bool {
+		load, ok := getLoadPhase(t, server.URL, run.GetRunID())
+
+		return ok && load.Waiting != nil
+	}, 30*time.Second, 250*time.Millisecond, "the unstarted Load never read as waiting")
+
+	load, ok := getLoadPhase(t, server.URL, run.GetRunID())
+	require.True(t, ok)
+	require.NotNil(t, load.Waiting)
+	assert.Equal(t, runsapi.PhaseActive, load.Status)
+	assert.Equal(t, "Load", load.Waiting.Activity)
+	assert.Equal(t, dataQueue, load.Waiting.TaskQueue)
+	assert.False(t, load.Waiting.Stalled, "a wait inside the cold-start grace must not read as stalled")
+	require.NotNil(t, load.Waiting.Pollers, "DescribeTaskQueue must report the poller count")
+	assert.Equal(t, 0, *load.Waiting.Pollers)
+
+	release := make(chan struct{})
+
+	dataWorker := worker.New(temporalClient, dataQueue, worker.Options{})
+	dataWorker.RegisterActivityWithOptions(func(ctx context.Context) error {
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}, activity.RegisterOptions{Name: "Load"})
+	require.NoError(t, dataWorker.Start())
+
+	defer dataWorker.Stop()
+	defer close(release)
+
+	require.Eventually(t, func() bool {
+		load, ok := getLoadPhase(t, server.URL, run.GetRunID())
+
+		return ok && load.Status == runsapi.PhaseActive && load.Waiting == nil
+	}, 30*time.Second, 250*time.Millisecond, "the Load a worker picked up never read as plainly active")
 }

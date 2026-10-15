@@ -95,6 +95,9 @@ type PhaseInfo struct {
 	// Error is the failure rendered as text, set only when Status ==
 	// PhaseFailed.
 	Error string `json:"error,omitempty"`
+	// Waiting is set on an active phase whose activity is scheduled but has not
+	// been picked up by a worker yet, distinguishing it from one executing.
+	Waiting *PhaseWaiting `json:"waiting,omitempty"`
 }
 
 // RunPhasesResponse is the GET /api/runs/{runID}/phases response body.
@@ -122,9 +125,10 @@ func (h *handler) getRunPhases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outcomes := deriveTapeOutcomes(history.Activities)
+	timeline := buildPhaseTimeline(history, deriveTapeOutcomes(history.Activities))
+	annotateWaiting(ctx, h.temporalClient, runID, history, timeline, time.Now())
 
-	writeJSON(w, http.StatusOK, RunPhasesResponse{RunID: runID, Phases: buildPhaseTimeline(history, outcomes)})
+	writeJSON(w, http.StatusOK, RunPhasesResponse{RunID: runID, Phases: timeline})
 }
 
 // buildPhaseTimeline reconstructs the 11-phase timeline from history.

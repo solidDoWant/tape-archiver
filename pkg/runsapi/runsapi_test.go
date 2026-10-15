@@ -98,6 +98,16 @@ type fakeTemporalClient struct {
 	// (used by phases/config/tapes-endpoint tests). nil yields an iterator
 	// with no events and no error (an empty, successfully-fetched history).
 	historyFunc func(runID string) client.HistoryEventIterator
+
+	taskQueueResponse *workflowservice.DescribeTaskQueueResponse
+	taskQueueErr      error
+	taskQueueCalls    []string
+}
+
+func (f *fakeTemporalClient) DescribeTaskQueue(_ context.Context, taskQueue string, _ enumspb.TaskQueueType) (*workflowservice.DescribeTaskQueueResponse, error) {
+	f.taskQueueCalls = append(f.taskQueueCalls, taskQueue)
+
+	return f.taskQueueResponse, f.taskQueueErr
 }
 
 func (f *fakeTemporalClient) ListWorkflow(context.Context, *workflowservice.ListWorkflowExecutionsRequest) (*workflowservice.ListWorkflowExecutionsResponse, error) {

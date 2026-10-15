@@ -346,6 +346,20 @@ from it too), so the moment something changes the page reflects it within a coup
 seconds. If the underlying connection drops, the page shows a "connection lost" notice
 and keeps retrying automatically.
 
+A phase whose next step has been handed to Temporal but never picked up by a worker is
+not shown as simply running. Once it has waited more than 60 seconds — longer than a
+worker cold start takes — its rail marker turns into a still dashed ring, its view reads
+**WAITING FOR WORKER**, and the overview shows an amber notice in place of "No operator
+action needed" naming the task queue it waits on (e.g. `data`), how long ago it was
+scheduled, and whether any worker is polling that queue at all ("No workers are polling
+that queue" usually means the storage host's data worker is down). This is what a
+resume looks like when the data worker is unavailable: the pause clears as soon as the
+run schedules its next step — the resume took effect — and the phase then reads as
+waiting rather than running. Within the first 60 seconds (e.g. while KEDA starts a
+worker) the phase reads as active as usual. The page re-checks every 15 seconds while
+anything is waiting, so the notice appears, and clears once a worker picks the step up,
+without a reload.
+
 | Light | Dark |
 | --- | --- |
 | ![A run's live detail view, light mode](images/web-ui-run-detail-light.png) | ![A run's live detail view, dark mode](images/web-ui-run-detail-dark.png) |

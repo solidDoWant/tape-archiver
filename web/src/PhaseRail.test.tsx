@@ -92,4 +92,18 @@ describe('PhaseRail', () => {
     expect(screen.getByRole('button', { name: /^generate par2|^par2/i })).toHaveAttribute('data-status', 'pending')
     expect(screen.getByRole('button', { name: /^deliver/i })).toHaveAttribute('data-status', 'failed')
   })
+
+  it('names an active phase stalled waiting for a worker as such, but not one inside the cold-start grace', () => {
+    const waiting = { activity: 'Pack', taskQueue: 'data', since: '2026-07-09T12:05:00Z', stalled: true }
+    const stalled = phases.map((phase) => (phase.name === 'Pack' ? { ...phase, waiting } : phase))
+
+    const { unmount } = render(<PhaseRail phases={stalled} selected="overview" onSelect={vi.fn()} />)
+    expect(screen.getByRole('button', { name: /^pack\b.*waiting for a worker/i })).toBeInTheDocument()
+    unmount()
+
+    const coldStart = phases.map((phase) => (phase.name === 'Pack' ? { ...phase, waiting: { ...waiting, stalled: false } } : phase))
+
+    render(<PhaseRail phases={coldStart} selected="overview" onSelect={vi.fn()} />)
+    expect(screen.getByRole('button', { name: /^pack\b.*active/i })).toBeInTheDocument()
+  })
 })

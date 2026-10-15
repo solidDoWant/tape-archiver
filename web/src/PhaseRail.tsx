@@ -3,12 +3,17 @@ import { formatDuration, phaseLabel } from './phaseFormat'
 
 // PhaseMarker is the 18x18 circular status indicator (DESIGN_ANALYSIS.md §3's
 // "phase stepper/rail"): a solid check for completed, a solid cross for
-// failed, a pulsing ring for active, and a plain outline ring for pending.
+// failed, a pulsing ring for active, a still dashed ring for an active phase
+// stalled waiting for a worker, and a plain outline ring for pending.
 // The glyph is decorative (aria-hidden) — PhaseRailRow's button carries the
 // status in its own accessible name instead, so a screen-reader user gets it
 // without relying on the glyph's shape/color alone.
-function PhaseMarker({ status }: { status: PhaseStatus }) {
+function PhaseMarker({ status, stalled }: { status: PhaseStatus; stalled: boolean }) {
   const base = 'flex h-[18px] w-[18px] flex-none items-center justify-center rounded-full text-[10px] font-bold'
+
+  if (status === 'active' && stalled) {
+    return <span aria-hidden="true" className={`${base} border-2 border-dashed border-amber bg-transparent`} />
+  }
 
   switch (status) {
     case 'completed':
@@ -95,10 +100,10 @@ function PhaseRail({ phases, selected, onSelect }: PhaseRailProps) {
             data-status={phase.status}
             className={`${itemBase} ${isSelected ? 'bg-nav-active font-semibold text-text' : 'text-text hover:bg-nav-hover'}`}
           >
-            <PhaseMarker status={phase.status} />
+            <PhaseMarker status={phase.status} stalled={Boolean(phase.waiting?.stalled)} />
             <span className="flex-1">
               {label}
-              <span className="sr-only"> — {phase.status}</span>
+              <span className="sr-only"> — {phase.waiting?.stalled ? 'waiting for a worker' : phase.status}</span>
             </span>
             <span className="hidden font-mono text-[11px] text-text-faint md:inline">
               {formatDuration(phase.startTime, phase.endTime)}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -157,6 +158,7 @@ func (b *eventBuilder) scheduled(t *testing.T, name string, input interface{}) i
 		EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED,
 		Attributes: &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{
 			ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{
+				ActivityId:   strconv.FormatInt(id, 10),
 				ActivityType: &commonpb.ActivityType{Name: name},
 				Input:        mustEncode(t, input),
 			},

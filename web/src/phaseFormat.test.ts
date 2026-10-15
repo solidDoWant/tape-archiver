@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { formatDuration, phaseLabel } from './phaseFormat'
+import { formatDuration, phaseLabel, stalledWait, waitingSummary } from './phaseFormat'
 
 describe('phaseFormat.phaseLabel', () => {
   it('shortens Generate PAR2 to PAR2 and passes every other phase through', () => {
@@ -35,5 +35,37 @@ describe('phaseFormat.formatDuration', () => {
     // Start 3s ahead of the client clock: must read "0s", not the em dash
     // api.formatDuration renders for a negative elapsed.
     expect(formatDuration('2026-01-01T00:00:03Z')).toBe('0s')
+  })
+})
+
+describe('phaseFormat.waitingSummary', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const waiting = { activity: 'Load', taskQueue: 'data', since: '2026-01-01T00:00:00Z', stalled: true }
+  const base = 'Load was scheduled 5m 0s ago on the “data” task queue, but no worker has picked it up.'
+
+  it.each([
+    { pollers: undefined, want: base },
+    { pollers: 0, want: `${base} No workers are polling that queue.` },
+    { pollers: 1, want: `${base} 1 worker is polling that queue.` },
+    { pollers: 2, want: `${base} 2 workers are polling that queue.` },
+  ])('describes the wait with pollers=$pollers', ({ pollers, want }) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:05:00Z'))
+
+    expect(waitingSummary({ ...waiting, pollers })).toBe(want)
+  })
+})
+
+describe('phaseFormat.stalledWait', () => {
+  it('finds only a phase whose wait is stalled', () => {
+    const coldStart = { activity: 'Load', taskQueue: 'data', since: '2026-01-01T00:00:00Z', stalled: false }
+
+    expect(stalledWait([{ name: 'Load', status: 'active', facts: [], waiting: coldStart }])).toBeUndefined()
+    expect(stalledWait([{ name: 'Load', status: 'active', facts: [], waiting: { ...coldStart, stalled: true } }])?.name).toBe(
+      'Load',
+    )
   })
 })
