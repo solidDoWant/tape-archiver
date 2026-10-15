@@ -498,20 +498,21 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: require.NoError,
 		},
 		{
-			// Present but no drives: disabled, still accepted.
+			// A present block that would burn nothing is rejected, not silently skipped (#386).
 			name: "optical burn empty drives",
 			mutate: func(c *Config) {
 				c.Delivery.OpticalBurn = &OpticalBurn{Copies: 2}
 			},
-			wantErr: require.NoError,
+			wantErr:     require.Error,
+			errContains: "delivery.opticalBurn.drives",
 		},
 		{
-			// Present with drives but zero copies: disabled, still accepted.
 			name: "optical burn zero copies",
 			mutate: func(c *Config) {
 				c.Delivery.OpticalBurn = &OpticalBurn{Drives: []string{"/dev/sr0"}, Copies: 0}
 			},
-			wantErr: require.NoError,
+			wantErr:     require.Error,
+			errContains: "delivery.opticalBurn.copies",
 		},
 		{
 			name: "optical burn enabled",

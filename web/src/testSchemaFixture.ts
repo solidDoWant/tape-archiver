@@ -85,8 +85,8 @@ export const testRunConfigSchema: JSONSchema = {
       additionalProperties: false,
       required: ['drives', 'copies'],
       properties: {
-        drives: { type: 'array', items: { type: 'string' } },
-        copies: { type: 'integer' },
+        drives: { type: 'array', minItems: 1, items: { type: 'string' } },
+        copies: { type: 'integer', minimum: 1 },
         allowNonBlankDiscs: { type: 'boolean' },
         burnWaitTimeoutSeconds: { type: 'integer' },
       },

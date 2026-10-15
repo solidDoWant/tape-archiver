@@ -438,6 +438,34 @@ describe('ConfigPage', () => {
     await settle()
   })
 
+  it.each([0, -1])('blocks Review when optical burn is on with %i copies', async (copies) => {
+    renderPage({
+      '/api/config/ui': {
+        status: 200,
+        body: {
+          temporalUiBaseUrl: '',
+          temporalNamespace: '',
+          library: { changer: '/dev/sch0', drives: ['/dev/nst0'], slotCount: 8, cleaningSlots: [], ioStationSlots: [] },
+          delivery: { webhookConfigured: true, opticalBurnDrives: ['/dev/sr0'] },
+        },
+      },
+    })
+    await waitFor(() => screen.getByRole('group', { name: /config input mode/i }))
+
+    await fillMinimalValidForm()
+    fireEvent.click(screen.getByLabelText('Enable optical recovery discs'))
+    fireEvent.change(screen.getByLabelText(/copies per run/i), { target: { value: String(copies) } })
+
+    fireEvent.click(screen.getByRole('button', { name: /review →/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/delivery\.opticalBurn\.copies: must be at least 1/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByText('STEP 2 · REVIEW')).not.toBeInTheDocument()
+
+    await settle()
+  })
+
   it('blocks the Review transition and shows the schema issue when the config does not validate', async () => {
     renderPage({
       // A schema requiring a field Form mode never sets, to exercise the
