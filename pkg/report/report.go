@@ -29,6 +29,9 @@ type Manifest struct {
 	// AgeIdentity is deliberately included for key escrow (SPEC §7).
 	AgeIdentity       string
 	RecoveryProcedure string
+	// DryRun marks a rehearsal against the virtual library: no real tape holds
+	// this data, so every page says so.
+	DryRun bool
 }
 
 // Archive describes one archived group or volume in the contents manifest.
@@ -134,11 +137,12 @@ var (
 	colBar    = [3]int{233, 236, 239} // section header / table header fill
 	colKeyBG  = [3]int{255, 243, 205} // key-escrow callout fill (amber)
 	colKeyBdr = [3]int{255, 193, 7}   // key-escrow callout border
+	colDryRun = [3]int{200, 35, 51}   // dry-run warning
 )
 
 // Build renders m as a PDF report to w, including the age private identity.
 func Build(m Manifest, w io.Writer) error {
-	d := newDoc()
+	d := newDoc(m.DryRun)
 
 	d.title()
 	d.runSection(m)
@@ -160,17 +164,18 @@ func Build(m Manifest, w io.Writer) error {
 // doc wraps the fpdf canvas and the cp1252 translator the core fonts need for
 // characters such as the em dash and section sign.
 type doc struct {
-	pdf *fpdf.Fpdf
-	tr  func(string) string
+	pdf    *fpdf.Fpdf
+	tr     func(string) string
+	dryRun bool
 }
 
-func newDoc() *doc {
+func newDoc(dryRun bool) *doc {
 	pdf := fpdf.New("P", "mm", "A4", "")
 	pdf.SetMargins(marginX, marginY, marginX)
 	pdf.SetAutoPageBreak(true, marginY)
 	pdf.AliasNbPages("")
 
-	d := &doc{pdf: pdf, tr: pdf.UnicodeTranslatorFromDescriptor("")}
+	d := &doc{pdf: pdf, tr: pdf.UnicodeTranslatorFromDescriptor(""), dryRun: dryRun}
 	pdf.SetFooterFunc(d.footer)
 	pdf.AddPage()
 
@@ -181,7 +186,15 @@ func (d *doc) footer() {
 	d.pdf.SetY(-footerInset)
 	d.pdf.SetFont(fontBody, "I", 8)
 	d.text(colMuted)
-	d.pdf.CellFormat(0, 6, d.tr(fmt.Sprintf("Page %d of {nb}", d.pdf.PageNo())), "", 0, "C", false, 0, "")
+
+	footer := fmt.Sprintf("Page %d of {nb}", d.pdf.PageNo())
+	if d.dryRun {
+		d.text(colDryRun)
+
+		footer = "DRY RUN — no real tapes were written — " + footer
+	}
+
+	d.pdf.CellFormat(0, 6, d.tr(footer), "", 0, "C", false, 0, "")
 }
 
 func (d *doc) title() {
@@ -192,6 +205,14 @@ func (d *doc) title() {
 	d.pdf.SetFont(fontBody, "I", 9.5)
 	d.text(colMuted)
 	d.pdf.MultiCell(contentW, 5, d.tr("Durable offline index — print, laminate, and store with the physical tapes."), "", "L", false)
+
+	if d.dryRun {
+		d.pdf.Ln(2)
+		d.pdf.SetFont(fontBody, "B", 12)
+		d.text(colDryRun)
+		d.pdf.MultiCell(contentW, 6, d.tr("DRY RUN — a rehearsal against the virtual (mhvtl) library. No real tapes were "+
+			"written; the barcodes below are the real library's, mirrored. Do not file this report with any tapes."), "", "L", false)
+	}
 
 	d.pdf.Ln(2.5)
 	d.draw(colInk)

@@ -650,3 +650,21 @@ func TestSendFileCarriesMessageContent(t *testing.T) {
 		})
 	}
 }
+
+func TestWithDryRunPrefixesAlerts(t *testing.T) {
+	t.Parallel()
+
+	for _, dryRun := range []bool{false, true} {
+		var got webhook.Message
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+			w.WriteHeader(http.StatusNoContent)
+		}))
+
+		webhook.New(server.URL).WithDryRun(dryRun).SendFailure(t.Context(), "backup", "Load", errors.New("boom"))
+		server.Close()
+
+		assert.Equal(t, dryRun, strings.HasPrefix(got.Content, webhook.DryRunPrefix), "dryRun=%v: %q", dryRun, got.Content)
+	}
+}

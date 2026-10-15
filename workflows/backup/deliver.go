@@ -112,7 +112,7 @@ func classifyDeliverError(err error) error {
 
 // deliverySummary composes the short message posted with the report: the run,
 // what was archived, and onto which tapes.
-func deliverySummary(runID string, state *runState) string {
+func deliverySummary(runID string, state *runState, dryRun bool) string {
 	var (
 		archives int64
 		bytes    int64
@@ -128,18 +128,32 @@ func deliverySummary(runID string, state *runState) string {
 		barcodes = append(barcodes, string(written.Barcode))
 	}
 
+	header := "📼 **Backup complete**"
+	if dryRun {
+		header = "🧪 **Dry run complete** — a rehearsal against the virtual library; no real tapes were written"
+	}
+
 	lines := []string{
-		"📼 **Backup complete**",
+		header,
 		fmt.Sprintf("**Run:** `%s`", runID),
 		fmt.Sprintf("**Archived:** %d %s (%s)", archives, plural(archives, "archive"), humanBytes(bytes)),
 	}
 
-	if len(barcodes) > 0 {
-		lines = append(lines, fmt.Sprintf("**Tapes:** %s", strings.Join(barcodes, ", ")))
+	tapesLabel := "Tapes"
+	if dryRun {
+		tapesLabel = "Virtual tapes"
 	}
 
-	lines = append(lines, "",
-		"The attached report is this run's recovery index — print it and store it with the tapes.")
+	if len(barcodes) > 0 {
+		lines = append(lines, fmt.Sprintf("**%s:** %s", tapesLabel, strings.Join(barcodes, ", ")))
+	}
+
+	if dryRun {
+		lines = append(lines, "", "The attached report is from a rehearsal — do not file it with any tapes.")
+	} else {
+		lines = append(lines, "",
+			"The attached report is this run's recovery index — print it and store it with the tapes.")
+	}
 
 	return strings.Join(lines, "\n")
 }
@@ -192,7 +206,7 @@ func deliverPhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	input := DeliverInput{
 		WebhookURL: cfg.Delivery.WebhookURL,
 		ReportPath: state.reportPath,
-		Summary:    deliverySummary(workflow.GetInfo(ctx).WorkflowExecution.RunID, state),
+		Summary:    deliverySummary(workflow.GetInfo(ctx).WorkflowExecution.RunID, state, isDryRun(ctx)),
 	}
 
 	// The result lives only in history; pkg/runsapi reads it from there (#306).

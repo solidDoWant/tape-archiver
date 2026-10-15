@@ -853,6 +853,7 @@ func runIOStationStatus(ctx workflow.Context, cfg config.Config) (IOStatus, erro
 // run.
 func notifyOperatorPause(ctx workflow.Context, readyForRemoval []tape.Barcode, awaiting int) {
 	input := OperatorPauseInput{
+		DryRun:          isDryRun(ctx),
 		RunID:           workflow.GetInfo(ctx).WorkflowExecution.ID,
 		ReadyForRemoval: barcodeStrings(readyForRemoval),
 		Awaiting:        awaiting,

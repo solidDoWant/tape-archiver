@@ -201,6 +201,7 @@ func notifyWritePathPause(ctx workflow.Context, phase string, affectedBarcodes [
 	}
 
 	input := WritePathPauseInput{
+		DryRun:        isDryRun(ctx),
 		RunID:         workflow.GetInfo(ctx).WorkflowExecution.ID,
 		Phase:         phase,
 		AffectedTapes: affectedBarcodes,

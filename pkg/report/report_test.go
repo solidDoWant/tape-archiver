@@ -473,3 +473,27 @@ func TestBuildProducesValidPDF(t *testing.T) {
 	assert.True(t, bytes.HasPrefix(buf.Bytes(), []byte("%PDF-")),
 		"output does not start with the PDF magic header")
 }
+
+func TestBuildLabelsADryRunOnEveryPage(t *testing.T) {
+	t.Parallel()
+
+	manifest := completeManifest()
+	assert.NotContains(t, stripWhitespace(extractText(t, manifest)), "DRYRUN")
+
+	manifest.DryRun = true
+	text := stripWhitespace(extractText(t, manifest))
+
+	assert.Contains(t, text, stripWhitespace("No real tapes were written"))
+	assert.Contains(t, text, stripWhitespace("Do not file this report with any tapes."))
+
+	var buf bytes.Buffer
+	require.NoError(t, report.Build(manifest, &buf))
+	reader, err := pdf.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	require.NoError(t, err)
+
+	for page := 1; page <= reader.NumPage(); page++ {
+		pageText, err := reader.Page(page).GetPlainText(nil)
+		require.NoError(t, err)
+		assert.Contains(t, stripWhitespace(pageText), "DRYRUN", "page %d must say it is a dry run", page)
+	}
+}

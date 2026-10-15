@@ -113,6 +113,7 @@ func newReportActivities(stagingRoot, binariesDir, sourcesDir string) *ReportAct
 // workflow so retries stamp the artifact identically.
 type ReportInput struct {
 	Config         config.Config
+	DryRun         bool
 	RunID          string
 	Date           time.Time
 	SliceSizeBytes int64
@@ -409,6 +410,7 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 		Build:             buildParams(input.Config, input.SliceSizeBytes, device, input.Written),
 		AgeIdentity:       input.Config.Encryption.Identity,
 		RecoveryProcedure: recoveryProcedure,
+		DryRun:            input.DryRun,
 	}
 }
 
@@ -710,6 +712,7 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 func reportInput(ctx workflow.Context, cfg config.Config, state *runState) ReportInput {
 	return ReportInput{
 		Config:         cfg,
+		DryRun:         isDryRun(ctx),
 		RunID:          workflow.GetInfo(ctx).WorkflowExecution.RunID,
 		Date:           state.reportDate,
 		SliceSizeBytes: state.sliceSizeBytes,

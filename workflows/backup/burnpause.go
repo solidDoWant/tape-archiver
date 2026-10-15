@@ -75,6 +75,7 @@ func notifyBurnPause(ctx workflow.Context, devices []string, cause error) {
 	}
 
 	input := BurnPauseInput{
+		DryRun:       isDryRun(ctx),
 		RunID:        workflow.GetInfo(ctx).WorkflowExecution.ID,
 		Devices:      devices,
 		ErrorSummary: summary,
