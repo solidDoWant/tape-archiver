@@ -661,3 +661,67 @@ func returnAndBlank(ctx context.Context, changer *tape.Changer, stDev, sgDev str
 	_ = exec.CommandContext(ctx, "sg_raw", sgDev, "0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
 	_ = changer.Unload(ctx, slotAddr, driveAddr)
 }
+
+// TestReturnToSlotsUnloadsByIdentity: ReturnToSlots unloads a loaded tape to its
+// source slot even when its recorded barcode is empty, and is a no-op once the
+// drive is empty (#389).
+func TestReturnToSlotsUnloadsByIdentity(t *testing.T) {
+	testutil.SkipIfMhvtlUnavailable(t)
+
+	changer := tape.NewChanger(testutil.ChangerDev(t))
+	device := testutil.Drive0Dev(t)
+
+	inv, err := changer.Inventory(t.Context())
+	require.NoError(t, err, "initial inventory")
+
+	info, err := tape.NewDrive(device).Inquire(t.Context())
+	require.NoError(t, err, "INQUIRY")
+
+	de, err := matchDriveElement(inv, info.Serial)
+	if err != nil {
+		t.Skipf("cannot pair %s to a changer element by DVCID: %v", device, err)
+	}
+
+	require.False(t, de.Loaded, "drive must start empty")
+
+	const slotIdx = 3
+	require.Greater(t, len(inv.Slots), slotIdx, "need at least 4 storage slots")
+	require.Truef(t, inv.Slots[slotIdx].Full, "slot %d must hold a tape", slotIdx)
+
+	slotAddr := inv.Slots[slotIdx].Address
+	barcode := inv.Slots[slotIdx].Barcode
+
+	require.NoError(t, changer.Load(t.Context(), slotAddr, de.Address))
+
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
+		defer cancel()
+
+		if after, invErr := changer.Inventory(cleanupCtx); invErr == nil {
+			if current, ok := driveElementBySerial(after, info.Serial); ok && current.Loaded {
+				_ = changer.Unload(cleanupCtx, slotAddr, current.Address)
+			}
+		}
+	})
+
+	input := ReturnToSlotsInput{
+		Changer: testutil.ChangerDev(t),
+		Tapes:   []LoadedTape{{Barcode: "", DriveIndex: 0, SourceSlot: slotAddr, STDevice: device}},
+	}
+
+	acts := newLoadActivities()
+	require.NoError(t, acts.ReturnToSlots(t.Context(), input))
+
+	after, err := changer.Inventory(t.Context())
+	require.NoError(t, err)
+
+	current, ok := driveElementBySerial(after, info.Serial)
+	require.True(t, ok)
+	assert.False(t, current.Loaded, "the drive is empty")
+
+	slotBC, full := slotBarcode(after, slotAddr)
+	assert.True(t, full, "the tape is back in its slot")
+	assert.Equal(t, barcode, slotBC)
+
+	require.NoError(t, acts.ReturnToSlots(t.Context(), input), "an already-empty drive is a no-op")
+}

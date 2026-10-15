@@ -11,8 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
@@ -908,4 +910,170 @@ func TestWritePathPauseCancelIsNotTimeout(t *testing.T) {
 			assert.NotContains(t, err.Error(), "did not resume or abort")
 		})
 	}
+}
+
+// TestWritePathOrchestrationFaultReturnsTapes pins #389: a Write-phase fault
+// after Load (bad barcode, no session) returns the drive-set's tapes to their
+// slots and the error says where they were left.
+func TestWritePathOrchestrationFaultReturnsTapes(t *testing.T) {
+	tests := []struct {
+		name           string
+		barcodes       []tape.Barcode
+		noSession      bool
+		returnErr      error
+		wantSubstrings []string
+	}{
+		{
+			name:           "empty barcode",
+			barcodes:       []tape.Barcode{"TA0100L6", ""},
+			wantSubstrings: []string{"empty barcode", "returned to their storage slots", "slot 100", "slot 101"},
+		},
+		{
+			name:           "duplicate barcode",
+			barcodes:       []tape.Barcode{"BC-DUP", "BC-DUP"},
+			wantSubstrings: []string{"duplicate barcode", "returned to their storage slots", "slot 100", "slot 101"},
+		},
+		{
+			name:           "session creation fails",
+			barcodes:       []tape.Barcode{"TA0100L6", "TA0101L6"},
+			noSession:      true,
+			wantSubstrings: []string{"session", "returned to their storage slots", "slot 100", "slot 101"},
+		},
+		{
+			name:           "returning the tapes fails",
+			barcodes:       []tape.Barcode{"TA0100L6", ""},
+			returnErr:      errors.New("move medium: robot jammed"),
+			wantSubstrings: []string{"empty barcode", "may still be in the drives", "robot jammed"},
+		},
+		{
+			// The data worker is down: neither the session nor the return is
+			// ever picked up, and the run must still fail (and so alert).
+			name:           "returning the tapes is never picked up",
+			barcodes:       []tape.Barcode{"TA0100L6", "TA0101L6"},
+			noSession:      true,
+			returnErr:      temporal.NewTimeoutError(enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START, nil),
+			wantSubstrings: []string{"session", "may still be in the drives", "ScheduleToStart"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+
+			env := suite.NewTestWorkflowEnvironment()
+			env.RegisterWorkflow(writePauseTestWorkflow)
+
+			recorder := &activityOptionsRecorder{}
+			env.SetWorkerOptions(worker.Options{
+				EnableSessionWorker: !test.noSession,
+				Interceptors:        []interceptor.WorkerInterceptor{recorder},
+			})
+
+			env.RegisterActivity(newLoadActivities())
+			env.RegisterActivity(newEjectActivities())
+
+			registry := newMountRegistry()
+			env.RegisterActivity(newWriteActivities(registry, t.TempDir()))
+			env.RegisterActivity(newTeardownActivities(registry))
+
+			env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
+					loaded := make([]LoadedTape, len(input.Tapes))
+					for i, assignment := range input.Tapes {
+						loaded[i] = loadedFromAssignment(assignment)
+						loaded[i].Barcode = test.barcodes[i]
+					}
+
+					return loaded, nil
+				})
+
+			var returned []LoadedTape
+
+			env.OnActivity((&LoadActivities{}).ReturnToSlots, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input ReturnToSlotsInput) error {
+					returned = append(returned, input.Tapes...)
+
+					return test.returnErr
+				})
+
+			env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: twoDriveConfig(3600), Set: twoTapeSet()})
+
+			require.True(t, env.IsWorkflowCompleted())
+
+			err := env.GetWorkflowError()
+			require.Error(t, err)
+
+			for _, want := range test.wantSubstrings {
+				assert.ErrorContains(t, err, want)
+			}
+
+			require.Len(t, returned, 2, "every tape of the drive-set is returned")
+			assert.Equal(t, []int{100, 101}, []int{returned[0].SourceSlot, returned[1].SourceSlot})
+
+			// The test env never times out schedule-to-start, so check the bound
+			// that lets an unreachable data worker still fail the run.
+			options, ok := recorder.optionsFor("ReturnToSlots")
+			require.True(t, ok, "ReturnToSlots was scheduled")
+			assert.Positive(t, options.ScheduleToStartTimeout, "ReturnToSlots must not wait forever for a data worker")
+			assert.LessOrEqual(t, options.ScheduleToStartTimeout, sessionCreationTimeout)
+		})
+	}
+}
+
+// activityOptionsRecorder records the options each activity type is scheduled
+// with, which the test environment does not otherwise expose.
+type activityOptionsRecorder struct {
+	interceptor.WorkerInterceptorBase
+
+	mu      sync.Mutex
+	options map[string]workflow.ActivityOptions
+}
+
+func (r *activityOptionsRecorder) InterceptWorkflow(
+	_ workflow.Context, next interceptor.WorkflowInboundInterceptor,
+) interceptor.WorkflowInboundInterceptor {
+	inbound := &optionsRecordingInbound{recorder: r}
+	inbound.Next = next
+
+	return inbound
+}
+
+func (r *activityOptionsRecorder) optionsFor(activityType string) (workflow.ActivityOptions, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	options, ok := r.options[activityType]
+
+	return options, ok
+}
+
+type optionsRecordingInbound struct {
+	interceptor.WorkflowInboundInterceptorBase
+
+	recorder *activityOptionsRecorder
+}
+
+func (i *optionsRecordingInbound) Init(outbound interceptor.WorkflowOutboundInterceptor) error {
+	recording := &optionsRecordingOutbound{recorder: i.recorder}
+	recording.Next = outbound
+
+	return i.Next.Init(recording)
+}
+
+type optionsRecordingOutbound struct {
+	interceptor.WorkflowOutboundInterceptorBase
+
+	recorder *activityOptionsRecorder
+}
+
+func (o *optionsRecordingOutbound) ExecuteActivity(ctx workflow.Context, activityType string, args ...any) workflow.Future {
+	o.recorder.mu.Lock()
+	if o.recorder.options == nil {
+		o.recorder.options = map[string]workflow.ActivityOptions{}
+	}
+
+	o.recorder.options[activityType] = workflow.GetActivityOptions(ctx)
+	o.recorder.mu.Unlock()
+
+	return o.Next.ExecuteActivity(ctx, activityType, args...)
 }
