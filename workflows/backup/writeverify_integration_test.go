@@ -120,13 +120,15 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 		Barcode: lt.Barcode,
 	}), "FormatTape")
 
-	require.NoError(t, writeActs.WriteTree(t.Context(), WriteTreeInput{
+	written, err := writeActs.WriteTree(t.Context(), WriteTreeInput{
 		Device:    lt.SGDevice,
 		Barcode:   lt.Barcode,
 		TapeIndex: lt.TapeIndex,
 		CopyIndex: lt.CopyIndex,
 		Archives:  archives,
-	}), "WriteTree")
+	})
+	require.NoError(t, err, "WriteTree")
+	assert.Positive(t, written.StreamDuration, "WriteTree must time the streaming copy (#409)")
 
 	// FinalizeTape unmounts, flushing the LTFS index to tape.
 	_, err = writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
@@ -237,7 +239,7 @@ func TestWriteTreeCopyFailureLeavesNoManifest(t *testing.T) {
 		SizeBytes: 42,
 	}
 
-	err = writeActs.WriteTree(t.Context(), WriteTreeInput{
+	_, err = writeActs.WriteTree(t.Context(), WriteTreeInput{
 		Device:    sgDev,
 		Barcode:   barcode,
 		TapeIndex: 0,

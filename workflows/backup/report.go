@@ -529,14 +529,15 @@ func reportWriteHealth(health WriteHealth) *report.WriteHealth {
 	}
 
 	return &report.WriteHealth{
-		ThroughputMBps:      health.ThroughputMBps,
-		FloorMBps:           health.FloorMBps,
-		FloorKnown:          health.FloorKnown,
-		BelowFloor:          health.BelowFloor,
-		Repositions:         health.Repositions,
-		RepositionsMeasured: health.RepositionsMeasured,
-		TapeAlertFlags:      health.TapeAlertFlags,
-		Healthy:             health.Healthy(),
+		ThroughputMBps:         health.ThroughputMBps,
+		ThroughputUnmeasurable: health.ThroughputUnmeasurable,
+		FloorMBps:              health.FloorMBps,
+		FloorKnown:             health.FloorKnown,
+		BelowFloor:             health.BelowFloor,
+		Repositions:            health.Repositions,
+		RepositionsMeasured:    health.RepositionsMeasured,
+		TapeAlertFlags:         health.TapeAlertFlags,
+		Healthy:                health.Healthy(),
 	}
 }
 

@@ -139,13 +139,13 @@ func TestTapePath(t *testing.T) {
 	}
 
 	// WriteTree (AC2: tree copied, manifest written last).
-	require.NoError(t, writeActs.WriteTree(t.Context(), WriteTreeInput{
+	require.NoError(t, writeTreeErr(writeActs.WriteTree(t.Context(), WriteTreeInput{
 		Device:    lt.SGDevice,
 		Barcode:   lt.Barcode,
 		TapeIndex: lt.TapeIndex,
 		CopyIndex: lt.CopyIndex,
 		Archives:  archives,
-	}), "WriteTree")
+	})), "WriteTree")
 
 	// AC3: the index is staged to disk, not returned (issue #221).
 	indexPath, err := writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
@@ -399,13 +399,13 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 			Barcode: lt.Barcode,
 		}), "set %d: FormatTape", setIndex)
 
-		require.NoErrorf(t, writeActs.WriteTree(t.Context(), WriteTreeInput{
+		require.NoErrorf(t, writeTreeErr(writeActs.WriteTree(t.Context(), WriteTreeInput{
 			Device:    lt.SGDevice,
 			Barcode:   lt.Barcode,
 			TapeIndex: lt.TapeIndex,
 			CopyIndex: lt.CopyIndex,
 			Archives:  archives,
-		}), "set %d: WriteTree", setIndex)
+		})), "set %d: WriteTree", setIndex)
 
 		indexPath, err := writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
 		require.NoErrorf(t, err, "set %d: FinalizeTape", setIndex)

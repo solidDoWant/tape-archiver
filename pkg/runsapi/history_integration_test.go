@@ -226,7 +226,10 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	assert.Equal(t, slotAddr, writtenTape.Slot)
 	assert.Equal(t, "written", writtenTape.Result)
 	require.NotNil(t, writtenTape.WriteHealth, "write-health must be recovered from the history")
-	assert.Greater(t, writtenTape.WriteHealth.ThroughputMBps, 0.0)
+	assert.True(t, writtenTape.WriteHealth.Measured)
+	// The 8 MB fixture pool is far too small to judge streaming (#409).
+	assert.True(t, writtenTape.WriteHealth.ThroughputUnmeasurable,
+		"a write this small must report throughput as not measurable, not a near-zero rate")
 
 	// --- GET /api/tapes (AC6) ---
 	aggregateStatus, aggregateBody := getJSON[runsapi.AggregateTapesResponse](t, server.URL+"/api/tapes")

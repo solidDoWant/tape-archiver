@@ -170,6 +170,14 @@ func (r *MountRegistry) Teardown(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// WriteTreeResult is the WriteTree activity's result. A WriteTree completed
+// before #409 decodes as the zero value, i.e. an unknown stream duration.
+type WriteTreeResult struct {
+	// StreamDuration times only the copy of the staged tree to the mounted
+	// volume: not the mount, the manifest, or the unmount-time index write.
+	StreamDuration time.Duration
+}
+
 // FormatInput is the payload for the FormatTape activity.
 type FormatInput struct {
 	// Device is the SCSI generic node (e.g. /dev/sg0).
@@ -235,13 +243,13 @@ func (a *WriteActivities) FormatTape(ctx context.Context, input FormatInput) err
 // drive reads independently and the ZFS ARC coalesces parallel identical
 // streams, so there is no shared fan-out buffer; revisit only if a benchmark
 // shows a drive starving below the speed-matching floor.
-func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) error {
+func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) (WriteTreeResult, error) {
 	mountDir := filepath.Join(a.stagingDir, "mounts", string(input.Barcode))
 	workDir := filepath.Join(a.stagingDir, "work", string(input.Barcode))
 
 	mount, err := ltfs.NewVolume(input.Device).Mount(ctx, mountDir, workDir)
 	if err != nil {
-		return fmt.Errorf("mount LTFS volume on %s: %w", input.Device, err)
+		return WriteTreeResult{}, fmt.Errorf("mount LTFS volume on %s: %w", input.Device, err)
 	}
 
 	a.registry.Put(input.Device, mount)
@@ -251,19 +259,24 @@ func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) e
 	slog.InfoContext(ctx, "write: mounted LTFS volume; streaming staged tree to tape",
 		"barcode", input.Barcode, "device", input.Device, "archives", len(input.Archives), "bytes", writtenBytes)
 
+	copyStart := time.Now()
+
 	if err := copyTape(ctx, mount.Mountpoint(), input.Archives); err != nil {
-		return fmt.Errorf("copy staged tree to tape %s: %w", input.Barcode, err)
+		return WriteTreeResult{}, fmt.Errorf("copy staged tree to tape %s: %w", input.Barcode, err)
 	}
+
+	result := WriteTreeResult{StreamDuration: time.Since(copyStart)}
 
 	manifest := buildManifest(input.Barcode, input.TapeIndex, input.CopyIndex, input.Archives)
 	if err := writeManifest(mount.Mountpoint(), manifest); err != nil {
-		return fmt.Errorf("write manifest to tape %s: %w", input.Barcode, err)
+		return WriteTreeResult{}, fmt.Errorf("write manifest to tape %s: %w", input.Barcode, err)
 	}
 
 	slog.InfoContext(ctx, "write: staged tree and per-tape manifest written to tape",
-		"barcode", input.Barcode, "device", input.Device, "archives", len(input.Archives), "bytes", writtenBytes)
+		"barcode", input.Barcode, "device", input.Device, "archives", len(input.Archives), "bytes", writtenBytes,
+		"streamDuration", result.StreamDuration)
 
-	return nil
+	return result, nil
 }
 
 // FinalizeTape unmounts the live mount (triggering the single deferred index
@@ -503,17 +516,17 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 				return
 			}
 
-			// The write window spans exactly WriteTree → FinalizeTape (SPEC §14);
-			// workflow.Now keeps it replay-deterministic.
-			writeStart := workflow.Now(gctx)
-
+			// Throughput is timed around the streaming copy only (SPEC §14): the
+			// mount and unmount-time index write are fixed overheads that would
+			// swamp a small write.
+			var written WriteTreeResult
 			if err := workflow.ExecuteActivity(noRetryCtx, acts.WriteTree, WriteTreeInput{
 				Device:    lt.SGDevice,
 				Barcode:   lt.Barcode,
 				TapeIndex: lt.TapeIndex,
 				CopyIndex: lt.CopyIndex,
 				Archives:  archives,
-			}).Get(noRetryCtx, nil); err != nil {
+			}).Get(noRetryCtx, &written); err != nil {
 				res.err = fmt.Errorf("drive %d: write tree: %w", lt.DriveIndex, err)
 				ch.Send(gctx, res)
 
@@ -534,7 +547,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 			res.indexPath = indexPath
 			// Measure while still loaded (the only time the medium's generation can be
 			// read). Observational only (SPEC §2 principle 2): failures never fail the run.
-			res.measurement = measureWriteHealth(gctx, lt, archives, workflow.Now(gctx).Sub(writeStart), floorMBps, floorKnown)
+			res.measurement = measureWriteHealth(gctx, lt, archives, written.StreamDuration, floorMBps, floorKnown)
 
 			ch.Send(gctx, res)
 		})

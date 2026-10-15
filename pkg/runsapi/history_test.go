@@ -3,6 +3,7 @@ package runsapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -849,6 +850,81 @@ func TestDeriveTapeOutcomesUnmeasuredWriteHealth(t *testing.T) {
 	require.NotNil(t, outcome.WriteHealth)
 	assert.False(t, outcome.WriteHealth.Measured, "an untaken measurement must report measured=false")
 	assert.False(t, outcome.WriteHealth.Healthy, "an unmeasured tape is never certified healthy")
+}
+
+// TestDeriveTapeOutcomesUnmeasurableThroughput: a write too small to judge is
+// projected as not measurable (no rate), while a measurement recorded before
+// #409 (no such field) projects as before.
+func TestDeriveTapeOutcomesUnmeasurableThroughput(t *testing.T) {
+	tests := []struct {
+		name             string
+		health           backup.WriteHealth
+		wantUnmeasurable bool
+		wantThroughput   float64
+	}{
+		{
+			name: "too little data",
+			health: backup.WriteHealth{
+				Measured: true, ThroughputUnmeasurable: true, FloorMBps: 40, FloorKnown: true, RepositionsMeasured: true,
+			},
+			wantUnmeasurable: true,
+		},
+		{
+			name: "recorded before #409",
+			health: backup.WriteHealth{
+				Measured: true, ThroughputMBps: 0.026, FloorMBps: 40, FloorKnown: true, BelowFloor: true, RepositionsMeasured: true,
+			},
+			wantThroughput: 0.026,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			b := newEventBuilder()
+			b.started(t, testConfig)
+
+			load := b.scheduled(t, "Load", nil)
+			b.completed(t, load, []backup.LoadedTape{{Barcode: "SMALLTAPE1", SourceSlot: 1}})
+
+			format := b.scheduled(t, "FormatTape", struct{ Barcode string }{"SMALLTAPE1"})
+			b.completed(t, format, nil)
+
+			write := b.scheduled(t, "WriteTree", struct{ Barcode string }{"SMALLTAPE1"})
+			b.completed(t, write, nil)
+
+			finalize := b.scheduled(t, "FinalizeTape", struct{ Barcode string }{"SMALLTAPE1"})
+			b.completed(t, finalize, "/staging/SMALLTAPE1/index.xml")
+
+			health := b.scheduled(t, "MeasureWriteHealth", struct{ Barcode string }{"SMALLTAPE1"})
+			b.completed(t, health, backup.TapeMeasurement{Health: test.health})
+
+			b.runCompleted()
+
+			history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+				return &fakeHistoryIterator{events: b.events}
+			}}, "run-small")
+			require.NoError(t, err)
+
+			outcomes := deriveTapeOutcomes(history.Activities)
+			require.Len(t, outcomes, 1)
+			require.NotNil(t, outcomes[0].WriteHealth)
+
+			info := outcomes[0].WriteHealth
+			assert.Equal(t, test.wantUnmeasurable, info.ThroughputUnmeasurable)
+			assert.InDelta(t, test.wantThroughput, info.ThroughputMBps, 0.0001)
+			assert.Equal(t, test.health.BelowFloor, info.BelowFloor)
+			assert.Equal(t, test.wantUnmeasurable, info.Healthy,
+				"unmeasurable throughput alone never makes a tape unhealthy")
+
+			encoded, err := json.Marshal(info)
+			require.NoError(t, err)
+			assert.Contains(t, string(encoded), fmt.Sprintf(`"throughputUnmeasurable":%t`, test.wantUnmeasurable))
+
+			metric := toDriveMetric(outcomes[0], driveSample{})
+			assert.Equal(t, test.wantUnmeasurable, metric.ThroughputUnmeasurable,
+				"the live drive panel must learn the throughput was not measurable")
+		})
+	}
 }
 
 func TestGetRunPhasesHandler(t *testing.T) {

@@ -4,6 +4,7 @@ import { Link } from './router'
 import { runPath } from './route'
 import { IconWarning } from './icons'
 import DryRunBadge from './DryRunBadge'
+import { throughputUnmeasurableText } from './writeHealth'
 
 // WriteHealthInfo/TapeOutcome mirror pkg/runsapi's tape-outcome JSON shapes
 // (tapes.go) — the same shapes DriveMetricsPanel.tsx's FinalDriveMetrics
@@ -17,6 +18,8 @@ import DryRunBadge from './DryRunBadge'
 interface WriteHealthInfo {
   measured: boolean
   throughputMBps: number
+  // Absent on runs recorded before issue #409.
+  throughputUnmeasurable?: boolean
   floorMBps?: number
   floorKnown: boolean
   belowFloor: boolean
@@ -118,7 +121,9 @@ function WriteHealthCell({ health }: { health?: WriteHealthInfo }) {
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      {typeof health.throughputMBps === 'number' ? (
+      {health.throughputUnmeasurable ? (
+        <span className="font-mono text-text-dim">{throughputUnmeasurableText}</span>
+      ) : typeof health.throughputMBps === 'number' ? (
         <span className="font-mono text-text">{health.throughputMBps.toFixed(0)} MB/s</span>
       ) : null}
       {health.floorKnown && typeof health.floorMBps === 'number' ? (

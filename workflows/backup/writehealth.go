@@ -16,6 +16,11 @@ import (
 // bytesPerMB is the decimal megabyte, as drive rates are quoted.
 const bytesPerMB = 1_000_000.0
 
+// minMeasurableWriteBytes is the smallest write whose rate can indicate
+// streaming: LTFS's write cache plus the drive buffer (256 MB on LTO-5) absorb a
+// smaller copy before the tape catches up, so 1 GB keeps buffering a minority.
+const minMeasurableWriteBytes int64 = 1_000_000_000
+
 // speedMatchingFloorsMBps maps an LTO generation to the lowest rate the drive
 // can slow to before it must back-hitch; sustained throughput below it means the
 // drive likely shoe-shined (SPEC §14). Values are the conservative published
@@ -41,8 +46,13 @@ func writeHealthFloor(capacityBytes int64) (floorMBps float64, known bool) {
 type WriteHealth struct {
 	// Measured is false when the activity could not run at all.
 	Measured bool
-	// ThroughputMBps is bytes written (slices + PAR2) / write-window seconds.
+	// ThroughputMBps is bytes written (slices + PAR2) / streaming-copy seconds;
+	// a zero placeholder when ThroughputUnmeasurable.
 	ThroughputMBps float64
+	// ThroughputUnmeasurable is true when the write was too small (or its
+	// duration unknown) to judge streaming, so no below-floor verdict is made.
+	// Its zero value keeps runs recorded before #409 rendering as before.
+	ThroughputUnmeasurable bool
 	// FloorMBps is meaningless when FloorKnown is false.
 	FloorMBps float64
 	// FloorKnown false means no below-floor verdict is made.
@@ -64,8 +74,9 @@ func (h WriteHealth) Healthy() bool {
 		h.RepositionsMeasured && h.Repositions == 0 && len(h.TapeAlertFlags) == 0
 }
 
-// evaluateWriteHealth computes the verdict. A non-positive elapsed yields zero
-// throughput that is not flagged below-floor (unmeasurable, not slow).
+// evaluateWriteHealth computes the verdict. A write below
+// minMeasurableWriteBytes or with a non-positive elapsed is unmeasurable: zero
+// throughput and no below-floor verdict (not slow, just unjudgeable).
 func evaluateWriteHealth(bytesWritten int64, elapsed time.Duration, logs tape.LogPageResult, floorMBps float64, floorKnown bool) WriteHealth {
 	health := WriteHealth{
 		Measured:            true,
@@ -82,11 +93,15 @@ func evaluateWriteHealth(bytesWritten int64, elapsed time.Duration, logs tape.Lo
 	}
 
 	seconds := elapsed.Seconds()
-	if seconds > 0 {
-		health.ThroughputMBps = float64(bytesWritten) / bytesPerMB / seconds
-		if floorKnown {
-			health.BelowFloor = health.ThroughputMBps < floorMBps
-		}
+	if seconds <= 0 || bytesWritten < minMeasurableWriteBytes {
+		health.ThroughputUnmeasurable = true
+
+		return health
+	}
+
+	health.ThroughputMBps = float64(bytesWritten) / bytesPerMB / seconds
+	if floorKnown {
+		health.BelowFloor = health.ThroughputMBps < floorMBps
 	}
 
 	return health
@@ -120,7 +135,7 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "throughput_mbps",
-			Help:      "Sustained write throughput over the tape's write window, in MB/s (bytes written to tape (slices + PAR2) / elapsed).",
+			Help:      "Sustained write throughput while streaming the staged tree to the mounted tape, in MB/s (bytes written to tape (slices + PAR2) / copy duration). Unset when the write was too small to measure.",
 		}, []string{"barcode"}),
 		repositions: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "tape_archiver",
@@ -138,7 +153,7 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 			Namespace: "tape_archiver",
 			Subsystem: "write",
 			Name:      "below_floor",
-			Help:      "1 when the measured throughput was below the tape generation's speed-matching floor, else 0. Unset when the generation has no known floor.",
+			Help:      "1 when the measured throughput was below the tape generation's speed-matching floor, else 0 (including a write too small to measure). Unset when the generation has no known floor.",
 		}, []string{"barcode"}),
 	}
 
@@ -160,7 +175,14 @@ func (m *writeHealthMetrics) record(barcode string, health WriteHealth) {
 	}
 
 	labels := prometheus.Labels{"barcode": barcode}
-	m.throughput.With(labels).Set(health.ThroughputMBps)
+
+	// Deleted rather than zeroed so a stale reading for the barcode never lingers.
+	if health.ThroughputUnmeasurable {
+		m.throughput.Delete(labels)
+	} else {
+		m.throughput.With(labels).Set(health.ThroughputMBps)
+	}
+
 	m.tapeAlerts.With(labels).Set(float64(len(health.TapeAlertFlags)))
 
 	// Left unset when unread so a zero is never implied (SPEC §14).
@@ -207,7 +229,8 @@ type MeasureWriteHealthInput struct {
 	Barcode tape.Barcode
 	// BytesWritten is slices plus PAR2 files written in the window.
 	BytesWritten int64
-	// Elapsed spans WriteTree through FinalizeTape.
+	// Elapsed is WriteTree's streaming-copy duration (no mount or unmount); zero
+	// means unknown and yields an unmeasurable throughput.
 	Elapsed    time.Duration
 	FloorMBps  float64
 	FloorKnown bool
@@ -246,6 +269,7 @@ func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input Me
 
 	slog.InfoContext(ctx, "write-health: measured tape write performance",
 		"barcode", input.Barcode, "throughputMBps", health.ThroughputMBps,
+		"throughputUnmeasurable", health.ThroughputUnmeasurable,
 		"floorMBps", health.FloorMBps, "floorKnown", health.FloorKnown, "belowFloor", health.BelowFloor,
 		"repositions", health.Repositions, "repositionsMeasured", health.RepositionsMeasured,
 		"tapeAlertFlags", len(health.TapeAlertFlags), "healthy", health.Healthy(),

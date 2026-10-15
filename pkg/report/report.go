@@ -77,6 +77,9 @@ type Disc struct {
 // never reflects run success: a flagged tape was still written.
 type WriteHealth struct {
 	ThroughputMBps float64
+	// ThroughputUnmeasurable marks a write too small to judge streaming;
+	// ThroughputMBps is then a placeholder and no below-floor verdict is made.
+	ThroughputUnmeasurable bool
 	// FloorMBps is meaningful only when FloorKnown is true.
 	FloorMBps  float64
 	FloorKnown bool
@@ -541,6 +544,9 @@ func (d *doc) writeHealthSection(m Manifest) {
 			}
 
 			thr = fmt.Sprintf("%.1f", health.ThroughputMBps)
+			if health.ThroughputUnmeasurable {
+				thr = "not measurable"
+			}
 
 			// "n/m" keeps an unread counter from looking like a clean zero (SPEC §14).
 			repos = "n/m"
@@ -564,11 +570,22 @@ func writeHealthStatus(health *WriteHealth) string {
 		return "not measured"
 	}
 
+	// Too little data is not a fault, but the reader must not assume a rate.
+	const unmeasurableNote = "throughput not measurable (too little data)"
+
 	if health.Healthy {
+		if health.ThroughputUnmeasurable {
+			return "healthy; " + unmeasurableNote
+		}
+
 		return "healthy"
 	}
 
 	var flags []string
+
+	if health.ThroughputUnmeasurable {
+		flags = append(flags, unmeasurableNote)
+	}
 
 	switch {
 	case !health.FloorKnown:

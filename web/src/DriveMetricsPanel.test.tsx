@@ -403,6 +403,47 @@ describe('DriveMetricsPanel', () => {
       expect(screen.queryByText(/undefined/)).not.toBeInTheDocument()
     })
 
+    it('renders a write too small to judge as not measurable, never 0 MB/s (issue #409)', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          if (String(input).endsWith('/api/runs/run-1/tapes')) {
+            return jsonResponse(200, {
+              runId: 'run-1',
+              tapes: [
+                {
+                  barcode: 'SMALL01L5',
+                  tapeIndex: 0,
+                  copyIndex: 0,
+                  driveIndex: 0,
+                  result: 'written',
+                  writeHealth: {
+                    measured: true,
+                    throughputMBps: 0,
+                    throughputUnmeasurable: true,
+                    floorMBps: 40,
+                    floorKnown: true,
+                    belowFloor: false,
+                    repositions: 0,
+                    repositionsMeasured: true,
+                    healthy: true,
+                  },
+                },
+              ],
+            })
+          }
+
+          throw new Error(`unexpected fetch to ${String(input)}`)
+        }),
+      )
+
+      render(<DriveMetricsPanel runId="run-1" terminal />)
+
+      await waitFor(() => expect(screen.getByText('MB/s not measurable (too little data)')).toBeInTheDocument())
+      expect(screen.queryByText('0 MB/s')).not.toBeInTheDocument()
+      expect(screen.queryByText(/below speed-matching floor/i)).not.toBeInTheDocument()
+    })
+
     it('shows a no-tapes placeholder for a terminal run that wrote nothing', async () => {
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { runId: 'run-1', tapes: [] })))
 

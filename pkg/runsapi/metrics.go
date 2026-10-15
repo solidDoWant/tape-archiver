@@ -80,6 +80,9 @@ type DriveMetric struct {
 	// FloorMBps/FloorKnown come from run history; the floor is not exported as a gauge.
 	FloorMBps  float64 `json:"floorMBps,omitempty"`
 	FloorKnown bool    `json:"floorKnown"`
+	// ThroughputUnmeasurable comes from run history: the write was too small
+	// to judge, so no throughput gauge is exported for it.
+	ThroughputUnmeasurable bool `json:"throughputUnmeasurable"`
 }
 
 // DriveMetricsResponse is the GET /api/runs/{runID}/metrics/drives response body.
@@ -268,6 +271,7 @@ func toDriveMetric(outcome TapeOutcome, sample driveSample) DriveMetric {
 	if outcome.WriteHealth != nil {
 		metric.FloorMBps = outcome.WriteHealth.FloorMBps
 		metric.FloorKnown = outcome.WriteHealth.FloorKnown
+		metric.ThroughputUnmeasurable = outcome.WriteHealth.ThroughputUnmeasurable
 	}
 
 	return metric

@@ -162,7 +162,7 @@ func newWritePauseEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 
 // expectHealthyWriteExceptFormat mocks every write step except FormatTape.
 func expectHealthyWriteExceptFormat(env *testsuite.TestWorkflowEnvironment) {
-	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return("/stage/indexes/tape.xml", nil)
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(WriteHealth{}, nil)
 }

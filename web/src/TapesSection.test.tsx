@@ -49,6 +49,36 @@ describe('TapesSection', () => {
     expect(screen.getByText(/tapealert/i)).toBeInTheDocument()
   })
 
+  it('notes a write too small to judge as not measurable, without a below-floor badge (issue #409)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          runId: 'run-1',
+          tapes: [
+            {
+              barcode: 'SMALL01L5',
+              tapeIndex: 0,
+              copyIndex: 0,
+              driveIndex: 0,
+              slot: 5,
+              result: 'written',
+              writeHealth: { measured: true, belowFloor: false, throughputUnmeasurable: true },
+            },
+          ],
+        }),
+      ),
+    )
+
+    render(<TapesSection runId="run-1" terminal={false} />)
+
+    await waitFor(() => {
+      expect(screen.getByText('SMALL01L5')).toBeInTheDocument()
+    })
+    expect(screen.getByText('MB/s not measurable (too little data)')).toBeInTheDocument()
+    expect(screen.queryByText(/below floor/i)).not.toBeInTheDocument()
+  })
+
   it('flags a tape that overwrote a non-blank tape', async () => {
     vi.stubGlobal(
       'fetch',

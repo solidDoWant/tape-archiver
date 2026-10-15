@@ -41,6 +41,7 @@ func TestEvaluateWriteHealth(t *testing.T) {
 		floorMBps               float64
 		floorKnown              bool
 		wantThroughput          float64
+		wantUnmeasurable        bool
 		wantBelowFloor          bool
 		wantRepositions         int64
 		wantRepositionsMeasured bool
@@ -121,6 +122,67 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			wantRepositionsMeasured: true,
 			wantHealthy:             false,
 		},
+		{
+			// Prod #409: ~1.9 MB copied quickly. Too little data to judge
+			// streaming: no rate, no below-floor verdict, not failed for it.
+			name:                    "tiny write is unmeasurable",
+			stagedBytes:             1_900_000,
+			elapsed:                 2 * time.Second,
+			logs:                    measuredZero(),
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantUnmeasurable:        true,
+			wantRepositionsMeasured: true,
+			wantHealthy:             true,
+		},
+		{
+			// Just under the threshold, even at a rate that would be below floor.
+			name:                    "just under the minimum is unmeasurable",
+			stagedBytes:             minMeasurableWriteBytes - 1,
+			elapsed:                 time.Hour,
+			logs:                    measuredZero(),
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantUnmeasurable:        true,
+			wantRepositionsMeasured: true,
+			wantHealthy:             true,
+		},
+		{
+			// 1 GB in 100 s = 10 MB/s: large enough to judge, so below floor.
+			name:                    "minimum-size slow write is below floor",
+			stagedBytes:             minMeasurableWriteBytes,
+			elapsed:                 100 * time.Second,
+			logs:                    measuredZero(),
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantThroughput:          10,
+			wantBelowFloor:          true,
+			wantRepositionsMeasured: true,
+		},
+		{
+			// An unknown duration (e.g. a pre-#409 WriteTree) is not a 0 MB/s rate.
+			name:                    "zero duration is unmeasurable",
+			stagedBytes:             6_000_000_000,
+			elapsed:                 0,
+			logs:                    measuredZero(),
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantUnmeasurable:        true,
+			wantRepositionsMeasured: true,
+			wantHealthy:             true,
+		},
+		{
+			// Unmeasurable throughput does not mask other faults.
+			name:                    "tiny write with repositions is unhealthy",
+			stagedBytes:             1_900_000,
+			elapsed:                 2 * time.Second,
+			logs:                    tape.LogPageResult{Repositions: 3, RepositionsMeasured: true},
+			floorMBps:               floor,
+			floorKnown:              true,
+			wantUnmeasurable:        true,
+			wantRepositions:         3,
+			wantRepositionsMeasured: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -131,6 +193,7 @@ func TestEvaluateWriteHealth(t *testing.T) {
 
 			assert.True(t, health.Measured)
 			assert.InDelta(t, test.wantThroughput, health.ThroughputMBps, 0.001)
+			assert.Equal(t, test.wantUnmeasurable, health.ThroughputUnmeasurable)
 			assert.Equal(t, test.floorKnown, health.FloorKnown)
 			assert.InDelta(t, test.floorMBps, health.FloorMBps, 0.001)
 			assert.Equal(t, test.wantBelowFloor, health.BelowFloor)
@@ -251,6 +314,41 @@ func TestMeasureWriteHealthRecordsMetrics(t *testing.T) {
 	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.tapeAlerts.WithLabelValues("TAPE0002L6")), 0.001)
 }
 
+// TestMeasureWriteHealthUnmeasurableMetrics: a write too small to judge exports
+// no throughput reading (dropping any stale one) and below_floor 0 (#409).
+func TestMeasureWriteHealthUnmeasurableMetrics(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	activities := newWriteHealthActivities(reg)
+	require.NotNil(t, activities.metrics)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	const barcode = "TAPE0003L5"
+
+	input := MeasureWriteHealthInput{
+		Device: "/dev/does-not-exist", Barcode: barcode,
+		BytesWritten: 2_400_000_000, Elapsed: 60 * time.Second, FloorMBps: 40, FloorKnown: true,
+	}
+
+	// An earlier measurable write of the same barcode leaves a reading behind.
+	_, err := activities.MeasureWriteHealth(ctx, input)
+	require.NoError(t, err)
+	require.Equal(t, 1, testutil.CollectAndCount(activities.metrics.throughput))
+
+	input.BytesWritten = 1_900_000
+	measurement, err := activities.MeasureWriteHealth(ctx, input)
+	require.NoError(t, err)
+
+	assert.True(t, measurement.Health.ThroughputUnmeasurable)
+	assert.Equal(t, 0, testutil.CollectAndCount(activities.metrics.throughput),
+		"an unmeasurable write must not export a throughput reading")
+	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.belowFloor.WithLabelValues(barcode)), 0.001,
+		"an unmeasurable write is not below floor")
+}
+
 // TestNewWriteHealthActivitiesNilRegisterer asserts a nil registry is a safe no-op.
 func TestNewWriteHealthActivitiesNilRegisterer(t *testing.T) {
 	t.Parallel()
@@ -288,6 +386,14 @@ func TestReportWriteHealthMapping(t *testing.T) {
 	assert.True(t, mapped.RepositionsMeasured)
 	assert.Equal(t, []string{"8: Cleaning required"}, mapped.TapeAlertFlags)
 	assert.False(t, mapped.Healthy, "repositions make the tape unhealthy")
+	assert.False(t, mapped.ThroughputUnmeasurable)
+
+	unmeasurable := reportWriteHealth(WriteHealth{
+		Measured: true, ThroughputUnmeasurable: true, FloorMBps: 40, FloorKnown: true, RepositionsMeasured: true,
+	})
+	require.NotNil(t, unmeasurable)
+	assert.True(t, unmeasurable.ThroughputUnmeasurable, "the report must learn the throughput was not measurable")
+	assert.True(t, unmeasurable.Healthy, "unmeasurable throughput alone never makes a tape unhealthy")
 }
 
 // TestTapeWrittenBytes asserts the throughput numerator counts slices AND PAR2,
