@@ -283,6 +283,34 @@ describe('RunDetail', () => {
     expect(screen.queryByText(/unavailable/i)).not.toBeInTheDocument()
   })
 
+  it('keeps refetching the phases while one waits for a worker, so the wait turning stalled shows up', async () => {
+    const waiting = { activity: 'Generate PAR2', taskQueue: 'data', since: '2026-07-09T12:05:00Z', stalled: false, pollers: 0 }
+    const withWait = (stalled: boolean) =>
+      runningPhases().map((phase) => (phase.status === 'active' ? { ...phase, waiting: { ...waiting, stalled } } : phase))
+
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: withWait(false) } } })
+
+      expect(screen.queryByText(/waiting for a worker/i)).not.toBeInTheDocument()
+
+      // No SSE frame arrives: only the wait poll can surface the change.
+      stub({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: withWait(true) } } })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+
+      await waitFor(() => {
+        expect(screen.getByText(/par2 is waiting for a worker on the “data” task queue/i)).toBeInTheDocument()
+      })
+      expect(screen.getByRole('button', { name: /^par2\b.*waiting for a worker/i })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('shows a pending placeholder for a phase that has not started', async () => {
     await renderReady({ '/api/runs/run-abc/phases': { status: 200, body: { runId: 'run-abc', phases: runningPhases() } } })
 

@@ -2,6 +2,7 @@ import type { PhaseInfo } from './RunDetail'
 import { phaseLabel, formatDuration } from './phaseFormat'
 import LogPanel from './LogPanel'
 import DriveMetricsPanel from './DriveMetricsPanel'
+import WaitingNotice from './WaitingNotice'
 
 function statusBadgeClass(status: PhaseInfo['status']): string {
   switch (status) {
@@ -45,7 +46,7 @@ function PhaseDetail({ runId, index, phase, terminal }: PhaseDetailProps) {
         <div className="mb-1.5 flex flex-wrap items-center gap-2.5">
           <span className="font-mono text-[11px] tracking-[0.04em] text-text-faint">PHASE {index}</span>
           <span className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] font-semibold tracking-[0.03em] ${statusBadgeClass(phase.status)}`}>
-            {phase.status.toUpperCase()}
+            {phase.waiting?.stalled ? 'WAITING FOR WORKER' : phase.status.toUpperCase()}
           </span>
           <span className="font-mono text-[11px] text-text-faint">{formatDuration(phase.startTime, phase.endTime)}</span>
         </div>
@@ -62,6 +63,8 @@ function PhaseDetail({ runId, index, phase, terminal }: PhaseDetailProps) {
         </div>
       ) : (
         <>
+          <WaitingNotice phase={phase} />
+
           {phase.facts.length > 0 ? (
             <dl className="rounded-xl border border-border bg-surface px-5 py-1 shadow-card">
               {phase.facts.map((fact) => (

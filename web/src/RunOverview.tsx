@@ -6,7 +6,8 @@ import RestartRunButton from './RestartRunButton'
 import PauseActions from './PauseActions'
 import type { PhaseInfo, RunEventDetail } from './RunDetail'
 import TapesSection from './TapesSection'
-import { formatDuration, phaseLabel } from './phaseFormat'
+import { formatDuration, phaseLabel, stalledWait } from './phaseFormat'
+import WaitingNotice from './WaitingNotice'
 import { useReportMessageUrl } from './runDelivery'
 import { livePauseState, runStatusView } from './runHeader'
 import { temporalWorkflowUrl, useUiConfig } from './uiConfig'
@@ -36,7 +37,8 @@ export interface RunOverviewProps {
 
 // RunOverview is the run detail page's default "Run overview" view
 // (DESIGN_ANALYSIS.md §2.B's "isSummary" sub-view): a status hero, the
-// operator pause zone (or a "no action needed" placeholder while healthy),
+// operator pause zone (or a stalled waiting-for-worker notice, or a "no action
+// needed" placeholder while healthy),
 // a phase-completion summary, a live per-drive write-health glance while the
 // run is writing (DriveMetricsPanel, issue #307), a failed-run error console,
 // the run-config viewer (ConfigSummary), and this run's own tape/slot outcomes
@@ -51,6 +53,7 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
 
   const completedCount = phases.filter((phase) => phase.status === 'completed').length
   const failedPhase = phases.find((phase) => phase.status === 'failed')
+  const stalledPhase = stalledWait(phases)
 
   const packPhase = phases.find((phase) => phase.name === 'Pack')
   const logicalTapes = factValue(packPhase, 'logicalTapes')
@@ -129,6 +132,8 @@ function RunOverview({ runId, detail, phases, terminal }: RunOverviewProps) {
 
       {isPaused || pauseUnknown ? (
         <PauseActions runId={runId} pause={pause} />
+      ) : stalledPhase && !terminal ? (
+        <WaitingNotice phase={stalledPhase} />
       ) : detail.status === 'Running' ? (
         <div className="flex items-center gap-2.5 rounded-lg border border-dashed border-border-strong px-4 py-3 text-[12px] text-text-dim">
           No operator action needed right now. Pauses show up here when you need to restock blanks, clear the I/O

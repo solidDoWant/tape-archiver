@@ -86,6 +86,35 @@ describe('RunOverview', () => {
     await settlePanels()
   })
 
+  it('flags a phase stalled waiting for a worker in place of the "no action needed" placeholder', async () => {
+    stubPanels()
+
+    const waiting = { activity: 'Pack', taskQueue: 'data', since: '2026-07-09T12:05:00Z', stalled: true, pollers: 0 }
+    const stalled = phases.map((phase) => (phase.name === 'Pack' ? { ...phase, waiting } : phase))
+
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={stalled} terminal={false} />)
+
+    const notice = screen.getByText(/pack is waiting for a worker on the “data” task queue/i).closest('[role="status"]')
+    expect(notice).toHaveTextContent(/no workers are polling that queue/i)
+    expect(screen.queryByText(/no operator action needed/i)).not.toBeInTheDocument()
+
+    await settlePanels()
+  })
+
+  it('does not flag a wait still inside the worker cold-start grace', async () => {
+    stubPanels()
+
+    const waiting = { activity: 'Pack', taskQueue: 'data', since: '2026-07-09T12:05:00Z', stalled: false, pollers: 0 }
+    const coldStart = phases.map((phase) => (phase.name === 'Pack' ? { ...phase, waiting } : phase))
+
+    renderOverview(<RunOverview runId="run-1" detail={runningDetail} phases={coldStart} terminal={false} />)
+
+    expect(screen.queryByText(/waiting for a worker/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/no operator action needed/i)).toBeInTheDocument()
+
+    await settlePanels()
+  })
+
   it('offers a Cancel run button while the run is still in progress', async () => {
     stubPanels()
 

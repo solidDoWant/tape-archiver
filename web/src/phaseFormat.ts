@@ -6,6 +6,7 @@
 // split from router.tsx.
 
 import { formatDuration as formatClosedDuration } from './api'
+import type { PhaseInfo, PhaseWaiting } from './RunDetail'
 
 // phaseDisplayLabels maps a workflow phase's stable code-order name
 // (workflows/backup's Phase* constants, as returned verbatim by GET
@@ -54,4 +55,32 @@ export function formatDuration(startTime?: string, endTime?: string): string {
   const endMillis = Number.isNaN(startMillis) ? nowMillis : Math.max(startMillis, nowMillis)
 
   return formatClosedDuration(startTime, new Date(endMillis).toISOString())
+}
+
+// waitingPollInterval is how often the run page refetches the phase timeline
+// while a phase waits for a worker: the SSE stream only fires on status/phase/
+// pause changes, so neither the wait turning stalled nor a worker picking the
+// activity up would otherwise reach the page.
+export const waitingPollInterval = 15_000
+
+// stalledWait returns the first phase whose activity has waited for a worker
+// longer than a cold start explains (PhaseWaiting.stalled), if any.
+export function stalledWait(phases: PhaseInfo[]): PhaseInfo | undefined {
+  return phases.find((phase) => phase.waiting?.stalled)
+}
+
+// waitingSummary describes a stalled wait in operator terms, naming the queue
+// and, when known, whether anything is polling it.
+export function waitingSummary(waiting: PhaseWaiting): string {
+  const base = `${waiting.activity} was scheduled ${formatDuration(waiting.since)} ago on the “${waiting.taskQueue}” task queue, but no worker has picked it up.`
+
+  if (waiting.pollers === undefined) {
+    return base
+  }
+
+  if (waiting.pollers === 0) {
+    return `${base} No workers are polling that queue.`
+  }
+
+  return `${base} ${waiting.pollers} worker${waiting.pollers === 1 ? ' is' : 's are'} polling that queue.`
 }

@@ -55,14 +55,20 @@ var phaseOrder = []string{
 
 // activityRecord is one activity invocation reconstructed from a run's history:
 // the ACTIVITY_TASK_SCHEDULED event that created it, joined with whatever
-// terminal event (COMPLETED/FAILED/TIMED_OUT/CANCELED) followed, if any — none
-// of Completed/Failed/TimedOut/Canceled is true while the activity is still in
-// flight (or the run ended before it finished).
+// STARTED and terminal (COMPLETED/FAILED/TIMED_OUT/CANCELED) events followed.
 type activityRecord struct {
 	ScheduledEventID int64
+	ActivityID       string
 	Name             string
+	TaskQueue        string
 	ScheduledTime    time.Time
 	Input            *commonpb.Payloads
+
+	// Started is set by ACTIVITY_TASK_STARTED. Temporal writes that event only
+	// when the attempt closes for an activity with a retry policy, so an
+	// in-flight activity usually reads !Started here; DescribeWorkflowExecution's
+	// pending-activity state is authoritative for that (see waiting.go).
+	Started bool
 
 	Completed bool
 	Failed    bool
@@ -187,12 +193,20 @@ func applyHistoryEvent(history *runHistory, indexByScheduled map[int64]int, even
 
 		history.Activities = append(history.Activities, activityRecord{
 			ScheduledEventID: event.GetEventId(),
+			ActivityID:       attrs.GetActivityId(),
 			Name:             name,
+			TaskQueue:        attrs.GetTaskQueue().GetName(),
 			ScheduledTime:    eventTime,
 			Input:            input,
 			Barcode:          extractBarcode(name, input),
 		})
 		indexByScheduled[event.GetEventId()] = len(history.Activities) - 1
+
+	case enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED:
+		attrs := event.GetActivityTaskStartedEventAttributes()
+		if idx, ok := indexByScheduled[attrs.GetScheduledEventId()]; ok {
+			history.Activities[idx].Started = true
+		}
 
 	case enumspb.EVENT_TYPE_ACTIVITY_TASK_COMPLETED:
 		attrs := event.GetActivityTaskCompletedEventAttributes()

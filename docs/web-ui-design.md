@@ -259,7 +259,8 @@ Foundation lands first, then parallel feature work:
   phase rail) rather than a broken page — same shape the pre-redesign `RunDetail.tsx`
   always showed.
 - The phase rail refetches `GET /api/runs/{runID}/phases` on every SSE update/done
-  event (not on a fixed poll interval), but only the very first fetch shows a loading
+  event (plus every 15 s while a phase is waiting for a worker, which no SSE event
+  signals), but only the very first fetch shows a loading
   state; later refreshes swap in silently so the rail never flickers while a run is
   progressing.
 - The run-config viewer (`ConfigSummary.tsx`, `GET /api/runs/{runID}/config`) is a

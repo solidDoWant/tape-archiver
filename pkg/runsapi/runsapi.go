@@ -91,6 +91,9 @@ type TemporalClient interface {
 	// history predates the currently-deployed workflow code (nondeterminism
 	// — see history.go's doc comment).
 	GetWorkflowHistory(ctx context.Context, workflowID string, runID string, isLongPoll bool, filterType enumspb.HistoryEventFilterType) client.HistoryEventIterator
+	// DescribeTaskQueue reports a task queue's pollers, so the phase timeline
+	// can say whether any worker is serving a waiting activity (waiting.go).
+	DescribeTaskQueue(ctx context.Context, taskQueue string, taskQueueType enumspb.TaskQueueType) (*workflowservice.DescribeTaskQueueResponse, error)
 	runsubmit.TemporalClient
 }
 

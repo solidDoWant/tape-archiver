@@ -5,7 +5,7 @@ import PauseActions, { type CurrentPauseInfo } from './PauseActions'
 import RestartRunButton from './RestartRunButton'
 import PhaseDetail from './PhaseDetail'
 import PhaseRail from './PhaseRail'
-import { phaseLabel } from './phaseFormat'
+import { phaseLabel, waitingPollInterval } from './phaseFormat'
 import { Link } from './router'
 import { useRunEvents, type RunEventDetail } from './runEvents'
 import { headerRuntime, livePauseState, runStatusView, usePublishRunHeader } from './runHeader'
@@ -43,6 +43,18 @@ export interface PhaseInfo {
   endTime?: string
   facts: PhaseFact[]
   error?: string
+  waiting?: PhaseWaiting
+}
+
+// PhaseWaiting mirrors pkg/runsapi.PhaseWaiting: the phase's activity is
+// scheduled but no worker has picked it up. stalled is set server-side once
+// the wait outlasts a worker cold start; pollers is absent when unknown.
+export interface PhaseWaiting {
+  activity: string
+  taskQueue: string
+  since: string
+  stalled: boolean
+  pollers?: number
 }
 
 interface RunPhasesResponse {
@@ -162,6 +174,7 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
   const { state: connection, detail: liveDetail } = useRunEvents(runId)
   const [selected, setSelected] = useState<string>('overview')
   const [phases, setPhases] = useState<PhasesState>({ status: 'loading' })
+  const [pollTick, setPollTick] = useState(0)
 
   // The latest SSE frame once one has arrived, else the parent's existence-
   // check snapshot; currentPause normalized defensively either way (the
@@ -230,8 +243,8 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
     // detail object per SSE update/done event, so its identity changing is
     // exactly "a fresh frame arrived" — the phase timeline is re-derived
     // from the latest workflow history as the run progresses, not just once
-    // at mount.
-  }, [runId, liveDetail])
+    // at mount. pollTick drives the refetch while a phase waits for a worker.
+  }, [runId, liveDetail, pollTick])
 
   // terminal: closeTime is authoritative (present the moment the initial
   // fetch or any SSE frame reports the run closed) and does not require
@@ -240,6 +253,18 @@ function RunDetailLive({ runId, initialDetail }: { runId: string; initialDetail:
   // run) — connection stays 'connecting'/'live' briefly in that case, but
   // detail.closeTime is already set from the initial fetch.
   const terminal = Boolean(detail.closeTime) || connection === 'terminal'
+
+  const anyWaiting = phases.status === 'ready' && phases.phases.some((phase) => phase.waiting)
+
+  useEffect(() => {
+    if (!anyWaiting || terminal) {
+      return
+    }
+
+    const timer = setInterval(() => setPollTick((tick) => tick + 1), waitingPollInterval)
+
+    return () => clearInterval(timer)
+  }, [anyWaiting, terminal])
 
   // Publish this run's status + runtime to the app-shell header (App.tsx), which
   // is the run page's single header — RunDetail renders no title bar of its own.

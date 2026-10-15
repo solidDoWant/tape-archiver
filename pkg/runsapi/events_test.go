@@ -149,6 +149,10 @@ func (c *dynamicTemporalClient) GetWorkflowHistory(_ context.Context, _, _ strin
 	return &fakeHistoryIterator{}
 }
 
+func (c *dynamicTemporalClient) DescribeTaskQueue(context.Context, string, enumspb.TaskQueueType) (*workflowservice.DescribeTaskQueueResponse, error) {
+	return &workflowservice.DescribeTaskQueueResponse{}, nil
+}
+
 func (c *dynamicTemporalClient) callCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
