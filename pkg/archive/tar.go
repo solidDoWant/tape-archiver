@@ -118,7 +118,19 @@ type sparseRegion struct {
 	length int64
 }
 
+// zfsControlDir is the ZFS control directory at a dataset's root; with
+// snapdir=visible its snapshot/ holds every snapshot of the dataset.
+const zfsControlDir = ".zfs"
+
+// tree archives srcDir's own filesystem only, as a snapshot would: the root's
+// .zfs control directory is skipped, and a filesystem mounted below srcDir (e.g.
+// a child dataset) is archived as its empty mountpoint directory.
 func (w *tarWriter) tree(ctx context.Context, srcDir, prefix string) error {
+	rootDev, err := dirDevice(srcDir)
+	if err != nil {
+		return err
+	}
+
 	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -128,8 +140,56 @@ func (w *tarWriter) tree(ctx context.Context, srcDir, prefix string) error {
 			return err
 		}
 
-		return w.writeEntry(ctx, srcDir, prefix, path, entry)
+		if !entry.IsDir() || path == srcDir {
+			return w.writeEntry(ctx, srcDir, prefix, path, entry)
+		}
+
+		if entry.Name() == zfsControlDir && filepath.Dir(path) == filepath.Clean(srcDir) {
+			slog.DebugContext(ctx, "skipping ZFS control directory", "path", path)
+
+			return fs.SkipDir
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		if err := w.writeEntry(ctx, srcDir, prefix, path, entry); err != nil {
+			return err
+		}
+
+		if dev, ok := deviceOf(info); ok && dev != rootDev {
+			slog.InfoContext(ctx, "not descending into a separate filesystem mounted inside the source", "path", path)
+
+			return fs.SkipDir
+		}
+
+		return nil
 	})
+}
+
+// dirDevice returns the device of the filesystem holding dir's contents. It
+// opens dir rather than stat'ing its path so an automounted directory (a ZFS
+// snapshot) reports the mounted filesystem, not its placeholder.
+func dirDevice(dir string) (uint64, error) {
+	file, err := os.Open(dir)
+	if err != nil {
+		return 0, err
+	}
+
+	info, err := file.Stat()
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+
+	if err != nil {
+		return 0, err
+	}
+
+	dev, _ := deviceOf(info)
+
+	return dev, nil
 }
 
 // writeEntry writes one entry. Without a prefix the root is skipped; with one it

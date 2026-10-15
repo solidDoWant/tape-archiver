@@ -302,7 +302,9 @@ The config defines, at minimum:
     archived from its live mountpoint; if the dataset is not mounted (its `mounted`
     property is `no`), the run fails during Prepare rather than archiving whatever
     directory shadows the mountpoint — a stale or empty shadow would otherwise be
-    silently certified.
+    silently certified. Like a snapshot, it covers only that dataset: the root's
+    `.zfs` control directory is skipped and filesystems mounted below it (child
+    datasets) are archived as empty directories.
 - **Copies (N)** — number of identical physical tape copies to produce (required; must
   be at least 1, with no default). Up to `len(Drives)` copies write in parallel; a copy count exceeding the
   drive count is written across successive drive-sets (§4.3 steps 6–8). The library must

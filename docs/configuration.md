@@ -114,7 +114,11 @@ An explicit ZFS dataset or snapshot by name.
 A bare dataset name (no `@`) is archived from the dataset's live mountpoint. The dataset
 must be mounted: if it is not, the run fails during Prepare — before any tape is written —
 rather than archiving whatever directory shadows the (unmounted) mountpoint, which would
-silently certify a stale or empty archive.
+silently certify a stale or empty archive. Only the dataset itself is archived, matching
+what a snapshot of it contains: its `.zfs` control directory (visible with
+`snapdir=visible`) is skipped, and a child dataset or any other filesystem mounted below
+the mountpoint is archived as an empty directory. Name each child dataset as its own
+source to archive it.
 
 ---
 
