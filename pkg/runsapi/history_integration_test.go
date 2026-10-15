@@ -42,10 +42,9 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 		t.Skipf("%s not set; run via `make test-integration`", testutil.EnvTestSnapshot)
 	}
 
-	for _, name := range []string{"MHVTL_CHANGER_DEV", "MHVTL_DRIVE0_DEV", "MHVTL_DRIVE1_DEV"} {
-		if os.Getenv(name) == "" {
-			t.Skipf("%s not set; run via `make test-integration`", name)
-		}
+	// The drive variables are resolved by SCSI address below.
+	if os.Getenv("MHVTL_CHANGER_DEV") == "" {
+		t.Skip("MHVTL_CHANGER_DEV not set; run via `make test-integration`")
 	}
 
 	source := testutil.PoolDataset(t) + "@" + snapshot
