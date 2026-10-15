@@ -1,0 +1,66 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  // Managers: gomod (go.mod), npm (web/), helmv3 (deploy/charts/), docker-compose,
+  // nix (flake.lock). Policy is split by topic under .github/renovate/.
+  extends: [
+    "config:recommended",
+    ":semanticCommits",
+    ":timezone(America/Chicago)",
+    // Applied in this order, then the packageRules below. local> presets are
+    // read from the default branch.
+    "local>solidDoWant/tape-archiver//.github/renovate/managers.json5",
+    "local>solidDoWant/tape-archiver//.github/renovate/safety.json5",
+    "local>solidDoWant/tape-archiver//.github/renovate/groups.json5",
+    "local>solidDoWant/tape-archiver//.github/renovate/labels.json5",
+  ],
+
+  // Hold new releases briefly (supply-chain safety, chained hotfix releases).
+  // timestamp-optional: registries without release timestamps would be held forever.
+  minimumReleaseAge: "3 days",
+  // cspell:words Behaviour
+  minimumReleaseAgeBehaviour: "timestamp-optional",
+  // Expected outcome of the above; keep it out of the repository-problems list.
+  logLevelRemap: [
+    {
+      matchMessage: "/did not have a releaseTimestamp, but as we're running with minimumReleaseAgeBehaviour=timestamp-optional/",
+      newLogLevel: "debug",
+    },
+  ],
+  suppressNotifications: ["prEditedNotification", "prIgnoreNotification"],
+  // Default PR body, minus Configuration lines that match this repo's defaults.
+  prBodyTemplate: "{{{header}}}{{{table}}}{{{warnings}}}{{{notes}}}{{{changelogs}}}{{{replace '^\\n\\n---\\n\\n### Configuration\\n\\n$' '' \
+    (replace '[^\\n]*\\*\\*(Automerge\\*\\*: Disabled by config|Rebasing\\*\\*: Whenever PR becomes conflicted,|Ignore\\*\\*:)[^\\n]*\\n\\n' '' \
+    (replace '[^\\n]*\\*\\*Schedule\\*\\*: [^\\n]*\\n\\n\\n\\n' '' \
+    (replace '- (Branch creation|Automerge)\\n  - At any time \\(no schedule defined\\)\\n' '' configDescription)))}}}{{{controls}}}{{{footer}}}",
+  // Tags can be re-pushed; a digest pins the exact content.
+  pinDigests: true,
+
+  // Replaces config:recommended's list, so the defaults are repeated.
+  ignorePaths: [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    ".claude/**",
+    "**/docs/**",
+    "schemas/**",
+    // Empty fence module (see its doc comment); nothing to update.
+    "web/go.mod",
+  ],
+
+  // Off by default upstream. Locked flake inputs only move through
+  // lockFileMaintenance (`nix flake update`).
+  nix: { enabled: true, lockFileMaintenance: { enabled: true } },
+  // Opens only when ticked on the Dependency Dashboard, not every week.
+  lockFileMaintenance: { dependencyDashboardApproval: true },
+
+  // Tidy go.sum after bumps. Renovate can't run nix, so Nix hashes stay stale (see safety.json5).
+  postUpdateOptions: ["gomodTidy"],
+
+  packageRules: [
+    // Last so it overrides any preset rule: no CI, every merge needs a human.
+    {
+      description: "Automerge disabled for everything",
+      matchPackageNames: ["*"],
+      automerge: false,
+    },
+  ],
+}

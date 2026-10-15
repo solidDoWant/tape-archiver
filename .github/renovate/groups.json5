@@ -1,0 +1,39 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  description: "Groups (one PR per stale Nix hash), then the digest-only group that overrides them",
+  packageRules: [
+    {
+      description: "Go modules: one PR, one vendorHash refresh",
+      groupName: "go modules",
+      matchManagers: ["gomod"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      group: { commitMessageTopic: "{{{groupName}}} group" },
+    },
+    {
+      description: "Web npm packages: one PR, one npmDepsHash refresh. @playwright/test is gated in safety.json5",
+      groupName: "web npm",
+      matchManagers: ["npm"],
+      matchUpdateTypes: ["minor", "patch"],
+      matchPackageNames: ["!@playwright/test"],
+      group: { commitMessageTopic: "{{{groupName}}} group" },
+    },
+    {
+      description: "VictoriaMetrics + VictoriaLogs in the web-dev stack",
+      groupName: "victoria-metrics",
+      matchDatasources: ["docker"],
+      matchPackageNames: ["victoriametrics/victoria-metrics", "victoriametrics/victoria-logs"],
+      group: { commitMessageTopic: "{{{groupName}}} group" },
+    },
+
+    // After every group rule, so it takes image digest-only updates out of their groups.
+    {
+      description: "Image digest-only updates (same tag, new digest): one PR, held for Dashboard approval",
+      matchDatasources: ["docker"],
+      matchUpdateTypes: ["digest"],
+      groupName: "digest updates",
+      groupSlug: "digest-updates",
+      group: { commitMessageTopic: "digests" },
+      dependencyDashboardApproval: true,
+    },
+  ],
+}
