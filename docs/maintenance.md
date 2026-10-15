@@ -102,10 +102,23 @@ For the duration of a run, tape-archiver pins each of its ZFS source snapshots w
 `zfs hold` so an external prune (`zfs destroy`) cannot delete a snapshot mid-run (SPEC
 §4.3). The hold is tagged `tape-archiver-hold-<run-id>` — reconstructable from the run
 alone, with no cross-run state (SPEC §4.2) — and is **released automatically on every
-run exit**: success, failure, or cancellation.
+run exit**: success, failure, or cancellation, unless the release itself fails (below).
 
-A hard **Terminate** of a run (as opposed to a cancel) skips the workflow's cleanup, so
-it can leave a hold behind. A leaked hold is harmless — it never blocks a future run,
+Two things can leave a hold behind:
+
+- A hard **Terminate** of a run (as opposed to a cancel) skips the workflow's cleanup.
+- An **exhausted release**. The release retries transient failures (a busy pool, a
+  failing `zfs` command, a data-worker restart) with backoff from 1 s doubling to 1 min,
+  up to 10 attempts and at most 15 minutes in total, including any time spent waiting
+  for an unreachable data worker. If it still fails, the run gives up so the failure
+  alert and staging cleanup are not blocked. The control worker then logs
+  `failed to release source snapshot holds`, with the `tag` and the `error`. On a
+  failed run, the failure alert's error summary also ends with
+  `also: release source-snapshot hold tape-archiver-hold-<run-id> (leaked; clear it by hand): ...`.
+  On a successful run there is no alert, so watch the logs for that line. A snapshot
+  that was already destroyed is not a failure: releasing it is a no-op.
+
+A leaked hold is harmless — it never blocks a future run,
 whose hold carries a different run-id tag — but it keeps the affected snapshot
 undestroyable until cleared, which can defeat an external snapshot-pruning policy. It is
 fully observable and clearable by hand; there is no hidden state to reconcile:

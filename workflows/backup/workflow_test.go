@@ -420,6 +420,9 @@ func TestBackupHoldFailureAlertsDespiteFailingRelease(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 	require.ErrorContains(t, env.GetWorkflowError(), "phase Hold")
 	assert.Equal(t, holdMaxAttempts, holds)
-	assert.Equal(t, holdMaxAttempts, releases)
+	assert.Equal(t, releaseMaxAttempts, releases)
 	assert.Equal(t, PhaseHold, alerted.Phase)
+	assert.Contains(t, alerted.ErrorSummary, "hold boom")
+	assert.Contains(t, alerted.ErrorSummary, "release source-snapshot hold tape-archiver-hold-",
+		"the alert names the leaked hold")
 }

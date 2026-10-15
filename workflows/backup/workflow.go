@@ -152,7 +152,13 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 		if currentPhase.name == PhaseResolve {
 			failingPhase = PhaseHold
 
-			defer releaseSnapshots(ctx, state)
+			// Runs before the alert defer, so a failed run's alert names a
+			// leaked hold; a successful run only logs it.
+			defer func() {
+				if releaseErr := releaseSnapshots(ctx, state); releaseErr != nil && err != nil {
+					err = fmt.Errorf("%w; also: %w", err, releaseErr)
+				}
+			}()
 
 			if err = holdSnapshots(ctx, state); err != nil {
 				err = fmt.Errorf("phase %s: %w", PhaseHold, err)

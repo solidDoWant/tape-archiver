@@ -24,10 +24,20 @@ const (
 
 	holdTimeout = 5 * time.Minute
 
-	// holdMaxAttempts bounds hold and release retries: unbounded, a vanished
-	// snapshot wedges the run, and the release defer blocks the failure alert
-	// and staging cleanup behind it (#387).
+	// holdMaxAttempts bounds hold retries: unbounded, a vanished snapshot wedges
+	// the run before staging (#387).
 	holdMaxAttempts = 3
+
+	// Release retries ride out transient zfs or data-worker faults for a few
+	// minutes (1s doubling to 1m, ~4m of backoff), then give up so the release
+	// defer cannot block the failure alert and staging cleanup forever (#387).
+	// A vanished snapshot is already a no-op, so only transients are retried.
+	releaseInitialInterval = time.Second
+	releaseMaxInterval     = time.Minute
+	releaseMaxAttempts     = 10
+	// releaseWindow caps the whole release, including time spent waiting for an
+	// unreachable data worker.
+	releaseWindow = 15 * time.Minute
 
 	// snapshotNotFoundErrorType marks a resolved snapshot destroyed before its hold.
 	snapshotNotFoundErrorType = "snapshot-not-found"
@@ -161,12 +171,13 @@ func holdSnapshots(ctx workflow.Context, state *runState) error {
 }
 
 // releaseSnapshots releases the run's holds on a disconnected context, so it
-// also fires on cancellation. It logs but never returns an error, so a leaked
-// hold (manually clearable, docs/maintenance.md) cannot mask the run's outcome.
-func releaseSnapshots(ctx workflow.Context, state *runState) {
+// also fires on cancellation. An exhausted release is logged and returned for
+// the caller to surface; it must never replace the run's own outcome. The hold
+// is then leaked (manually clearable, docs/maintenance.md).
+func releaseSnapshots(ctx workflow.Context, state *runState) error {
 	snapshots := holdSnapshotPaths(state)
 	if len(snapshots) == 0 {
-		return
+		return nil
 	}
 
 	input := HoldInput{
@@ -178,9 +189,15 @@ func releaseSnapshots(ctx workflow.Context, state *runState) {
 	defer cancel()
 
 	actx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
-		TaskQueue:           DataTaskQueue,
-		StartToCloseTimeout: holdTimeout,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: holdMaxAttempts},
+		TaskQueue:              DataTaskQueue,
+		StartToCloseTimeout:    holdTimeout,
+		ScheduleToCloseTimeout: releaseWindow,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    releaseInitialInterval,
+			BackoffCoefficient: 2,
+			MaximumInterval:    releaseMaxInterval,
+			MaximumAttempts:    releaseMaxAttempts,
+		},
 	})
 
 	var activities *HoldActivities
@@ -189,5 +206,9 @@ func releaseSnapshots(ctx workflow.Context, state *runState) {
 			"tag", input.Tag,
 			"error", err,
 		)
+
+		return fmt.Errorf("release source-snapshot hold %s (leaked; clear it by hand): %w", input.Tag, err)
 	}
+
+	return nil
 }
