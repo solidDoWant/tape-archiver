@@ -68,7 +68,7 @@ test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests
 	  : "the drive and contaminates shared tapes. Do not remove without"; \
 	  : "giving each package its own drive/tape."; \
 	  sudo env \
-	    MHVTL_CHANGER_DEV=/dev/sch0 MHVTL_DRIVE0_DEV=/dev/nst0 MHVTL_DRIVE1_DEV=/dev/nst1 \
+	    MHVTL_CHANGER_DEV=/dev/sch0 \
 	    TAPE_POOL_MOUNT=/mnt/tape-test-pool/archive TAPE_POOL_DATASET=tape_test/archive \
 	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
 	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
