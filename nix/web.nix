@@ -60,16 +60,9 @@ buildGoModule {
     ];
   };
 
-  # Pinned vendor hash: refresh with `make update-dependencies` (or by setting
-  # this to lib.fakeHash and reading the value nix reports on the failed build)
-  # whenever go.mod/go.sum, cmd/web's own imports, or internal/pkg/workflows/
-  # schemas' imports change. No longer shared with nix/worker.nix's vendorHash
-  # (#259): each binary's src fileset is now scoped to its own subPackage, so
-  # the two hashes are independent, refreshed separately, and need not match
-  # (this one differs from worker's because dropping cmd/worker and cmd/tapectl
-  # from the store copy shrinks the vendored set to what cmd/web + the shared
-  # packages actually import).
-  vendorHash = "sha256-IymodVI/SYEarVQ88futphou7cUA8J9Wed/7pqiDWMw=";
+  # Refresh with `make update-dependencies` whenever the Go imports reachable
+  # from cmd/web change. Independent of nix/worker.nix's vendorHash.
+  vendorHash = "sha256-lXPKEyZNFEufurx1DNwrqEqZAsdZCbukgHAvHGLubfE=";
 
   # Replace the gitignored (or, in a from-scratch checkout, placeholder-only)
   # cmd/web/dist with the hermetically-built frontend before compiling, so
