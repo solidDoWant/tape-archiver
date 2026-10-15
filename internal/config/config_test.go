@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
+	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -669,8 +669,11 @@ func TestSchemaValidation(t *testing.T) {
 	schemaBytes, err := os.ReadFile(schemaPath)
 	require.NoError(t, err, "committed schema must exist; run: make generate-schema")
 
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaBytes))
+	require.NoError(t, err)
+
 	compiler := jsonschema.NewCompiler()
-	require.NoError(t, compiler.AddResource("run-config.schema.json", bytes.NewReader(schemaBytes)))
+	require.NoError(t, compiler.AddResource("run-config.schema.json", schemaDoc))
 	sch, err := compiler.Compile("run-config.schema.json")
 	require.NoError(t, err)
 
