@@ -1258,6 +1258,31 @@ func TestSubmitRun(t *testing.T) {
 		assert.False(t, fake.executeCaptured)
 	})
 
+	// Removing only the drives would leave a block rejected as "drives required"
+	// (#396), so the hint must name the whole block.
+	t.Run("client-supplied burner drives without a deploy burner are told to remove the opticalBurn block", func(t *testing.T) {
+		burnConfig := `{
+		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
+		  "copies": 2,
+		  "library": {"changer": "/dev/sch0", "drives": ["/dev/nst0", "/dev/nst1"], "blankSlots": [1, 2], "tapeCapacityBytes": 2500000000000},
+		  "redundancy": {"targetPercentage": 10},
+		  "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"},
+		  "delivery": {"opticalBurn": {"drives": ["/dev/rogue-burner"], "copies": 2}}
+		}`
+
+		fake := &fakeTemporalClient{}
+		handler := newMux(newHandler(fake, func(string) string { return "" },
+			WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")))
+
+		recorder := postJSON(t, handler, "/api/runs", []byte(`{"config": `+burnConfig+`}`), nil)
+
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "OPTICAL_BURNER_DRIVES")
+		assert.Contains(t, recorder.Body.String(), "remove the delivery.opticalBurn block")
+		assert.NotContains(t, recorder.Body.String(), "remove delivery.opticalBurn.drives")
+		assert.False(t, fake.executeCaptured)
+	})
+
 	t.Run("a burn-enabled run with no burner drives is rejected naming the drives", func(t *testing.T) {
 		noDriveBurnConfig := `{
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],

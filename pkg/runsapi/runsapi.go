@@ -632,7 +632,7 @@ func (h *handler) requireDeviceOwnership(cfg *config.Config) error {
 	// Checks drives even on a disabled (copies: 0) block, which would otherwise
 	// carry a client device path into a production config.
 	if len(h.deployOpticalBurnerDrives) == 0 && cfg.Delivery.OpticalBurn != nil && len(cfg.Delivery.OpticalBurn.Drives) > 0 {
-		return errors.New("this deployment does not configure optical burner drives (set OPTICAL_BURNER_DRIVES): a production run may not target client-supplied burner drives — configure the deployment's burner, remove delivery.opticalBurn.drives, or submit as a dry-run")
+		return errors.New("this deployment does not configure optical burner drives (set OPTICAL_BURNER_DRIVES): a production run may not target client-supplied burner drives — configure the deployment's burner, remove the delivery.opticalBurn block, or submit as a dry-run")
 	}
 
 	// The report embeds the age escrow private identity (SPEC §7), so it must
