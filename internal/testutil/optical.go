@@ -6,16 +6,11 @@ import (
 	"testing"
 )
 
-// OpticalBurnDevEnv names the environment variable that points the optical
-// integration tests at a real burner/loop device for the medium-state
-// transitions a file-backed (stdio) pseudo-disc cannot represent — a genuine
-// write-once disc that is appendable or finalized, and Blank's refusal of it.
-// When it is unset those real-hardware assertions are skipped.
+// OpticalBurnDevEnv names a real burner device for the write-once medium states a
+// file-backed pseudo-disc cannot represent.
 const OpticalBurnDevEnv = "OPTICAL_BURN_DEV"
 
-// SkipIfXorrisoUnavailable skips the test when the xorriso burn binary is not on
-// PATH (run inside `nix develop` so the pinned xorriso is present). pkg/optical
-// shells out to xorriso for every disc operation.
+// SkipIfXorrisoUnavailable skips the test when xorriso is not on PATH.
 func SkipIfXorrisoUnavailable(t *testing.T) {
 	t.Helper()
 
@@ -25,10 +20,8 @@ func SkipIfXorrisoUnavailable(t *testing.T) {
 	}
 }
 
-// SkipIfLosetupUnavailable skips the test when the mount/umount tooling needed to
-// read a burned disc back is absent. The optical read-back mounts an ISO 9660
-// filesystem, which needs mount/umount and privilege; the integration target
-// runs under sudo (like the LTFS path), and an unprivileged run skips cleanly.
+// SkipIfLosetupUnavailable skips the test unless mount/umount exist and the
+// process is root, as mounting an ISO 9660 read-back requires.
 func SkipIfLosetupUnavailable(t *testing.T) {
 	t.Helper()
 
@@ -44,8 +37,7 @@ func SkipIfLosetupUnavailable(t *testing.T) {
 	}
 }
 
-// OpticalBurnDev returns the real burner/loop device path for the hardware-only
-// optical assertions, skipping the test when OPTICAL_BURN_DEV is unset.
+// OpticalBurnDev returns OPTICAL_BURN_DEV, skipping the test when unset.
 func OpticalBurnDev(t *testing.T) string {
 	t.Helper()
 

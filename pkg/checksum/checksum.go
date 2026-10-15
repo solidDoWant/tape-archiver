@@ -1,7 +1,4 @@
-// Package checksum provides SHA-256 helpers used by the Prepare, Verify, and
-// Write phases to digest and validate staged files. Files are streamed through
-// the hasher rather than read fully into memory, so they may be arbitrarily
-// large.
+// Package checksum provides streaming SHA-256 helpers for staged files.
 package checksum
 
 import (
@@ -12,9 +9,7 @@ import (
 	"os"
 )
 
-// SHA256File streams the file at path through SHA-256 and returns its digest as
-// a lowercase hex-encoded string. It returns a non-nil error if the file cannot
-// be opened or read.
+// SHA256File returns the lowercase hex SHA-256 of the file at path.
 func SHA256File(path string) (digest string, err error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -35,9 +30,7 @@ func SHA256File(path string) (digest string, err error) {
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// Verify computes the SHA-256 digest of the file at path and compares it against
-// expected. It returns nil when they match, and a non-nil error when they differ
-// or when the file cannot be digested.
+// Verify returns an error unless the file at path has SHA-256 digest expected.
 func Verify(path, expected string) error {
 	actual, err := SHA256File(path)
 	if err != nil {

@@ -105,7 +105,6 @@ func TestSplit(t *testing.T) {
 			assert.True(t, bytes.Equal(data, reconstructed),
 				"concatenated slices must reconstruct the input")
 
-			// No stray files beyond the returned slices.
 			remaining, readErr := os.ReadDir(dir)
 			require.NoError(t, readErr)
 			assert.Len(t, remaining, len(paths))
@@ -113,15 +112,9 @@ func TestSplit(t *testing.T) {
 	}
 }
 
-// TestSplitUniformWidthBeyond999 exercises Split past the 999-slice boundary
-// where the suffix width rolls from three to four digits. It proves the fix for
-// issue #138: every slice in the archive shares a single uniform suffix width,
-// so lexical filename order equals numeric slice order and the recovery
-// procedure's documented reassembly glob (archive.[0-9]*) reconstructs the input
-// byte-for-byte. Slice size 1 over 1005 bytes yields 1005 slices (indices
-// 0…1004), forcing a four-digit uniform pad. Without the fix, mixed three/four
-// digit names (archive.999, archive.1000) sort archive.1000 before archive.101,
-// scrambling the stream.
+// TestSplitUniformWidthBeyond999 guards #138: mixed three/four-digit suffixes
+// sort archive.1000 before archive.101, scrambling the recovery glob's
+// reassembly.
 func TestSplitUniformWidthBeyond999(t *testing.T) {
 	t.Parallel()
 
@@ -138,19 +131,15 @@ func TestSplitUniformWidthBeyond999(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, paths, sliceCount)
 
-	// Every returned path carries a uniform four-digit suffix.
 	for index, path := range paths {
 		assert.Equal(t, filepath.Join(dir, fmt.Sprintf("archive.%04d", index)), path)
 	}
 
-	// AC2: sorting the filenames lexically yields the same order Split returns.
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
 	assert.Equal(t, paths, sorted, "lexical filename order must equal slice order")
 
-	// AC1: the documented recovery reassembly — the shell's lexical expansion of
-	// `cat archive.[0-9]*`, mirrored by filepath.Glob's lexical match order —
-	// reconstructs the input byte-for-byte.
+	// filepath.Glob mirrors the shell's lexical `cat archive.[0-9]*`.
 	matches, err := filepath.Glob(filepath.Join(dir, "archive.[0-9]*"))
 	require.NoError(t, err)
 	require.Len(t, matches, sliceCount)
@@ -168,18 +157,13 @@ func TestSplitUniformWidthBeyond999(t *testing.T) {
 		"documented archive.[0-9]* reassembly must reconstruct the input")
 }
 
-// TestSplitCancelledMidSlice confirms Split stops when the context is cancelled
-// partway through copying a single slice, rather than running the copy to
-// completion. The source yields one chunk, cancels, then blocks forever on any
-// further read — modeling a large or slow source. Only per-read cancellation
-// lets Split return without reaching that blocking read; without it the copy
-// would hang past the timeout.
+// TestSplitCancelledMidSlice: only per-read cancellation lets Split return
+// before the source's blocking second read.
 func TestSplitCancelledMidSlice(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(t.Context())
 
-	// sliceSize exceeds the first chunk, so the copy needs a second read.
 	const sliceSize = 1 << 20
 
 	src := &cancelThenBlockReader{cancel: cancel, chunk: make([]byte, 64<<10)}
@@ -205,9 +189,7 @@ func TestSplitCancelledMidSlice(t *testing.T) {
 	}
 }
 
-// cancelThenBlockReader yields one chunk and cancels its context on the first
-// read, then blocks forever on every subsequent read. A reader of this shape is
-// only escaped by checking the context before each read.
+// cancelThenBlockReader yields one chunk and cancels, then blocks forever.
 type cancelThenBlockReader struct {
 	cancel  context.CancelFunc
 	chunk   []byte
@@ -226,7 +208,6 @@ func (r *cancelThenBlockReader) Read(p []byte) (int, error) {
 	select {} // unreachable unless the context is not checked before reading
 }
 
-// pad renders a slice index as the three-digit suffix Split uses.
 func pad(index int) string {
 	digits := []byte{
 		byte('0' + index/100%10),

@@ -11,9 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// fakeSnapshotClient serves prepared VolumeSnapshot/VolumeSnapshotContent objects
-// from maps, standing in for the typed clientset so Resolve/ResolveGroup can be
-// exercised without a cluster. A missing key yields a not-found-style error.
+// fakeSnapshotClient serves canned objects from maps in place of the clientset.
 type fakeSnapshotClient struct {
 	snapshots map[string]*snapshotv1.VolumeSnapshot        // keyed by namespace/name
 	contents  map[string]*snapshotv1.VolumeSnapshotContent // keyed by name
@@ -41,8 +39,7 @@ func (f *fakeSnapshotClient) ListVolumeSnapshots(_ context.Context, _, _ string)
 	return f.listed, f.listErr
 }
 
-// readySnapshot builds a ready, bound VolumeSnapshot in namespace with the given
-// source PVC, plus the matching VolumeSnapshotContent carrying handle.
+// readySnapshot builds a ready, bound VolumeSnapshot and its content carrying handle.
 func readySnapshot(namespace, name, pvc, contentName, handle string) (*snapshotv1.VolumeSnapshot, *snapshotv1.VolumeSnapshotContent) {
 	ready := true
 

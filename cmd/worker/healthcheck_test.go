@@ -10,8 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stripScheme turns an httptest server URL (http://host:port) into the bare
-// host:port the healthcheck resolves against.
 func stripScheme(t *testing.T, serverURL string) string {
 	t.Helper()
 
@@ -44,8 +42,6 @@ func TestRunHealthcheck(t *testing.T) {
 			}))
 			defer server.Close()
 
-			// Pass the address as the positional override so the probe targets
-			// the test server rather than the default HEALTH_ADDR.
 			err := runHealthcheck(t.Context(), []string{stripScheme(t, server.URL)})
 			test.wantErr(t, err)
 
@@ -56,8 +52,7 @@ func TestRunHealthcheck(t *testing.T) {
 }
 
 func TestRunHealthcheck_Unreachable(t *testing.T) {
-	// A closed listener yields a free address that nothing is serving, so the
-	// probe must fail with a dial error (non-zero exit).
+	// A closed listener yields an address nothing is serving.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 

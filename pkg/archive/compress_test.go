@@ -27,8 +27,6 @@ func TestCompress(t *testing.T) {
 		{name: "ultra level", opts: []archive.CompressOption{archive.WithLevel(20)}},
 	}
 
-	// A mix of compressible runs and varied bytes, large enough to exercise the
-	// streaming path through the zstd subprocess.
 	payload := make([]byte, 1<<16)
 	for index := range payload {
 		payload[index] = byte((index / 64) % 256)
@@ -45,8 +43,7 @@ func TestCompress(t *testing.T) {
 
 			assert.Equal(t, zstdMagic, compressed.Bytes()[:4], "output must be a zstd frame")
 
-			// Decompress with the real zstd binary — the same tool a recoverer
-			// uses — and confirm a byte-for-byte round trip.
+			// Use the real zstd binary, the same tool a recoverer uses.
 			roundTripped := decompressWithZstd(t, compressed.Bytes())
 			assert.Equal(t, payload, roundTripped)
 		})
@@ -63,7 +60,6 @@ func TestCompressContextCancelled(t *testing.T) {
 	require.Error(t, err)
 }
 
-// decompressWithZstd decompresses data by invoking the bundled zstd binary.
 func decompressWithZstd(t *testing.T, data []byte) []byte {
 	t.Helper()
 

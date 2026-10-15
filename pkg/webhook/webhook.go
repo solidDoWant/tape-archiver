@@ -1,9 +1,5 @@
-// Package webhook provides a Discord webhook client used for both run-success
-// delivery (report + recovery ISO) and operational run-failure alerts
-// (SPEC §11). A Client wraps a webhook URL; when that URL is empty every method
-// is a no-op, so callers never nil-check the client. The failure-alert path
-// (SendFailure) never masks the caller's original error: a delivery failure is
-// logged via slog, not returned.
+// Package webhook is a Discord webhook client for run-success delivery and
+// failure alerts (SPEC §11). A Client with an empty URL is a no-op.
 package webhook
 
 import (
@@ -24,26 +20,18 @@ import (
 )
 
 const (
-	// maxContentLength is Discord's hard limit on a webhook message's content
-	// field, in Unicode code points. Content over this is rejected with HTTP 400.
+	// maxContentLength is Discord's content limit, in code points.
 	maxContentLength = 2000
 
-	// maxSummaryLength budgets the variable error/reason text embedded in an
-	// operational alert, leaving ample headroom under maxContentLength for the
-	// fixed boilerplate — the resume/abort instructions in particular — plus the
-	// run id and any tape/slot lists, so a giant error tail cannot push the
-	// actionable text past Discord's limit.
+	// maxSummaryLength caps embedded error text so the fixed resume/abort
+	// instructions always fit under maxContentLength.
 	maxSummaryLength = 1500
 
-	// truncationMarker is appended to any text truncate shortens, pointing the
-	// operator at the authoritative full error (Temporal history and logs).
 	truncationMarker = " […truncated; see logs]"
 )
 
-// truncate returns s unchanged when its rune count is at most max, otherwise it
-// keeps a leading prefix and appends truncationMarker so the result's rune count
-// is at most max. It counts Unicode code points, not bytes, because Discord's
-// content limit is measured in code points.
+// truncate caps s at max runes (Discord counts code points, not bytes),
+// appending truncationMarker when it cuts.
 func truncate(s string, max int) string {
 	if utf8.RuneCountInString(s) <= max {
 		return s
@@ -57,60 +45,40 @@ func truncate(s string, max int) string {
 	return string([]rune(s)[:max-markerLen]) + truncationMarker
 }
 
-// codeBlock wraps an error/reason summary in a fenced code block on its own
-// lines. The joined write-failure summaries carry real newlines — the ltfs (or
-// mkltfs) stderr dump plus one line per failed tape — which Discord otherwise
-// renders as an unreadable run-on when they sit inline in a sentence. A fenced
-// block preserves those newlines verbatim and detaches the diagnostics from the
-// operator instructions around them. Callers pass the already-truncated summary
-// so the fence never lands inside a cut. (Subprocess output contains no triple
-// backticks, so the fence cannot be broken out of in practice.)
+// codeBlock fences a multi-line error summary so Discord preserves its
+// newlines. Pass the already-truncated summary so the fence is never cut.
 func codeBlock(s string) string {
 	return "\n```\n" + s + "\n```"
 }
 
-// Message is a Discord webhook message payload. Only the content field is used;
-// it is rendered as the message body.
+// Message is a Discord webhook message payload.
 type Message struct {
 	Content string `json:"content"`
 }
 
-// Client posts messages and file attachments to a Discord webhook. The zero
-// value is not usable; construct one with New. A Client whose URL is empty is a
-// disabled no-op: every method returns nil (or, for SendFailure, returns
-// silently) without performing any I/O.
+// Client posts messages and file attachments to a Discord webhook.
 type Client struct {
 	url        string
 	httpClient *http.Client
 }
 
-// New returns a Client targeting the given webhook URL. An empty URL yields a
-// disabled client whose methods are no-ops, so callers can construct
-// unconditionally and never nil-check.
+// New returns a Client for url; an empty URL yields a disabled no-op client.
 func New(url string) *Client {
 	return &Client{
 		url: url,
-		// No client-wide Timeout: Go's http.Client.Timeout caps the entire
-		// request lifecycle, including the body upload, so a fixed value would
-		// always undercut the caller's context deadline (e.g. the Deliver
-		// activity's 30-minute bound for a multi-megabyte report). The request
-		// context passed to every send is the sole timeout.
+		// No client-wide Timeout: it would also cap the body upload and undercut
+		// the caller's context deadline, which is the sole timeout.
 		httpClient: &http.Client{},
 	}
 }
 
-// Send posts msg to the webhook as a JSON payload. It returns nil on an HTTP
-// 2xx response and a non-nil error on any non-2xx status or transport failure.
-// When the client's URL is empty, Send is a no-op and returns nil.
+// Send posts msg as JSON, returning an error on a non-2xx status or transport failure.
 func (c *Client) Send(ctx context.Context, msg Message) error {
 	if c.url == "" {
 		return nil
 	}
 
-	// Backstop: no content-bearing message may exceed Discord's 2000-code-point
-	// limit regardless of how long the interpolated fields are, or Discord
-	// rejects it with HTTP 400 and the alert is lost. SendFile uses a multipart
-	// body, not content, so it is unaffected.
+	// Backstop: Discord rejects content over its limit with HTTP 400.
 	msg.Content = truncate(msg.Content, maxContentLength)
 
 	body, err := json.Marshal(msg)
@@ -128,33 +96,18 @@ func (c *Client) Send(ctx context.Context, msg Message) error {
 	return c.do(req)
 }
 
-// PostedMessage identifies a message a webhook execution created. Discord returns
-// it only when the webhook is posted with ?wait=true (see SendFile); without that
-// the endpoint answers 204 with no body. It carries just what a jump-to-message
-// deep-link needs — https://discord.com/channels/{guild}/{channel}/{message} —
-// minus the guild, which the execution response omits (obtain it via
-// FetchWebhookGuild).
+// PostedMessage identifies a message created by a ?wait=true webhook execution,
+// for building a jump-to-message link (the guild comes from FetchWebhookGuild).
 type PostedMessage struct {
-	// ID is the created message's snowflake ID (the {message} path segment).
+	// ID is the message snowflake ID.
 	ID string
-	// ChannelID is the channel the message landed in (the {channel} segment).
+	// ChannelID is the channel the message landed in.
 	ChannelID string
 }
 
-// SendFile uploads the file at path to the webhook as a multipart attachment
-// (Discord's files[0] form field), posting with ?wait=true so Discord returns the
-// created message. content is posted as the message text alongside the
-// attachment, so the upload reads as a notification rather than a bare file; an
-// empty content posts the attachment on its own. It returns the posted message's
-// identity on an HTTP 2xx response and a non-nil error if the file cannot be read
-// or the endpoint returns a non-2xx status. When the client's URL is empty,
-// SendFile is a no-op and returns (nil, nil).
-//
-// The returned *PostedMessage is best-effort and orthogonal to delivery success:
-// a nil error always means the report was delivered. If the 2xx response body
-// cannot be parsed (an unexpected Discord response), SendFile returns (nil, nil) —
-// delivered, identity unknown — rather than failing the upload, so a missing
-// deep-link never costs the run its report.
+// SendFile uploads the file at path as an attachment with content as the message
+// text, returning the posted message. A nil error always means delivered; the
+// returned *PostedMessage is best-effort and may be nil.
 func (c *Client) SendFile(ctx context.Context, path, content string) (*PostedMessage, error) {
 	if c.url == "" {
 		return nil, nil
@@ -170,8 +123,7 @@ func (c *Client) SendFile(ctx context.Context, path, content string) (*PostedMes
 
 	writer := multipart.NewWriter(&body)
 
-	// Discord takes the message fields of a multipart upload as a JSON document
-	// in the payload_json part, beside the file parts.
+	// Discord takes multipart message fields as JSON in the payload_json part.
 	if content != "" {
 		payload, err := json.Marshal(Message{Content: truncate(content, maxContentLength)})
 		if err != nil {
@@ -213,8 +165,7 @@ func (c *Client) SendFile(ctx context.Context, path, content string) (*PostedMes
 		ChannelID string `json:"channel_id"`
 	}
 	if err := json.Unmarshal(respBody, &posted); err != nil {
-		// The report was delivered (2xx); only the deep-link identity is lost.
-		// Degrade to "delivered, identity unknown" rather than failing the run.
+		// Delivered; only the deep-link identity is lost, so don't fail the run.
 		slog.WarnContext(ctx, "webhook: could not decode posted-message response; deep-link unavailable", "error", err)
 		return nil, nil
 	}
@@ -222,14 +173,9 @@ func (c *Client) SendFile(ctx context.Context, path, content string) (*PostedMes
 	return &PostedMessage{ID: posted.ID, ChannelID: posted.ChannelID}, nil
 }
 
-// FetchWebhookGuild fetches the webhook object (GET on the webhook URL) and
-// returns the ID of the guild its channel belongs to, so a jump-to-message
-// deep-link can name the guild — Discord's ?wait=true execution response
-// (SendFile) carries the message and channel IDs but not the guild. It is
-// best-effort: the webhook object's guild_id may be absent (returned as ""), and
-// a transport/status/decode failure returns an error the caller is free to
-// ignore, since the report has already been delivered and a missing guild only
-// costs the deep-link. An empty client URL returns ("", nil).
+// FetchWebhookGuild returns the guild ID of the webhook's channel (which the
+// ?wait=true response omits). Best-effort: the result may be "" and errors are
+// safe to ignore.
 func (c *Client) FetchWebhookGuild(ctx context.Context) (string, error) {
 	if c.url == "" {
 		return "", nil
@@ -255,10 +201,7 @@ func (c *Client) FetchWebhookGuild(ctx context.Context) (string, error) {
 	return hook.GuildID, nil
 }
 
-// withWait returns rawURL with the wait=true query parameter set, so a Discord
-// webhook execution returns the created message object instead of a bare 204.
-// A URL that fails to parse is returned unchanged; the malformed URL then surfaces
-// a clearer error at request-construction time than a parse failure here would.
+// withWait sets wait=true so Discord returns the created message instead of a 204.
 func withWait(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -272,11 +215,8 @@ func withWait(rawURL string) string {
 	return parsed.String()
 }
 
-// SendFailure posts a concise failure alert naming the run, the failing phase,
-// and the error summary. Per SPEC §11 it must never mask the caller's original
-// error, so it returns nothing: a delivery failure (transport error or non-2xx
-// status) is logged via slog and otherwise ignored, leaving runErr to propagate
-// in the caller. When the client's URL is empty, SendFailure is a silent no-op.
+// SendFailure posts a failure alert. It returns nothing so it can never mask the
+// caller's error (SPEC §11); delivery failures are only logged.
 func (c *Client) SendFailure(ctx context.Context, runID, phase string, runErr error) {
 	if c.url == "" {
 		return
@@ -302,13 +242,8 @@ func (c *Client) SendFailure(ctx context.Context, runID, phase string, runErr er
 	}
 }
 
-// SendOperatorPause posts an operator-in-the-loop pause alert: the Eject phase
-// filled the import/export station and is waiting for the operator to remove the
-// exported tapes so the remaining ones can be exported (SPEC §4.3 phase 8, §11).
-// It names the run, the tapes ready for removal, and how many still await a free
-// slot. Like SendFailure it is best-effort — a delivery failure is logged, not
-// returned — so a webhook outage never aborts a run that is otherwise healthy.
-// When the client's URL is empty, it is a silent no-op.
+// SendOperatorPause alerts that the Eject phase filled the import/export station
+// and is waiting for the operator to remove tapes (SPEC §4.3, §11). Best-effort.
 func (c *Client) SendOperatorPause(ctx context.Context, runID string, readyForRemoval []string, awaiting int) {
 	if c.url == "" {
 		return
@@ -336,15 +271,9 @@ func (c *Client) SendOperatorPause(ctx context.Context, runID string, readyForRe
 	}
 }
 
-// SendWritePathPause posts an operator-in-the-loop pause alert: a Load or Write
-// failed for one drive-set, so the tape path paused and is waiting for the
-// operator to swap the affected tapes for fresh blanks and resume, or to abort
-// the run (SPEC §4.3, §11). It names the run, the failing phase, the affected
-// tapes, the storage slots to restock with fresh blanks, and the error summary,
-// and tells the operator the exact `tapectl resume`/`tapectl abort` commands.
-// Like SendFailure it is best-effort — a delivery failure is logged, not returned
-// — so a webhook outage never aborts a run that is only waiting. When the
-// client's URL is empty, it is a silent no-op.
+// SendWritePathPause alerts that a Load or Write failed for one drive-set and the
+// run is waiting for the operator to swap tapes and resume or abort (SPEC §4.3,
+// §11). Best-effort.
 func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, affectedTapes []string, reloadSlots []int, errSummary string) {
 	if c.url == "" {
 		return
@@ -378,15 +307,8 @@ func (c *Client) SendWritePathPause(ctx context.Context, runID, phase string, af
 	}
 }
 
-// SendBurnPause posts an operator-in-the-loop pause alert for the optical Burn
-// phase: either a burn/verify failed for one disc-set, or a disc-set completed
-// and the next set needs fresh blanks loaded (there is no optical autoloader, so
-// every set after the first requires a manual disc swap). It names the run, the
-// burner drive(s) involved, and the reason, and tells the operator the exact
-// `tapectl resume`/`tapectl abort` commands (SPEC §10, §11). Like SendFailure it
-// is best-effort — a delivery failure is logged, not returned — so a webhook
-// outage never aborts a run that is only waiting. When the client's URL is empty,
-// it is a silent no-op.
+// SendBurnPause alerts that the optical Burn phase is waiting for blank discs,
+// after a failure or between disc-sets (no autoloader). Best-effort.
 func (c *Client) SendBurnPause(ctx context.Context, runID string, devices []string, reason string) {
 	if c.url == "" {
 		return
@@ -418,9 +340,6 @@ func (c *Client) SendBurnPause(ctx context.Context, runID string, devices []stri
 	}
 }
 
-// formatSlots renders a list of storage-slot addresses for an operator message.
-// An empty list falls back to a generic phrase (a Load failure has no per-tape
-// slots to name beyond the set's own).
 func formatSlots(slots []int) string {
 	if len(slots) == 0 {
 		return "the drive-set's blank slots"
@@ -434,34 +353,23 @@ func formatSlots(slots []int) string {
 	return strings.Join(parts, ", ")
 }
 
-// StatusError is the error do returns when the webhook endpoint answers with a
-// non-2xx HTTP status. It carries the numeric status Code so callers can classify
-// the failure's retryability without string-matching. Its Error text is unchanged
-// from the previous opaque error, so logs and existing callers are unaffected.
+// StatusError is returned for a non-2xx webhook response.
 type StatusError struct {
 	Code int
 }
 
-// Error renders the status as "webhook: unexpected status %d".
+// Error implements error.
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("webhook: unexpected status %d", e.Code)
 }
 
-// Retryable reports whether a retry could plausibly succeed for this status. It
-// encodes HTTP-domain knowledge, staying free of any orchestration concern: 429
-// (Discord rate-limiting) and any 5xx (server-side) are transient and worth
-// retrying; every other non-2xx (a permanent 4xx such as 400/401/404/413 — a
-// deleted or rotated webhook, or a report the endpoint refuses as too large) is
-// deterministic and will fail identically on every attempt.
+// Retryable reports whether the status is transient (429 or 5xx); other 4xx
+// statuses fail identically on every attempt.
 func (e *StatusError) Retryable() bool {
 	return e.Code == http.StatusTooManyRequests || (e.Code >= 500 && e.Code <= 599)
 }
 
-// do sends req with the client's HTTP client and maps the response to an error:
-// nil for 2xx, a non-nil error otherwise. A non-2xx status yields a *StatusError
-// carrying the code (so callers can classify retryability); a transport failure
-// yields a plain wrapped error (inherently transient, hence retryable). The
-// response body is always drained and closed.
+// do sends req, returning *StatusError for a non-2xx status.
 func (c *Client) do(req *http.Request) error {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -476,11 +384,7 @@ func (c *Client) do(req *http.Request) error {
 	return nil
 }
 
-// doReturningBody is do's variant for the endpoints whose 2xx response carries a
-// body worth reading (SendFile's ?wait=true message object, FetchWebhookGuild's
-// webhook object). It maps the response identically — a *StatusError for a non-2xx
-// status, a wrapped transport error otherwise — but returns the response body on
-// success. The body is always drained and closed.
+// doReturningBody is do but returns the 2xx response body.
 func (c *Client) doReturningBody(req *http.Request) ([]byte, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

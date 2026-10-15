@@ -38,9 +38,7 @@ func TestParse(t *testing.T) {
 			assertErr: require.Error,
 		},
 		{
-			// The slice size is no longer operator-configurable (issue #324); a config
-			// that still sets it is rejected, naming the removed field, via
-			// DisallowUnknownFields.
+			// sliceSizeBytes was removed in issue #324.
 			name:        "removed sliceSizeBytes field is rejected naming the field",
 			json:        `{"sources": [{"zfsPath": {"name": "p@s"}}], "copies": 2, "redundancy": {"targetPercentage": 10, "sliceSizeBytes": 1073741824}}`,
 			assertErr:   require.Error,
@@ -52,8 +50,7 @@ func TestParse(t *testing.T) {
 			assertErr: require.Error,
 		},
 		{
-			// Copies exceeding the drive count is valid: the copies are written in
-			// successive drive-sets (issue #66).
+			// Copies are written in successive drive-sets (issue #66).
 			name: "copies exceeding drives is accepted",
 			json: `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],

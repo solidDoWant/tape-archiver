@@ -170,9 +170,6 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "sources[0].k8s.namespace",
 		},
 		{
-			// A labelSelector with no namespace is valid: it selects matching
-			// snapshots across all namespaces (cluster-wide; SPEC §5). Only a single
-			// named snapshot requires a namespace (see "k8s no namespace" above).
 			name: "k8s labelSelector without namespace is cluster-wide",
 			mutate: func(c *Config) {
 				c.Sources[0].ZFSPath = nil
@@ -217,11 +214,8 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "copies",
 		},
 		{
-			// Copies may exceed the drive count: the tape path writes the copies
-			// of each logical tape in successive drive-sets (issue #66).
 			name: "copies exceeds drives is allowed",
-			// Give a full copy-set of blanks (a multiple of copies) so the only
-			// thing under test is that copies may exceed the drive count.
+			// Copies are written in successive drive-sets (issue #66).
 			mutate:  func(c *Config) { c.Copies = 5; c.Library.BlankSlots = []int{1, 2, 3, 4, 5} },
 			wantErr: require.NoError,
 		},
@@ -278,8 +272,6 @@ func TestConfigValidate(t *testing.T) {
 			wantErr: require.NoError,
 		},
 		{
-			// 3 blanks with 2 copies leaves one blank that can never complete
-			// another logical tape's copy set (physical tapes = tapes × copies).
 			name:        "library blank slots not a multiple of copies",
 			mutate:      func(c *Config) { c.Copies = 2; c.Library.BlankSlots = []int{1, 2, 3} },
 			wantErr:     require.Error,

@@ -10,20 +10,11 @@ import (
 	"strconv"
 )
 
-// Split reads from src and writes it to dir as consecutive fixed-size slice
-// files of sliceSize bytes each; the final slice holds the remainder. Slice
-// files are named "<baseName>.NNN" starting at .000. Every slice in one archive
-// shares a single zero-padded suffix width — the minimum of three, widened to
-// the digit count the final slice total needs (e.g. 1001 slices -> four digits,
-// .0000 … .1000). A uniform width guarantees lexical filename order equals
-// numeric slice order for any slice count, so the documented recovery glob
-// (archive.[0-9]*) reassembles the stream correctly. Split returns the slice
-// paths in order — the authoritative order whose concatenation reconstructs the
-// stream exactly.
-//
-// Slicing bounds the blast radius of a damaged tape region to a single slice,
-// recoverable via PAR2 or the redundant copy (SPEC §8); it is the final prepare
-// stage before checksumming (SPEC §4.3). An empty stream produces no slices.
+// Split writes src to dir as sliceSize-byte files "baseName.NNN" and returns
+// their paths in order. All slices share one zero-padded width (at least three
+// digits) so lexical order equals numeric order and the recovery glob
+// (archive.[0-9]*) reassembles correctly. Slicing bounds a damaged tape region's
+// blast radius to one slice (SPEC §8).
 func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName string) ([]string, error) {
 	if sliceSize <= 0 {
 		return nil, fmt.Errorf("slice size must be positive, got %d", sliceSize)
@@ -44,9 +35,7 @@ func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName st
 		}
 
 		if written == 0 {
-			// EOF: the slice just created is empty. Remove it so an input whose
-			// length is an exact multiple of sliceSize (or an empty input) leaves
-			// no trailing empty file behind.
+			// EOF: drop the empty trailing slice.
 			if err := os.Remove(path); err != nil {
 				return nil, fmt.Errorf("remove empty trailing slice %s: %w", path, err)
 			}
@@ -64,14 +53,7 @@ func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName st
 	return normalizeWidth(paths, dir, baseName)
 }
 
-// normalizeWidth ensures every slice in the archive shares one zero-padded
-// suffix width. The write loop names slices with the provisional three-digit
-// "%03d" pad; once the count is known, the final width is max(3, digits of the
-// highest index). When that exceeds three the slices are renamed to the wider
-// uniform pad and the returned paths updated to match. Fewer than 1001 slices
-// need no rename (highest index <= 999 fits three digits), so the common case
-// is untouched. This runs in the prepare phase on staging disk before any tape
-// write (SPEC §4.3), so the renames never touch the write window.
+// normalizeWidth renames slices to a uniform pad once the count exceeds 1000.
 func normalizeWidth(paths []string, dir, baseName string) ([]string, error) {
 	if len(paths) == 0 {
 		return paths, nil
@@ -98,10 +80,7 @@ func normalizeWidth(paths []string, dir, baseName string) ([]string, error) {
 	return paths, nil
 }
 
-// writeSlice creates the file at path and copies up to sliceSize bytes into it
-// from src, returning the number of bytes written. A return below sliceSize
-// means src reached EOF. The copy honors ctx cancellation per read buffer so a
-// single large slice does not block cancellation.
+// writeSlice copies up to sliceSize bytes; a short count means EOF.
 func writeSlice(ctx context.Context, path string, src io.Reader, sliceSize int64) (int64, error) {
 	file, err := os.Create(path)
 	if err != nil {
@@ -112,8 +91,6 @@ func writeSlice(ctx context.Context, path string, src io.Reader, sliceSize int64
 
 	closeErr := file.Close()
 
-	// io.CopyN reports io.EOF when src ends before sliceSize bytes; that is the
-	// normal end-of-stream signal, not a failure.
 	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
 		return written, fmt.Errorf("write slice %s: %w", path, copyErr)
 	}

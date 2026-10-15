@@ -9,10 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakePropertyReader returns a canned single-property value (or an error) for any
-// path, standing in for pkg/zfs so Verify can be exercised without a pool. It
-// records the path and property name it was asked about. properties maps a
-// property name to its value; an unread property yields "-" as real zfs does.
+// fakePropertyReader stands in for pkg/zfs, recording what it was asked and
+// returning "-" for unset properties as real zfs does.
 type fakePropertyReader struct {
 	properties    map[string]string
 	err           error

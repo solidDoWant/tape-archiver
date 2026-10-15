@@ -12,22 +12,14 @@ import (
 	"time"
 )
 
-// blockSize is the fixed tar block size; every header and payload is padded up
-// to a multiple of it.
 const blockSize = 512
 
-// writeSparseEntry emits file as a GNU sparse 1.0 (PAX GNU.sparse.*) archive
-// member. The standard archive/tar writer deliberately refuses to emit
-// GNU.sparse.* records, so the member is hand-rolled directly onto the
-// underlying stream: a PAX extended header carrying the sparse metadata, then a
-// regular-file header whose payload begins with the sparse map and holds only
-// the allocated data extents. Both the shipped static GNU tar and Go's
-// archive/tar reader decode this transparently, so extraction restores the holes
-// as zeros without the archive ever growing to the file's logical size.
+// writeSparseEntry hand-rolls a GNU sparse 1.0 (PAX GNU.sparse.*) member onto
+// w.raw, since archive/tar refuses to emit GNU.sparse.* records. Both GNU tar
+// and Go's reader restore the holes as zeros.
 //
-// The bytes are written to w.raw rather than through w.tw; w.tw is flushed first
-// so the stream is at a block boundary, and every piece written here is a whole
-// number of 512-byte blocks, so subsequent w.tw entries stay aligned.
+// w.tw is flushed first and every piece here is whole 512-byte blocks, so later
+// w.tw entries stay aligned.
 func (w *tarWriter) writeSparseEntry(ctx context.Context, header *tar.Header, file *os.File, regions []sparseRegion) error {
 	realSize := header.Size
 	realName := header.Name
@@ -90,8 +82,6 @@ func (w *tarWriter) writeSparseEntry(ctx context.Context, header *tar.Header, fi
 	return nil
 }
 
-// copyRegions writes each allocated data extent of file, in order, to the
-// underlying stream, honoring ctx cancellation between extents.
 func (w *tarWriter) copyRegions(ctx context.Context, file *os.File, regions []sparseRegion) error {
 	for _, region := range regions {
 		if err := ctx.Err(); err != nil {
@@ -110,18 +100,12 @@ func (w *tarWriter) copyRegions(ctx context.Context, file *os.File, regions []sp
 	return nil
 }
 
-// buildSparseMap encodes the GNU sparse 1.0 in-band map: a decimal count of map
-// entries, then an offset/length pair per entry, each terminated by a newline,
-// padded with NUL to a 512-byte block boundary.
+// buildSparseMap encodes the GNU sparse 1.0 in-band map (count, then
+// offset/length pairs, newline-terminated, NUL-padded to a block).
 //
-// When the last data region ends before realSize — i.e. the file ends in a hole,
-// including the all-hole case where there are no data regions at all — a terminal
-// {realSize, 0} entry is appended. GNU tar's sparse 1.0 decoder extracts only up to
-// the end of the last map entry and does not extend the file to GNU.sparse.realsize,
-// so without this terminal entry it would silently truncate a trailing-hole file at
-// its last data extent. GNU tar's own encoder emits the identical terminal entry
-// (e.g. "2\n0\n4096\n8388608\n0\n" for a file with 4096 bytes of head data and a hole
-// to 8 MiB), and Go's archive/tar reader accepts it too.
+// A file ending in a hole gets a terminal {realSize, 0} entry: GNU tar does not
+// extend to GNU.sparse.realsize, so without it a trailing hole is silently
+// truncated. GNU tar's own encoder emits the same entry.
 func buildSparseMap(regions []sparseRegion, realSize int64) []byte {
 	var builder strings.Builder
 
@@ -153,9 +137,7 @@ func buildSparseMap(regions []sparseRegion, realSize int64) []byte {
 	return encoded
 }
 
-// appendTimeRecords adds PAX time records so the sparse entry preserves the same
-// timestamp fidelity as the plain-file path, which the standard writer encodes as
-// PAX records for sub-second times.
+// appendTimeRecords keeps sub-second timestamp fidelity matching archive/tar.
 func appendTimeRecords(records []paxRecord, header *tar.Header) []paxRecord {
 	if !header.ModTime.IsZero() {
 		records = append(records, paxRecord{"mtime", formatPaxTime(header.ModTime)})
@@ -172,15 +154,11 @@ func appendTimeRecords(records []paxRecord, header *tar.Header) []paxRecord {
 	return records
 }
 
-// paxRecord is one key/value pair for a PAX extended header.
 type paxRecord struct {
 	key   string
 	value string
 }
 
-// writePaxExtendedHeader writes a PAX extended header block ('x') followed by its
-// record payload padded to a block boundary. name is used only for the (cosmetic)
-// header name; the records carry the meaningful data.
 func writePaxExtendedHeader(w io.Writer, name string, records []paxRecord) error {
 	var payload strings.Builder
 	for _, record := range records {
@@ -212,14 +190,12 @@ func writePaxExtendedHeader(w io.Writer, name string, records []paxRecord) error
 	return nil
 }
 
-// formatPaxRecord encodes one PAX record as "<len> <key>=<value>\n", where len is
-// the total byte length of the record including the length field itself.
+// formatPaxRecord encodes "len key=value\n", where len includes itself.
 func formatPaxRecord(key, value string) string {
 	size := len(key) + len(value) + len(" =\n")
 	size += len(strconv.Itoa(size))
 
-	// The length field is self-referential: adding its own digits may push the
-	// total into another decimal digit, so iterate to a fixed point.
+	// The length is self-referential; iterate to a fixed point.
 	for size != len(strconv.Itoa(size))+len(key)+len(value)+len(" =\n") {
 		size = len(strconv.Itoa(size)) + len(key) + len(value) + len(" =\n")
 	}
@@ -227,8 +203,6 @@ func formatPaxRecord(key, value string) string {
 	return fmt.Sprintf("%d %s=%s\n", size, key, value)
 }
 
-// formatPaxTime encodes a timestamp as decimal seconds with an optional
-// nanosecond fraction, the PAX representation both GNU tar and Go's reader accept.
 func formatPaxTime(t time.Time) string {
 	if nanos := t.Nanosecond(); nanos != 0 {
 		return fmt.Sprintf("%d.%09d", t.Unix(), nanos)
@@ -237,8 +211,7 @@ func formatPaxTime(t time.Time) string {
 	return strconv.FormatInt(t.Unix(), 10)
 }
 
-// rawHeader is the minimal set of fields needed to encode a POSIX ustar header
-// block by hand for the sparse-file path.
+// rawHeader holds the fields for a hand-encoded ustar header block.
 type rawHeader struct {
 	name     string
 	mode     int64
@@ -251,7 +224,6 @@ type rawHeader struct {
 	gname    string
 }
 
-// writeTo encodes the header as a single 512-byte ustar block and writes it.
 func (h rawHeader) writeTo(w io.Writer) error {
 	var block [blockSize]byte
 
@@ -274,8 +246,6 @@ func (h rawHeader) writeTo(w io.Writer) error {
 	return err
 }
 
-// copyField copies s into field, truncating to fit and leaving the remainder as
-// NUL bytes.
 func copyField(field []byte, s string) {
 	if len(s) > len(field) {
 		s = s[:len(field)]
@@ -284,8 +254,7 @@ func copyField(field []byte, s string) {
 	copy(field, s)
 }
 
-// putNumber encodes x into field as zero-padded octal with a trailing NUL, or as
-// GNU base-256 when the value does not fit the octal width.
+// putNumber encodes octal with a trailing NUL, or GNU base-256 if it won't fit.
 func putNumber(field []byte, x int64) {
 	if x >= 0 && x < int64(1)<<uint(3*(len(field)-1)) {
 		for i := range field {
@@ -308,8 +277,7 @@ func putNumber(field []byte, x int64) {
 	field[0] |= 0x80
 }
 
-// putChecksum computes and writes the header checksum: the octal sum of every
-// byte with the checksum field itself taken as spaces.
+// putChecksum sums every byte with the checksum field taken as spaces.
 func putChecksum(block *[blockSize]byte) {
 	for i := 148; i < 156; i++ {
 		block[i] = ' '
@@ -325,9 +293,7 @@ func putChecksum(block *[blockSize]byte) {
 	block[155] = ' '
 }
 
-// ustarName returns a name that fits the 100-byte ustar name field. The sparse
-// entry's real name is carried in PAX records (path and GNU.sparse.name), so this
-// header name is only a fallback; long names keep their tail.
+// ustarName is only a fallback; the real name is in the PAX records.
 func ustarName(name string) string {
 	if len(name) <= 100 {
 		return name
@@ -336,7 +302,6 @@ func ustarName(name string) string {
 	return name[len(name)-100:]
 }
 
-// paxHeaderName returns a cosmetic name for the PAX extended header block.
 func paxHeaderName(name string) string {
 	base := slashpath.Base(name)
 
@@ -348,8 +313,6 @@ func paxHeaderName(name string) string {
 	return full
 }
 
-// blockPadding returns the number of bytes needed to round n up to the next
-// 512-byte tar block boundary.
 func blockPadding(n int) int {
 	if rem := n % blockSize; rem != 0 {
 		return blockSize - rem

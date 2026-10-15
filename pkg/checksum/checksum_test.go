@@ -17,8 +17,6 @@ const (
 	abcDigest   = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 )
 
-// writeFile creates a file under a fresh temp dir with the given contents and
-// returns its path.
 func writeFile(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "data")

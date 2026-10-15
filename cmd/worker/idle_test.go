@@ -14,8 +14,7 @@ import (
 	"go.temporal.io/sdk/worker"
 )
 
-// manualClock is a deterministic clock for tracker tests: time advances only when
-// the test calls advance, so idle-duration assertions do not depend on wall time.
+// manualClock advances only when the test calls advance.
 type manualClock struct {
 	mu sync.Mutex
 	t  time.Time
@@ -39,9 +38,7 @@ func (c *manualClock) advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
-// stubActivityInbound is the next interceptor in the chain: it runs a supplied
-// function as the activity execution so tests can observe the tracker state while
-// the activity is "in flight".
+// stubActivityInbound runs onExecute as the activity execution.
 type stubActivityInbound struct {
 	interceptor.ActivityInboundInterceptorBase
 	onExecute func(context.Context, *interceptor.ExecuteActivityInput) (interface{}, error)
@@ -54,27 +51,20 @@ func (s *stubActivityInbound) ExecuteActivity(
 	return s.onExecute(ctx, in)
 }
 
-// TestIdleTrackerBumpsOnStartAndEnd covers the tracker's core semantics: an
-// in-flight task reads as not-idle, and the idle countdown restarts from a task's
-// completion (bumped on end, not only start), so a long task does not force an
-// instant exit on return.
 func TestIdleTrackerBumpsOnStartAndEnd(t *testing.T) {
 	clock := newManualClock()
 	tracker := newIdleTracker(clock.now)
 
-	// Freshly seeded: idle since "now", so no elapsed idle time yet.
 	inFlight, idleFor := tracker.state()
 	assert.Equal(t, 0, inFlight)
 	assert.Zero(t, idleFor)
 
-	// Time passes with no work: idle duration accrues.
 	clock.advance(10 * time.Minute)
 
 	inFlight, idleFor = tracker.state()
 	assert.Equal(t, 0, inFlight)
 	assert.Equal(t, 10*time.Minute, idleFor)
 
-	// A task starts: in-flight, and therefore never idle regardless of time.
 	tracker.begin()
 	clock.advance(time.Hour)
 
@@ -82,8 +72,7 @@ func TestIdleTrackerBumpsOnStartAndEnd(t *testing.T) {
 	assert.Equal(t, 1, inFlight)
 	assert.Zero(t, idleFor)
 
-	// The task completes: the countdown restarts from the completion time, so a
-	// long task does not read as already-idle for its whole duration.
+	// The countdown restarts from completion, not start.
 	tracker.end()
 
 	inFlight, idleFor = tracker.state()
@@ -96,9 +85,6 @@ func TestIdleTrackerBumpsOnStartAndEnd(t *testing.T) {
 	assert.Equal(t, 5*time.Minute, idleFor)
 }
 
-// TestIdleInterceptorTracksActivityExecution asserts the interceptor marks a task
-// in-flight for the duration of its execution and restores the count afterwards, so
-// the worker cannot idle-exit mid-activity.
 func TestIdleInterceptorTracksActivityExecution(t *testing.T) {
 	tracker := newIdleTracker(newManualClock().now)
 
@@ -118,7 +104,6 @@ func TestIdleInterceptorTracksActivityExecution(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ok", result)
 
-	// In-flight during the activity, back to zero once it returns.
 	assert.Equal(t, 1, inFlightDuringCall)
 
 	after, _ := tracker.state()
@@ -169,8 +154,6 @@ func TestSecondsUntilExit(t *testing.T) {
 	}
 }
 
-// TestRunIdleExitFiresWhenIdle asserts the poll loop triggers the drain once the
-// worker has been idle for the window, and refreshes the in-flight metric.
 func TestRunIdleExitFiresWhenIdle(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	metrics, err := newIdleMetrics(reg)
@@ -193,11 +176,9 @@ func TestRunIdleExitFiresWhenIdle(t *testing.T) {
 	assert.Equal(t, 0.0, testutil.ToFloat64(metrics.inFlight))
 }
 
-// TestRunIdleExitWaitsForInFlightActivity asserts the poll loop does not exit while
-// an activity is in flight — no mid-activity termination — and fires once it ends.
 func TestRunIdleExitWaitsForInFlightActivity(t *testing.T) {
 	tracker := newIdleTracker(nil)
-	tracker.begin() // an activity is running
+	tracker.begin()
 
 	triggered := make(chan struct{})
 
@@ -205,15 +186,12 @@ func TestRunIdleExitWaitsForInFlightActivity(t *testing.T) {
 		close(triggered)
 	})
 
-	// While in-flight the exit predicate is false regardless of elapsed time, so it
-	// must not fire.
 	select {
 	case <-triggered:
 		t.Fatal("idle-exit fired while an activity was in flight")
 	case <-time.After(150 * time.Millisecond):
 	}
 
-	// Once the activity completes, the window elapses and the loop fires.
 	tracker.end()
 
 	select {
@@ -223,8 +201,6 @@ func TestRunIdleExitWaitsForInFlightActivity(t *testing.T) {
 	}
 }
 
-// TestRunIdleExitReturnsOnContextCancel asserts the loop stops without triggering
-// when its context is cancelled (e.g. the worker stopped via SIGTERM instead).
 func TestRunIdleExitReturnsOnContextCancel(t *testing.T) {
 	tracker := newIdleTracker(nil)
 
@@ -263,17 +239,12 @@ func TestIdleMetrics(t *testing.T) {
 	assert.Equal(t, 2.0, testutil.ToFloat64(metrics.inFlight))
 	assert.Equal(t, 900.0, testutil.ToFloat64(metrics.secondsToExit))
 
-	// A nil registry (metrics disabled) yields nil metrics whose observe is a safe
-	// no-op.
 	disabled, err := newIdleMetrics(nil)
 	require.NoError(t, err)
 	assert.Nil(t, disabled)
 	assert.NotPanics(t, func() { disabled.observe(1, 1) })
 }
 
-// TestInstallIdleExitDisabled asserts idle-exit is not wired when the window is zero
-// (the default): the interrupt channel is returned unchanged and no interceptor is
-// added, so behavior is exactly as before.
 func TestInstallIdleExitDisabled(t *testing.T) {
 	var interruptCh <-chan interface{} = make(chan interface{})
 
@@ -285,9 +256,6 @@ func TestInstallIdleExitDisabled(t *testing.T) {
 	assert.Empty(t, options.Interceptors)
 }
 
-// TestInstallIdleExitInertForDataRole asserts a data worker ignores the setting: no
-// interceptor is installed and the interrupt channel is unchanged, so the data
-// worker lifecycle is unaffected.
 func TestInstallIdleExitInertForDataRole(t *testing.T) {
 	var interruptCh <-chan interface{} = make(chan interface{})
 
@@ -299,9 +267,6 @@ func TestInstallIdleExitInertForDataRole(t *testing.T) {
 	assert.Empty(t, options.Interceptors)
 }
 
-// TestInstallIdleExitForwardsOSInterrupt asserts the merged channel handed to
-// worker.Run drains when an OS interrupt arrives (the SIGTERM path), independent of
-// the idle timer.
 func TestInstallIdleExitForwardsOSInterrupt(t *testing.T) {
 	interruptCh := make(chan interface{}, 1)
 	options := worker.Options{}
@@ -309,13 +274,12 @@ func TestInstallIdleExitForwardsOSInterrupt(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	// A long window ensures only the forwarded interrupt — not the idle timer —
-	// closes the returned channel.
+	// A long window ensures only the forwarded interrupt closes the channel.
 	out, err := installIdleExit(ctx, Config{Role: RoleControl, IdleExitAfter: time.Hour}, &options, nil, interruptCh)
 	require.NoError(t, err)
 	require.Len(t, options.Interceptors, 1)
 
-	interruptCh <- struct{}{} // simulate an OS signal delivery
+	interruptCh <- struct{}{}
 
 	select {
 	case <-out:
@@ -324,9 +288,6 @@ func TestInstallIdleExitForwardsOSInterrupt(t *testing.T) {
 	}
 }
 
-// TestInstallIdleExitFiresWhenIdle asserts the fully wired control-worker path
-// closes the merged drain channel once the idle window elapses (AC1 through the real
-// wiring), installing exactly one interceptor.
 func TestInstallIdleExitFiresWhenIdle(t *testing.T) {
 	var interruptCh <-chan interface{} = make(chan interface{})
 
@@ -339,8 +300,6 @@ func TestInstallIdleExitFiresWhenIdle(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, options.Interceptors, 1)
 
-	// idlePollInterval is one second, so the first tick fires shortly after the
-	// (already-elapsed) millisecond window.
 	select {
 	case <-out:
 	case <-time.After(3 * time.Second):

@@ -25,9 +25,7 @@ func completeManifest() report.Manifest {
 				Name:            "k8s-group-photos",
 				MemberVolumes:   []string{"pvc-photos-raw", "pvc-photos-thumbs"},
 				SourceSnapshots: []string{"bulk-pool-01/photos@snap-20260629"},
-				// Compressed, matching its .tar.zst.age file names; zfs-media below
-				// is uncompressed, so the fixture covers both renderings.
-				Compressed: true,
+				Compressed:      true,
 				Files: []report.ArchiveFile{
 					{
 						Name:   "photos.tar.zst.age.000",
@@ -90,8 +88,7 @@ func completeManifest() report.Manifest {
 			LTFSVersion:    "ltfs 2.5.0",
 			SliceSize:      268435456,
 			PAR2Redundancy: "fill-to-capacity",
-			// LTO-7 media written by an LTO-8 drive: the two differ, which is the
-			// case the report has to get right (issue #340).
+			// Media and drive generations differ on purpose (issue #340).
 			TapeGeneration:  "LTO-7",
 			DriveModel:      "IBM ULT3580-HH8",
 			DriveGeneration: "LTO-8",
@@ -103,8 +100,7 @@ func completeManifest() report.Manifest {
 	}
 }
 
-// extractText renders m to a PDF, parses it back with a pure-Go reader, and
-// returns the extracted plain text. It asserts the PDF is structurally valid.
+// extractText renders m to a PDF and returns its extracted plain text.
 func extractText(t *testing.T, m report.Manifest) string {
 	t.Helper()
 
@@ -125,14 +121,11 @@ func extractText(t *testing.T, m report.Manifest) string {
 	return string(text)
 }
 
-// stripWhitespace removes all whitespace so substring checks test the rendered
-// content independent of how the extractor spaces or wraps glyphs.
+// stripWhitespace makes substring checks independent of extractor spacing.
 func stripWhitespace(s string) string {
 	return strings.Join(strings.Fields(s), "")
 }
 
-// extractPages builds the report and returns the whitespace-stripped text of
-// each page separately, so a caller can assert which page a glyph rendered on.
 func extractPages(t *testing.T, m report.Manifest) []string {
 	t.Helper()
 
@@ -156,8 +149,6 @@ func extractPages(t *testing.T, m report.Manifest) []string {
 	return pages
 }
 
-// pageContaining returns the index of the first page whose text contains needle,
-// or -1 if none does.
 func pageContaining(pages []string, needle string) int {
 	for index, page := range pages {
 		if strings.Contains(page, needle) {
@@ -168,12 +159,8 @@ func pageContaining(pages []string, needle string) int {
 	return -1
 }
 
-// TestBuildKVLabelAndValueShareAPage asserts that a label/value row (kv) never
-// renders its label on one page and its value on another, even when the row
-// lands at a page bottom. It sweeps the amount of content preceding the
-// build-parameters section (one fixed-height file-table row per step) so the
-// "Drive serial" row is pushed through every vertical offset — including the
-// bottom-of-page boundary that stranded the value on a later page before the fix.
+// TestBuildKVLabelAndValueShareAPage sweeps the "Drive serial" row through every
+// vertical offset to prove a kv label and value never land on different pages.
 func TestBuildKVLabelAndValueShareAPage(t *testing.T) {
 	t.Parallel()
 
@@ -189,9 +176,6 @@ func TestBuildKVLabelAndValueShareAPage(t *testing.T) {
 			manifest := completeManifest()
 			manifest.Build.DriveSerial = serial
 
-			// Each file-table row is one fixed-height line, so padding archive 0
-			// shifts every later section — including the "Drive serial" row — down
-			// by a line, sweeping it through the page boundary.
 			files := make([]report.ArchiveFile, fillers)
 			for index := range files {
 				files[index] = report.ArchiveFile{
@@ -214,20 +198,13 @@ func TestBuildKVLabelAndValueShareAPage(t *testing.T) {
 	}
 }
 
-// TestBuildTableRowMonoCellStaysOnOnePage asserts that a table row whose
-// monospace cell wraps to more lines under the mono font than under the body
-// font is never split across a page boundary — tableRow's row-atomicity
-// contract. It sweeps the content preceding the Recovery discs section (one
-// fixed-height file-table row per step) so the disc row carrying a long device
-// path is pushed through every vertical offset, including the page bottom that —
-// before tableRow measured each cell under its own font — let the Courier cell
-// auto-page-break mid-row while its neighbour stayed anchored to the prior page.
+// TestBuildTableRowMonoCellStaysOnOnePage sweeps a disc row whose mono cell wraps
+// further under Courier than Helvetica through every vertical offset, proving
+// the row never splits across pages.
 func TestBuildTableRowMonoCellStaysOnOnePage(t *testing.T) {
 	t.Parallel()
 
-	// 29 chars of narrow glyphs: two lines under Courier 8.5 (~24 chars per 46mm
-	// line) but a single line under Helvetica, so measuring the mono cell under a
-	// leftover proportional font under-counts its wrapped height.
+	// Two lines under Courier 8.5 in a 46mm cell, but one under Helvetica.
 	const device = "/dev/disk/by-id/il-1234567890"
 
 	for fillers := 0; fillers <= 60; fillers++ {
@@ -237,9 +214,6 @@ func TestBuildTableRowMonoCellStaysOnOnePage(t *testing.T) {
 			manifest := completeManifest()
 			manifest.Discs = []report.Disc{{Device: device}}
 
-			// Each file-table row is one fixed-height line, so padding archive 0
-			// shifts the Recovery discs section down a line at a time, sweeping its
-			// row through the page boundary.
 			files := make([]report.ArchiveFile, fillers)
 			for index := range files {
 				files[index] = report.ArchiveFile{
@@ -316,10 +290,9 @@ func TestBuildContainsEverySpec9Field(t *testing.T) {
 	}
 }
 
-// TestBuildNamesTheTapeGenerationToRead pins issue #340: what a recoverer needs is
-// the generation of the media, since that decides which drives can read them. The
-// writing drive's generation is provenance and can differ — an LTO-6 drive writes
-// LTO-5 media — so the two are rendered as distinct, separately labelled facts.
+// TestBuildNamesTheTapeGenerationToRead pins issue #340: media and drive
+// generations are rendered as distinct facts, since only the media's decides
+// which drives can read the tapes.
 func TestBuildNamesTheTapeGenerationToRead(t *testing.T) {
 	t.Parallel()
 
@@ -335,11 +308,8 @@ func TestBuildNamesTheTapeGenerationToRead(t *testing.T) {
 		"the drive rows must read as provenance, not as the drive a recoverer needs")
 }
 
-// TestBuildRecordsCompressionPerArchive pins issue #340: compression is configured
-// per source, and the recovery steps differ by it (a compressed archive needs a
-// zstd pass between decryption and untarring). Without it in the report a recoverer
-// is left identifying the format from the decrypted stream's magic bytes, so each
-// archive states its own answer.
+// TestBuildRecordsCompressionPerArchive pins issue #340: each archive states
+// whether recovery needs a zstd pass.
 func TestBuildRecordsCompressionPerArchive(t *testing.T) {
 	t.Parallel()
 
@@ -355,10 +325,8 @@ func TestBuildRecordsCompressionPerArchive(t *testing.T) {
 		"an uncompressed archive must say so, so no zstd step is attempted")
 }
 
-// TestBuildCitesNoInternalDocument pins issue #340: the report is read by whoever
-// holds the printout, decades from now, with no access to this project's
-// repository. Citing an internal document ("SPEC §7") points that reader at
-// something they cannot obtain, so every note states its point on its own terms.
+// TestBuildCitesNoInternalDocument pins issue #340: a reader decades from now has
+// no access to the repository, so the report must not cite internal documents.
 func TestBuildCitesNoInternalDocument(t *testing.T) {
 	t.Parallel()
 
@@ -370,9 +338,7 @@ func TestBuildCitesNoInternalDocument(t *testing.T) {
 	}
 }
 
-// TestBuildWriteHealthSection asserts the report renders each write-health state
-// distinctly (SPEC §14): healthy, below-floor, repositions, TapeAlert, and the
-// "not measured" fallback when a tape carries no measurement.
+// TestBuildWriteHealthSection asserts each write-health state renders distinctly (SPEC §14).
 func TestBuildWriteHealthSection(t *testing.T) {
 	t.Parallel()
 
@@ -404,9 +370,7 @@ func TestBuildWriteHealthSection(t *testing.T) {
 			contains: []string{"12 repositions"},
 		},
 		{
-			// A drive that does not support the reposition counter (page 0x30): the
-			// report must state it is not supported, not imply a measured-zero clean
-			// back-hitch verdict (SPEC §14, AC3).
+			// An unsupported counter must not read as a measured zero (SPEC §14).
 			name:     "reposition counter not supported",
 			health:   &report.WriteHealth{ThroughputMBps: 120.0, FloorMBps: 50, FloorKnown: true, RepositionsMeasured: false},
 			contains: []string{"reposition counter not supported"},
@@ -458,21 +422,17 @@ func TestBuildTapesSectionOverwroteNonBlank(t *testing.T) {
 
 	const annotation = "Overwrote a non-blank tape"
 
-	// A tape written over a non-blank tape is annotated as such in the Tapes section.
 	overwrote := stripWhitespace(extractText(t, manifest(true)))
 	assert.Contains(t, overwrote, stripWhitespace(annotation),
 		"a tape written over a non-blank tape must be annotated in the report")
 
-	// A normally-written (blank) tape carries no such annotation.
 	normal := stripWhitespace(extractText(t, manifest(false)))
 	assert.NotContains(t, normal, stripWhitespace(annotation),
 		"a tape written to a blank tape must not be annotated as an overwrite")
 }
 
-// TestBuildDiscsSection asserts the optical Recovery discs section renders only
-// when discs were burned (SPEC §10), naming each burner and annotating a
-// deliberately reclaimed non-blank disc — and is omitted entirely otherwise, so a
-// run without optical burning renders exactly as before.
+// TestBuildDiscsSection asserts the Recovery discs section appears only when discs
+// were burned (SPEC §10) and annotates reclaimed non-blank discs.
 func TestBuildDiscsSection(t *testing.T) {
 	t.Parallel()
 
@@ -481,12 +441,10 @@ func TestBuildDiscsSection(t *testing.T) {
 		annotation = "Overwrote a non-blank disc"
 	)
 
-	// No discs: the section is omitted entirely.
 	none := stripWhitespace(extractText(t, completeManifest()))
 	assert.NotContains(t, none, stripWhitespace(heading),
 		"a run without optical burning must not render a Recovery discs section")
 
-	// Blank discs: the section names the burners without an overwrite annotation.
 	withDiscs := completeManifest()
 	withDiscs.Discs = []report.Disc{
 		{Device: "/dev/sr0"},
@@ -500,7 +458,6 @@ func TestBuildDiscsSection(t *testing.T) {
 	assert.Contains(t, rendered, stripWhitespace(annotation),
 		"a reclaimed non-blank disc must be annotated in the Recovery discs section")
 
-	// A disc burned to a blank medium carries no overwrite annotation.
 	blankOnly := completeManifest()
 	blankOnly.Discs = []report.Disc{{Device: "/dev/sr0"}}
 	assert.NotContains(t, stripWhitespace(extractText(t, blankOnly)), stripWhitespace(annotation),

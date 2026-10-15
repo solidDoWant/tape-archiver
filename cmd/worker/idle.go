@@ -12,28 +12,17 @@ import (
 	"go.temporal.io/sdk/worker"
 )
 
-// Idle-exit lets a control worker drain and exit once it has done no work for a
-// configured window (WORKER_IDLE_EXIT_AFTER), so a KEDA-spawned Job can scale back
-// to zero (parent #113; SPEC §4.1). It is control-role only: the data worker runs
-// under systemd on the storage host with a fixed lifecycle and is unaffected.
+// Idle-exit lets a control worker drain and exit after WORKER_IDLE_EXIT_AFTER of
+// no work so a KEDA-spawned Job scales to zero (#113; SPEC §4.1).
 //
-// Only in-flight *activity* executions gate the exit. A workflow parked awaiting a
-// data-queue activity must read as idle so the control worker can scale to zero
-// while the long data-side write runs — and Temporal's workflow-execution
-// interceptor spans the entire workflow lifetime (it blocks on the workflow
-// coroutine across every workflow task until the workflow function returns), so
-// tracking it would pin the worker alive for the whole run and defeat scale-to-zero.
-// Respawn replay is cheap (<1s, measured in #114), so exiting mid-run is safe.
+// Only in-flight activities gate the exit. Temporal's workflow interceptor spans
+// the whole workflow lifetime, so tracking workflows would pin the worker alive
+// while a parked workflow awaits the long data-side write. Respawn replay is
+// cheap (<1s, #114), so exiting mid-run is safe.
 
-// idlePollInterval is how often the idle-exit loop re-evaluates the tracker and
-// refreshes the idle metrics. It is well below any realistic idle window (default
-// 15m), so the exit fires within a second of the window elapsing.
 const idlePollInterval = time.Second
 
-// idleTracker records the worker's in-flight activity count and the timestamp of
-// the last task boundary (start or completion). It is safe for concurrent use by
-// the interceptor (activity goroutines) and the idle poll loop. now is injectable
-// so tests can drive the clock deterministically; it defaults to time.Now.
+// idleTracker records in-flight activities and the last start/completion time.
 type idleTracker struct {
 	mu         sync.Mutex
 	inFlight   int
@@ -42,7 +31,7 @@ type idleTracker struct {
 }
 
 // newIdleTracker returns a tracker seeded as idle-since-now, so a worker that never
-// runs a task still exits after the idle window. A nil now defaults to time.Now.
+// runs a task still exits after the idle window.
 func newIdleTracker(now func() time.Time) *idleTracker {
 	if now == nil {
 		now = time.Now
@@ -51,8 +40,6 @@ func newIdleTracker(now func() time.Time) *idleTracker {
 	return &idleTracker{now: now, lastActive: now()}
 }
 
-// begin records the start of an activity task: it increments the in-flight count
-// and bumps the last-active timestamp.
 func (t *idleTracker) begin() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -61,10 +48,8 @@ func (t *idleTracker) begin() {
 	t.lastActive = t.now()
 }
 
-// end records the completion of an activity task: it decrements the in-flight count
-// and bumps the last-active timestamp, so the idle countdown restarts from the
-// completion time (not the start) — a long task does not force an instant exit on
-// return.
+// end restarts the countdown from completion, so a long task does not force an
+// instant exit on return.
 func (t *idleTracker) end() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -73,8 +58,7 @@ func (t *idleTracker) end() {
 	t.lastActive = t.now()
 }
 
-// state returns the current in-flight count and how long the worker has been idle.
-// While any task is in flight the worker is not idle, so idleFor is zero.
+// state returns the in-flight count and idle duration (zero while busy).
 func (t *idleTracker) state() (inFlight int, idleFor time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -86,21 +70,17 @@ func (t *idleTracker) state() (inFlight int, idleFor time.Duration) {
 	return 0, t.now().Sub(t.lastActive)
 }
 
-// idleInterceptor is a Temporal WorkerInterceptor that feeds an idleTracker from
-// activity task execution. It tracks activities only, deliberately — see the
-// package-level note above.
+// idleInterceptor feeds an idleTracker from activity executions only (see above).
 type idleInterceptor struct {
 	interceptor.WorkerInterceptorBase
 	tracker *idleTracker
 }
 
-// newIdleInterceptor returns an interceptor feeding tracker.
 func newIdleInterceptor(tracker *idleTracker) *idleInterceptor {
 	return &idleInterceptor{tracker: tracker}
 }
 
-// InterceptActivity wraps each activity execution so the tracker sees its start and
-// end.
+// InterceptActivity wraps each activity so the tracker sees its start and end.
 func (i *idleInterceptor) InterceptActivity(
 	ctx context.Context,
 	next interceptor.ActivityInboundInterceptor,
@@ -111,15 +91,12 @@ func (i *idleInterceptor) InterceptActivity(
 	}
 }
 
-// idleActivityInterceptor bumps the tracker around a single activity execution.
 type idleActivityInterceptor struct {
 	interceptor.ActivityInboundInterceptorBase
 	tracker *idleTracker
 }
 
-// ExecuteActivity marks the activity in-flight for the duration of its execution so
-// the worker never idle-exits while an activity is running, and restarts the idle
-// countdown when it completes.
+// ExecuteActivity marks the activity in flight while it runs.
 func (i *idleActivityInterceptor) ExecuteActivity(
 	ctx context.Context,
 	in *interceptor.ExecuteActivityInput,
@@ -130,16 +107,13 @@ func (i *idleActivityInterceptor) ExecuteActivity(
 	return i.ActivityInboundInterceptorBase.ExecuteActivity(ctx, in)
 }
 
-// idleMetrics holds the Prometheus gauges that make idle-exit observable. It is nil
-// when metrics are disabled (no registry), in which case observe is a no-op.
+// idleMetrics holds the idle-exit gauges; nil when metrics are disabled.
 type idleMetrics struct {
 	inFlight      prometheus.Gauge
 	secondsToExit prometheus.Gauge
 }
 
-// newIdleMetrics registers the idle-exit gauges against reg. A nil reg (metrics
-// disabled) yields a nil *idleMetrics. A registration error is returned so worker
-// startup fails loudly rather than running without the promised observability.
+// newIdleMetrics registers the gauges against reg; a nil reg yields nil.
 func newIdleMetrics(reg prometheus.Registerer) (*idleMetrics, error) {
 	if reg == nil {
 		return nil, nil
@@ -169,8 +143,6 @@ func newIdleMetrics(reg prometheus.Registerer) (*idleMetrics, error) {
 	return metrics, nil
 }
 
-// observe records the current in-flight count and countdown. It is a no-op on a nil
-// receiver (metrics disabled).
 func (m *idleMetrics) observe(inFlight int, secondsUntilExit float64) {
 	if m == nil {
 		return
@@ -180,9 +152,8 @@ func (m *idleMetrics) observe(inFlight int, secondsUntilExit float64) {
 	m.secondsToExit.Set(secondsUntilExit)
 }
 
-// secondsUntilExit is the countdown exported to Prometheus: the full idle window
-// while any task is in flight, otherwise the time remaining before exit, clamped at
-// zero.
+// secondsUntilExit is the full window while busy, else the remaining time
+// clamped at zero.
 func secondsUntilExit(inFlight int, idleFor, idleExitAfter time.Duration) float64 {
 	remaining := idleExitAfter
 	if inFlight == 0 {
@@ -196,17 +167,12 @@ func secondsUntilExit(inFlight int, idleFor, idleExitAfter time.Duration) float6
 	return remaining.Seconds()
 }
 
-// shouldExit reports whether the idle window has fully elapsed with no task in
-// flight.
 func shouldExit(inFlight int, idleFor, idleExitAfter time.Duration) bool {
 	return inFlight == 0 && idleFor >= idleExitAfter
 }
 
-// runIdleExit polls the tracker every pollInterval, refreshes the idle metrics, and
-// calls trigger exactly once when the worker has been idle for idleExitAfter. It
-// returns after triggering or when ctx is cancelled (e.g. the worker stopped for
-// another reason). trigger must initiate the graceful drain — never os.Exit — so
-// in-flight tasks finish before the process exits (see run in main.go).
+// runIdleExit polls the tracker and calls trigger once the idle window elapses.
+// trigger must start the graceful drain, never os.Exit, so in-flight tasks finish.
 func runIdleExit(
 	ctx context.Context,
 	tracker *idleTracker,
@@ -236,12 +202,9 @@ func runIdleExit(
 	}
 }
 
-// installIdleExit wires idle-exit into the worker for a control worker with a
-// positive idle window, returning the interrupt channel worker.Run should block on:
-// the OS interrupt merged with the idle trigger, so idle-exit drives the identical
-// graceful-drain path as SIGTERM. For the data role or a zero window it is a no-op —
-// options is untouched and the original interruptCh is returned unchanged. ctx
-// bounds the background idle loop; the caller must cancel it when run returns.
+// installIdleExit returns the channel worker.Run should block on: interruptCh
+// merged with the idle trigger, so idle-exit shares SIGTERM's drain path. It is a
+// no-op for the data role or a zero window. The caller must cancel ctx on return.
 func installIdleExit(
 	ctx context.Context,
 	cfg Config,
@@ -254,9 +217,7 @@ func installIdleExit(
 	}
 
 	if cfg.Role != RoleControl {
-		// Idle-exit is a control-worker feature (KEDA scale-to-zero). The data
-		// worker's lifecycle is fixed, so the setting is inert there rather than
-		// silently changing its behavior.
+		// The data worker's lifecycle is fixed (systemd), so the setting is inert.
 		slog.Warn("WORKER_IDLE_EXIT_AFTER is set but ignored for the data role",
 			"idle_exit_after", cfg.IdleExitAfter.String())
 
@@ -271,8 +232,6 @@ func installIdleExit(
 	tracker := newIdleTracker(nil)
 	options.Interceptors = append(options.Interceptors, newIdleInterceptor(tracker))
 
-	// The idle loop and an OS interrupt both close the same drain channel handed to
-	// worker.Run, giving idle-exit and SIGTERM one shared graceful-drain path.
 	drain := make(chan interface{})
 	trigger := sync.OnceFunc(func() { close(drain) })
 

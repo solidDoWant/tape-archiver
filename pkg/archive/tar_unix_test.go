@@ -23,8 +23,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/archive"
 )
 
-// syncBuffer is a concurrency-safe buffer so a slog handler can be read after
-// the archive walk finishes.
 type syncBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -44,8 +42,6 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// captureLogs swaps the global slog logger for one writing to the returned
-// buffer for the duration of the test, restoring the original afterward.
 func captureLogs(t *testing.T) *syncBuffer {
 	t.Helper()
 
@@ -58,16 +54,11 @@ func captureLogs(t *testing.T) *syncBuffer {
 	return buf
 }
 
-// TestTarSkipsIrregularFiles covers AC1: a source tree containing a unix socket
-// (and a FIFO) is archived successfully — the run does not fail — every regular
-// file, directory, and symlink is present, the irregular entries are absent, and
-// each skip is surfaced as a warning naming the path.
 func TestTarSkipsIrregularFiles(t *testing.T) {
 	// Not parallel: it swaps the process-global slog logger.
 	logs := captureLogs(t)
 
-	// A short path root keeps the unix socket address under sun_path's 108-byte
-	// limit regardless of the (possibly long) test temp dir.
+	// Keep the socket path under sun_path's 108-byte limit.
 	src, err := os.MkdirTemp("/tmp", "tar-irregular")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(src) })
@@ -110,9 +101,6 @@ func TestTarSkipsIrregularFiles(t *testing.T) {
 	assert.Contains(t, output, "pipe.fifo", "the warning must name the skipped FIFO")
 }
 
-// TestTarDeduplicatesHardlinks covers AC2: two paths hardlinked to one file are
-// stored once (the stream is not enlarged by a second full copy) and extraction
-// reproduces both paths with identical content.
 func TestTarDeduplicatesHardlinks(t *testing.T) {
 	t.Parallel()
 
@@ -133,7 +121,6 @@ func TestTarDeduplicatesHardlinks(t *testing.T) {
 	assert.Less(t, len(raw), len(content)+(64<<10),
 		"the archive must hold one copy of the shared file, not two")
 
-	// Exactly one file body and one hardlink entry are emitted.
 	var (
 		bodies int
 		links  int
@@ -169,18 +156,13 @@ func TestTarDeduplicatesHardlinks(t *testing.T) {
 		"both hardlinked paths must extract with identical content")
 }
 
-// dataExtent is a run of real (non-hole) bytes written at a given offset when
-// building a sparse test fixture.
 type dataExtent struct {
 	offset int64
 	data   []byte
 }
 
-// writeSparseFixture creates a sparse file of the given logical size with the
-// supplied data extents written into it (the gaps are left as holes). It returns
-// the file's full logical contents so extractions can be compared byte-for-byte.
-// It skips the test when the filesystem did not actually leave a hole, so the
-// sparse encoder is genuinely exercised.
+// writeSparseFixture returns the file's logical contents. It skips when the
+// filesystem did not leave a hole.
 func writeSparseFixture(t *testing.T, path string, logical int64, extents []dataExtent) []byte {
 	t.Helper()
 
@@ -212,12 +194,9 @@ func writeSparseFixture(t *testing.T, path string, logical int64, extents []data
 	return want
 }
 
-// TestTarSparseFile covers AC1–AC3: sparse files (including trailing-hole and
-// all-hole layouts) do not grow the archive to their full logical size, and extract
-// byte-identically at their full logical size through *both* a real GNU tar binary —
-// the family the recovery disc ships, whose sparse 1.0 decoder does not honor
-// GNU.sparse.realsize and so truncates a map that omits the terminal hole entry — and
-// Go's archive/tar reader.
+// TestTarSparseFile checks sparse files stay small and extract byte-identically
+// through both GNU tar (as on the recovery disc, which truncates a map missing
+// the terminal hole entry) and Go's archive/tar.
 func TestTarSparseFile(t *testing.T) {
 	t.Parallel()
 
@@ -231,19 +210,15 @@ func TestTarSparseFile(t *testing.T) {
 		extents []dataExtent
 	}{
 		{
-			// Data at the start, hole through to the logical end: the case GNU tar
-			// silently truncated before the terminal {realsize, 0} map entry.
+			// GNU tar truncated this before the terminal {realsize, 0} entry.
 			name:    "trailing hole",
 			extents: []dataExtent{{offset: 0, data: head}},
 		},
 		{
-			// No data at all: an all-hole file of nonzero logical size.
 			name:    "all hole",
 			extents: nil,
 		},
 		{
-			// Data at both ends, hole in the middle, ending in data: the pre-fix
-			// layout, kept as a regression guard.
 			name: "ends in data",
 			extents: []dataExtent{
 				{offset: 0, data: head},
@@ -296,11 +271,8 @@ func TestTarSparseFile(t *testing.T) {
 	}
 }
 
-// extractWithGNUTar extracts archived into dest by invoking the bundled GNU tar
-// binary — the family the recovery disc ships and that docs/recovery-procedure.md
-// runs as `bin/tar -xf`. Unlike Go's archive/tar reader it does not extend sparse
-// files to GNU.sparse.realsize, so it is the extractor that reveals a sparse map
-// missing its terminal hole entry. The test skips when no tar binary is available.
+// extractWithGNUTar uses GNU tar, as the recovery procedure does; unlike Go's
+// reader it does not extend sparse files to GNU.sparse.realsize.
 func extractWithGNUTar(t *testing.T, archived []byte, dest string) {
 	t.Helper()
 
@@ -318,9 +290,7 @@ func extractWithGNUTar(t *testing.T, archived []byte, dest string) {
 	require.NoError(t, cmd.Run(), "gnu tar extraction failed: %s", stderr.String())
 }
 
-// TestTarDropsExtendedAttributes covers AC4 (behavioral half): a user.* extended
-// attribute set on a source file does not survive a tar round-trip, pinning the
-// observed behavior that SPEC §6 and the recovery docs describe.
+// TestTarDropsExtendedAttributes pins the xattr drop documented in SPEC §6.
 func TestTarDropsExtendedAttributes(t *testing.T) {
 	t.Parallel()
 
@@ -334,7 +304,6 @@ func TestTarDropsExtendedAttributes(t *testing.T) {
 		t.Skipf("filesystem does not support user xattrs: %v", err)
 	}
 
-	// Confirm the attribute is really set on the source before archiving.
 	require.NoError(t, unix.Setxattr(path, xattrName, []byte("present"), 0))
 
 	var buf bytes.Buffer
@@ -351,9 +320,6 @@ func TestTarDropsExtendedAttributes(t *testing.T) {
 	assert.ErrorIs(t, err, unix.ENODATA)
 }
 
-// TestMetadataFidelityDocumented covers AC4 (documentation half): SPEC §6 and the
-// recovery procedure state the fate of extended attributes, POSIX ACLs, and file
-// capabilities, matching the observed drop.
 func TestMetadataFidelityDocumented(t *testing.T) {
 	t.Parallel()
 

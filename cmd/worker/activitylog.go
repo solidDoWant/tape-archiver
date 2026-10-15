@@ -13,34 +13,20 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/buildinfo"
 )
 
-// activityLogInterceptor emits a structured line at the start and end of every
-// activity execution, on both worker roles. The start line stamps the
-// tape-archiver build version and the worker identity onto the activity; the end
-// line reports its outcome and duration. This answers "which binary produced this
-// log, and how long did the step take?" for every activity without threading the
-// version/worker through each call site — a log line that predates a deploy can be
-// told apart from one that follows it by its version stamp alone.
+// activityLogInterceptor logs each activity's start (with build version and
+// worker identity) and end (outcome, duration).
 //
-// It must be registered AFTER logTagsInterceptor in worker.Options.Interceptors
-// so it runs *inside* it: logTagsInterceptor seeds the context with the run's
-// WorkflowID/RunID (#303), and these boundary lines are logged with that seeded
-// context so they carry the same tags and surface in the web UI's run-detail log
-// panel alongside the activity's own output.
+// It must be registered after logTagsInterceptor so it runs inside it and its
+// lines carry the run tags (#303).
 type activityLogInterceptor struct {
 	interceptor.WorkerInterceptorBase
 
-	// worker identifies this worker process (role@host/pid). Computed once at
-	// construction rather than per-activity because it never changes.
+	// worker is role@host/pid.
 	worker string
-	// version is buildinfo.ToolVersion(), captured once (it is constant for the
-	// process) so the hot path does not re-read the build info per activity.
+	// version is captured once since it is constant for the process.
 	version string
 }
 
-// newActivityLogInterceptor builds the interceptor, capturing the worker identity
-// and build version once. The worker identity mirrors the shape of Temporal's
-// default client identity (pid@host) but leads with the role so control- and
-// data-worker lines are distinguishable at a glance.
 func newActivityLogInterceptor(role Role) *activityLogInterceptor {
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
@@ -53,7 +39,7 @@ func newActivityLogInterceptor(role Role) *activityLogInterceptor {
 	}
 }
 
-// InterceptActivity wraps each activity execution with start/end logging.
+// InterceptActivity wraps each activity with start/end logging.
 func (w *activityLogInterceptor) InterceptActivity(
 	ctx context.Context,
 	next interceptor.ActivityInboundInterceptor,
@@ -65,8 +51,6 @@ func (w *activityLogInterceptor) InterceptActivity(
 	}
 }
 
-// activityLogActivityInterceptor logs the boundaries of a single activity
-// execution.
 type activityLogActivityInterceptor struct {
 	interceptor.ActivityInboundInterceptorBase
 
@@ -74,10 +58,8 @@ type activityLogActivityInterceptor struct {
 	version string
 }
 
-// ExecuteActivity logs one "activity started" line before the activity runs and
-// one "activity finished"/"activity failed" line after. The end line is deferred
-// so it fires on every exit path (success, error, or panic) and reports the
-// wall-clock duration. Attempt is included on every line so retries are visible.
+// ExecuteActivity logs around the activity; the end line is deferred so it fires
+// on every exit path.
 func (i *activityLogActivityInterceptor) ExecuteActivity(
 	ctx context.Context,
 	in *interceptor.ExecuteActivityInput,

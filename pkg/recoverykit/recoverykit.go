@@ -1,34 +1,10 @@
 // Package recoverykit builds the optical recovery kit (SPEC §10): a
-// self-contained ISO 9660 image that, together with the physical tapes, lets a
-// future operator read, repair, decrypt, decompress, and unpack the archives
-// with nothing but the disc and the tapes.
+// self-contained ISO 9660 image that, with the tapes alone, lets a future
+// operator recover the archives.
 //
-// Build assembles five kinds of artifact into one image:
-//
-//   - the PDF run report (consumed as opaque input bytes, so this package has no
-//     compile-time dependency on pkg/report);
-//   - the full SHA-256 manifest;
-//   - a backup copy of each tape's LTFS index (from pkg/ltfs.ReadIndex), in case
-//     the on-tape index is damaged;
-//   - the static recovery binaries (age, par2, zstd, tar) staged from a
-//     configurable source directory, plus the full step-by-step recovery
-//     procedure (recovery-procedure.md), embedded from docs/recovery-procedure.md;
-//   - the recovery tools' upstream source archives (SPEC §2, §10) staged from a
-//     configurable directory, so the tools can be rebuilt from source on future
-//     hardware the pinned static binaries cannot run on.
-//
-// Recovery binaries MUST be statically linked. At restore time — potentially
-// decades later, on unknown hardware with no package manager — a dynamically
-// linked binary whose shared-library dependencies cannot be resolved is dead
-// weight. Build therefore inspects every staged binary and fails the run if any
-// is not statically linked, so a misconfigured run can never silently produce a
-// useless recovery disc (SPEC §2: 20-year recoverability; everything is tested).
-//
-// The image is written with the pure-Go github.com/kdomanski/iso9660 writer so
-// the build and its tests stay hermetic, with no runtime CLI dependency —
-// consistent with pkg/report's pure-Go choice. This package emits an uncompressed
-// image; compression of the .iso for delivery (SPEC §11) is the Report phase's
-// concern, not this package's.
+// Recovery binaries must be statically linked: decades from now there may be no
+// package manager to resolve shared libraries, so Build fails rather than ship a
+// useless disc.
 package recoverykit
 
 import (
@@ -52,26 +28,18 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/checksum"
 )
 
-// recoveryProcedureDoc is the full operator recovery procedure, embedded so the
-// disc always carries the same bytes as docs/recovery-procedure.md (a test
-// asserts they are identical). It is shipped verbatim on the disc as
-// recovery-procedure.md and is the authoritative, self-contained recovery
-// reference — the PDF report carries only a concise copy (SPEC §10, issue #21).
+// recoveryProcedureDoc is docs/recovery-procedure.md, shipped verbatim on the
+// disc (a test asserts the copy matches; issue #21).
 //
 //go:generate cp ../../docs/recovery-procedure.md recovery-procedure.md
 //go:embed recovery-procedure.md
 var recoveryProcedureDoc []byte
 
-// volumeIdentifier is the ISO 9660 primary volume identifier. It uses only
-// valid d-characters and is within the 32-character limit.
+// volumeIdentifier must use only d-characters and fit in 32 characters.
 const volumeIdentifier = "TAPE_ARCHIVER_RECOVERY"
 
-// On-disc layout (SPEC §10). The fixed artifact names below are short, lowercase,
-// and free of interior dots beyond a single extension, so they survive ISO 9660
-// level-2 naming (no Rock Ridge) unchanged. Names Build cannot control — the tape
-// barcodes under indexDir and the source archive names under srcDir — are keyed in
-// the manifest via readbackPath, which reproduces the writer's name transform so
-// the manifest always matches what the burned disc presents on read-back.
+// On-disc layout (SPEC §10). These names survive ISO 9660 level-2 naming
+// unchanged; names Build cannot control are keyed via readbackPath.
 const (
 	reportPath    = "report.pdf"
 	manifestPath  = "manifest.sha256"
@@ -82,71 +50,43 @@ const (
 	srcDir        = "src"
 )
 
-// The following mirror the pinned github.com/kdomanski/iso9660 v0.4.0 writer's
-// name-mangling rules (image_writer.go manglePath/mangleFileName/mangleD1String
-// and iso9660.go's d1-character set), reproduced by readbackPath so the manifest
-// keys match the names the read-back presents. They are PINNED to that version: a
-// dependency bump must re-verify these against the writer (the round-trip tests,
-// which read the real image back, are the guard).
+// These mirror the name-mangling rules of github.com/kdomanski/iso9660 v0.4.0
+// and are PINNED to it: a dependency bump must re-verify them (the round-trip
+// tests are the guard).
 const (
-	// isoFileIdentifierMaxLength and isoDirIdentifierMaxLength are the ISO 9660
-	// level-2 identifier length caps the writer enforces (ECMA-119 7.5 / 7.6.3).
+	// ECMA-119 7.5 / 7.6.3 level-2 identifier caps.
 	isoFileIdentifierMaxLength = 30
 	isoDirIdentifierMaxLength  = 31
-	// isoExtensionMaxLength is the writer's cap on the extension component.
+	// Extension component cap.
 	isoExtensionMaxLength = 8
-	// isoVersionSuffixLength is len(";1") accounted for in the file-identifier
-	// budget; the reader strips the ";1" version so it never appears on read-back.
+	// The ";1" version counts against the budget but is stripped on read-back.
 	isoVersionLength = 1 // len("1")
 
-	// d1Characters is the writer's d1-character set. Any byte outside it is folded
-	// to '_'; the writer lowercases first, so the manifest keys are lowercase.
 	d1Characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_!\"%&'()*+,-./:;<=>?"
 )
 
-// Input is the complete set of artifacts assembled into the recovery ISO. The
-// report and manifest are supplied as bytes (input artifacts), so building and
-// testing this package needs no live PDF or checksum tooling.
+// Input is the complete set of artifacts assembled into the recovery ISO.
 type Input struct {
-	// Report is the PDF run report (SPEC §9), treated as opaque bytes.
+	// Report is the PDF run report, treated as opaque bytes.
 	Report []byte
 	// Manifest is the full SHA-256 manifest covering every on-tape file.
 	Manifest []byte
 	// TapeIndexes holds one captured LTFS index per physical tape.
 	TapeIndexes []TapeIndex
-	// BinariesDir is the source directory holding the static recovery binaries
-	// (age, par2, zstd, tar). Its top-level regular files are staged verbatim;
-	// each must be a statically linked native executable. The binaries are
-	// produced and pinned elsewhere (the OCI image) to match the recovery-disc
-	// versions — this package only stages what is present and proves it is
-	// static.
+	// BinariesDir holds the recovery binaries; each top-level file must be a
+	// statically linked executable.
 	BinariesDir string
-	// SourcesDir is the source directory holding the recovery tools' upstream
-	// source archives (SPEC §2, §10 — "…plus their source"). Its top-level regular
-	// files are staged verbatim into the disc's src/; unlike the binaries these are
-	// archives, not executables, so they are not linkage-checked. It must be set and
-	// yield at least one file — a disc without source cannot rebuild the tools on
-	// hardware the pinned binaries do not run on. The archives are produced alongside
-	// the binaries (nix/recovery-binaries.nix emits them under $out/src, the sibling
-	// of $out/bin).
+	// SourcesDir holds the recovery tools' source archives (SPEC §2, §10). It must
+	// yield at least one file so the tools can be rebuilt where the binaries no
+	// longer run.
 	SourcesDir string
 }
 
-// Manifest maps each disc-relative, slash-separated path Build stages to the
-// lowercase hex SHA-256 of that file's content. It is the set of files a burned
-// disc must contain, and their digests, for the Burn phase's read-back
-// verification (SPEC §10; pkg/optical.Verify). Paths are recorded exactly as the
-// burned disc presents them on read-back — this image carries no Rock Ridge, so
-// the ISO 9660 mount transforms names (lowercasing, folding characters outside the
-// d1 set to '_', joining interior dots, and truncating to the level-2 length caps;
-// see readbackPath) — so a manifest built here compares equal to what
-// pkg/optical.Verify walks off the mounted disc without any per-caller fix-up.
-// Render it to standard sha256sum format with Bytes.
+// Manifest maps each disc path, exactly as the burned disc presents it on
+// read-back (see readbackPath), to its lowercase hex SHA-256.
 type Manifest map[string]string
 
-// Bytes renders the manifest to the standard sha256sum format — one
-// "<hex-digest>  <path>" line per file, sorted by path for a deterministic,
-// diff-stable file — which pkg/optical.ParseManifest reads back verbatim.
+// Bytes renders the manifest in sha256sum format, sorted by path.
 func (m Manifest) Bytes() []byte {
 	names := make([]string, 0, len(m))
 	for name := range m {
@@ -163,37 +103,22 @@ func (m Manifest) Bytes() []byte {
 	return []byte(builder.String())
 }
 
-// add records the disc-relative path -> SHA-256 of data, under the path the
-// burned disc presents on read-back (see readbackPath).
 func (m Manifest) add(discPath string, data []byte) {
 	sum := sha256.Sum256(data)
 	m[readbackPath(discPath)] = hex.EncodeToString(sum[:])
 }
 
-// readbackPath maps a staged disc path to the path the read-back presents. The
-// image carries no Rock Ridge, so the ISO 9660 mount (and the pure-Go reader)
-// does not just lowercase names — it applies the full ISO 9660 level-2 transform
-// the pinned writer performs: each path segment is lowercased, every byte outside
-// the d1 set is folded to '_', interior dots in a file name are joined with '_'
-// (the last dot separates the extension), and the stem, extension, and directory
-// identifiers are truncated to the level-2 caps. The reader strips the ";1"
-// version suffix, so it is not part of the read-back name. Modelling only the
-// lowercasing (as an earlier version did) silently mis-keys any barcode carrying a
-// space, an interior dot, a non-d1 character, or more characters than the on-disc
-// budget allows, making post-burn verification fail on every attempt and letting
-// two distinct barcodes collide to one on-disc index file (issue #153).
-//
-// This mirrors github.com/kdomanski/iso9660 v0.4.0 and is pinned to it; the
-// round-trip tests read the real image back to prove the mapping stays exact.
+// readbackPath maps a staged disc path to the name the read-back presents. With
+// no Rock Ridge, the writer applies the full ISO 9660 level-2 transform, not
+// just lowercasing; modelling only lowercasing mis-keyed barcodes and let two
+// barcodes collide to one index file (issue #153).
 func readbackPath(discPath string) string {
 	segments := strings.Split(discPath, "/")
 
 	for i, segment := range segments {
 		if i == len(segments)-1 {
-			// The final segment is a file name (mangleFileName), minus the version.
 			segments[i] = mangleReadbackFileName(segment)
 		} else {
-			// Interior segments are directory identifiers (mangleDirectoryName).
 			segments[i] = mangleD1(segment, isoDirIdentifierMaxLength)
 		}
 	}
@@ -201,12 +126,8 @@ func readbackPath(discPath string) string {
 	return path.Join(segments...)
 }
 
-// mangleReadbackFileName reproduces the writer's mangleFileName for v0.4.0 and
-// returns the name the reader presents on read-back (i.e. without the ";1" version
-// suffix the writer appends and the reader strips). It lowercases, splits off the
-// final dot as the extension separator, joins any interior dots in the stem with
-// '_', caps the extension at isoExtensionMaxLength, and caps the stem at whatever
-// the 30-character file-identifier budget leaves after the version and extension.
+// mangleReadbackFileName reproduces the writer's mangleFileName, minus the ";1"
+// version suffix the reader strips.
 func mangleReadbackFileName(input string) string {
 	input = strings.ToLower(input)
 	split := strings.Split(input, ".")
@@ -235,10 +156,7 @@ func mangleReadbackFileName(input string) string {
 	return stem
 }
 
-// mangleD1 reproduces the writer's mangleD1String for v0.4.0: it lowercases the
-// input, then, byte by byte up to maxCharacters bytes, keeps bytes in the d1 set
-// and folds every other byte to '_'. It operates on bytes, exactly as the writer
-// does (there is no multibyte handling in a d1 identifier).
+// mangleD1 reproduces the writer's mangleD1String, byte-wise as the writer does.
 func mangleD1(input string, maxCharacters int) string {
 	input = strings.ToLower(input)
 
@@ -255,22 +173,16 @@ func mangleD1(input string, maxCharacters int) string {
 	return builder.String()
 }
 
-// TapeIndex is one tape's LTFS index backup, named by the tape's barcode — the
-// canonical physical ID (SPEC §6).
+// TapeIndex is one tape's LTFS index backup, named by the tape's barcode.
 type TapeIndex struct {
-	// Barcode is the library-read barcode / LTFS volume name. It names the
-	// index file on the disc (ltfs-index/<barcode>.schema).
+	// Barcode names the index file on the disc (ltfs-index/`barcode`.schema).
 	Barcode string
-	// Index is the LTFS index XML, as returned by pkg/ltfs.ReadIndex.
+	// Index is the LTFS index XML.
 	Index []byte
 }
 
-// Build assembles in into a valid ISO 9660 image and writes it to w, returning
-// the disc-content Manifest (every staged file's read-back path -> SHA-256) so
-// the Burn phase can verify the burned disc against it (SPEC §10). It returns an
-// error if any input is missing, if any recovery binary is not a statically
-// linked ELF executable, if no source archive is present, or if the image cannot
-// be written. ctx cancellation is honored between staging steps.
+// Build writes the ISO 9660 image for in to w and returns the disc-content
+// Manifest the Burn phase verifies the burned disc against.
 func Build(ctx context.Context, in Input, w io.Writer) (Manifest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -335,8 +247,6 @@ func Build(ctx context.Context, in Input, w io.Writer) (Manifest, error) {
 	return manifest, nil
 }
 
-// validate checks that every required artifact is present and that the tape
-// indexes are usable and uniquely named.
 func (in Input) validate() error {
 	if len(in.Report) == 0 {
 		return fmt.Errorf("report PDF is empty")
@@ -350,11 +260,8 @@ func (in Input) validate() error {
 		return fmt.Errorf("at least one tape LTFS index is required")
 	}
 
-	// The ISO 9660 writer mangles each barcode into the on-disc index file name
-	// (readbackPath), and distinct barcodes can mangle to one name — e.g. a space or
-	// a dot both fold toward '_'. Key the collision check on that real on-disc name,
-	// not just the case-folded barcode, so no tape's index silently overwrites
-	// another's (issue #153).
+	// Distinct barcodes can mangle to one on-disc name, so key the collision
+	// check on that name, not the barcode (issue #153).
 	seen := make(map[string]string, len(in.TapeIndexes))
 
 	for _, tape := range in.TapeIndexes {
@@ -385,12 +292,8 @@ func (in Input) validate() error {
 	return nil
 }
 
-// stageBinaries stages every top-level regular file in dir into /bin, after
-// proving each is a statically linked ELF executable, recording each staged
-// binary's read-back path and SHA-256 into manifest. It fails if the directory
-// cannot be read, if a non-regular file is present, if a binary is not static,
-// or if the directory yields no binaries (a recovery kit with no tooling is
-// useless).
+// stageBinaries stages every top-level file in dir into /bin, failing on any
+// non-static binary or an empty directory.
 func stageBinaries(ctx context.Context, writer *iso9660.ImageWriter, dir string, manifest Manifest) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -449,15 +352,8 @@ func stageBinaries(ctx context.Context, writer *iso9660.ImageWriter, dir string,
 	return nil
 }
 
-// stageSources stages every top-level regular file in dir into /src, recording
-// each staged file's read-back path and SHA-256 into manifest (SPEC §2, §10 — the
-// recovery tools' source ships on the disc so the tools can be rebuilt on future
-// hardware the pinned static binaries cannot run on). Unlike stageBinaries these
-// are source archives, not executables, so there is no linkage check — but it
-// otherwise fails on the same conditions: the directory cannot be read, a
-// non-regular file is present, or the directory yields no source archives (a
-// recovery kit that ships binaries but no source violates the 20-year
-// recoverability principle — fail loudly, never silently drop the source).
+// stageSources stages every top-level file in dir into /src. An empty directory
+// fails: a disc without source violates the 20-year recoverability principle.
 func stageSources(ctx context.Context, writer *iso9660.ImageWriter, dir string, manifest Manifest) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -512,11 +408,8 @@ func stageSources(ctx context.Context, writer *iso9660.ImageWriter, dir string, 
 	return nil
 }
 
-// assertStaticallyLinked returns an error unless pathName is a statically linked
-// ELF executable. A dynamically linked binary carries a PT_INTERP program header
-// (naming the dynamic loader) and/or DT_NEEDED shared-library dependencies;
-// statically linked and static-PIE binaries have neither. Detection uses the
-// standard library's debug/elf so it needs no external tool and stays hermetic.
+// assertStaticallyLinked rejects ELF files with a PT_INTERP header or DT_NEEDED
+// entries; static and static-PIE binaries have neither.
 func assertStaticallyLinked(pathName string) error {
 	file, err := elf.Open(pathName)
 	if err != nil {

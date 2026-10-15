@@ -15,17 +15,11 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/checksum"
 )
 
-// Manifest maps a disc-relative slash-separated path to its expected lowercase
-// hex SHA-256 digest. It is the set of files a burned disc must contain, and
-// their digests, for Verify to consider the disc good.
+// Manifest maps a disc-relative slash-separated path to its lowercase hex SHA-256.
 type Manifest map[string]string
 
-// ParseManifest parses the standard sha256sum manifest format — one
-// "<hex-digest>  <path>" line per file — into a Manifest. The two-space (text)
-// and " *" (binary) separators sha256sum emits are both accepted, and a leading
-// "./" on the path is stripped so paths match the relative paths Verify walks.
-// Blank lines are ignored. It returns an error on a malformed line or a duplicate
-// path.
+// ParseManifest parses sha256sum output (text or binary mode) into a Manifest,
+// stripping a leading "./" so paths match what Verify walks.
 func ParseManifest(r io.Reader) (Manifest, error) {
 	manifest := make(Manifest)
 	scanner := bufio.NewScanner(r)
@@ -45,8 +39,6 @@ func ParseManifest(r io.Reader) (Manifest, error) {
 			return nil, fmt.Errorf("optical: malformed manifest line %d: %q is not a SHA-256 digest", line, digest)
 		}
 
-		// sha256sum separates digest and name with two spaces (text mode) or a
-		// space and '*' (binary mode); trim the residual separator character.
 		name := strings.TrimPrefix(strings.TrimSpace(rest), "*")
 		name = strings.TrimPrefix(strings.TrimSpace(name), "./")
 
@@ -68,29 +60,19 @@ func ParseManifest(r io.Reader) (Manifest, error) {
 	return manifest, nil
 }
 
-// VerifyResult is the outcome of comparing a burned disc's contents against a
-// Manifest. A disc verifies only when all three slices are empty (OK). Each slice
-// is sorted for stable, readable reporting.
+// VerifyResult lists, sorted, the paths where a disc differs from its Manifest.
 type VerifyResult struct {
-	// Mismatched holds paths present on the disc and in the manifest whose
-	// SHA-256 digests differ.
 	Mismatched []string
-	// Missing holds paths in the manifest that are absent from the disc.
-	Missing []string
-	// Extra holds regular files on the disc that the manifest does not list.
-	Extra []string
+	Missing    []string
+	Extra      []string
 }
 
-// OK reports whether the disc matches the manifest exactly — no mismatched,
-// missing, or extra files.
+// OK reports whether the disc matches the manifest exactly.
 func (r *VerifyResult) OK() bool {
 	return len(r.Mismatched) == 0 && len(r.Missing) == 0 && len(r.Extra) == 0
 }
 
-// Err returns a non-nil error describing every discrepancy when the disc does not
-// verify, and nil when it does. Callers that want the verification failure as an
-// error (the common case) use this; callers that want to inspect the discrepancy
-// lists read the fields directly.
+// Err returns an error describing every discrepancy, or nil when OK.
 func (r *VerifyResult) Err() error {
 	if r.OK() {
 		return nil
@@ -113,12 +95,8 @@ func (r *VerifyResult) Err() error {
 	return fmt.Errorf("optical: disc does not match manifest (%s)", strings.Join(parts, "; "))
 }
 
-// Verify mounts this disc read-only and checks its contents against manifest,
-// returning a VerifyResult describing any mismatched, missing, or extra files. It
-// mounts to a temporary directory, compares, and unmounts before returning (even
-// on error). A returned error signals an operational failure (mount or read); a
-// content mismatch is reported through the VerifyResult, whose Err/OK methods the
-// caller uses to decide pass/fail.
+// Verify mounts the disc read-only and compares it against manifest. The error
+// reports operational failures only; content mismatches are in the VerifyResult.
 func (d *Disc) Verify(ctx context.Context, manifest Manifest) (result *VerifyResult, err error) {
 	mountpoint, err := os.MkdirTemp("", "optical-verify-")
 	if err != nil {
@@ -142,11 +120,7 @@ func (d *Disc) Verify(ctx context.Context, manifest Manifest) (result *VerifyRes
 	return verifyTree(mountpoint, manifest)
 }
 
-// mountReadOnly mounts this disc's filesystem read-only at mountpoint. A regular
-// file backing (the stdio pseudo-disc in tests) is mounted through a loop device
-// (-o loop); a block device (a real optical drive, or a loop device) is mounted
-// directly. Mounting an ISO 9660 filesystem requires privilege, which the
-// integration target provides (it runs under sudo, like the LTFS path).
+// mountReadOnly mounts the disc read-only, via -o loop for a regular file. Requires root.
 func (d *Disc) mountReadOnly(ctx context.Context, mountpoint string) error {
 	options := "ro"
 
@@ -171,7 +145,6 @@ func (d *Disc) mountReadOnly(ctx context.Context, mountpoint string) error {
 	return nil
 }
 
-// unmount unmounts the filesystem at mountpoint.
 func unmount(ctx context.Context, mountpoint string) error {
 	cmd := exec.CommandContext(ctx, "umount", mountpoint)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -185,11 +158,8 @@ func unmount(ctx context.Context, mountpoint string) error {
 	return nil
 }
 
-// verifyTree walks the regular files under root and compares them against
-// manifest, returning the mismatched, missing, and extra paths. It is a pure
-// function of the filesystem tree and the manifest — no disc, mount, or xorriso —
-// so the verification logic (the highest-value, most bug-prone path) is unit
-// tested directly. Paths are reported disc-relative with slash separators.
+// verifyTree compares the regular files under root against manifest. It is
+// separate from Verify so it can be unit tested without a disc.
 func verifyTree(root string, manifest Manifest) (*VerifyResult, error) {
 	seen := make(map[string]bool, len(manifest))
 	result := &VerifyResult{}

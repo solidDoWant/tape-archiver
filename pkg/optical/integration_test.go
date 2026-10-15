@@ -20,16 +20,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/optical"
 )
 
-// TestBurnVerifyBlankReburn exercises the full physical optical path against a
-// loop-device-backed pseudo-disc: burn a recovery ISO, read it back by mounting
-// read-only and verifying every file against a manifest (including the
-// mismatch/missing/extra failure modes), observe the medium state through each
-// transition, then reclaim the rewritable disc with Blank and burn again. It
-// backs the "disc" with a real losetup'd block device so the mount read-back path
-// runs exactly as it would on hardware; it covers ACs 1–4 for the states a
-// file-backed medium can represent. (True write-once states — appendable/
-// finalized, and Blank's refusal of them — need real media and are covered by
-// TestBlankRefusesWriteOnceMedium, gated behind OPTICAL_BURN_DEV.)
+// TestBurnVerifyBlankReburn burns, verifies, blanks, and reburns a loop-device
+// pseudo-disc. Write-once states need real media; see TestBlankRefusesWriteOnceMedium.
 func TestBurnVerifyBlankReburn(t *testing.T) {
 	testutil.SkipIfXorrisoUnavailable(t)
 	testutil.SkipIfLosetupUnavailable(t)
@@ -37,12 +29,10 @@ func TestBurnVerifyBlankReburn(t *testing.T) {
 	device := loopDevice(t, 64<<20) // 64 MiB backing, ample for a tens-of-MB ISO
 	disc := optical.NewDisc(device)
 
-	// --- Blank to start (AC3: a fresh medium reports blank) --------------------
 	state, err := disc.State(t.Context())
 	require.NoError(t, err, "state of fresh disc")
 	assert.Equal(t, optical.StateBlank, state, "a fresh loop-backed disc should be blank")
 
-	// --- Burn (AC1: a prepared ISO burns to a mountable ISO 9660 filesystem) ---
 	source := map[string]string{
 		"report.pdf":           "pretend PDF report bytes\n",
 		"recovery.txt":         "step-by-step recovery procedure\n",
@@ -53,20 +43,17 @@ func TestBurnVerifyBlankReburn(t *testing.T) {
 
 	require.NoError(t, disc.WriteImage(t.Context(), isoPath), "burn recovery ISO")
 
-	// --- State after burn (AC3: an overwriteable medium is non-blank) ----------
 	state, err = disc.State(t.Context())
 	require.NoError(t, err, "state after burn")
 	assert.Equal(t, optical.StateNonBlankRewritable, state,
 		"a written overwriteable disc should be non-blank rewritable")
 
-	// --- Read-back verify: matching disc (ACs 1 & 2) ---------------------------
 	manifest := manifestFor(source)
 
 	result, err := disc.Verify(t.Context(), manifest)
 	require.NoError(t, err, "verify burned disc")
 	assert.True(t, result.OK(), "burned disc should match its manifest: %v", result.Err())
 
-	// --- Read-back verify: failure modes (AC2) ---------------------------------
 	t.Run("mismatch is a verification failure", func(t *testing.T) {
 		bad := cloneManifest(manifest)
 		bad["report.pdf"] = sha256Hex("tampered")
@@ -97,14 +84,12 @@ func TestBurnVerifyBlankReburn(t *testing.T) {
 		assert.Equal(t, []string{"bin/age"}, result.Extra)
 	})
 
-	// --- Blank reclaims the rewritable disc (AC4) ------------------------------
 	require.NoError(t, disc.Blank(t.Context()), "blank rewritable disc")
 
 	state, err = disc.State(t.Context())
 	require.NoError(t, err, "state after blank")
 	assert.Equal(t, optical.StateBlank, state, "blanked disc should report blank again")
 
-	// --- A subsequent burn succeeds after the reclaim (AC4) --------------------
 	require.NoError(t, disc.WriteImage(t.Context(), isoPath), "re-burn after blank")
 
 	result, err = disc.Verify(t.Context(), manifest)
@@ -112,10 +97,7 @@ func TestBurnVerifyBlankReburn(t *testing.T) {
 	assert.True(t, result.OK(), "re-burned disc should match its manifest: %v", result.Err())
 }
 
-// TestBlankRefusesWriteOnceMedium asserts that Blank refuses a write-once medium
-// rather than silently succeeding (AC4). A file-backed stdio disc is always
-// overwriteable, so this transition needs real write-once media; it is skipped
-// unless OPTICAL_BURN_DEV points at one.
+// TestBlankRefusesWriteOnceMedium needs real write-once media via OPTICAL_BURN_DEV.
 func TestBlankRefusesWriteOnceMedium(t *testing.T) {
 	testutil.SkipIfXorrisoUnavailable(t)
 
@@ -131,10 +113,7 @@ func TestBlankRefusesWriteOnceMedium(t *testing.T) {
 	assert.Contains(t, err.Error(), "write-once")
 }
 
-// loopDevice creates a size-byte backing file and attaches it to a loop device,
-// returning the loop device path (e.g. /dev/loop0). Both the loop device and the
-// backing file are cleaned up when the test ends. Requires root (losetup), which
-// the integration target provides.
+// loopDevice attaches a size-byte backing file to a loop device. Requires root.
 func loopDevice(t *testing.T, size int64) string {
 	t.Helper()
 
@@ -159,9 +138,7 @@ func loopDevice(t *testing.T, size int64) string {
 	return device
 }
 
-// makeISO builds an ISO 9660 image from the given slash-separated path -> content
-// map using xorriso's mkisofs emulation, and returns the image path. This stands
-// in for the recovery ISO that pkg/recoverykit produces.
+// makeISO builds an ISO 9660 image from a path -> content map.
 func makeISO(t *testing.T, files map[string]string) string {
 	t.Helper()
 
@@ -181,7 +158,6 @@ func makeISO(t *testing.T, files map[string]string) string {
 	return isoPath
 }
 
-// manifestFor builds the optical.Manifest describing files (path -> content).
 func manifestFor(files map[string]string) optical.Manifest {
 	manifest := make(optical.Manifest, len(files))
 	for name, content := range files {
@@ -191,7 +167,6 @@ func manifestFor(files map[string]string) optical.Manifest {
 	return manifest
 }
 
-// cloneManifest returns a shallow copy so a test can mutate it independently.
 func cloneManifest(manifest optical.Manifest) optical.Manifest {
 	clone := make(optical.Manifest, len(manifest))
 	for name, digest := range manifest {

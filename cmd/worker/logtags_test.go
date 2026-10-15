@@ -21,17 +21,13 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
 )
 
-// runIdentity is what loggingActivity reports back so the test can compare the
-// run identity the activity actually saw against the tags that landed on its log
-// line.
 type runIdentity struct {
 	WorkflowID string
 	RunID      string
 }
 
-// loggingActivity emits one bulk log line the way real activities and pkg/*
-// helpers do — a plain slog.*Context call — and returns the run identity Temporal
-// gave it, so the test can assert the emitted line carries exactly those tags.
+// loggingActivity logs via plain slog.*Context, like real activities, and
+// returns the run identity Temporal gave it.
 func loggingActivity(ctx context.Context) (runIdentity, error) {
 	slog.InfoContext(ctx, activityLogMessage)
 
@@ -43,9 +39,8 @@ func loggingActivity(ctx context.Context) (runIdentity, error) {
 	}, nil
 }
 
-// loggingWorkflow runs loggingActivity once. It exists only to give the activity
-// a real workflow execution (WorkflowID/RunID), which the standalone activity
-// test environment does not populate.
+// loggingWorkflow exists because the standalone activity test environment does
+// not populate WorkflowID/RunID.
 func loggingWorkflow(ctx workflow.Context) (runIdentity, error) {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute,
@@ -60,10 +55,8 @@ func loggingWorkflow(ctx workflow.Context) (runIdentity, error) {
 
 const activityLogMessage = "logtags test: activity emitted a bulk log line"
 
-// TestLogTagsInterceptorTagsActivityLogs is the end-to-end proof of #303: with the
-// interceptor installed, a plain slog line emitted inside an activity carries the
-// run's WorkflowID/RunID — the fields the web UI's log panel filters on — without
-// the activity routing through a Temporal context logger.
+// TestLogTagsInterceptorTagsActivityLogs guards #303: a plain slog line inside an
+// activity must carry the run's WorkflowID/RunID.
 func TestLogTagsInterceptorTagsActivityLogs(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 
@@ -94,9 +87,8 @@ func TestLogTagsInterceptorTagsActivityLogs(t *testing.T) {
 		"activity log line must carry the run's RunID")
 }
 
-// captureStderr redirects os.Stderr to a pipe for the duration of fn and returns
-// everything written to it. The pipe is drained concurrently so a large volume of
-// SDK/test output cannot deadlock fn on a full pipe buffer.
+// captureStderr returns everything fn writes to os.Stderr. The pipe is drained
+// concurrently so a full buffer cannot deadlock fn.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 
@@ -126,8 +118,6 @@ func captureStderr(t *testing.T, fn func()) string {
 	return output
 }
 
-// findRecordByMessage decodes the captured JSON log lines and returns the one
-// whose message is msg, failing the test if no such line was emitted.
 func findRecordByMessage(t *testing.T, output, msg string) map[string]any {
 	t.Helper()
 

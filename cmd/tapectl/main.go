@@ -1,10 +1,6 @@
-// Command tapectl is the operator CLI for tape-archiver. It submits a run
-// config to Temporal as a backup workflow (optionally as a dry-run against the
-// mhvtl virtual library) and inspects the status of running or completed runs.
-//
-// Temporal connection settings are read from the environment via the same
-// envconfig loader the worker uses (TEMPORAL_ADDRESS, TEMPORAL_NAMESPACE, and
-// the rest); see pkg/temporalclient.
+// Command tapectl is the operator CLI for tape-archiver: it submits backup runs
+// to Temporal and inspects or controls the running one. Temporal settings come
+// from the environment (see pkg/temporalclient).
 package main
 
 import (
@@ -39,8 +35,7 @@ arguments; they act on the one backup run. Connection is configured via
 TEMPORAL_ADDRESS (and TEMPORAL_NAMESPACE, etc.).
 `
 
-// getenv reads environment variables. It is a package variable so tests can
-// substitute a lookup without mutating the process environment.
+// getenv is a var so tests can substitute it.
 var getenv = os.Getenv
 
 func main() {
@@ -50,8 +45,6 @@ func main() {
 	}
 }
 
-// dispatch routes to the requested subcommand. It is separated from main so
-// tests can drive the CLI with explicit args, output, and context.
 func dispatch(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("a command is required\n\n%s", usage)
@@ -78,10 +71,6 @@ func dispatch(ctx context.Context, args []string, out io.Writer) error {
 	}
 }
 
-// requireTemporalAddress fails fast with a descriptive error when the Temporal
-// frontend address is unset, before any connection is attempted. getenv is
-// injected so tests can exercise both branches without mutating the process
-// environment.
 func requireTemporalAddress(getenv func(string) string) error {
 	if getenv("TEMPORAL_ADDRESS") == "" {
 		return fmt.Errorf("TEMPORAL_ADDRESS is not set; set it to the Temporal frontend address (e.g. localhost:7233)")
@@ -90,10 +79,8 @@ func requireTemporalAddress(getenv func(string) string) error {
 	return nil
 }
 
-// requireNoArgs rejects any positional arguments for the singleton subcommands
-// (status, resume, abort, cancel). Every run submits under the same workflow ID
-// (backupWorkflowID, SPEC §4.2), so these commands act on that one run and take no
-// arguments; a stray argument is a mistake worth reporting rather than ignoring.
+// requireNoArgs rejects positional arguments for the subcommands that act on
+// the singleton run.
 func requireNoArgs(command string, args []string) error {
 	flagSet := flag.NewFlagSet(command, flag.ContinueOnError)
 	if err := flagSet.Parse(args); err != nil {

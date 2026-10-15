@@ -13,26 +13,17 @@ const (
 	EnvPoolMount = "TAPE_POOL_MOUNT"
 	// EnvPoolDataset overrides the ZFS dataset name used by integration tests.
 	EnvPoolDataset = "TAPE_POOL_DATASET"
-	// EnvTestSnapshot names a snapshot that exists under the test dataset, for
-	// exercising the positive read paths. Empty when unset.
+	// EnvTestSnapshot names a snapshot that exists under the test dataset.
 	EnvTestSnapshot = "TAPE_TEST_SNAPSHOT"
-	// EnvTestMinBytes is the minimum logicalreferenced byte count the test
-	// dataset/snapshot is known to hold, used to assert a meaningful value.
+	// EnvTestMinBytes is the minimum logicalreferenced bytes the test dataset holds.
 	EnvTestMinBytes = "TAPE_TEST_MIN_BYTES"
 
-	// Defaults target the ephemeral, file-backed pool created by "make
-	// zpool-up" (see scripts/zpool-up.sh), NOT the production pool. Tests are
-	// read-only, but defaulting to a throwaway pool keeps them deterministic and
-	// hermetic and avoids silently reaching for live data. To run against the
-	// real pool deliberately, set TAPE_POOL_MOUNT=/mnt/bulk-pool-01 (and the
-	// matching TAPE_POOL_DATASET). These mirror the zpool-up.sh defaults.
+	// Defaults target the throwaway "make zpool-up" pool, never live data.
 	defaultPoolMount   = "/mnt/tape-test-pool/archive"
 	defaultPoolDataset = "tape_test/archive"
 )
 
-// PoolMount returns the ZFS dataset mountpoint whose .zfs/snapshot directory the
-// tests read, preferring TAPE_POOL_MOUNT and falling back to the "make zpool-up"
-// test pool. "make test-integration" sets it explicitly.
+// PoolMount returns TAPE_POOL_MOUNT, or the "make zpool-up" mountpoint.
 func PoolMount(t *testing.T) string {
 	t.Helper()
 
@@ -43,9 +34,7 @@ func PoolMount(t *testing.T) string {
 	return defaultPoolMount
 }
 
-// PoolDataset returns the ZFS dataset name to query, preferring TAPE_POOL_DATASET
-// and falling back to the "make zpool-up" test dataset. It is a full dataset path
-// (pool/dataset), not derivable from the mountpoint, so it has its own default.
+// PoolDataset returns TAPE_POOL_DATASET, or the "make zpool-up" dataset.
 func PoolDataset(t *testing.T) string {
 	t.Helper()
 
@@ -56,17 +45,14 @@ func PoolDataset(t *testing.T) string {
 	return defaultPoolDataset
 }
 
-// TestSnapshot returns the short name of a snapshot known to exist under the
-// test dataset (from TAPE_TEST_SNAPSHOT), or "" when unset.
+// TestSnapshot returns TAPE_TEST_SNAPSHOT, or "".
 func TestSnapshot(t *testing.T) string {
 	t.Helper()
 
 	return os.Getenv(EnvTestSnapshot)
 }
 
-// TestMinBytes returns the minimum logicalreferenced byte count the test
-// dataset is known to hold (from TAPE_TEST_MIN_BYTES), or 0 when unset or
-// unparseable.
+// TestMinBytes returns TAPE_TEST_MIN_BYTES, or 0 when unset.
 func TestMinBytes(t *testing.T) int64 {
 	t.Helper()
 
@@ -83,11 +69,7 @@ func TestMinBytes(t *testing.T) int64 {
 	return value
 }
 
-// SkipIfPoolUnavailable skips the test when the ZFS pool is not mounted at the
-// PoolMount path. Integration tests that read snapshots or dataset properties
-// require a mounted pool; without it (e.g. CI, isolated dev) the test is skipped
-// rather than failed. Run "make test-integration", which creates an ephemeral
-// file-backed pool via "make zpool-up".
+// SkipIfPoolUnavailable skips the test when no pool is mounted at PoolMount.
 func SkipIfPoolUnavailable(t *testing.T) {
 	t.Helper()
 
@@ -98,19 +80,14 @@ func SkipIfPoolUnavailable(t *testing.T) {
 	}
 }
 
-// CreateEphemeralDataset creates a throwaway child dataset named <PoolDataset>/name
-// on the test pool and returns its full ZFS name. It is for tests that need to
-// manipulate a dataset's mount state without touching the shared payload dataset.
-// A t.Cleanup destroys it (recursively) at test end, and any leftover from a
-// previous run is destroyed first. When zfs cannot create the dataset — e.g. an
-// unprivileged run outside "make test-integration" — the test is skipped rather
-// than failed.
+// CreateEphemeralDataset creates PoolDataset/name, destroyed at test end, and
+// returns its full name. Skips when zfs create is not permitted.
 func CreateEphemeralDataset(t *testing.T, name string) string {
 	t.Helper()
 
 	dataset := PoolDataset(t) + "/" + name
 
-	// Clear any leftover from an interrupted prior run so create is deterministic.
+	// Clear any leftover from an interrupted prior run.
 	_ = exec.CommandContext(t.Context(), "zfs", "destroy", "-r", dataset).Run()
 
 	if out, err := exec.CommandContext(t.Context(), "zfs", "create", dataset).CombinedOutput(); err != nil {
@@ -125,8 +102,7 @@ func CreateEphemeralDataset(t *testing.T, name string) string {
 	return dataset
 }
 
-// UnmountDataset unmounts the given ZFS dataset, failing the test on error. It is
-// paired with CreateEphemeralDataset to exercise the unmounted-dataset paths.
+// UnmountDataset unmounts dataset, failing the test on error.
 func UnmountDataset(t *testing.T, dataset string) {
 	t.Helper()
 
@@ -135,9 +111,7 @@ func UnmountDataset(t *testing.T, dataset string) {
 	}
 }
 
-// SkipIfZFSUnavailable skips the test when the ZFS userspace tooling or kernel
-// support is absent: the zfs binary must be on PATH and /dev/zfs must exist.
-// Tests that shell out to zfs (e.g. reading logicalreferenced) use this.
+// SkipIfZFSUnavailable skips the test unless zfs is on PATH and /dev/zfs exists.
 func SkipIfZFSUnavailable(t *testing.T) {
 	t.Helper()
 
