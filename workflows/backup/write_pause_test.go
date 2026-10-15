@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
@@ -929,4 +930,36 @@ func TestEjectProjectionDropsIndexAndHealth(t *testing.T) {
 	// The projection must be a fresh slice: mutating it never touches the run record.
 	projected[0].Barcode = tape.Barcode("MUTATED")
 	assert.Equal(t, tape.Barcode("TAPE01L6"), written[0].Barcode, "projection must not alias the input")
+}
+
+// TestWritePathLoadNonBlankPauseNamesTape checks a Load refused for a non-blank
+// tape alerts with that tape and only its slot.
+func TestWritePathLoadNonBlankPauseNamesTape(t *testing.T) {
+	cfg := twoDriveConfig(3600)
+	env := newWritePauseEnv(t)
+
+	env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(nil,
+		temporal.NewNonRetryableApplicationError("tape USED01L5 is not blank", nonBlankTapeErrorType, nil, "USED01L5", 101))
+
+	var alert WritePathPauseInput
+
+	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, input WritePathPauseInput) error {
+			alert = input
+
+			return nil
+		})
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(OperatorAbortSignal, nil)
+	}, 30*time.Second)
+
+	env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+
+	assert.Equal(t, PhaseLoad, alert.Phase)
+	assert.Equal(t, []string{"USED01L5"}, alert.AffectedTapes)
+	assert.Equal(t, []int{101}, alert.ReloadSlots)
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -58,7 +59,14 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 		loaded, err := loadPhase(ctx, cfg, pending)
 		if err != nil {
 			// The whole set failed to load. Pause; on resume retry the same set.
-			switch waitForOperator(ctx, cfg, state, PhaseLoad, nil, slotsOf(pending), err) {
+			var affected []string
+
+			reload := slotsOf(pending)
+			if barcode, slot, ok := nonBlankTape(err); ok {
+				affected, reload = []string{barcode}, []int{slot}
+			}
+
+			switch waitForOperator(ctx, cfg, state, PhaseLoad, affected, reload, err) {
 			case pauseResumed:
 				continue
 			case pauseAborted:
@@ -379,4 +387,22 @@ func joinFailed(failed []failedTape) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// nonBlankTapeErrorType marks a Load refused because a tape was not blank; its
+// details carry the barcode and the slot it was returned to.
+const nonBlankTapeErrorType = "NonBlankTape"
+
+// nonBlankTape returns the tape Load refused as non-blank, if that is why it failed.
+func nonBlankTape(err error) (barcode string, slot int, ok bool) {
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || appErr.Type() != nonBlankTapeErrorType {
+		return "", 0, false
+	}
+
+	if appErr.Details(&barcode, &slot) != nil || barcode == "" {
+		return "", 0, false
+	}
+
+	return barcode, slot, true
 }

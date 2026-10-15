@@ -74,7 +74,7 @@ func newLoadActivities() *LoadActivities { return &LoadActivities{} }
 // tape. It returns a LoadedTape per tape in the same order as input.Tapes.
 //
 // MaximumAttempts is 1: tape moves are physical and non-idempotent.
-func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTape, error) {
+func (a *LoadActivities) Load(ctx context.Context, input LoadInput) (_ []LoadedTape, err error) {
 	setSize := len(input.Tapes)
 	if setSize == 0 {
 		return nil, nil
@@ -108,6 +108,25 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 	// it through avoids any extra changer reads.
 	relocated := make(map[int]tape.Barcode)
 
+	// A failed Load returns what it loaded to the slots they came from, so a
+	// refused tape is never left in a drive.
+	type loadedInto struct{ slot, drive int }
+
+	var inDrives []loadedInto
+
+	defer func() {
+		if err == nil {
+			return
+		}
+
+		for _, loaded := range inDrives {
+			if unloadErr := changer.Unload(context.WithoutCancel(ctx), loaded.slot, loaded.drive); unloadErr != nil {
+				slog.WarnContext(ctx, "load: could not return a tape to its slot after a failed load",
+					"slot", loaded.slot, "drive", loaded.drive, "error", unloadErr)
+			}
+		}
+	}()
+
 	for i, assignment := range input.Tapes {
 		stDev := assignment.Drive
 		targetSlot := assignment.BlankSlot
@@ -130,6 +149,8 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 			return nil, fmt.Errorf("load drive %d (%s, slot %d): %w", assignment.DriveIndex, stDev, targetSlot, err)
 		}
 
+		inDrives = append(inDrives, loadedInto{slot: targetSlot, drive: de.Address})
+
 		sgDev, err := drive.SGDevice()
 		if err != nil {
 			return nil, fmt.Errorf("drive %d (%s): resolve SCSI generic node: %w", assignment.DriveIndex, stDev, err)
@@ -144,8 +165,10 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) ([]LoadedTap
 
 		if !blank {
 			if !input.AllowNonBlankTapes {
-				return nil, fmt.Errorf("drive %d (%s): tape %s is not blank — refusing to write"+
-					" (SPEC §4.3 step 6; reload a blank tape to continue)", assignment.DriveIndex, stDev, barcode)
+				return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+					"drive %d (%s): tape %s is not blank — refusing to write"+
+						" (SPEC §4.3 step 6; it was returned to slot %d — replace it with a blank to continue)",
+					assignment.DriveIndex, stDev, barcode, targetSlot), nonBlankTapeErrorType, nil, string(barcode), targetSlot)
 			}
 
 			// The operator deliberately opted in to reclaiming used tapes
