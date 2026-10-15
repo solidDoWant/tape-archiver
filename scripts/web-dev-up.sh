@@ -264,6 +264,16 @@ WEB_DEV_LOG_DIR="$LOG_DIR" docker compose \
   -p "$(basename "$PROJECT_DIR" | tr '[:upper:]' '[:lower:]')-obs" \
   -f "$PROJECT_DIR/docker-compose.web-dev.yml" up -d --wait --wait-timeout 120
 
+# The VictoriaLogs image has no shell for a compose healthcheck; probe it here.
+for _ in $(seq 1 120); do
+  curl -fs "$VICTORIALOGS_URL/health" > /dev/null 2>&1 && break
+  sleep 0.5 || true
+done
+curl -fs "$VICTORIALOGS_URL/health" > /dev/null 2>&1 || {
+  echo "error: VictoriaLogs did not become healthy at $VICTORIALOGS_URL" >&2
+  exit 1
+}
+
 # ---------------------------------------------------------------------------
 # Recovery binaries (real static age/par2/zstd/tar — the data worker's Report
 # phase requires them; `make web-dev`'s prerequisites already built them via

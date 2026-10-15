@@ -31,22 +31,18 @@
 
 services:
   victorialogs:
-    image: victoriametrics/victoria-logs:v1.24.0-victorialogs
+    image: victoriametrics/victoria-logs:v1.53.0@sha256:251121fa882af99b95ba0c230a4a2f412ea602d2698c64a96c58dc9842bb755d
     restart: on-failure
     network_mode: host
     command:
       - -httpListenAddr=:9428
     volumes:
       - victorialogs_data:/victoria-logs-data
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9428/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 5s
+    # No healthcheck: the image is distroless (no shell or wget). web-dev-up.sh
+    # polls /health from the host instead.
 
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.147.0
+    image: victoriametrics/victoria-metrics:v1.154.0@sha256:4bd592341587d669b7f57d54bbb82bd21ac8675f4e24234b7703a7c0f85197d8
     restart: on-failure
     network_mode: host
     command:
@@ -67,20 +63,18 @@ services:
   # $WEB_DEV_STATE_DIR/logs on the host — see scripts/web-dev-up.sh, which
   # sets WEB_DEV_LOG_DIR before bringing this stack up) and ships them into
   # victorialogs — see scripts/web-dev-vector.yml for the pipeline itself.
-  # Depends on victorialogs being healthy first so it isn't posting into a
-  # not-yet-serving endpoint at startup (it would just retry, but there is no
-  # reason to make it). The healthcheck hits vector's own API (enabled in
+  # Its sink retries until victorialogs is serving. The healthcheck hits vector's own API (enabled in
   # web-dev-vector.yml, loopback-only) so `up --wait` fails fast and visibly
   # if the config doesn't load rather than reporting a crash-looping shipper
   # as up: vector exits on a config error, and without a healthcheck compose
   # counts a just-started (about-to-crash) container as ready.
   vector:
-    image: timberio/vector:0.44.0-alpine@sha256:e285e1543366ac306f3957c25d3aca4d2f86855ae274fa4de3522676d72fa0df
+    image: timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a
     restart: on-failure
     network_mode: host
     depends_on:
       victorialogs:
-        condition: service_healthy
+        condition: service_started
     volumes:
       - ./scripts/web-dev-vector.yml:/etc/vector/vector.yaml:ro
       - ${WEB_DEV_LOG_DIR:?WEB_DEV_LOG_DIR must be set — see scripts/web-dev-up.sh}:/var/log/tape-archiver:ro
