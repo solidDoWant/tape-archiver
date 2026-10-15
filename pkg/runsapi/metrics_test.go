@@ -12,9 +12,7 @@ import (
 	"go.temporal.io/sdk/client"
 )
 
-// envFor builds a getenv func serving vmURL for VICTORIAMETRICS_URL and ""
-// for anything else — the metrics.go handlers only ever read that one
-// variable.
+// envFor returns a getenv serving vmURL for VICTORIAMETRICS_URL only.
 func envFor(vmURL string) func(string) string {
 	return func(key string) string {
 		if key == victoriaMetricsEnvVar {
@@ -25,9 +23,7 @@ func envFor(vmURL string) func(string) string {
 	}
 }
 
-// rawPair encodes one Prometheus/VictoriaMetrics [timestamp, "value"] pair
-// the way the real API does: a bare JSON number timestamp and a JSON string
-// value.
+// rawPair encodes a [timestamp, "value"] pair as the real API does.
 func rawPair(t *testing.T, timestamp float64, value string) []json.RawMessage {
 	t.Helper()
 
@@ -40,9 +36,7 @@ func rawPair(t *testing.T, timestamp float64, value string) []json.RawMessage {
 	return []json.RawMessage{ts, val}
 }
 
-// fakeVictoriaMetrics serves instant to /api/v1/query and rangeResp to
-// /api/v1/query_range — a hand-rolled fake of the one real dependency these
-// handlers proxy, per the "never mock the component under test" rule.
+// fakeVictoriaMetrics serves instant to /api/v1/query and rangeResp to /api/v1/query_range.
 func fakeVictoriaMetrics(t *testing.T, instant, rangeResp vmResponse) *httptest.Server {
 	t.Helper()
 
@@ -77,8 +71,7 @@ func TestGetRunDriveMetricsHandler(t *testing.T) {
 		require.NoError(t, json.Unmarshal(first.Body.Bytes(), &body))
 		assert.Equal(t, errVMUnconfigured.Error(), body.Error)
 
-		// A second, independent request gets byte-identical output — "stable"
-		// per issue #275 AC1, not just "some 503".
+		// Byte-identical output: "stable" per issue #275 AC1.
 		second := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/metrics/drives", nil)
 		assert.Equal(t, first.Body.String(), second.Body.String())
 	})
@@ -165,10 +158,7 @@ func TestGetRunDriveMetricsHandler(t *testing.T) {
 			return &fakeHistoryIterator{events: buildSuccessfulRunHistory(t)}
 		}}
 
-		// A data-worker restart mid-run leaves two throughput series for the same
-		// barcode (distinct instance labels). The newer sample is listed FIRST, so
-		// a last-writer-wins merge would wrongly keep the older; freshest-by-time
-		// must keep the newer.
+		// The newer sample is listed first, so last-writer-wins would pick the wrong one.
 		instant := vmResponse{Status: "success", Data: vmData{ResultType: "vector", Result: []vmResult{
 			{Metric: map[string]string{"__name__": metricThroughput, "barcode": "GOODTAPE01", "instance": "worker-new"}, Value: rawPair(t, 1700000600, "142.5")},
 			{Metric: map[string]string{"__name__": metricThroughput, "barcode": "GOODTAPE01", "instance": "worker-old"}, Value: rawPair(t, 1700000000, "9.9")},
@@ -209,9 +199,7 @@ func TestMetricQueryWindow(t *testing.T) {
 	assert.Equal(t, closeTime, metricQueryWindow(runHistory{Closed: true, CloseTime: closeTime}, now),
 		"a closed run with no reconstructable write activity falls back to its close time")
 
-	// A closed run that has a Write-phase activity is anchored to when it stopped
-	// writing, not its close time: the write finished long before close (a slow
-	// eject/burn), so a close-time window would miss the throughput samples.
+	// The write finished long before close, so close time would miss the samples.
 	writeEnd := closeTime.Add(-time.Hour)
 	withWrite := runHistory{
 		Closed:    true,
@@ -237,9 +225,7 @@ func TestGetRunDriveMetricsHistoryHandler(t *testing.T) {
 	})
 
 	t.Run("unconfigured VictoriaMetrics is a 503 even with an unknown metric", func(t *testing.T) {
-		// The config check must run before the metric-param allowlist, so a
-		// client that keys "metrics unavailable" on 503 sees it rather than a
-		// spurious 400 for the bad param.
+		// The config check must precede the metric allowlist.
 		handler := newMux(newHandler(fake, emptyEnv))
 		recorder := doJSON(t, handler, http.MethodGet, "/api/runs/run-1/metrics/drives/GOODTAPE01/history?metric=bogus", nil)
 		assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
@@ -292,9 +278,7 @@ func TestGetRunDriveMetricsHistoryHandler(t *testing.T) {
 	})
 
 	t.Run("merges the sparkline across two series left by a mid-run worker restart", func(t *testing.T) {
-		// A restart splits the barcode's samples across two series (distinct
-		// instance labels), each covering part of the window. Taking only the
-		// first series would drop half the sparkline; the points must be merged.
+		// A restart splits the samples across two series; both must be merged.
 		rangeResp := vmResponse{Status: "success", Data: vmData{ResultType: "matrix", Result: []vmResult{
 			{
 				Metric: map[string]string{"barcode": "GOODTAPE01", "instance": "worker-old"},

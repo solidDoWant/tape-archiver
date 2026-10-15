@@ -13,9 +13,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
 )
 
-// captureStderr redirects os.Stderr to a pipe for the duration of fn, then
-// returns everything written to it. It is not safe for parallel use: it swaps
-// the process-global os.Stderr, which logging.Setup writes to.
+// captureStderr returns what fn writes to stderr. Not safe for parallel use.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 
@@ -47,8 +45,6 @@ func captureStderr(t *testing.T, fn func()) string {
 	return builder.String()
 }
 
-// nonEmptyLines splits captured output into the individual JSON log records,
-// dropping any trailing blank line.
 func nonEmptyLines(output string) []string {
 	var lines []string
 
@@ -114,8 +110,7 @@ func TestSetupUnrecognizedLevelWarnsAndFallsBackToInfo(t *testing.T) {
 		records = append(records, record)
 	}
 
-	// The fallback warning is emitted by Setup itself, and the subsequent
-	// info record proves the effective level is info (debug suppressed).
+	// Setup's own fallback warning plus the info record; debug is suppressed.
 	require.Len(t, records, 2)
 	assert.Equal(t, "WARN", records[0][slog.LevelKey])
 	assert.Equal(t, "bogus", records[0]["input"])

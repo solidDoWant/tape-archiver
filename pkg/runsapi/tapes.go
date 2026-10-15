@@ -1,11 +1,7 @@
-// This file implements GET /api/runs/{runID}/tapes and GET /api/tapes (issue
-// #273): per-run and aggregate-across-runs tape/copy outcomes, reconstructed
-// from a run's raw workflow history (history.go) by correlating the Load
-// phase's per-tape barcodes with the Write phase's FormatTape/WriteTree/
-// FinalizeTape/MeasureWriteHealth activities for that same barcode — never
-// from persisted state (SPEC §4.2). The aggregate endpoint degrades per run
-// (issue #273's requirement): a run whose history cannot be reconstructed
-// contributes an entry to RunErrors instead of failing the whole listing.
+// GET /api/runs/{runID}/tapes and GET /api/tapes (issue #273): tape outcomes
+// reconstructed from workflow history by joining Load's barcodes with the
+// Write-phase activities, never persisted state (SPEC §4.2). The aggregate
+// endpoint degrades per run instead of failing the whole listing.
 package runsapi
 
 import (
@@ -23,32 +19,21 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// Tape outcome result values (issue #273 AC5/AC6).
 const (
-	// tapeOutcomeLoaded means the tape was loaded into a drive but the write
-	// pipeline for it has not reached a terminal state yet in this history —
-	// either the run is still in progress, or it ended (crashed/was
-	// terminated) before finishing this tape.
+	// tapeOutcomeLoaded: loaded, but its write pipeline has not finished (still
+	// running, or the run ended first).
 	tapeOutcomeLoaded = "loaded"
-	// tapeOutcomeWritten means FinalizeTape completed successfully for this
-	// tape: it was formatted, written, and its LTFS index captured.
+	// tapeOutcomeWritten: FinalizeTape completed.
 	tapeOutcomeWritten = "written"
-	// tapeOutcomeFailed means FormatTape, WriteTree, or FinalizeTape failed,
-	// timed out, or was canceled for this tape.
+	// tapeOutcomeFailed: FormatTape, WriteTree, or FinalizeTape failed.
 	tapeOutcomeFailed = "failed"
 )
 
-// WriteHealthInfo is the JSON projection of backup.WriteHealth (issue #273):
-// the observational write-health verdict measured for one tape (SPEC §14),
-// present only when a MeasureWriteHealth result was found for the tape's
-// barcode.
+// WriteHealthInfo is the JSON projection of backup.WriteHealth (SPEC §14).
 type WriteHealthInfo struct {
-	// Measured mirrors backup.WriteHealth.Measured: false means the
-	// MeasureWriteHealth activity could not take a measurement at all
-	// (writehealth.go — the run still succeeds), so every other field here is
-	// a zero placeholder, not a measured value. Without this flag a
-	// never-measured tape would be indistinguishable from one measured
-	// unhealthy (Healthy == false either way).
+	// Measured is false when no measurement could be taken; the other fields
+	// are then zero placeholders, so "unmeasured" is distinguishable from
+	// "unhealthy".
 	Measured            bool     `json:"measured"`
 	ThroughputMBps      float64  `json:"throughputMBps"`
 	FloorMBps           float64  `json:"floorMBps,omitempty"`
@@ -57,15 +42,11 @@ type WriteHealthInfo struct {
 	Repositions         int64    `json:"repositions,omitempty"`
 	RepositionsMeasured bool     `json:"repositionsMeasured"`
 	TapeAlertFlags      []string `json:"tapeAlertFlags,omitempty"`
-	// Healthy mirrors backup.WriteHealth.Healthy(): the tape streamed cleanly
-	// (measured, at/above a known floor, zero measured repositions, no active
-	// TapeAlert flags). Carried pre-computed so clients need not reimplement
-	// the verdict. Always false when Measured is false — check Measured to
-	// tell "unhealthy" apart from "unmeasured".
+	// Healthy is backup.WriteHealth.Healthy(), pre-computed; always false when
+	// Measured is false.
 	Healthy bool `json:"healthy"`
 }
 
-// toWriteHealthInfo maps a decoded backup.WriteHealth to its JSON projection.
 func toWriteHealthInfo(health backup.WriteHealth) *WriteHealthInfo {
 	return &WriteHealthInfo{
 		Measured:            health.Measured,
@@ -80,28 +61,22 @@ func toWriteHealthInfo(health backup.WriteHealth) *WriteHealthInfo {
 	}
 }
 
-// TapeOutcome is one physical tape this run loaded, with its outcome (issue
-// #273 AC5): barcode, logical tape/copy index, storage slot, and result.
+// TapeOutcome is one physical tape this run loaded, with its outcome.
 type TapeOutcome struct {
 	Barcode    string `json:"barcode"`
 	TapeIndex  int    `json:"tapeIndex"`
 	CopyIndex  int    `json:"copyIndex"`
 	DriveIndex int    `json:"driveIndex"`
-	// Slot is the storage slot the blank tape was loaded from
-	// (LoadedTape.SourceSlot).
+	// Slot is the storage slot the tape was loaded from.
 	Slot int `json:"slot"`
 	// Result is one of tapeOutcomeLoaded/tapeOutcomeWritten/tapeOutcomeFailed.
 	Result string `json:"result"`
-	// Error is the failure rendered as text, set only when Result ==
-	// "failed".
+	// Error is set only when Result is "failed".
 	Error string `json:"error,omitempty"`
-	// OverwroteNonBlank is true when this tape was found non-blank at load
-	// and written over anyway because the run set
-	// library.allowNonBlankTapes (SPEC §4.3 step 6).
+	// OverwroteNonBlank is true when a non-blank tape was written over because
+	// the run set library.allowNonBlankTapes (SPEC §4.3 step 6).
 	OverwroteNonBlank bool `json:"overwroteNonBlank,omitempty"`
-	// WriteHealth is the observational write-health verdict (SPEC §14), nil
-	// when no MeasureWriteHealth result was found for this barcode (not yet
-	// measured, or the tape never reached the Write phase).
+	// WriteHealth is nil when no MeasureWriteHealth result exists for the tape.
 	WriteHealth *WriteHealthInfo `json:"writeHealth,omitempty"`
 }
 
@@ -111,26 +86,17 @@ type RunTapesResponse struct {
 	Tapes []TapeOutcome `json:"tapes"`
 }
 
-// AggregateTapeOutcome is one tape outcome in the GET /api/tapes aggregate
-// listing, attributed back to its run (issue #273 AC6).
+// AggregateTapeOutcome is one tape outcome in GET /api/tapes, attributed to its run.
 type AggregateTapeOutcome struct {
 	TapeOutcome
 	RunID        string    `json:"runId"`
 	RunStartTime time.Time `json:"runStartTime"`
 	RunStatus    string    `json:"runStatus"`
-	// DryRun is true when the run that loaded this tape was a dry-run against
-	// the mhvtl virtual library (runsubmit.MemoKeyDryRun), so its barcodes are
-	// virtual and do not correspond to a physical tape. The Tapes page uses
-	// this to keep dry-run tapes from being mistaken for the physical library's
-	// real inventory (hidden by default, surfaced behind a toggle).
+	// DryRun marks virtual mhvtl tapes so they are not mistaken for real inventory.
 	DryRun bool `json:"dryRun"`
 }
 
-// RunError names a run whose tape outcomes could not be reconstructed
-// (history.go's aged-out/not-found/upstream classification), reported
-// alongside — never instead of — every other run's successfully derived
-// tapes, so one bad run degrades the listing rather than failing it entirely
-// (issue #273's explicit requirement).
+// RunError names a run whose tape outcomes could not be reconstructed.
 type RunError struct {
 	RunID string `json:"runId"`
 	Error string `json:"error"`
@@ -139,28 +105,17 @@ type RunError struct {
 // AggregateTapesResponse is the GET /api/tapes response body.
 type AggregateTapesResponse struct {
 	Tapes []AggregateTapeOutcome `json:"tapes"`
-	// RunErrors lists runs (still within Temporal visibility) whose tape
-	// outcomes could not be derived, each with why. Omitted (empty) when
-	// every run in Temporal visibility degraded cleanly.
+	// RunErrors lists runs whose tape outcomes could not be derived.
 	RunErrors []RunError `json:"runErrors,omitempty"`
 }
 
-// listTapesConcurrency bounds how many runs' histories listTapes fetches at
-// once. Backup runs are a serial singleton (SPEC §4.2), so Temporal
-// visibility holds at most a few hundred executions in practice (see
-// listPageSize's doc comment) — this only guards against issuing that many
-// GetWorkflowHistory RPCs to Temporal all at once.
+// listTapesConcurrency bounds concurrent GetWorkflowHistory RPCs.
 const listTapesConcurrency = 8
 
-// defaultListTapesRunLimit is how many of the most recent runs GET /api/tapes
-// reconstructs when the request does not say (the `limit` query parameter).
-// Each run costs a full history fetch + parse, so the endpoint's work is
-// O(runs × history size); bounding it to the newest runs by default keeps the
-// common tapes-page/dashboard request cheap while `?limit=` (capped at
-// listPageSize) lets a client deliberately reach further back.
+// defaultListTapesRunLimit bounds how many newest runs GET /api/tapes
+// reconstructs by default, since each costs a full history fetch.
 const defaultListTapesRunLimit = 50
 
-// getRunTapes implements GET /api/runs/{runID}/tapes.
 func (h *handler) getRunTapes(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
@@ -182,16 +137,9 @@ func (h *handler) getRunTapes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, RunTapesResponse{RunID: runID, Tapes: deriveTapeOutcomes(history.Activities)})
 }
 
-// listTapes implements GET /api/tapes: tape outcomes across the most recent
-// runs still in Temporal visibility (issue #273 AC6), driving the Tapes page
-// and the dashboard's library-history summary. The `limit` query parameter
-// bounds how many of the newest runs are reconstructed
-// (defaultListTapesRunLimit when absent, capped at listPageSize) since each
-// run costs a full history fetch. Each run's history is fetched independently
-// and degrades on its own failure (RunError, which applies within whatever
-// limit is in effect) rather than failing the whole response — a listing must
-// never 500 because one old or foreign/stub run's history cannot be
-// reconstructed.
+// listTapes implements GET /api/tapes over the newest `limit` runs. A run whose
+// history cannot be reconstructed becomes a RunError rather than failing the
+// response.
 func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
@@ -210,10 +158,7 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Newest runs first, then apply the run limit. Sorting happens here in Go
-	// for the same reason listRuns sorts client-side (runsapi.go): standard
-	// SQL-backed Temporal visibility rejects ORDER BY, so this is the only
-	// portable ordering.
+	// Sorted in Go: SQL-backed Temporal visibility rejects ORDER BY.
 	sort.Slice(executions, func(i, j int) bool {
 		return executions[i].GetStartTime().AsTime().After(executions[j].GetStartTime().AsTime())
 	})
@@ -224,12 +169,7 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		mutex sync.Mutex
-		// Initialized (not a nil slice) so an empty result serializes as
-		// "tapes": [] rather than "tapes": null — a fresh deployment with no
-		// runs, or a limit window in which every run's history has aged out,
-		// otherwise emits null and crashes a web client that maps over it. This
-		// matches the per-run endpoint, whose deriveTapeOutcomes always returns
-		// a non-nil slice.
+		// Non-nil so an empty result serializes as [] rather than null.
 		tapes = []AggregateTapeOutcome{}
 		errs  []RunError
 	)
@@ -251,14 +191,8 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 			defer mutex.Unlock()
 
 			if err != nil {
-				// Mask an upstream-fault (502/504-class) error the same way
-				// writeError does before it reaches the client: fetchRunHistory's
-				// raw Temporal/gRPC error can embed internal endpoint/host detail,
-				// and this one is embedded in a per-run RunError inside an
-				// otherwise-200 body rather than a status, so without this it would
-				// bypass the masking every other endpoint applies (the per-run
-				// getRunTapes masks it via writeHistoryError → writeError). The raw
-				// error is logged server-side for diagnosis.
+				// Mask upstream errors as writeError does: they can embed internal
+				// host detail and would otherwise leak via a 200 body.
 				status := statusForTemporalError(err)
 				if status == http.StatusBadGateway || status == http.StatusGatewayTimeout {
 					slog.ErrorContext(groupCtx, "runsapi: reconstruct run history for tape listing failed", "run_id", runID, "error", err)
@@ -283,23 +217,11 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// group.Wait's error is always nil: every goroutine above returns nil
-	// unconditionally and records its own failure in errs instead, so one
-	// run's unreconstructable history degrades that run's entry rather than
-	// aborting the others still in flight or failing this request (issue
-	// #273's explicit degrade-per-run requirement).
+	// Always nil: goroutines record failures in errs so one run degrades alone.
 	_ = group.Wait()
 
-	// A done request context means the whole request timed out (requestTimeout)
-	// or the client disconnected mid-flight — one infra failure, not N
-	// independent per-run failures. Every in-flight history fetch then returned a
-	// context error that was recorded as a per-run RunError above, so without
-	// this check the handler would emit 200 with a pile of "context deadline
-	// exceeded" rows and a possibly-empty tapes list, misreporting a gateway
-	// timeout as a successful-but-degraded listing. Surface it as the status
-	// statusForTemporalError maps it to (504 for the deadline, 499 for a client
-	// disconnect), the same classification writeError gives a whole-response
-	// Temporal failure.
+	// A done request context is one infra failure (timeout or disconnect), not
+	// N per-run failures; report it as such instead of a degraded 200.
 	if err := ctx.Err(); err != nil {
 		writeError(w, statusForTemporalError(err), fmt.Errorf("list tapes: %w", err))
 
@@ -319,12 +241,8 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 			return tapes[i].CopyIndex < tapes[j].CopyIndex
 		}
 
-		// Barcode is the final, total tiebreak: a Load/Write-failure retry loads a
-		// fresh blank onto the same slot (deriveTapeOutcomes' doc), producing two
-		// outcomes with identical (TapeIndex, CopyIndex) but different barcodes and
-		// results (one failed, one written). Without a tiebreak sort.Slice is not
-		// stable, so those two would render in an order that flips between requests;
-		// barcode makes the ordering deterministic.
+		// A retry loads a fresh blank with the same indexes; barcode keeps the
+		// order deterministic.
 		return tapes[i].Barcode < tapes[j].Barcode
 	})
 	sort.Slice(errs, func(i, j int) bool { return errs[i].RunID < errs[j].RunID })
@@ -332,10 +250,8 @@ func (h *handler) listTapes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, AggregateTapesResponse{Tapes: tapes, RunErrors: errs})
 }
 
-// listTapesRunLimit parses GET /api/tapes' `limit` query parameter: how many
-// of the most recent runs to reconstruct. Absent/empty means
-// defaultListTapesRunLimit; anything else must be a positive integer, capped
-// at listPageSize (the most runs one visibility page returns anyway).
+// listTapesRunLimit parses `limit`: empty means the default, otherwise a
+// positive integer capped at listPageSize.
 func listTapesRunLimit(raw string) (int, error) {
 	if raw == "" {
 		return defaultListTapesRunLimit, nil
@@ -353,16 +269,9 @@ func listTapesRunLimit(raw string) (int, error) {
 	return limit, nil
 }
 
-// deriveTapeOutcomes reconstructs every physical tape this run loaded and its
-// outcome, by joining every completed Load activity's result (each a batch of
-// backup.LoadedTape, library.go) with the FormatTape/WriteTree/FinalizeTape/
-// MeasureWriteHealth activities recorded for that same barcode
-// (activityRecord.Barcode, pre-extracted by history.go). One entry per
-// barcode: a barcode identifies one physical tape for the run's whole
-// lifetime (a Load/Write-failure retry loads a *fresh* blank — a different
-// physical tape with its own barcode — onto the same slot, SPEC §4.3, so it
-// naturally appears as its own separate entry here rather than overwriting
-// the failed attempt).
+// deriveTapeOutcomes returns one entry per loaded barcode. A failed tape's
+// retry loads a fresh blank with its own barcode, so it appears as a separate
+// entry (SPEC §4.3).
 func deriveTapeOutcomes(activities []activityRecord) []TapeOutcome {
 	var loaded []backup.LoadedTape
 
@@ -394,22 +303,16 @@ func deriveTapeOutcomes(activities []activityRecord) []TapeOutcome {
 			return outcomes[i].CopyIndex < outcomes[j].CopyIndex
 		}
 
-		// Barcode is the final, total tiebreak so a Load/Write-failure retry (a
-		// fresh blank on the same slot — same TapeIndex/CopyIndex, different
-		// barcode and result) renders in a deterministic order rather than one
-		// sort.Slice picks arbitrarily and can flip between requests.
+		// Deterministic tiebreak for retries on the same slot.
 		return outcomes[i].Barcode < outcomes[j].Barcode
 	})
 
 	return outcomes
 }
 
-// tapeOutcomeFor resolves one loaded tape's outcome by walking its write
-// pipeline in order: FormatTape, then WriteTree, then FinalizeTape. The first
-// of the three that failed/timed out/was canceled decides a "failed" outcome;
-// FinalizeTape completing decides "written"; finding none of the three at all
-// (Load succeeded but nothing progressed further — an in-progress or
-// interrupted run) leaves the default "loaded".
+// tapeOutcomeFor walks FormatTape, WriteTree, FinalizeTape in order: the first
+// failure decides "failed", a completed FinalizeTape decides "written",
+// otherwise the tape stays "loaded".
 func tapeOutcomeFor(activities []activityRecord, tape backup.LoadedTape) TapeOutcome {
 	barcode := string(tape.Barcode)
 
@@ -442,13 +345,8 @@ func tapeOutcomeFor(activities []activityRecord, tape backup.LoadedTape) TapeOut
 	}
 
 	if record, ok := activityByBarcode(activities, "MeasureWriteHealth", barcode); ok && record.Completed {
-		// The activity's result is a backup.TapeMeasurement, which wraps the
-		// verdict in a Health field alongside MediaGeneration — not a bare
-		// backup.WriteHealth. Decoding the payload straight into WriteHealth
-		// does not error (JSON simply ignores the unrecognised Health and
-		// MediaGeneration keys); it silently yields the zero value, so every
-		// written tape reported Measured=false and a 0 MB/s throughput despite
-		// a real measurement sitting in the history (issue #338).
+		// The result is a TapeMeasurement wrapping Health. Decoding straight into
+		// WriteHealth silently yields the zero value (issue #338).
 		var measurement backup.TapeMeasurement
 		if err := decodePayloads(record.Result, &measurement); err == nil {
 			outcome.WriteHealth = toWriteHealthInfo(measurement.Health)
@@ -458,12 +356,9 @@ func tapeOutcomeFor(activities []activityRecord, tape backup.LoadedTape) TapeOut
 	return outcome
 }
 
-// activityByBarcode finds the activity named name whose pre-extracted
-// Barcode matches. At most one such activity is ever scheduled per (name,
-// barcode) pair: FormatTape/WriteTree run at most once per physical tape
-// (workflows/backup/session.go's noRetryOpts, MaximumAttempts: 1), and
-// FinalizeTape's own internal retries (MaximumAttempts: 3) share a single
-// ScheduledEventId, hence a single activityRecord.
+// activityByBarcode relies on at most one activity per (name, barcode):
+// FormatTape/WriteTree never retry, and FinalizeTape's retries share one
+// ScheduledEventId.
 func activityByBarcode(activities []activityRecord, name, barcode string) (activityRecord, bool) {
 	if barcode == "" {
 		return activityRecord{}, false

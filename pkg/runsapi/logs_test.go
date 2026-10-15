@@ -20,15 +20,10 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// testRunID is a well-formed UUID (runIDPattern's only requirement) used by
-// every logs_test.go case that needs to get past getRunLogs' own validation
-// and reach VictoriaLogs/Temporal.
+// testRunID is a UUID that passes runIDPattern.
 const testRunID = "11111111-2222-4333-8444-555555555555"
 
-// fakeVictoriaLogs stands in for a real VictoriaLogs instance: it records
-// every request's "query" parameter (so a test can assert on the LogsQL
-// this package builds) and answers with a fixed newline-delimited JSON body
-// and status code.
+// fakeVictoriaLogs records each request's LogsQL query and answers with a fixed body and status.
 type fakeVictoriaLogs struct {
 	*httptest.Server
 
@@ -52,9 +47,7 @@ func newFakeVictoriaLogs(t *testing.T, status int, body string) *fakeVictoriaLog
 	return fake
 }
 
-// vlLine renders one synthetic VictoriaLogs record line, matching the shape
-// docs/web-ui.md's vector shipper produces (_time/_msg from a worker's
-// slog "time"/"msg" fields, "level" passed through unchanged).
+// vlLine renders one record in the shape the dev vector shipper produces.
 func vlLine(t time.Time, level, msg string) string {
 	return fmt.Sprintf(`{"_time":%q,"_msg":%q,"level":%q,"RunID":"x"}`, t.UTC().Format(time.RFC3339Nano), msg, level)
 }
@@ -69,9 +62,7 @@ func TestGetRunLogsUnconfiguredIsUnavailable(t *testing.T) {
 }
 
 func TestGetRunLogsUnreachableIsUnavailable(t *testing.T) {
-	// A URL nothing listens on: the request fails at the transport level,
-	// exercising the "configured but unreachable" half of AC2 rather than
-	// AC1's "unconfigured" half above.
+	// Nothing listens here: configured but unreachable (AC2).
 	getenv := envWith(map[string]string{victoriaLogsURLEnv: "http://127.0.0.1:1"})
 
 	fake := &fakeTemporalClient{describeResponse: describeResponseFor(testRunID, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, time.Now(), nil)}
@@ -157,18 +148,13 @@ func TestGetRunLogsWholeRunHappyPath(t *testing.T) {
 	assert.Contains(t, query, "(*)")
 	assert.Contains(t, query, "sort by (_time)")
 	assert.Contains(t, query, fmt.Sprintf("limit %d", maxLogLines))
-	// The cap must keep the NEWEST lines, not the oldest: an over-long window's
-	// tail (a failure's error lines) must survive truncation. That is expressed
-	// as "sort desc | limit | sort asc" — see buildLogsQLQuery.
+	// The cap must keep the newest lines so a failure's tail survives truncation.
 	assert.Contains(t, query, "sort by (_time) desc")
 	assert.Regexp(t, `sort by \(_time\) desc \| limit \d+ \| sort by \(_time\)`, query)
 }
 
-// TestGetRunLogsSurfacesErrorField covers the whole point of LogLine.Error: a
-// line whose real cause lives in a structured field, not the terse _msg, must
-// come through so the log panel can show it. Both conventions are exercised —
-// the Temporal SDK's retrying-activity log ("Activity error." + capitalized
-// "Error"), and this repo's own slog error logs (lowercase "error").
+// TestGetRunLogsSurfacesErrorField covers both the Temporal SDK's "Error" and
+// this repo's slog "error" field conventions.
 func TestGetRunLogsSurfacesErrorField(t *testing.T) {
 	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	close := start.Add(time.Hour)
@@ -277,9 +263,7 @@ func TestGetRunLogsPhaseHappyPath(t *testing.T) {
 	}}
 	handler := newMux(newHandler(temporalClient, getenv))
 
-	// "Resolve" completed with a real time window in the fixture (see
-	// history_test.go's buildSuccessfulRunHistory) — the completed-phase
-	// happy path.
+	// "Resolve" completed with a real time window in the fixture.
 	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs?phase=Resolve", nil)
 	require.Equal(t, http.StatusOK, recorder.Code)
 
@@ -290,25 +274,13 @@ func TestGetRunLogsPhaseHappyPath(t *testing.T) {
 	require.Len(t, fake.queries, 1)
 }
 
-// TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries covers the
-// interleaved-tape-path hazard logWindow.spans exists for: on a run whose
-// first Write failed and was retried after an operator pause
-// (Load1 → Write1 fails → pause → Load2 → Write2), each phase's activities
-// are NOT contiguous — "Load"'s single [earliest, latest] envelope contains
-// the failed Write's and the pause's log lines, and "Write"'s contains the
-// second Load's. A phase-scoped request must return only the lines that
-// fall inside that phase's own per-activity spans (issue #274 AC3: "the
-// matching log lines"), with lines in the gaps between spans excluded.
+// TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries checks that interleaved
+// Load/Write retries (Load1, Write1 fails, pause, Load2, Write2) return only
+// lines inside each phase's own activity spans, not its whole envelope.
 func TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries(t *testing.T) {
-	// eventBuilder times are deterministic: base 2026-01-01T00:00:00Z, +1
-	// minute per event (history_test.go). The layout below yields:
-	//   Load spans:  [00:02, 00:03] (Load1), [00:08, 00:09] (Load2)
-	//   Write spans: [00:04, 00:05] (Write1 fails), [00:06, 00:07] (pause
-	//                alert, attributed to Write via its input), [00:10,
-	//                00:11] (Write2)
-	// so Load's envelope [00:02, 00:09] swallows both Write1 and the pause,
-	// and Write's [00:04, 00:11] swallows Load2 — exactly the over-inclusion
-	// this test must fail on.
+	// Events are one minute apart from 00:00, giving Load spans [00:02, 00:03],
+	// [00:08, 00:09] and Write spans [00:04, 00:05], [00:06, 00:07] (pause),
+	// [00:10, 00:11].
 	builder := newEventBuilder()
 	builder.started(t, testConfig)
 
@@ -333,9 +305,7 @@ func TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries(t *testing.T) {
 		return time.Date(2026, 1, 1, 0, minute, second, 0, time.UTC)
 	}
 
-	// The fake returns every line for any query — the envelope query is one
-	// request either way, so span filtering can only happen server-side,
-	// after the response.
+	// The fake returns every line, so filtering must happen after the response.
 	body := strings.Join([]string{
 		vlLine(at(2, 30), "INFO", "load one"),
 		vlLine(at(4, 30), "ERROR", "write one failing"),
@@ -379,12 +349,8 @@ func TestGetRunLogsPhaseWindowsAreDisjointAcrossRetries(t *testing.T) {
 	}
 }
 
-// TestGetRunLogsPhaseQueryRestrictsLimitToSpans proves the phase-scoped LogsQL
-// ANDs the phase's activity spans into its time filter as a disjunction, so the
-// server-side "keep newest limit" pass counts only in-span lines. Without it the
-// limit truncates the whole [start, end] envelope: on the interleaved layout
-// below, a high-volume Write between two Load attempts would dominate the newest
-// limit envelope lines and then be filtered out, starving the Load panel.
+// TestGetRunLogsPhaseQueryRestrictsLimitToSpans checks the span disjunction is
+// applied before the limit, so an interleaved phase cannot crowd out this one.
 func TestGetRunLogsPhaseQueryRestrictsLimitToSpans(t *testing.T) {
 	builder := newEventBuilder()
 	builder.started(t, testConfig)
@@ -418,11 +384,10 @@ func TestGetRunLogsPhaseQueryRestrictsLimitToSpans(t *testing.T) {
 	query, err := url.QueryUnescape(fake.queries[0])
 	require.NoError(t, err)
 
-	// Load has two disjoint spans, so the time filter carries a disjunction...
+	// Two disjoint Load spans yield a _time disjunction...
 	assert.Regexp(t, `\(_time:\[[^()]*\] OR _time:\[[^()]*\]\)`, query,
 		"a phase with disjoint activity spans must AND a _time disjunction into the query")
-	// ...and the newest-limit truncation pipe comes after it, so limit applies to
-	// the span-restricted set rather than the whole envelope.
+	// ...applied before the limit pipe.
 	assert.Regexp(t, `OR _time:\[[^()]*\]\).*\| sort by \(_time\) desc \| limit \d+`, query)
 }
 
@@ -435,8 +400,7 @@ func TestGetRunLogsPhaseNotYetStartedIsEmptyNotUnavailable(t *testing.T) {
 	}}
 	handler := newMux(newHandler(temporalClient, getenv))
 
-	// "Burn" never ran in the fixture (optical burning disabled) — no
-	// activity, so no time window at all yet.
+	// "Burn" never ran in the fixture.
 	recorder := doJSON(t, handler, http.MethodGet, "/api/runs/"+testRunID+"/logs?phase=Burn", nil)
 	require.Equal(t, http.StatusOK, recorder.Code)
 
@@ -452,10 +416,7 @@ func TestGetRunLogsPhaseNotYetStartedOnLiveRunStaysLive(t *testing.T) {
 	fake := newFakeVictoriaLogs(t, http.StatusOK, "")
 	getenv := envWith(map[string]string{victoriaLogsURLEnv: fake.URL})
 
-	// A still-running run: Resolve ran, but the run has not closed and later
-	// phases have not started. A not-yet-reached phase must report Live so the
-	// log panel keeps polling until it starts, rather than looking like a
-	// finished window the poll loop stops tailing.
+	// Resolve ran but the run is still open, so a later phase must stay Live.
 	b := newEventBuilder()
 	b.started(t, testConfig)
 	resolve := b.scheduled(t, "ResolveAndCheck", backup.ResolveDataInput{Config: testConfig})
@@ -515,12 +476,7 @@ func TestGetRunLogsErrorClassificationMatchesOtherEndpoints(t *testing.T) {
 	}
 }
 
-// TestBuildLogsQLQueryFieldPrefix pins the exact query string in both field
-// namings: an empty prefix keeps the original top-level, unquoted "RunID:="
-// (full backward compatibility), while a merge-key prefix shifts it to the
-// quoted "log_fields.RunID":= so the dot is a literal field-name character.
-// The stream filter and every _time clause are VictoriaLogs-owned and stay
-// unprefixed either way.
+// TestBuildLogsQLQueryFieldPrefix pins the query with and without a field prefix.
 func TestBuildLogsQLQueryFieldPrefix(t *testing.T) {
 	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	end := start.Add(time.Hour)
@@ -556,11 +512,8 @@ func TestBuildLogsQLQueryFieldPrefix(t *testing.T) {
 	}
 }
 
-// TestParseLogsQLRecordFieldPrefix decodes a realistic record from each
-// pipeline shape. Under a merge-key prefix the worker's fields are nested as
-// "log_fields.*" (all string-valued) and _msg is the raw JSON slog line, so
-// the human message must come from log_fields.msg, not _msg; the legacy shape
-// reads _msg and top-level fields exactly as before.
+// TestParseLogsQLRecordFieldPrefix decodes realistic records from both the
+// merge-key (prefixed) and top-level pipeline shapes.
 func TestParseLogsQLRecordFieldPrefix(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -605,8 +558,7 @@ func TestParseLogsQLRecordFieldPrefix(t *testing.T) {
 		{
 			name:   "merge-key line missing log_fields.msg falls back to _msg",
 			prefix: "log_fields.",
-			// No log_fields.msg field at all — the human message is unavailable,
-			// so _msg (here a plain message, not a JSON blob) is used.
+			// No log_fields.msg at all, so _msg is used.
 			raw:         `{"_time":"2026-07-19T18:41:03Z","_msg":"fallback message","log_fields.level":"WARN"}`,
 			wantLevel:   "WARN",
 			wantMessage: "fallback message",
@@ -633,10 +585,7 @@ func TestParseLogsQLRecordFieldPrefix(t *testing.T) {
 	}
 }
 
-// TestGetRunLogsFieldPrefixEndToEnd drives a merge-key-shaped fake VictoriaLogs
-// through the whole handler with VICTORIALOGS_FIELD_PREFIX set: the query must
-// filter on the prefixed RunID field and the projected lines must carry the
-// prefixed level/message rather than the raw _msg JSON blob.
+// TestGetRunLogsFieldPrefixEndToEnd drives VICTORIALOGS_FIELD_PREFIX through the whole handler.
 func TestGetRunLogsFieldPrefixEndToEnd(t *testing.T) {
 	start := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
 	close := start.Add(time.Hour)
@@ -673,17 +622,14 @@ func TestGetRunLogsFieldPrefixEndToEnd(t *testing.T) {
 	assert.NotContains(t, query, ` RunID:=`, "the unprefixed RunID field must not appear")
 }
 
-// envWith returns a getenv func serving overrides, and "" for anything else
-// — the same shape newHandler's getenv parameter expects.
+// envWith returns a getenv serving overrides and "" otherwise.
 func envWith(overrides map[string]string) func(string) string {
 	return func(key string) string {
 		return overrides[key]
 	}
 }
 
-// describeResponseFor builds a DescribeWorkflowExecutionResponse with just
-// the fields resolveLogWindow's whole-run path reads (via fetchRunDetail ->
-// toRunSummary), reusing executionInfo (runsapi_test.go).
+// describeResponseFor builds a minimal DescribeWorkflowExecutionResponse.
 func describeResponseFor(runID string, status enumspb.WorkflowExecutionStatus, start time.Time, closeTime *time.Time) *workflowservice.DescribeWorkflowExecutionResponse {
 	return &workflowservice.DescribeWorkflowExecutionResponse{
 		WorkflowExecutionInfo: executionInfo(runID, status, start, closeTime),

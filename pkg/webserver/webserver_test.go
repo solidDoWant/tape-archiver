@@ -10,9 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeAssets is a minimal in-memory SPA build: an index.html shell plus one
-// hashed asset, standing in for a real `vite build` output so these tests
-// never depend on web/ actually having been built.
+// fakeAssets stands in for a real `vite build` so tests don't need web/ built.
 func fakeAssets() fstest.MapFS {
 	return fstest.MapFS{
 		"index.html":           &fstest.MapFile{Data: []byte("<html><body>tape-archiver shell</body></html>")},
@@ -93,11 +91,6 @@ func TestHandlerRoutes(t *testing.T) {
 	}
 }
 
-// TestAPIDelegation covers the /api/* routing contract: requests under
-// /api/ reach the injected api handler rather than falling back to the SPA,
-// and the SPA catch-all still serves everything else — proving the ordering
-// promised by NewHandler's doc comment without depending on any real API
-// package (pkg/webserver must not import pkg/runsapi or Temporal).
 func TestAPIDelegation(t *testing.T) {
 	var apiHit string
 
@@ -117,8 +110,6 @@ func TestAPIDelegation(t *testing.T) {
 	assert.Equal(t, http.StatusTeapot, recorder.Code, "an /api/ request must reach the injected api handler")
 	assert.Equal(t, "/api/runs", apiHit)
 
-	// A non-API path still falls through to the SPA even with an api handler
-	// configured.
 	request = httptest.NewRequest(http.MethodGet, "/runs/some-run-id", nil)
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)

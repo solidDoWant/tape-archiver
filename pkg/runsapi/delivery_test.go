@@ -12,10 +12,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// TestDeriveDeliveryMessageURL covers issue #306's reconstruction: the run
-// overview's Discord deep-link is built from the completed Deliver activity's
-// recorded result (backup.DeliverResult), and is empty whenever there is nothing
-// linkable — an incomplete identity, a failed delivery, or no Deliver at all.
 func TestDeriveDeliveryMessageURL(t *testing.T) {
 	t.Parallel()
 
@@ -76,9 +72,6 @@ func TestDeriveDeliveryMessageURL(t *testing.T) {
 	}
 }
 
-// TestGetRunDeliveryHandler covers the GET /api/runs/{runID}/delivery wiring: a
-// run whose Deliver recorded a full message identity reports the assembled Discord
-// deep-link.
 func TestGetRunDeliveryHandler(t *testing.T) {
 	t.Parallel()
 

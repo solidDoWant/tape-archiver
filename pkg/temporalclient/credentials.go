@@ -47,10 +47,8 @@ func readAPIKeyFile(path string) (string, error) {
 	return key, nil
 }
 
-// logAPIKeyClaims emits the decoded JWT claims at debug level so an operator
-// can confirm which credential is in use after a rotation. Decode failures
-// log at debug level; the token still flows to the server. Only the claims
-// payload is logged — never the signature — so logs can't be replayed.
+// logAPIKeyClaims debug-logs the JWT claims to identify the credential after
+// rotation; never the signature, so logs cannot be replayed.
 func logAPIKeyClaims(ctx context.Context, path, apiKey string) {
 	if !slog.Default().Enabled(ctx, slog.LevelDebug) {
 		return
@@ -69,9 +67,7 @@ func logAPIKeyClaims(ctx context.Context, path, apiKey string) {
 	slog.DebugContext(ctx, "loaded temporal api key", slog.String("path", path), slog.Any("claims", claims))
 }
 
-// decodeJWTClaims parses the claims segment of a JWS-Compact JWT. It does
-// not verify the signature — the caller has already chosen to trust the
-// source.
+// decodeJWTClaims parses a JWT's claims without verifying the signature.
 func decodeJWTClaims(token string) (map[string]any, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -91,11 +87,9 @@ func decodeJWTClaims(token string) (map[string]any, error) {
 	return claims, nil
 }
 
-// extractAPIKeyFile detects a "file:///abs/path" API key and clears the
-// inline value on the profile so envconfig's static-credentials path is
-// bypassed. Returns the file path, or "" when the key is inline.
-// Non-canonical forms like "file:/path" are rejected so typos aren't silently
-// sent as bearer tokens.
+// extractAPIKeyFile returns the path of a "file:///abs/path" API key (clearing
+// the inline value), or "" for an inline key. Non-canonical file: forms are
+// rejected so typos are not sent as bearer tokens.
 func extractAPIKeyFile(profile *envconfig.ClientConfigProfile) (string, error) {
 	if !strings.HasPrefix(profile.APIKey, apiKeyFileScheme) {
 		return "", nil

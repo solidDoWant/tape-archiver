@@ -50,9 +50,6 @@ func TestGroupDigits(t *testing.T) {
 	}
 }
 
-// TestPrepareFactsStagedBytes confirms the Prepare phase's stagedBytes fact
-// sums every staged archive, displays it humanized, and carries the exact
-// byte count in Title for the web UI's hover text.
 func TestPrepareFactsStagedBytes(t *testing.T) {
 	records := []activityRecord{{
 		Name:      "PrepareArchives",

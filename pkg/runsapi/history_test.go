@@ -28,10 +28,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// fakeHistoryIterator is a minimal client.HistoryEventIterator standing in
-// for the real SDK type, mirroring fakeEncodedValue/fakeTemporalClient in
-// runsapi_test.go's "never mock the component under test" pattern: this
-// fakes a Temporal SDK dependency, not runsapi itself.
+// fakeHistoryIterator fakes the Temporal SDK's history iterator.
 type fakeHistoryIterator struct {
 	events []*historypb.HistoryEvent
 	err    error
@@ -59,10 +56,7 @@ func (f *fakeHistoryIterator) Next() (*historypb.HistoryEvent, error) {
 	return event, nil
 }
 
-// GetWorkflowHistory implements the TemporalClient method history.go's
-// fetchRunHistory calls, routing through fakeTemporalClient.historyFunc with
-// the requested runID so a test can serve different histories per run (the
-// aggregate listTapes tests rely on this).
+// GetWorkflowHistory serves per-run histories via historyFunc.
 func (f *fakeTemporalClient) GetWorkflowHistory(_ context.Context, _, runID string, _ bool, _ enumspb.HistoryEventFilterType) client.HistoryEventIterator {
 	if f.historyFunc != nil {
 		return f.historyFunc(runID)
@@ -71,9 +65,7 @@ func (f *fakeTemporalClient) GetWorkflowHistory(_ context.Context, _, runID stri
 	return &fakeHistoryIterator{}
 }
 
-// mustEncode encodes value into *commonpb.Payloads using Temporal's default
-// data converter — the exact converter decodePayloads (history.go) decodes
-// with, so a test round-trips through the real encoding.
+// mustEncode uses the same default converter decodePayloads decodes with.
 func mustEncode(t *testing.T, value interface{}) *commonpb.Payloads {
 	t.Helper()
 
@@ -83,9 +75,7 @@ func mustEncode(t *testing.T, value interface{}) *commonpb.Payloads {
 	return payloads
 }
 
-// eventBuilder incrementally assembles a synthetic workflow history for
-// buildPhaseTimeline/deriveTapeOutcomes/getRunConfig tests, assigning
-// monotonic EventIds and EventTimes the way a real Temporal server would.
+// eventBuilder assembles a synthetic history with monotonic IDs and times.
 type eventBuilder struct {
 	events []*historypb.HistoryEvent
 	nextID int64
@@ -124,9 +114,7 @@ func (b *eventBuilder) started(t *testing.T, input interface{}) {
 	})
 }
 
-// startedDryRun appends a WorkflowExecutionStarted event carrying both the
-// config Input and the dry-run memo (runsubmit.MemoKeyDryRun), the way
-// runsubmit.Submit records a dry-run submission.
+// startedDryRun records a start event with the dry-run memo, as runsubmit does.
 func (b *eventBuilder) startedDryRun(t *testing.T, input interface{}, dryRun bool) {
 	t.Helper()
 
@@ -146,8 +134,7 @@ func (b *eventBuilder) startedDryRun(t *testing.T, input interface{}, dryRun boo
 	})
 }
 
-// scheduled appends an ACTIVITY_TASK_SCHEDULED event and returns its
-// EventId, so the caller can complete/fail it later.
+// scheduled returns the EventId so the caller can complete/fail it later.
 func (b *eventBuilder) scheduled(t *testing.T, name string, input interface{}) int64 {
 	t.Helper()
 
@@ -200,7 +187,6 @@ func (b *eventBuilder) failed(scheduledID int64, message string) *eventBuilder {
 	return b
 }
 
-// runCompleted appends WORKFLOW_EXECUTION_COMPLETED.
 func (b *eventBuilder) runCompleted() {
 	b.events = append(b.events, &historypb.HistoryEvent{
 		EventId:   b.id(),
@@ -212,7 +198,6 @@ func (b *eventBuilder) runCompleted() {
 	})
 }
 
-// runFailed appends WORKFLOW_EXECUTION_FAILED with message.
 func (b *eventBuilder) runFailed(message string) {
 	b.events = append(b.events, &historypb.HistoryEvent{
 		EventId:   b.id(),
@@ -242,10 +227,8 @@ var testConfig = config.Config{
 
 func floatPtr(f float64) *float64 { return &f }
 
-// buildSuccessfulRunHistory returns a synthetic complete-and-successful run
-// exercising every one of the 11 phases plus one tape write failure that gets
-// retried and succeeds (Load's second call), so both deriveTapeOutcomes'
-// "written" and "failed" outcomes are exercised in one fixture.
+// buildSuccessfulRunHistory covers all 11 phases plus one failed tape write
+// retried on a fresh tape, exercising both written and failed outcomes.
 func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	t.Helper()
 
@@ -256,8 +239,7 @@ func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	b.completed(t, resolveK8s, []backup.ResolvedArchive{})
 
 	resolveCheck := b.scheduled(t, "ResolveAndCheck", backup.ResolveDataInput{Config: testConfig})
-	// EstimatedBytes drives the derived slice size (DeriveSliceSize): 5 TB / 800 =
-	// 6.25 GB → rounded up to 6 GiB, the per-archive term dominating here.
+	// 5 TB / 800 = 6.25 GB, rounded to 6 GiB slices.
 	b.completed(t, resolveCheck, []backup.ResolvedArchive{{SourceIndex: 0, Label: "archive-0", EstimatedBytes: 5_000_000_000_000}})
 
 	hold := b.scheduled(t, "HoldSnapshots", nil)
@@ -278,9 +260,7 @@ func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	})
 	b.completed(t, verify, backup.VerifiedPlan{})
 
-	// First drive-set: one tape fails at WriteTree (a Load/Write-failure
-	// pause the operator resumes), then a second Load call loads a *fresh*
-	// blank tape (a different barcode) that writes successfully.
+	// One tape fails at WriteTree; a second Load writes a fresh tape.
 	load1 := b.scheduled(t, "Load", nil)
 	b.completed(t, load1, []backup.LoadedTape{
 		{Barcode: "FAILTAPE01", TapeIndex: 0, CopyIndex: 0, DriveIndex: 0, SourceSlot: 1},
@@ -309,10 +289,8 @@ func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	finalize2 := b.scheduled(t, "FinalizeTape", struct{ Barcode string }{"GOODTAPE01"})
 	b.completed(t, finalize2, "/staging/GOODTAPE01/index.xml")
 
-	// The real activity completes with a backup.TapeMeasurement wrapping the
-	// verdict, not a bare WriteHealth — a fixture that encodes the bare struct
-	// agrees with a decoder that reads the bare struct, so both can be wrong
-	// together (issue #338).
+	// Encode the real TapeMeasurement wrapper, not a bare WriteHealth, or the
+	// fixture and decoder can be wrong together (issue #338).
 	health2 := b.scheduled(t, "MeasureWriteHealth", struct{ Barcode string }{"GOODTAPE01"})
 	b.completed(t, health2, backup.TapeMeasurement{
 		Health: backup.WriteHealth{
@@ -328,8 +306,7 @@ func buildSuccessfulRunHistory(t *testing.T) []*historypb.HistoryEvent {
 	report := b.scheduled(t, "BuildReport", nil)
 	b.completed(t, report, backup.ReportOutput{ReportPath: "/staging/report.pdf"})
 
-	// Optical burning is disabled for this fixture (testConfig has no
-	// opticalBurn section), so burnPhase is a true no-op: zero activity.
+	// Burn is disabled in testConfig, so it schedules no activity.
 
 	deliver := b.scheduled(t, "Deliver", nil)
 	b.completed(t, deliver, nil)
@@ -389,9 +366,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 			names[i] = phase.Name
 			assert.Equal(t, PhaseCompleted, phase.Status, "phase %s", phase.Name)
 
-			// Burn ran as a no-op in this fixture (optical burning disabled),
-			// so it completes with no time window; every other phase started
-			// and ended.
+			// No-op Burn has no time window.
 			if phase.Name == backup.PhaseBurn {
 				assert.Nil(t, phase.StartTime, "no-op Burn has no start time")
 				assert.Nil(t, phase.EndTime, "no-op Burn has no end time")
@@ -545,8 +520,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 
 		verify := b.scheduled(t, "Verify", backup.VerifyInput{})
 		b.failed(verify, "checksum mismatch")
-		// No NotifyFailure activity in this fixture at all — an older
-		// workflow code version, or a foreign/stub workflow.
+		// No NotifyFailure: an older workflow version or a stub.
 		b.runFailed("phase Verify: checksum mismatch")
 
 		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
@@ -564,10 +538,8 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		verify := b.scheduled(t, "Verify", backup.VerifyInput{})
 		b.failed(verify, "checksum mismatch")
 
-		// Older workflow version: NotifyFailure ran, but its FailureInput
-		// predates the Phase field, so Phase decodes empty. The phase must still
-		// be recovered from the terminal message rather than left blank, which
-		// would drop the run out of timelineFrontier's failing-phase branch.
+		// Older NotifyFailure without Phase: recover it from the terminal
+		// message.
 		notify := b.scheduled(t, "NotifyFailure", backup.FailureInput{
 			RunID: "run-7", ErrorSummary: "phase Verify: checksum mismatch",
 		})
@@ -585,14 +557,9 @@ func TestBuildPhaseTimeline(t *testing.T) {
 	})
 
 	t.Run("a second drive-set's Write failure is failed even though set 1's Eject already ran", func(t *testing.T) {
-		// The interleaved tape path (SPEC §4.3 phases 6-8): drive-set 1
-		// completes Load → Write → Eject in full, then drive-set 2's WriteTree
-		// fails permanently and the run ends there. Eject holds real,
-		// completed activity from set 1, but the phase timeline must still
-		// report Write as the failed phase — later-phase activity from an
-		// earlier drive-set must never mask the failure — and Eject must not
-		// read active (nothing is running) or completed (the phase as a whole
-		// never finished).
+		// Interleaved tape path (SPEC §4.3): set 1 completes Load/Write/Eject,
+		// set 2 fails in Write. Set 1's Eject must not mask the Write failure,
+		// and Eject reads pending.
 		b := newEventBuilder()
 		b.started(t, testConfig)
 
@@ -615,8 +582,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		verify := b.scheduled(t, "Verify", backup.VerifyInput{})
 		b.completed(t, verify, backup.VerifiedPlan{})
 
-		// Drive-set 1 (one drive): Load, Write pipeline, and Eject all
-		// complete for copy 0.
+		// Drive-set 1.
 		load1 := b.scheduled(t, "Load", nil)
 		b.completed(t, load1, []backup.LoadedTape{
 			{Barcode: "SET1TAPE01", TapeIndex: 0, CopyIndex: 0, DriveIndex: 0, SourceSlot: 1},
@@ -634,8 +600,7 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		eject1 := b.scheduled(t, "Eject", nil)
 		b.completed(t, eject1, backup.EjectResult{InIOStation: []tape.Barcode{"SET1TAPE01"}})
 
-		// Drive-set 2: Load completes, WriteTree fails permanently, the
-		// operator aborts, the run fails in the Write phase.
+		// Drive-set 2: WriteTree fails and the run fails in Write.
 		load2 := b.scheduled(t, "Load", nil)
 		b.completed(t, load2, []backup.LoadedTape{
 			{Barcode: "SET2TAPE01", TapeIndex: 0, CopyIndex: 1, DriveIndex: 0, SourceSlot: 2},
@@ -678,23 +643,15 @@ func TestBuildPhaseTimeline(t *testing.T) {
 			assert.Equal(t, PhaseCompleted, byName[name].Status, "phase %s", name)
 		}
 
-		// Write is the failed phase — set 1's completed Eject activity must
-		// not mask it.
 		assert.Equal(t, PhaseFailed, byName[backup.PhaseWrite].Status)
 		assert.Contains(t, byName[backup.PhaseWrite].Error, "aborted by operator")
 
-		// Eject holds only set 1's partial activity: the phase never
-		// completed and nothing is running — pending, not active, not
-		// completed.
 		assert.Equal(t, PhasePending, byName[backup.PhaseEject].Status)
 
-		// Nothing after the tape path ever ran.
 		for _, name := range []string{backup.PhaseReport, backup.PhaseBurn, backup.PhaseDeliver} {
 			assert.Equal(t, PhasePending, byName[name].Status, "phase %s", name)
 		}
 
-		// The per-tape reality stays visible through the tape outcomes: set
-		// 1's tape written, set 2's failed.
 		byBarcode := make(map[string]TapeOutcome, len(outcomes))
 		for _, outcome := range outcomes {
 			byBarcode[outcome.Barcode] = outcome
@@ -705,10 +662,8 @@ func TestBuildPhaseTimeline(t *testing.T) {
 	})
 
 	t.Run("an open run mid-tape-path keeps set 1's Eject active, never completed", func(t *testing.T) {
-		// Same interleave, still running: set 1 fully ejected, set 2's
-		// WriteTree in flight. The frontier is Write (the latest scheduled
-		// activity); Eject's earlier-set activity keeps it active — in
-		// progress as part of the still-running tape path — not completed.
+		// Set 2's WriteTree in flight: Write is the frontier, and Eject stays
+		// active as part of the running tape path.
 		b := newEventBuilder()
 		b.started(t, testConfig)
 
@@ -731,7 +686,6 @@ func TestBuildPhaseTimeline(t *testing.T) {
 			{Barcode: "SET2TAPE01", TapeIndex: 0, CopyIndex: 1, DriveIndex: 0, SourceSlot: 2},
 		})
 
-		// In flight: scheduled, no terminal event, run still open.
 		b.scheduled(t, "WriteTree", struct{ Barcode string }{"SET2TAPE01"})
 
 		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
@@ -755,14 +709,8 @@ func TestBuildPhaseTimeline(t *testing.T) {
 	})
 
 	t.Run("a write-failure operator pause marks only Write active, not the already-completed Eject", func(t *testing.T) {
-		// Issue #331: a write-failure pause ejects the set's tapes (a completed
-		// Eject activity) and then pauses back on Write — NotifyWritePathPause,
-		// attributed to Write, is the latest-scheduled activity, so the frontier
-		// is Write. Unlike the open non-paused interleave above, Eject here holds
-		// only a completed record and nothing is running: while the run is paused,
-		// only the frontier (the pause's own phase) is active, so Eject must read
-		// pending, not active — otherwise both Write and Eject spin at once, two
-		// spinners for one paused phase.
+		// Issue #331: a write-failure pause ejects then pauses on Write. While
+		// paused only the frontier is active, so Eject must not spin too.
 		b := newEventBuilder()
 		b.started(t, testConfig)
 
@@ -777,16 +725,12 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		format := b.scheduled(t, "FormatTape", struct{ Barcode string }{"TAPE01"})
 		b.completed(t, format, nil)
 
-		// The tape fails to write; the set is ejected anyway (freeing the drive),
-		// then the run pauses back on Write for the operator to swap in blanks.
 		write := b.scheduled(t, "WriteTree", struct{ Barcode string }{"TAPE01"})
 		b.failed(write, "drive 0: write tree: medium error")
 
 		eject := b.scheduled(t, "Eject", nil)
 		b.completed(t, eject, backup.EjectResult{InIOStation: []tape.Barcode{"TAPE01"}})
 
-		// The pause alert is the last scheduled activity, and the run stays open:
-		// derivePause reports this as an active write-failure pause on Write.
 		pause := b.scheduled(t, "NotifyWritePathPause", backup.WritePathPauseInput{Phase: backup.PhaseWrite})
 		b.completed(t, pause, nil)
 
@@ -805,15 +749,11 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		assert.Equal(t, PhaseCompleted, byName[backup.PhaseVerify].Status)
 		assert.Equal(t, PhaseCompleted, byName[backup.PhaseLoad].Status)
 
-		// Write is the frontier (the paused phase): active, and still spinning —
-		// a start time but no end time.
 		write0 := byName[backup.PhaseWrite]
 		assert.Equal(t, PhaseActive, write0.Status)
 		assert.NotNil(t, write0.StartTime)
 		assert.Nil(t, write0.EndTime)
 
-		// Eject already completed and nothing is running there: while paused it
-		// must not also spin (issue #331).
 		assert.Equal(t, PhasePending, byName[backup.PhaseEject].Status,
 			"a completed Eject must not read active alongside the paused Write frontier")
 
@@ -844,10 +784,8 @@ func TestDeriveTapeOutcomes(t *testing.T) {
 	outcomes := deriveTapeOutcomes(history.Activities)
 	require.Len(t, outcomes, 2)
 
-	// The failed attempt and its same-slot retry share (TapeIndex, CopyIndex),
-	// so their relative order is decided entirely by the barcode tiebreak — a
-	// deterministic order across requests, not one a non-stable sort picks
-	// arbitrarily.
+	// The failed attempt and its retry share (TapeIndex, CopyIndex); the
+	// barcode tiebreak keeps the order deterministic.
 	require.Equal(t, outcomes[0].TapeIndex, outcomes[1].TapeIndex, "the retry reused the same logical tape index")
 	require.Equal(t, outcomes[0].CopyIndex, outcomes[1].CopyIndex, "the retry reused the same copy index")
 	assert.Equal(t, "FAILTAPE01", outcomes[0].Barcode, "barcode tiebreak orders tied outcomes deterministically")
@@ -872,11 +810,8 @@ func TestDeriveTapeOutcomes(t *testing.T) {
 	assert.True(t, writtenTape.WriteHealth.FloorKnown)
 }
 
-// TestDeriveTapeOutcomesUnmeasuredWriteHealth proves a tape whose
-// MeasureWriteHealth activity could not take a measurement (writehealth.go's
-// Measured == false — the workflow records WriteHealth{} and the run still
-// succeeds) is reported with measured=false, distinguishable from a tape
-// measured and found unhealthy.
+// TestDeriveTapeOutcomesUnmeasuredWriteHealth: an unmeasured tape must be
+// distinguishable from one measured unhealthy.
 func TestDeriveTapeOutcomesUnmeasuredWriteHealth(t *testing.T) {
 	b := newEventBuilder()
 	b.started(t, testConfig)
@@ -895,10 +830,7 @@ func TestDeriveTapeOutcomesUnmeasuredWriteHealth(t *testing.T) {
 	finalize := b.scheduled(t, "FinalizeTape", struct{ Barcode string }{"UNMEASURED01"})
 	b.completed(t, finalize, "/staging/UNMEASURED01/index.xml")
 
-	// The measurement could not be taken: the activity completes with the
-	// zero TapeMeasurement (Health.Measured false), exactly what
-	// measureWriteHealth (session.go) records when the activity fails or the
-	// scrape hangs.
+	// What session.go records when measurement fails.
 	health := b.scheduled(t, "MeasureWriteHealth", struct{ Barcode string }{"UNMEASURED01"})
 	b.completed(t, health, backup.TapeMeasurement{})
 
@@ -918,8 +850,6 @@ func TestDeriveTapeOutcomesUnmeasuredWriteHealth(t *testing.T) {
 	assert.False(t, outcome.WriteHealth.Measured, "an untaken measurement must report measured=false")
 	assert.False(t, outcome.WriteHealth.Healthy, "an unmeasured tape is never certified healthy")
 }
-
-// --- HTTP handler tests ---
 
 func TestGetRunPhasesHandler(t *testing.T) {
 	fake := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
@@ -955,9 +885,7 @@ func TestGetRunConfigHandler(t *testing.T) {
 }
 
 func TestGetRunConfigHandlerDryRun(t *testing.T) {
-	// The config endpoint surfaces the run's dry-run memo so a restart preload
-	// can re-select the dry-run toggle rather than defaulting a re-run of a
-	// dry-run to production.
+	// The dry-run memo lets a restart preload keep the dry-run toggle.
 	for _, dryRun := range []bool{true, false} {
 		builder := newEventBuilder()
 		builder.startedDryRun(t, testConfig, dryRun)
@@ -1002,7 +930,6 @@ func TestListTapesHandler(t *testing.T) {
 					executionInfo("run-gone", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start2, &start2),
 				},
 			},
-			// Route per runID: run-good gets the full fixture history,
 			// run-gone gets the NotFound a retention-expired history returns.
 			historyFunc: func(runID string) client.HistoryEventIterator {
 				if runID == "run-good" {
@@ -1044,8 +971,7 @@ func TestListTapesHandler(t *testing.T) {
 		fake := &fakeTemporalClient{
 			listResponse: &workflowservice.ListWorkflowExecutionsResponse{
 				Executions: []*workflowpb.WorkflowExecutionInfo{
-					// A production run carries no dry-run memo at all, the way an
-					// unlabelled run reads as production (dryRunFromMemo).
+					// No dry-run memo: reads as production.
 					executionInfo("run-prod", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start1, &start1),
 					dryRunExecution,
 				},
@@ -1083,9 +1009,7 @@ func TestListTapesHandler(t *testing.T) {
 					executionInfo("run-flaky", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, start, &start),
 				},
 			},
-			// A transient upstream fault whose raw text carries an internal
-			// endpoint — the same class writeError masks to a generic status for
-			// the whole-response case.
+			// Raw text carries an internal endpoint that must not leak.
 			historyFunc: func(string) client.HistoryEventIterator {
 				return &fakeHistoryIterator{
 					err: serviceerror.NewUnavailable("connection error: desc = transport: dial tcp temporal-frontend.internal:7233: connect: connection refused"),
@@ -1116,9 +1040,7 @@ func TestListTapesHandler(t *testing.T) {
 		fake := &fakeTemporalClient{
 			listResponse: &workflowservice.ListWorkflowExecutionsResponse{
 				Executions: []*workflowpb.WorkflowExecutionInfo{
-					// Deliberately listed oldest-first: the limit must apply
-					// to the NEWEST runs, so the endpoint has to sort before
-					// truncating rather than taking the page's head.
+					// Oldest-first: the endpoint must sort before limiting.
 					executionInfo("run-older", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, older, &older),
 					executionInfo("run-newer", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, newer, &newer),
 				},
@@ -1155,10 +1077,8 @@ func TestListTapesHandler(t *testing.T) {
 	})
 
 	t.Run("no runs yet serializes tapes as [] not null", func(t *testing.T) {
-		// A fresh deployment (no executions) must send "tapes":[] — a web client
-		// maps over the array and would crash on null. json.Unmarshal collapses
-		// [] and null to the same zero-length slice, so this asserts on the raw
-		// body rather than a decoded value.
+		// Must be [] not null (the client maps over it); check the raw body
+		// since Unmarshal treats both alike.
 		fake := &fakeTemporalClient{listResponse: &workflowservice.ListWorkflowExecutionsResponse{}}
 		handler := newMux(newHandler(fake, emptyEnv))
 
@@ -1184,9 +1104,7 @@ func TestListTapesHandler(t *testing.T) {
 
 		handler := newMux(newHandler(fake, emptyEnv))
 
-		// A request whose context is already canceled stands in for the client
-		// disconnecting (or the request timing out) mid-listing: the handler must
-		// not report that as a 200 degraded listing.
+		// A canceled request must not be reported as a 200 degraded listing.
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
@@ -1199,16 +1117,10 @@ func TestListTapesHandler(t *testing.T) {
 	})
 }
 
-// emptyEnv is a getenv func for tests whose handler never reads the
-// environment (the dry-run mhvtl gate is irrelevant to the GET endpoints
-// under test here).
 func emptyEnv(string) string { return "" }
 
-// TestHistoryEndpointErrorClassification proves the three-way distinction
-// issue #273 AC3/AC7 requires, across all three per-run history endpoints: a
-// run whose history has aged out of retention but which still appears in
-// Temporal visibility is 410 Gone; a run Temporal has no record of at all is
-// 404; a malformed run ID is 400 — each visibly distinct from the others.
+// TestHistoryEndpointErrorClassification: aged-out history is 410, unknown run
+// 404, malformed ID 400 (issue #273).
 func TestHistoryEndpointErrorClassification(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -1270,13 +1182,11 @@ func TestHistoryEndpointErrorClassification(t *testing.T) {
 	}
 }
 
-// TestGetRunConfigForeignWorkflow proves a history whose start input cannot
-// decode as a run config (a foreign/stub workflow sharing the fixed
-// WorkflowID — issue #273's warning) degrades to a per-run error status, not
-// a 500.
+// TestGetRunConfigForeignWorkflow: an undecodable start input (a stub sharing
+// the WorkflowID) degrades to a per-run error, not a 500.
 func TestGetRunConfigForeignWorkflow(t *testing.T) {
 	b := newEventBuilder()
-	// A start input that is not a config.Config object at all.
+	// Not a config.Config at all.
 	b.started(t, []string{"not", "a", "config"})
 	b.runCompleted()
 
@@ -1289,11 +1199,8 @@ func TestGetRunConfigForeignWorkflow(t *testing.T) {
 	assert.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
 }
 
-// TestGetRunPhasesForeignWorkflow proves a foreign/stub workflow's history —
-// no recognizable phase activities at all — yields a well-formed timeline
-// (all 11 phases, no invented progress) rather than an error, so the
-// aggregate views built on these endpoints can never be taken down by one
-// stub run (issue #273).
+// TestGetRunPhasesForeignWorkflow: a stub run yields a well-formed timeline,
+// not an error, so it cannot break aggregate views (issue #273).
 func TestGetRunPhasesForeignWorkflow(t *testing.T) {
 	b := newEventBuilder()
 	b.started(t, "some foreign input")
@@ -1315,9 +1222,7 @@ func TestGetRunPhasesForeignWorkflow(t *testing.T) {
 	require.Len(t, body.Phases, 11)
 
 	for _, phase := range body.Phases {
-		// The foreign activity maps to no phase, and the run "succeeded", so
-		// every phase reads completed-as-no-op — crucially with no fabricated
-		// times or facts, and no error.
+		// Every phase reads as a no-op completion, with no fabricated times.
 		assert.Equal(t, PhaseCompleted, phase.Status, "phase %s", phase.Name)
 		assert.Nil(t, phase.StartTime, "phase %s must not invent a start time", phase.Name)
 	}

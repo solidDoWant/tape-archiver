@@ -17,10 +17,8 @@ type sessionClaims struct {
 	ExpiresAt int64  `json:"exp"`
 }
 
-// stateClaims is the plaintext payload of the short-lived login-state
-// cookie, carrying everything handleCallback needs that cannot otherwise
-// survive the redirect through the IdP (there is no server-side session
-// store to stash it in — see the package doc comment).
+// stateClaims is the plaintext payload of the short-lived login-state cookie;
+// with no server-side store, it is how login state survives the IdP redirect.
 type stateClaims struct {
 	State        string `json:"state"`
 	Nonce        string `json:"nonce"`
@@ -29,11 +27,8 @@ type stateClaims struct {
 	ExpiresAt    int64  `json:"exp"`
 }
 
-// encrypt marshals v as JSON and seals it with AES-256-GCM under purpose as
-// additional authenticated data, returning a URL-safe cookie value. purpose
-// binds a ciphertext to the cookie kind it was created for (see
-// decrypt) — decrypting a session cookie's value with the state purpose (or
-// vice versa) fails authentication even though both use the same key.
+// encrypt seals v as JSON with AES-256-GCM. purpose is the AAD, binding the
+// ciphertext to one cookie kind so session and state cookies can't be swapped.
 func (a *Authenticator) encrypt(purpose string, v any) (string, error) {
 	plaintext, err := json.Marshal(v)
 	if err != nil {
@@ -50,14 +45,8 @@ func (a *Authenticator) encrypt(purpose string, v any) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(ciphertext), nil
 }
 
-// decrypt is the inverse of encrypt: it decodes, authenticates, and decrypts
-// value (a cookie's Value), then JSON-unmarshals the plaintext into v. Any
-// failure along the way — malformed base64, too-short ciphertext, a failed
-// GCM authentication tag (wrong key, wrong purpose, or a tampered value),
-// bad JSON — is returned as a single opaque error: callers treat every
-// failure mode identically (an invalid cookie, full stop), never
-// distinguishing "tampered" from "wrong purpose" from "corrupt", so a
-// crafted cookie can't be used to probe which failure mode it hit.
+// decrypt is the inverse of encrypt. Every failure returns the same opaque
+// error so a crafted cookie can't probe which check it failed.
 func (a *Authenticator) decrypt(purpose string, value string, v any) error {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
@@ -83,21 +72,14 @@ func (a *Authenticator) decrypt(purpose string, value string, v any) error {
 	return nil
 }
 
-// identityContextKey is an unexported type so context values set by this
-// package can never collide with a key from another package (the standard
-// Go context-key idiom).
 type identityContextKey struct{}
 
-// withIdentity returns a copy of ctx carrying identity, attached by
-// requireSession for every gated request.
 func withIdentity(ctx context.Context, identity Identity) context.Context {
 	return context.WithValue(ctx, identityContextKey{}, identity)
 }
 
-// IdentityFromContext returns the authenticated Identity attached to ctx by
-// the session middleware (Authenticator.Wrap), if any. Handlers mounted
-// behind Wrap's gated routes (i.e. everything except /auth/login,
-// /auth/callback, /auth/logout) can rely on this always succeeding.
+// IdentityFromContext returns the Identity attached by Authenticator.Wrap's
+// session middleware; it always succeeds behind gated routes.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	identity, ok := ctx.Value(identityContextKey{}).(Identity)
 

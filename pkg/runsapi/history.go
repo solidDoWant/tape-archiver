@@ -1,20 +1,7 @@
-// This file implements the shared machinery behind GET /api/runs/{runID}/phases,
-// GET /api/runs/{runID}/config, GET /api/runs/{runID}/tapes, and GET /api/tapes
-// (issue #273): everything is reconstructed on demand by walking a run's raw
-// Temporal workflow event history — never from a persisted catalog (SPEC §4.2's
-// "no cross-run state, no online catalog").
-//
-// This deliberately reads raw HistoryEvents (GetWorkflowHistory) rather than a
-// replay-based Temporal query: a query against a *closed* workflow execution is
-// answered by replaying its history against the querying worker's *currently
-// registered* workflow code, and this repo's history can span multiple deployed
-// versions of workflows/backup (feature work, bug fixes) as well as, in tests,
-// entirely foreign/stub workflows sharing the same fixed WorkflowID/TaskQueue.
-// Replaying an old run's history against newer code — or a stub's history
-// against the real Backup workflow code — is exactly the nondeterminism replay
-// panics guard against. Parsing the immutable event stream directly has no such
-// hazard: it only ever reads what already happened, never re-executes workflow
-// code.
+// Run details are reconstructed from a run's raw Temporal event history, never a
+// persisted catalog (SPEC §4.2). Raw events are parsed rather than using a
+// replay-based query because replaying a closed run against newer (or stub)
+// workflow code would hit nondeterminism panics.
 package runsapi
 
 import (
@@ -35,10 +22,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// phaseOrder is the 11 pipeline phases in execution order (SPEC §4.3), the
-// authoritative source being workflows/backup/workflow.go's backupPhases()
-// (with its single Load/Write/Eject table entry expanded to the three phase
-// names it completes, matching LastCompletedPhaseQuery's granularity).
+// phaseOrder is the 11 pipeline phases in execution order (SPEC §4.3), mirroring
+// backupPhases() with Load/Write/Eject expanded.
 var phaseOrder = []string{
 	backup.PhaseResolve,
 	backup.PhasePrepare,
@@ -53,9 +38,8 @@ var phaseOrder = []string{
 	backup.PhaseDeliver,
 }
 
-// activityRecord is one activity invocation reconstructed from a run's history:
-// the ACTIVITY_TASK_SCHEDULED event that created it, joined with whatever
-// STARTED and terminal (COMPLETED/FAILED/TIMED_OUT/CANCELED) events followed.
+// activityRecord is one activity invocation joined from its scheduled, started,
+// and terminal history events.
 type activityRecord struct {
 	ScheduledEventID int64
 	ActivityID       string
@@ -64,10 +48,9 @@ type activityRecord struct {
 	ScheduledTime    time.Time
 	Input            *commonpb.Payloads
 
-	// Started is set by ACTIVITY_TASK_STARTED. Temporal writes that event only
-	// when the attempt closes for an activity with a retry policy, so an
-	// in-flight activity usually reads !Started here; DescribeWorkflowExecution's
-	// pending-activity state is authoritative for that (see waiting.go).
+	// Started is unreliable for in-flight activities: Temporal writes STARTED
+	// only when a retried attempt closes. Use pending-activity state instead
+	// (waiting.go).
 	Started bool
 
 	Completed bool
@@ -78,11 +61,7 @@ type activityRecord struct {
 	Result    *commonpb.Payloads
 	ErrorText string
 
-	// Barcode is the tape barcode this activity's input names, pre-extracted
-	// at parse time for the write-pipeline activities (FormatTape/WriteTree/
-	// FinalizeTape/MeasureWriteHealth) so deriveTapeOutcomes can correlate
-	// them by barcode without re-decoding every Input by hand. Empty for
-	// activities with no barcode field, or when decoding failed.
+	// Barcode is pre-extracted for write-pipeline activities; empty otherwise.
 	Barcode string
 }
 
@@ -96,59 +75,37 @@ func (a activityRecord) Failure() bool {
 	return a.Failed || a.TimedOut || a.Canceled
 }
 
-// runHistory is a run's raw workflow history, parsed once by fetchRunHistory
-// into the shapes the phase-timeline, config, and tape-outcome derivations all
-// share.
+// runHistory is a run's parsed workflow history.
 type runHistory struct {
-	// StartInput is WorkflowExecutionStarted's Input: the single config.Config
-	// argument runsubmit.Submit passed to ExecuteWorkflow, i.e. the exact run
-	// configuration originally submitted for this run.
+	// StartInput is the submitted config.Config.
 	StartInput *commonpb.Payloads
 	StartTime  time.Time
-	// StartMemo is WorkflowExecutionStarted's Memo: the submit-time metadata
-	// runsubmit.Submit attached (currently the dry-run flag, MemoKeyDryRun).
-	// Read back so a restart preload can faithfully carry the dry-run intent,
-	// which the config Input alone does not record.
+	// StartMemo carries the dry-run flag, which the config Input does not
+	// record; restart preloads need it.
 	StartMemo *commonpb.Memo
 
-	// Activities are every activity this run ever scheduled, in schedule
-	// order (append order during the history walk, which is monotonic in
-	// ScheduledEventID since history events are strictly ordered).
+	// Activities are in schedule order.
 	Activities []activityRecord
 
-	// Closed/Succeeded describe the workflow's terminal state, both zero
-	// values while the run is still open (RUNNING, or paused — a pause is not
-	// a terminal Temporal status).
+	// Closed/Succeeded are false while the run is open (a pause is not terminal).
 	Closed    bool
 	Succeeded bool
-	// CloseTime is when the workflow reached its terminal event, zero while the
-	// run is still open. It bounds drive-metric queries (metrics.go) to when the
-	// run actually wrote, rather than the current wall clock.
+	// CloseTime bounds drive-metric queries to when the run actually wrote.
 	CloseTime time.Time
 
-	// FailureMessage is the terminal failure's rendered text, when Closed &&
-	// !Succeeded. Used only as populateFailingPhase's fallback signal.
+	// FailureMessage is the terminal failure text; only a fallback signal for
+	// populateFailingPhase.
 	FailureMessage string
 
-	// FailingPhase/FailingSummary identify which of the 11 phases (PhaseHold
-	// folded onto PhaseResolve, see normalizeFailingPhase) failed and why,
-	// primarily extracted from the NotifyFailure activity's own recorded
-	// input (failure.go's FailureInput) — the same structured phase name and
-	// error summary the SPEC §11 Discord alert carries — rather than by
-	// pattern-matching the workflow's own terminal failure message. Empty
-	// when the run has not failed, or failed before any phase (or Hold) had
-	// a chance to run (e.g. run-config validation, workflow.go's very first
-	// statement).
+	// FailingPhase/FailingSummary say which phase failed and why, preferably
+	// from NotifyFailure's structured input. Empty if the run failed before
+	// any phase ran.
 	FailingPhase   string
 	FailingSummary string
 }
 
-// fetchRunHistory drains runID's complete event history via
-// TemporalClient.GetWorkflowHistory and parses it into a runHistory. Every
-// error GetWorkflowHistory's iterator can return (serviceerror.NotFound,
-// InvalidArgument, ...) is returned unwrapped so writeHistoryError's
-// classification (statusForTemporalError plus the aged-out/never-existed
-// distinction) applies uniformly to every caller.
+// fetchRunHistory reads and parses runID's full history. Errors are returned
+// unwrapped so writeHistoryError can classify them.
 func fetchRunHistory(ctx context.Context, temporalClient TemporalClient, runID string) (runHistory, error) {
 	iterator := temporalClient.GetWorkflowHistory(ctx, backup.WorkflowID, runID, false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
 
@@ -170,12 +127,8 @@ func fetchRunHistory(ctx context.Context, temporalClient TemporalClient, runID s
 	return history, nil
 }
 
-// applyHistoryEvent folds one history event into history, tracking each
-// activity's ScheduledEventID -> index in history.Activities via
-// indexByScheduled so later COMPLETED/FAILED/TIMED_OUT/CANCELED events can
-// find and update the record its SCHEDULED event created. indexByScheduled
-// (rather than a pointer captured at append time) is required because
-// appending to history.Activities can reallocate its backing array.
+// applyHistoryEvent folds one event into history. indexByScheduled stores
+// indices, not pointers, because appending to Activities can reallocate.
 func applyHistoryEvent(history *runHistory, indexByScheduled map[int64]int, event *historypb.HistoryEvent) {
 	eventTime := event.GetEventTime().AsTime()
 
@@ -266,15 +219,9 @@ func applyHistoryEvent(history *runHistory, indexByScheduled map[int64]int, even
 	}
 }
 
-// extractBarcode decodes the tape barcode out of a write-pipeline activity's
-// scheduled Input (FormatInput/WriteTreeInput/FinalizeInput/
-// MeasureWriteHealthInput, session.go/writehealth.go — none of which are
-// exported as a shared interface, hence the anonymous decode target below,
-// matched by field name against whichever of the four this actually is).
-// Returns "" for any other activity name, or when decoding fails (e.g. an
-// older workflow code version whose input shape does not carry a Barcode
-// field at all — degrade to an unattributed record rather than fail the
-// whole history walk).
+// extractBarcode decodes the Barcode field from a write-pipeline activity's
+// input, returning "" for other activities or on decode failure (e.g. older
+// workflow versions).
 func extractBarcode(name string, input *commonpb.Payloads) string {
 	switch name {
 	case "FormatTape", "WriteTree", "FinalizeTape", "MeasureWriteHealth":
@@ -290,10 +237,8 @@ func extractBarcode(name string, input *commonpb.Payloads) string {
 	return payload.Barcode
 }
 
-// decodePayloads decodes payloads into target using Temporal's default data
-// converter — the same one client.Dial uses absent a custom
-// client.Options.DataConverter (pkg/temporalclient.buildOptions sets none), so
-// this always matches how the value was actually encoded on the wire.
+// decodePayloads uses the default data converter, which matches the client's
+// (pkg/temporalclient sets no custom converter).
 func decodePayloads(payloads *commonpb.Payloads, target interface{}) error {
 	if payloads == nil {
 		return errors.New("no payload")
@@ -302,15 +247,8 @@ func decodePayloads(payloads *commonpb.Payloads, target interface{}) error {
 	return converter.GetDefaultDataConverter().FromPayloads(payloads, target)
 }
 
-// normalizeFailingPhase maps PhaseHold (workflow.go) onto PhaseResolve for the
-// phase timeline. PhaseHold is the run-scoped zfs hold placed immediately after
-// Resolve produces its work list (SPEC §4.3 phase 1) — a continuation of
-// finishing Resolve's job, not one of the 11 pipeline phases this API reports
-// (the issue's phase list omits it, matching backupPhases()). A design
-// decision (documented on issue #273): rather than inventing a 12th phase or
-// silently dropping a Hold failure from the timeline, it surfaces as a Resolve
-// failure — the FailingSummary text ("phase Hold: ...") still names the real
-// failing step precisely.
+// normalizeFailingPhase reports a Hold failure as Resolve, since Hold is not one
+// of the 11 reported phases (issue #273); the summary still names Hold.
 func normalizeFailingPhase(phase string) string {
 	if phase == backup.PhaseHold {
 		return backup.PhaseResolve
@@ -319,30 +257,13 @@ func normalizeFailingPhase(phase string) string {
 	return phase
 }
 
-// notifyFailureActivityName is the Temporal activity type name for
-// (*backup.FailureActivities).NotifyFailure — the deferred failure-alert
-// activity every failed run schedules exactly once (workflow.go), carrying
-// the failing phase and error summary as its own recorded Input
-// (failure.go's FailureInput).
+// notifyFailureActivityName is scheduled once by every failed run.
 const notifyFailureActivityName = "NotifyFailure"
 
-// populateFailingPhase fills history.FailingPhase/FailingSummary. It prefers
-// decoding the NotifyFailure activity's own Input (FailureInput{Phase,
-// ErrorSummary}), the most direct, structured record of why a run failed
-// (SPEC §11's Discord alert reads the exact same fields) — present regardless
-// of whether DISCORD_FAILURE_WEBHOOK_URL is configured, since the activity
-// itself always runs (failure.go: an empty URL only makes the webhook client
-// a no-op, not the activity).
-//
-// Falls back to parsing the workflow-level terminal failure message when no
-// NotifyFailure activity is found in history at all: an older deployed
-// version of workflows/backup predating FailureInput's Phase field (this
-// API's history can span multiple code versions, issue #273), or a run whose
-// NotifyFailure activity itself never got scheduled (e.g. cfg.Validate()
-// rejected the config before the failure-alert defer was even installed,
-// workflow.go's first statement). workflow.go always wraps a phase failure as
-// `fmt.Errorf("phase %s: %w", name, err)`, so the fallback recovers the same
-// phase name from that prefix.
+// populateFailingPhase prefers NotifyFailure's input (which runs even without a
+// webhook configured), falling back to the "phase NAME: ..." prefix of the
+// terminal failure message for older workflow versions or runs that failed
+// before NotifyFailure was deferred.
 func populateFailingPhase(history *runHistory) {
 	for _, record := range history.Activities {
 		if record.Name != notifyFailureActivityName {
@@ -358,13 +279,8 @@ func populateFailingPhase(history *runHistory) {
 			continue
 		}
 
-		// A NotifyFailure from an older workflow version predating FailureInput's
-		// Phase field decodes cleanly with an empty Phase. Accepting that as the
-		// (blank) failing phase and returning here would skip the terminal-
-		// message fallback below — the very path meant to handle old-version
-		// history — leaving FailingPhase unset. Instead keep the structured
-		// ErrorSummary (if any) and fall through so the phase is recovered from
-		// the failure message.
+		// Older versions lack Phase: keep the summary and recover the phase
+		// from the failure message below.
 		if input.Phase == "" {
 			history.FailingSummary = input.ErrorSummary
 
@@ -393,19 +309,13 @@ func populateFailingPhase(history *runHistory) {
 
 	history.FailingPhase = normalizeFailingPhase(strings.TrimSpace(name))
 
-	// Preserve a structured ErrorSummary recovered from an old-version
-	// NotifyFailure above; only fall back to the raw terminal message when we
-	// have nothing better.
 	if history.FailingSummary == "" {
 		history.FailingSummary = history.FailureMessage
 	}
 }
 
-// runExistsInVisibility reports whether runID appears in Temporal visibility
-// as an execution of the singleton backup workflow — the same ListWorkflow
-// query listRuns (runsapi.go) already issues for GET /api/runs, reused here
-// (not a new catalog, SPEC §4.2) to distinguish a run that once existed from
-// one that never did (writeHistoryError).
+// runExistsInVisibility reports whether runID is listed in Temporal visibility,
+// distinguishing an aged-out run (410) from one that never existed (404).
 func runExistsInVisibility(ctx context.Context, temporalClient TemporalClient, runID string) (bool, error) {
 	var (
 		token   []byte
@@ -413,13 +323,8 @@ func runExistsInVisibility(ctx context.Context, temporalClient TemporalClient, r
 		pages   int
 	)
 
-	// Page through visibility until the run is found or the pages run out:
-	// reading only the first page (before this) could miss a real run on page
-	// 2+, wrongly making writeHistoryError report an aged-out run as 404
-	// instead of 410 Gone. Early-exit on a match, and stop at maxVisibilityScan
-	// rows or maxVisibilityPages pages — the same backstops
-	// listAllBackupExecutions applies, the page cap covering sparse/empty
-	// tokened pages the row cap alone would not bound.
+	// Scan all pages (a run on page 2+ must still be found), bounded by row and
+	// page caps; the page cap covers sparse/empty tokened pages.
 	for {
 		response, err := temporalClient.ListWorkflow(ctx, &workflowservicepb.ListWorkflowExecutionsRequest{
 			Query:         workflowIDQuery(),
@@ -448,25 +353,15 @@ func runExistsInVisibility(ctx context.Context, temporalClient TemporalClient, r
 	return false, nil
 }
 
-// workflowIDQuery is the visibility query every listing/existence check in
-// this package issues: every execution of the singleton backup workflow ID
-// (listRuns in runsapi.go builds the identical query inline; this named
-// helper exists so listTapes and runExistsInVisibility, added by issue #273,
-// use the exact same query text rather than two independently hand-written
-// copies).
+// workflowIDQuery matches every execution of the singleton backup workflow.
 func workflowIDQuery() string {
 	return fmt.Sprintf("WorkflowId = %q", backup.WorkflowID)
 }
 
-// intFact renders an integer fact as a PhaseFact with the value formatted in
-// base 10 — shared by every phaseFacts implementation in facts.go.
 func intFact(key, label string, n int) PhaseFact {
 	return PhaseFact{Key: key, Label: label, Value: strconv.Itoa(n)}
 }
 
-// sortByScheduleOrder sorts records by ScheduledEventID ascending — the order
-// they actually happened in, since history events are strictly ordered by
-// EventId.
 func sortByScheduleOrder(records []activityRecord) {
 	sort.Slice(records, func(i, j int) bool { return records[i].ScheduledEventID < records[j].ScheduledEventID })
 }

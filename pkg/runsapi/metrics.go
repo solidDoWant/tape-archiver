@@ -1,26 +1,9 @@
-// This file implements GET /api/runs/{runID}/metrics/drives and GET
-// /api/runs/{runID}/metrics/drives/{barcode}/history (issue #275): a thin,
-// read-only proxy over VictoriaMetrics for the live write-health gauges the
-// data worker already exports (workflows/backup/writehealth.go —
-// tape_archiver_write_throughput_mbps/repositions/tapealert_flags/
-// below_floor, all labeled by barcode). No new metric instrumentation is
-// added anywhere; this only queries what already exists.
-//
-// cmd/web must never become an open PromQL proxy: every query issued here is
-// built server-side from a fixed metric-name allowlist and a barcode this
-// run's own Temporal history actually loaded (deriveTapeOutcomes, shared with
-// tapes.go) — a client can never supply raw PromQL, an arbitrary metric name,
-// or a barcode outside this run. The sparkline range/step are also fixed
-// server-side constants, never client-controlled, keeping this a narrow
-// "current run's drive view" (issue #275's non-goal: no historical/long-range
-// metrics explorer).
-//
-// VictoriaMetrics is optional observability, not a dependency this API can
-// fail without: an unset VICTORIAMETRICS_URL always yields the same stable
-// 503 response (errVMUnconfigured), and any failure actually reaching or
-// parsing a VictoriaMetrics response also degrades to 503, never 500 — a
-// misbehaving or unreachable metrics backend must never make the run detail
-// API itself look broken.
+// This file implements the drive write-health metrics endpoints (issue #275), a
+// read-only proxy over VictoriaMetrics for the gauges in
+// workflows/backup/writehealth.go. It must never become an open PromQL proxy:
+// queries are built server-side from a fixed metric allowlist, a barcode this
+// run actually loaded, and a fixed range/step. Any VictoriaMetrics problem,
+// including being unconfigured, degrades to 503, never 500.
 package runsapi
 
 import (
@@ -40,24 +23,13 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// victoriaMetricsEnvVar names the environment variable carrying
-// VictoriaMetrics's base URL (e.g. "http://127.0.0.1:8428"), read via the
-// same injectable h.getenv every other env-gated handler in this package
-// uses (runsapi.go's dry-run mhvtl gate). Unset means metrics are not
-// configured for this deployment.
+// victoriaMetricsEnvVar holds VictoriaMetrics' base URL; unset means unconfigured.
 const victoriaMetricsEnvVar = "VICTORIAMETRICS_URL"
 
-// errVMUnconfigured is returned verbatim (same message, same 503 status)
-// whenever VICTORIAMETRICS_URL is unset, so "metrics unavailable because
-// unconfigured" is a single stable response shape a client/test can assert
-// on directly, per issue #275 AC1.
+// errVMUnconfigured is the stable 503 body when VICTORIAMETRICS_URL is unset (issue #275 AC1).
 var errVMUnconfigured = errors.New("VictoriaMetrics is not configured (VICTORIAMETRICS_URL is unset)")
 
-// The four write-health gauges workflows/backup/writehealth.go registers,
-// all labeled "barcode". These names must stay in sync with that file's
-// prometheus.GaugeOpts (Namespace "tape_archiver", Subsystem "write") — the
-// fixed allowlist queries built below never accept a client-supplied metric
-// name.
+// The write-health gauges registered in workflows/backup/writehealth.go; keep in sync.
 const (
 	metricThroughput  = "tape_archiver_write_throughput_mbps"
 	metricRepositions = "tape_archiver_write_repositions"
@@ -65,12 +37,8 @@ const (
 	metricBelowFloor  = "tape_archiver_write_below_floor"
 )
 
-// sparklineMetricAllowlist maps the history endpoint's public `metric` query
-// parameter to the underlying Prometheus metric name, so a client picks one
-// of a fixed, named set rather than ever supplying (or probing for) a raw
-// metric name. defaultSparklineMetric is used when the parameter is absent —
-// the design's write-rate sparkline (DESIGN_ANALYSIS.md §3) only ever needs
-// throughput, but the other three are exposed the same safe way for reuse.
+// sparklineMetricAllowlist maps the public `metric` query parameter to a metric
+// name, so clients can never supply a raw metric name.
 var sparklineMetricAllowlist = map[string]string{
 	"throughput":  metricThroughput,
 	"repositions": metricRepositions,
@@ -80,40 +48,28 @@ var sparklineMetricAllowlist = map[string]string{
 
 const defaultSparklineMetric = "throughput"
 
-// sparklinePoints/sparklineStep fix the write-rate sparkline's shape to the
-// design's 8-bar chart (DESIGN_ANALYSIS.md §3: "8-bar sparkline"): a
-// hard-coded, server-side-only range/step, never client-controlled, so this
-// endpoint cannot be used to page back through arbitrary history (issue
-// #275's explicit non-goal).
+// sparklinePoints/sparklineStep fix the sparkline window server-side so the
+// endpoint cannot page through arbitrary history (issue #275 non-goal).
 const (
 	sparklinePoints = 8
 	sparklineStep   = 90 * time.Second
 )
 
-// vmQueryTimeout bounds a single VictoriaMetrics HTTP request, well inside
-// requestTimeout so a slow/unreachable VictoriaMetrics cannot itself exhaust
-// the whole request's budget before this handler gets a chance to degrade to
-// 503.
+// vmQueryTimeout is well inside requestTimeout so a slow backend still leaves
+// time to degrade to 503.
 const vmQueryTimeout = 5 * time.Second
 
-// DriveMetric is one physical tape's live write-health reading, merging this
-// run's own history (barcode/drive/tape identity and the speed-matching
-// floor, which VictoriaMetrics does not carry) with whatever VictoriaMetrics
-// currently reports for that barcode's gauges.
+// DriveMetric is one tape's write-health reading, merging run history with
+// VictoriaMetrics gauges.
 type DriveMetric struct {
 	Barcode    string `json:"barcode"`
 	TapeIndex  int    `json:"tapeIndex"`
 	CopyIndex  int    `json:"copyIndex"`
 	DriveIndex int    `json:"driveIndex"`
-	// Result mirrors TapeOutcome.Result ("loaded", "written", or "failed")
-	// for this barcode, so a client can tell a still-in-flight tape apart
-	// from one already finalized without a second request.
+	// Result mirrors TapeOutcome.Result ("loaded", "written", or "failed").
 	Result string `json:"result"`
 
-	// HasData is true when VictoriaMetrics returned at least one of the four
-	// gauges for this barcode. False means the tape has not been measured
-	// yet (still writing, or the run never reached MeasureWriteHealth for
-	// it) — distinct from a zero/false reading.
+	// HasData is false when no gauge was reported yet, as distinct from a zero reading.
 	HasData bool `json:"hasData"`
 
 	ThroughputMBps     *float64 `json:"throughputMBps,omitempty"`
@@ -121,24 +77,18 @@ type DriveMetric struct {
 	TapeAlertFlagCount *int     `json:"tapeAlertFlagCount,omitempty"`
 	BelowFloor         *bool    `json:"belowFloor,omitempty"`
 
-	// FloorMBps/FloorKnown are this tape's speed-matching floor, sourced
-	// from the run's own history (backup.WriteHealth via tapes.go's
-	// TapeOutcome), not from VictoriaMetrics — the floor is a static,
-	// generation-derived constant (workflows/backup/writehealth.go), never
-	// exported as its own gauge.
+	// FloorMBps/FloorKnown come from run history; the floor is not exported as a gauge.
 	FloorMBps  float64 `json:"floorMBps,omitempty"`
 	FloorKnown bool    `json:"floorKnown"`
 }
 
-// DriveMetricsResponse is the GET /api/runs/{runID}/metrics/drives response
-// body.
+// DriveMetricsResponse is the GET /api/runs/{runID}/metrics/drives response body.
 type DriveMetricsResponse struct {
 	RunID  string        `json:"runId"`
 	Drives []DriveMetric `json:"drives"`
 }
 
-// MetricPoint is one sample in a GET
-// /api/runs/{runID}/metrics/drives/{barcode}/history series.
+// MetricPoint is one sample in a drive metric history series.
 type MetricPoint struct {
 	Time  time.Time `json:"time"`
 	Value float64   `json:"value"`
@@ -153,9 +103,7 @@ type DriveMetricHistoryResponse struct {
 	Points  []MetricPoint `json:"points"`
 }
 
-// getRunDriveMetrics implements GET /api/runs/{runID}/metrics/drives:
-// current write-health readings for every tape this run has loaded, live
-// from VictoriaMetrics (issue #275 AC3/AC4).
+// getRunDriveMetrics implements GET /api/runs/{runID}/metrics/drives.
 func (h *handler) getRunDriveMetrics(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
@@ -183,9 +131,7 @@ func (h *handler) getRunDriveMetrics(w http.ResponseWriter, r *http.Request) {
 
 	outcomes := deriveTapeOutcomes(history.Activities)
 	if len(outcomes) == 0 {
-		// No tape has been loaded yet (e.g. the run has not reached the
-		// Load/Write phases) — a normal, not-writing-yet state, not an
-		// error (issue #275's "no-data" state).
+		// No tape loaded yet: a normal no-data state.
 		writeJSON(w, http.StatusOK, DriveMetricsResponse{RunID: runID})
 
 		return
@@ -196,10 +142,7 @@ func (h *handler) getRunDriveMetrics(w http.ResponseWriter, r *http.Request) {
 		barcodes = append(barcodes, outcome.Barcode)
 	}
 
-	// Anchor the instant read to the run's own window: while running, "now";
-	// once closed, the run's close time — so a finished run reports its final
-	// readings, not whatever the same tape shows now if it was since reused in a
-	// later run.
+	// Anchor to the run's window so a finished run never reads a later reuse of the tape.
 	samples, err := queryDriveSamples(ctx, vmURL, barcodes, metricQueryWindow(history, time.Now()))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("query VictoriaMetrics: %w", err))
@@ -223,10 +166,7 @@ func (h *handler) getRunDriveMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, DriveMetricsResponse{RunID: runID, Drives: drives})
 }
 
-// getRunDriveMetricsHistory implements GET
-// /api/runs/{runID}/metrics/drives/{barcode}/history: a fixed-shape,
-// fixed-window sparkline series for one metric of one of this run's own
-// tapes (issue #275's write-rate sparkline).
+// getRunDriveMetricsHistory implements GET /api/runs/{runID}/metrics/drives/{barcode}/history.
 func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
@@ -240,12 +180,7 @@ func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Checked before the metric-param allowlist below so an unset
-	// VICTORIAMETRICS_URL always yields the same stable 503 (this file's
-	// header invariant, and matching getRunDriveMetrics' order above): a
-	// client's "metrics unavailable" detection keys on 503, and must not be
-	// pre-empted by a 400 for an unknown metric when metrics are simply not
-	// configured.
+	// Checked before the metric allowlist so unconfigured is always 503, never a 400.
 	vmURL := h.getenv(victoriaMetricsEnvVar)
 	if vmURL == "" {
 		writeError(w, http.StatusServiceUnavailable, errVMUnconfigured)
@@ -278,10 +213,7 @@ func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// End the sparkline window at the run's own close time once it is closed,
-	// not the current wall clock — otherwise a finished run's sparkline queries
-	// an unrelated recent window (showing another run's data if the tape was
-	// reused, or nothing at all) instead of when this run actually wrote.
+	// A closed run's window ends when it wrote, not at the current wall clock.
 	end := metricQueryWindow(history, time.Now())
 	start := end.Add(-sparklineStep * (sparklinePoints - 1))
 
@@ -300,10 +232,7 @@ func (h *handler) getRunDriveMetricsHistory(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// runHasBarcode reports whether barcode is one this run actually loaded,
-// per its own reconstructed tape outcomes — the membership check that keeps
-// the history endpoint from being usable to probe metrics for a barcode
-// outside this run.
+// runHasBarcode prevents probing metrics for barcodes outside this run.
 func runHasBarcode(outcomes []TapeOutcome, barcode string) bool {
 	for _, outcome := range outcomes {
 		if outcome.Barcode == barcode {
@@ -314,10 +243,7 @@ func runHasBarcode(outcomes []TapeOutcome, barcode string) bool {
 	return false
 }
 
-// driveSample holds whatever subset of the four write-health gauges
-// VictoriaMetrics reported for one barcode; a nil field means that gauge had
-// no sample (unmeasured, or the drive's generation has no known floor for
-// belowFloor).
+// driveSample holds the gauges reported for one barcode; nil means no sample.
 type driveSample struct {
 	throughput  *float64
 	repositions *int64
@@ -325,9 +251,6 @@ type driveSample struct {
 	belowFloor  *bool
 }
 
-// toDriveMetric merges one run-derived TapeOutcome with its VictoriaMetrics
-// sample (zero value when the barcode had none) into the API's DriveMetric
-// shape.
 func toDriveMetric(outcome TapeOutcome, sample driveSample) DriveMetric {
 	metric := DriveMetric{
 		Barcode:            outcome.Barcode,
@@ -350,13 +273,7 @@ func toDriveMetric(outcome TapeOutcome, sample driveSample) DriveMetric {
 	return metric
 }
 
-// --- VictoriaMetrics HTTP client ---
-//
-// VictoriaMetrics implements the same query/query_range HTTP API as
-// Prometheus (docs/web-ui.md's dev stack points cmd/web at it directly), so
-// these helpers speak that wire format.
-
-// vmResponse is the shared envelope for both /api/v1/query and
+// vmResponse is the Prometheus-compatible envelope for both /api/v1/query and
 // /api/v1/query_range.
 type vmResponse struct {
 	Status string `json:"status"`
@@ -369,21 +286,15 @@ type vmData struct {
 	Result     []vmResult `json:"result"`
 }
 
-// vmResult is one time series. Value is set for an instant query
-// (/api/v1/query), Values for a range query (/api/v1/query_range) — each a
-// Prometheus-style [timestamp, "value-as-string"] pair, decoded lazily via
-// json.RawMessage since the timestamp and value have different JSON types.
+// vmResult is one series: Value for instant queries, Values for range queries,
+// each a [timestamp, "value"] pair of mixed JSON types.
 type vmResult struct {
 	Metric map[string]string   `json:"metric"`
 	Value  []json.RawMessage   `json:"value,omitempty"`
 	Values [][]json.RawMessage `json:"values,omitempty"`
 }
 
-// vmDo issues one GET request against VictoriaMetrics' Prometheus-compatible
-// HTTP API and returns the decoded result series, or an error for any
-// non-success outcome (transport failure, non-200 status, malformed body, or
-// a {"status":"error",...} response body) — every case getRunDriveMetrics/
-// getRunDriveMetricsHistory fold into a single 503, never a 500.
+// vmDo issues one query and returns its series, or an error for any non-success outcome.
 func vmDo(ctx context.Context, baseURL, path string, values url.Values) ([]vmResult, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, vmQueryTimeout)
 	defer cancel()
@@ -417,18 +328,12 @@ func vmDo(ctx context.Context, baseURL, path string, values url.Values) ([]vmRes
 	return decoded.Data.Result, nil
 }
 
-// metricNameAlternation is a PromQL regex alternation of the four
-// write-health gauge names, built from the named constants (not a
-// hand-duplicated literal) so it cannot silently drift from them.
 var metricNameAlternation = strings.Join(
 	[]string{metricThroughput, metricRepositions, metricTapeAlerts, metricBelowFloor}, "|",
 )
 
-// barcodeRegex builds a PromQL label-match regex selecting exactly the given
-// barcodes. PromQL label regexes are implicitly fully anchored (matched as a
-// whole, like Go's regexp.MustCompile("^(?:...)$")), so a plain
-// QuoteMeta-escaped alternation is sufficient — no explicit ^/$ needed, and
-// escaping rules out any barcode value being interpreted as a wider regex.
+// barcodeRegex builds a label regex matching exactly barcodes; PromQL label
+// regexes are implicitly anchored, so QuoteMeta alone suffices.
 func barcodeRegex(barcodes []string) string {
 	quoted := make([]string, len(barcodes))
 	for i, barcode := range barcodes {
@@ -438,23 +343,10 @@ func barcodeRegex(barcodes []string) string {
 	return strings.Join(quoted, "|")
 }
 
-// metricQueryWindow returns the time a run's drive-metric queries should target:
-// while the run is open, the current time; once it is closed, the end of its
-// Write phase — so a finished run's readings and sparkline reflect when it
-// actually wrote rather than the current wall clock (which would surface another
-// run's data if the tape was since reused, or nothing at all).
-//
-// The anchor for a closed run is the end of the last Write-phase activity, NOT
-// the run's close time: the throughput/write-health gauges are emitted only
-// during the Write phase (FormatTape/WriteTree/FinalizeTape/MeasureWriteHealth),
-// and a run can then sit for a long time in Eject/Burn/Deliver on operator
-// pauses (SPEC §4.3). A window ending at close time — especially the sparkline's
-// fixed ~630s look-back off it — can then fall entirely after the last write
-// sample and show an empty chart despite the data existing. The write-phase end
-// is where the samples are, and is still <= close time, so it keeps the "never
-// read a later run's reuse of the tape" guarantee close time gave. Close time
-// (then now) is only a fallback for a closed run with no reconstructable write
-// activity.
+// metricQueryWindow returns now for an open run, else the end of its Write
+// phase. Not the close time: gauges are emitted only while writing, and a run
+// can sit paused in Eject/Burn/Deliver long enough that a window ending at close
+// would miss every sample. Close time is the fallback.
 func metricQueryWindow(history runHistory, now time.Time) time.Time {
 	if !history.Closed {
 		return now
@@ -471,10 +363,7 @@ func metricQueryWindow(history runHistory, now time.Time) time.Time {
 	return now
 }
 
-// writePhaseEnd returns the end time of the last Write-phase activity in
-// history, i.e. when the run stopped writing (and stopped emitting the
-// throughput/write-health gauges). ok is false when no Write-phase activity with
-// a terminal time exists yet.
+// writePhaseEnd returns the latest end time of a finished Write-phase activity.
 func writePhaseEnd(history runHistory) (time.Time, bool) {
 	var latest time.Time
 
@@ -496,16 +385,13 @@ func writePhaseEnd(history runHistory) (time.Time, bool) {
 	return latest, !latest.IsZero()
 }
 
-// queryDriveSamples issues one instant query for all four write-health gauges
-// across every given barcode in a single VictoriaMetrics round trip, evaluated
-// at `at` (the run's window anchor).
+// queryDriveSamples reads all gauges for all barcodes in one instant query at `at`.
 func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string, at time.Time) (map[string]driveSample, error) {
 	promql := fmt.Sprintf(`{__name__=~%q,barcode=~%q}`, metricNameAlternation, barcodeRegex(barcodes))
 
 	values := url.Values{"query": {promql}}
 	if !at.IsZero() {
-		// Evaluate at the run's window anchor rather than the server's current
-		// time, so a closed run does not read a later run's reuse of the barcode.
+		// A closed run must not read a later run's reuse of the barcode.
 		values.Set("time", strconv.FormatInt(at.Unix(), 10))
 	}
 
@@ -514,17 +400,8 @@ func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string, a
 		return nil, err
 	}
 
-	// A data-worker restart mid-run can leave two series for the same
-	// barcode+metric — Prometheus adds instance/job labels the gauges themselves
-	// do not carry. Prefer the freshest by sample timestamp rather than whichever
-	// the backend returned last. Note this only disambiguates when the series
-	// carry different timestamps (e.g. the stale instance has already aged out of
-	// part of the lookback); an instant query evaluates every returned series at
-	// the same `at`, so two still-live series tie — the real scoping against a
-	// stale/other-run reading is the query-time anchor above (a closed run reads
-	// at its close time) plus VictoriaMetrics' staleness horizon. The range
-	// endpoint, which carries real per-sample timestamps, is where the merge
-	// genuinely reunites a split series.
+	// A data-worker restart can split a barcode+metric into two series (different
+	// instance/job labels); prefer the freshest sample.
 	type tsValue struct {
 		timestamp float64
 		value     float64
@@ -583,10 +460,7 @@ func queryDriveSamples(ctx context.Context, baseURL string, barcodes []string, a
 	return samples, nil
 }
 
-// queryDriveRange issues a range query for one metric/barcode pair over
-// [start, end] at step, returning every sample VictoriaMetrics has — the
-// caller (getRunDriveMetricsHistory) always passes the fixed sparkline
-// window/step, never client-supplied values.
+// queryDriveRange issues a range query for one metric/barcode over [start, end].
 func queryDriveRange(ctx context.Context, baseURL, metricName, barcode string, start, end time.Time, step time.Duration) ([]MetricPoint, error) {
 	promql := fmt.Sprintf(`%s{barcode=%q}`, metricName, barcode)
 
@@ -602,13 +476,8 @@ func queryDriveRange(ctx context.Context, baseURL, metricName, barcode string, s
 		return nil, err
 	}
 
-	// Merge points across every returned series. A data-worker restart mid-run
-	// splits a barcode's samples into two series (different instance/job labels),
-	// each covering part of the window; taking only results[0] would drop half
-	// the sparkline and might show the stale instance. The series cover disjoint
-	// times in practice, so keying by timestamp dedupes cleanly. An empty result
-	// yields a non-nil empty slice so Points (no omitempty) marshals to [] not
-	// null — a JS client maps over [] but trips on null.
+	// Merge all series: a worker restart splits one barcode across series. Points
+	// must be non-nil so it marshals to [] rather than null.
 	byTime := make(map[int64]MetricPoint)
 
 	for _, result := range results {
@@ -634,13 +503,9 @@ func queryDriveRange(ctx context.Context, baseURL, metricName, barcode string, s
 	return points, nil
 }
 
-// parseSampleWithTime decodes a Prometheus/VictoriaMetrics [timestamp, "value"]
-// pair into its unix timestamp and value. The timestamp lets queryDriveSamples
-// pick the freshest of several series for one barcode (a mid-run worker
-// restart). Non-finite values ("NaN"/"Inf" for gap-filled or stale samples) are
-// rejected: encoding/json cannot marshal them, and by the time Encode fails
-// writeJSON has already sent a 200 header, so the client would get a truncated
-// body — the caller skips such a sample as it does any other malformed one.
+// parseSampleWithTime decodes a [timestamp, "value"] pair. Non-finite values are
+// rejected because encoding/json cannot marshal them, and writeJSON has already
+// sent a 200 by the time Encode fails.
 func parseSampleWithTime(raw []json.RawMessage) (timestamp float64, value float64, err error) {
 	if len(raw) != 2 {
 		return 0, 0, fmt.Errorf("malformed sample: expected 2 elements, got %d", len(raw))
@@ -667,17 +532,13 @@ func parseSampleWithTime(raw []json.RawMessage) (timestamp float64, value float6
 	return timestamp, parsed, nil
 }
 
-// parseSampleValue decodes an instant-query [timestamp, "value"] pair, returning
-// just the value (the timestamp is not needed for a single-series instant read).
 func parseSampleValue(raw []json.RawMessage) (float64, error) {
 	_, value, err := parseSampleWithTime(raw)
 
 	return value, err
 }
 
-// parseRangePoint decodes one [timestamp, "value"] pair from a range query's
-// "values" array into a MetricPoint. ok is false for a malformed pair, which
-// the caller skips rather than failing the whole series over one bad sample.
+// parseRangePoint decodes one range pair; ok is false for a malformed pair.
 func parseRangePoint(raw []json.RawMessage) (MetricPoint, bool) {
 	if len(raw) != 2 {
 		return MetricPoint{}, false
@@ -698,10 +559,7 @@ func parseRangePoint(raw []json.RawMessage) (MetricPoint, bool) {
 		return MetricPoint{}, false
 	}
 
-	// Skip non-finite values (VictoriaMetrics emits "NaN"/"Inf" for gap-filled
-	// or stale range points): encoding/json cannot marshal them, and by the
-	// time Encode fails writeJSON has already sent a 200 header — see
-	// parseSampleValue.
+	// Non-finite values cannot be marshaled; see parseSampleWithTime.
 	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return MetricPoint{}, false
 	}

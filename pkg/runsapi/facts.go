@@ -1,10 +1,6 @@
-// This file implements phases.go's per-phase fact extraction (issue #273
-// AC2): a small, fixed set of observable facts recoverable from each phase's
-// own activity Input/Result payloads — e.g. Resolve's archive count, Verify's
-// matched-file count, Pack's logical-tape/copy count. Facts are computed
-// opportunistically and best-effort: a phase that has not produced the
-// underlying activity result yet (still running, or failed before reaching
-// it) simply yields fewer facts, never an error.
+// Per-phase fact extraction (issue #273) from activity Input/Result payloads.
+// Best-effort: a phase without the underlying result yields fewer facts, never
+// an error.
 package runsapi
 
 import (
@@ -15,11 +11,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// writePathPausePhase decodes writepause.go's WritePathPauseInput to recover
-// which sub-phase ("Load" or "Write") a NotifyWritePathPause alert belongs to.
-// Defaults to PhaseWrite — the more common of the two failure sites, and a
-// harmless default relative to a genuinely undecodable/older-version input —
-// rather than dropping the activity from the timeline entirely.
+// writePathPausePhase returns which sub-phase a NotifyWritePathPause alert
+// belongs to, defaulting to Write for an undecodable input.
 func writePathPausePhase(input *commonpb.Payloads) string {
 	var decoded struct{ Phase string }
 	if err := decodePayloads(input, &decoded); err == nil && decoded.Phase == backup.PhaseLoad {
@@ -29,8 +22,6 @@ func writePathPausePhase(input *commonpb.Payloads) string {
 	return backup.PhaseWrite
 }
 
-// findByName returns every record in records whose Name matches, in the order
-// given (already schedule-ordered by buildPhaseTimeline).
 func findByName(records []activityRecord, name string) []activityRecord {
 	var matches []activityRecord
 
@@ -43,7 +34,6 @@ func findByName(records []activityRecord, name string) []activityRecord {
 	return matches
 }
 
-// last returns the last element of records, and false for an empty slice.
 func last(records []activityRecord) (activityRecord, bool) {
 	if len(records) == 0 {
 		return activityRecord{}, false
@@ -52,11 +42,8 @@ func last(records []activityRecord) (activityRecord, bool) {
 	return records[len(records)-1], true
 }
 
-// phaseFacts dispatches to the per-phase fact extractor for name, given that
-// phase's own activity records (already filtered/ordered by
-// buildPhaseTimeline) and, for the Write phase only, the whole run's derived
-// tape outcomes (deriveTapeOutcomes spans Load+Write-phase activities
-// together, so it cannot be computed from records alone).
+// phaseFacts dispatches to the per-phase extractor. Write uses the run-wide
+// tape outcomes, which span Load and Write activities.
 func phaseFacts(name string, status PhaseStatus, records []activityRecord, outcomes []TapeOutcome) []PhaseFact {
 	switch name {
 	case backup.PhaseResolve:
@@ -86,18 +73,12 @@ func phaseFacts(name string, status PhaseStatus, records []activityRecord, outco
 	}
 }
 
-// bytesPerGiB is the whole-GiB unit derived slice sizes are quantized to
-// (backup.DeriveSliceSize), so the Resolve "Slice size" fact renders them as an
-// exact GiB count rather than the rounded decimal humanizeBytes would give.
+// bytesPerGiB: derived slice sizes are whole GiB (backup.DeriveSliceSize).
 const bytesPerGiB = 1 << 30
 
-// resolveFacts reports the resolved archive count and the run's derived slice size
-// (issue #324) from ResolveAndCheck's completed result (resolve.go) — the final,
-// data-side-verified work list (rather than ResolveK8sSources' control-side-only
-// partial list). The slice size is recomputed from the same resolved sizes the
-// workflow derives it from (DeriveSliceSize is a pure function of the archives'
-// EstimatedBytes), so this displays exactly the size Prepare sliced at without a
-// dedicated workflow query.
+// resolveFacts uses ResolveAndCheck's data-side-verified result. The slice
+// size (issue #324) is recomputed with the same pure DeriveSliceSize the
+// workflow uses, so no workflow query is needed.
 func resolveFacts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "ResolveAndCheck"))
 	if !ok || !record.Completed {
@@ -122,8 +103,6 @@ func resolveFacts(records []activityRecord) []PhaseFact {
 	}
 }
 
-// prepareFacts reports the staged archive count and total staged bytes from
-// PrepareArchives' completed result (prepare.go).
 func prepareFacts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "PrepareArchives"))
 	if !ok || !record.Completed {
@@ -151,10 +130,7 @@ func prepareFacts(records []activityRecord) []PhaseFact {
 	}
 }
 
-// humanizeBytes renders a byte count in decimal (SI) units — matching the
-// decimal capacities the tape world quotes (an LTO-9 tape is 18 TB, not
-// TiB) — for compact display. The exact count travels alongside it in the
-// fact's Title for hover text, so this can round freely.
+// humanizeBytes uses decimal (SI) units, matching how tape capacities are quoted.
 func humanizeBytes(n int64) string {
 	const unit = 1000
 	if n < unit {
@@ -170,9 +146,7 @@ func humanizeBytes(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "kMGTPE"[exp])
 }
 
-// groupDigits renders n with thousands separators (e.g. 6000000000 ->
-// "6,000,000,000") so the exact byte count in a fact's hover Title stays
-// legible.
+// groupDigits renders n with thousands separators, e.g. "6,000,000,000".
 func groupDigits(n int64) string {
 	digits := fmt.Sprintf("%d", n)
 
@@ -194,8 +168,6 @@ func groupDigits(n int64) string {
 	return sign + string(grouped)
 }
 
-// packFacts reports the logical tape count and copy count from Pack's
-// completed result (plan.go).
 func packFacts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "Pack"))
 	if !ok || !record.Completed {
@@ -213,8 +185,6 @@ func packFacts(records []activityRecord) []PhaseFact {
 	}
 }
 
-// par2Facts reports the recovery-set count from GeneratePAR2's completed
-// result (par2.go) — one set per staged archive.
 func par2Facts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "GeneratePAR2"))
 	if !ok || !record.Completed {
@@ -229,15 +199,8 @@ func par2Facts(records []activityRecord) []PhaseFact {
 	return []PhaseFact{intFact("recoverySets", "Recovery sets", len(sets))}
 }
 
-// verifyFacts reports the planned file count (slices + PAR2 files across
-// every archive) from Verify's own scheduled Input (verify.go's VerifyInput)
-// — available as soon as the activity is scheduled, unlike the activity's
-// Result, which carries no count at all (VerifiedPlan is an empty struct;
-// verify() only ever returns success or a specific mismatch error). When the
-// activity has completed successfully every planned file is, by definition,
-// verified to match — matchedFiles equals the planned count and is reported
-// as "N/N", matching the design's "71/71 matched" fact
-// (DESIGN_ANALYSIS.md §5).
+// verifyFacts counts planned files from Verify's Input, since its Result is
+// empty. A successful Verify means every planned file matched, reported "N/N".
 func verifyFacts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "Verify"))
 	if !ok {
@@ -265,9 +228,7 @@ func verifyFacts(records []activityRecord) []PhaseFact {
 	return []PhaseFact{{Key: "filesVerified", Label: "Files verified", Value: fmt.Sprintf("%d/%d", total, total)}}
 }
 
-// loadFacts reports the total tapes loaded across every drive-set (SPEC §4.3
-// phases 6-8 interleave Load per set), summing every completed Load
-// activity's result (library.go).
+// loadFacts sums every completed Load across the interleaved drive-sets.
 func loadFacts(records []activityRecord) []PhaseFact {
 	var total int
 
@@ -291,10 +252,6 @@ func loadFacts(records []activityRecord) []PhaseFact {
 	return []PhaseFact{intFact("tapesLoaded", "Tapes loaded", total)}
 }
 
-// writeFacts reports the written/failed tape counts from the whole run's
-// derived tape outcomes (tapes.go) — outcomes correlate Load's per-tape
-// barcodes with the Write-phase activities that finish them, so it cannot be
-// computed from the Write phase's own activity records alone.
 func writeFacts(outcomes []TapeOutcome) []PhaseFact {
 	if len(outcomes) == 0 {
 		return nil
@@ -319,9 +276,7 @@ func writeFacts(outcomes []TapeOutcome) []PhaseFact {
 	return facts
 }
 
-// ejectFacts reports the exported-tape count from the most recent Eject
-// activity's completed result (library.go's EjectResult.InIOStation is
-// cumulative across every Eject call so far in the run).
+// ejectFacts uses the most recent Eject, since EjectResult.InIOStation is cumulative.
 func ejectFacts(records []activityRecord) []PhaseFact {
 	var mostRecent *backup.EjectResult
 
@@ -345,9 +300,6 @@ func ejectFacts(records []activityRecord) []PhaseFact {
 	return []PhaseFact{intFact("tapesExported", "Tapes exported", len(mostRecent.InIOStation))}
 }
 
-// reportFacts reports whether the report (and, when optical burning is
-// configured, the recovery ISO) were built, from BuildReport's completed
-// result (report.go).
 func reportFacts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "BuildReport"))
 	if !ok || !record.Completed {
@@ -367,12 +319,8 @@ func reportFacts(records []activityRecord) []PhaseFact {
 	return facts
 }
 
-// burnFacts reports the burned-disc count, or that optical burning is
-// disabled for this run. Zero Burn-phase activity is ambiguous on its own —
-// it means either "not reached yet" or "ran as a no-op" (burnPhase returns
-// immediately when delivery.opticalBurn is unset, burnpath.go) — so the
-// caller's already-resolved PhaseStatus disambiguates: only a completed phase
-// with no activity is reported as disabled.
+// burnFacts: zero Burn activity means either "not reached" or "disabled"
+// (a no-op phase); only a completed phase is reported as disabled.
 func burnFacts(status PhaseStatus, records []activityRecord) []PhaseFact {
 	if len(records) == 0 {
 		if status == PhaseCompleted {
@@ -382,10 +330,7 @@ func burnFacts(status PhaseStatus, records []activityRecord) []PhaseFact {
 		return nil
 	}
 
-	// Count only completed BurnDisc activities, not every scheduled attempt:
-	// a failed-and-retried burn would otherwise inflate the disc count above
-	// the number of discs actually written, the same completed-only filter
-	// loadFacts and ejectFacts already apply.
+	// Completed only, so retried burns do not inflate the count.
 	discs := 0
 
 	for _, record := range findByName(records, "BurnDisc") {
@@ -401,9 +346,6 @@ func burnFacts(status PhaseStatus, records []activityRecord) []PhaseFact {
 	return []PhaseFact{intFact("discsBurned", "Discs burned", discs)}
 }
 
-// deliverFacts reports whether the report was delivered, from Deliver's
-// terminal state (deliver.go's Deliver activity returns no meaningful result,
-// only success/failure).
 func deliverFacts(records []activityRecord) []PhaseFact {
 	record, ok := last(findByName(records, "Deliver"))
 	if !ok || !record.Completed {
@@ -413,8 +355,6 @@ func deliverFacts(records []activityRecord) []PhaseFact {
 	return []PhaseFact{{Key: "delivered", Label: "Delivered", Value: yesNo(true)}}
 }
 
-// yesNo renders a bool as the same "yes"/"no" convention every fact above
-// uses instead of a raw "true"/"false".
 func yesNo(b bool) string {
 	if b {
 		return "yes"

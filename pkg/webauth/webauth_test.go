@@ -23,9 +23,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/webserver"
 )
 
-// testConfig builds a Config wired to a fresh fake OIDC provider, plus a
-// 32-byte session key — everything New needs to build a real Authenticator
-// against an in-process provider.
 func testConfig(t *testing.T, idp *testutil.FakeOIDCProvider) Config {
 	t.Helper()
 
@@ -48,10 +45,8 @@ func testSessionKey(t *testing.T) []byte {
 	return key
 }
 
-// echoHandler is a stand-in for pkg/webserver's SPA+API handler: it reports
-// the request path and, when a session was attached to the context, the
-// authenticated Identity — enough for tests to assert both "the gate let
-// this request through" and "the gate attached the right identity".
+// echoHandler stands in for the SPA+API handler, echoing the path and the
+// attached Identity.
 func echoHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -65,10 +60,6 @@ func echoHandler() http.Handler {
 	})
 }
 
-// newGatedServer builds an httptest.Server serving authenticator.Wrap over
-// echoHandler(), standing in for cmd/web's real handler chain
-// (webauth.Wrap(webserver.NewHandler(...))) without depending on
-// pkg/webserver or pkg/runsapi.
 func newGatedServer(t *testing.T, authenticator *Authenticator) *httptest.Server {
 	t.Helper()
 
@@ -78,13 +69,8 @@ func newGatedServer(t *testing.T, authenticator *Authenticator) *httptest.Server
 	return server
 }
 
-// newGatedServerWithRealRedirect is like newGatedServer, but points the
-// Authenticator's RedirectURL at the server's own real loopback address
-// instead of a placeholder. Only tests that drive the login flow through an
-// actual HTTP redirect chain (the fake IdP's /authorize handler 302s the
-// client straight to RedirectURL — see testutil.FakeOIDCProvider) need this;
-// everything else can use testConfig + New + newGatedServer, since a
-// redirect target that is never actually dialed does not need to resolve.
+// newGatedServerWithRealRedirect points RedirectURL at the server itself, for
+// tests that actually follow the fake IdP's redirect to the callback.
 func newGatedServerWithRealRedirect(t *testing.T, idp *testutil.FakeOIDCProvider) (*httptest.Server, *Authenticator) {
 	t.Helper()
 
@@ -169,13 +155,8 @@ func TestParseSessionKey(t *testing.T) {
 	}
 }
 
-// TestUnauthenticatedRequests_areRejected covers the split gating decision:
-// a protected API route 401s (JSON body) rather than serving anything,
-// since a fetch()/XHR caller has no use for an HTML page body; a page
-// route is served normally (the SPA, standing in as echoHandler here) even
-// without a session, since the SPA itself renders the styled login page
-// once it learns (via GET /api/me, still 401-gated) that it has no session
-// — see the package doc comment.
+// TestUnauthenticatedRequests_areRejected: API routes 401, page routes still
+// serve the SPA (which renders the login page).
 func TestUnauthenticatedRequests_areRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -240,10 +221,6 @@ func TestUnauthenticatedRequests_areRejected(t *testing.T) {
 	})
 }
 
-// TestBuildInfo covers GET /api/build-info: ungated (served without a
-// session), and reflecting the Authenticator's configured AppVersion/
-// FooterHost — including FooterHost being omitted from the JSON body
-// entirely when unset, not rendered as a blank string.
 func TestBuildInfo(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 
@@ -291,10 +268,6 @@ func TestBuildInfo(t *testing.T) {
 	})
 }
 
-// TestLoginRedirectsToProvider covers "GET /auth/login redirects to the
-// provider's authorization endpoint with the configured client ID and
-// redirect URL", without following the redirect (that is exercised
-// end-to-end by TestFullLoginFlow below).
 func TestLoginRedirectsToProvider(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -321,7 +294,6 @@ func TestLoginRedirectsToProvider(t *testing.T) {
 	assert.NotEmpty(t, location.Query().Get("code_challenge"))
 	assert.Equal(t, "S256", location.Query().Get("code_challenge_method"))
 
-	// A state cookie must have been set for the callback to consume.
 	var sawStateCookie bool
 
 	for _, cookie := range resp.Cookies() {
@@ -333,11 +305,8 @@ func TestLoginRedirectsToProvider(t *testing.T) {
 	assert.True(t, sawStateCookie, "expected %s cookie to be set", stateCookieName)
 }
 
-// TestFullLoginFlow drives the complete authorization-code flow against the
-// fake IdP: login -> IdP "authenticates" and redirects to the callback ->
-// callback exchanges the code and sets the session -> an authenticated
-// request succeeds and GET /api/me reports the right identity -> logout
-// clears the session and the next request is rejected again.
+// TestFullLoginFlow drives login, callback, authenticated access, and logout
+// against the fake IdP.
 func TestFullLoginFlow(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	idp.Subject = "user-42"
@@ -347,17 +316,12 @@ func TestFullLoginFlow(t *testing.T) {
 	server, _ := newGatedServerWithRealRedirect(t, idp)
 	client := newCookieClient(t)
 
-	// Before login: protected routes are rejected.
 	resp, err := client.Get(server.URL + "/api/runs")
 	require.NoError(t, err)
 
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 
-	// Drive the flow: GET /auth/login -> fake IdP /authorize -> our
-	// /auth/callback -> back into the app. The client follows every
-	// redirect and carries cookies across hosts (app + fake IdP), exactly
-	// like a real browser.
 	resp, err = client.Get(server.URL + "/auth/login?redirect=" + "/runs/abc")
 	require.NoError(t, err)
 
@@ -375,14 +339,12 @@ func TestFullLoginFlow(t *testing.T) {
 	assert.Equal(t, "operator@example.com", final.Identity.Email)
 	assert.Equal(t, "Test Operator", final.Identity.Name)
 
-	// After login: GET /api/me reports the same identity.
 	resp, err = client.Get(server.URL + "/api/me")
 	require.NoError(t, err)
 
 	body, _ = io.ReadAll(resp.Body)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	// The identity response is per-operator and session-gated: it must not be
-	// stored by any shared/intermediary cache.
+	// Per-operator identity must never be stored by a shared cache.
 	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
 	_ = resp.Body.Close()
 
@@ -392,20 +354,14 @@ func TestFullLoginFlow(t *testing.T) {
 	assert.Equal(t, "operator@example.com", identity.Email)
 	assert.Equal(t, "Test Operator", identity.Name)
 
-	// After login: a previously-protected API route now succeeds.
 	resp, err = client.Get(server.URL + "/api/runs")
 	require.NoError(t, err)
 
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Logout: use a client sharing the same cookie jar but that does NOT
-	// follow redirects. Auto-following here would chase /auth/logout's
-	// redirect to "/" straight through a fresh, transparent
-	// re-authentication against the fake IdP (it has no concept of an
-	// existing IdP-side session requiring interaction, unlike a real
-	// provider's login prompt) — defeating the point of this check. A real
-	// browser tab would stop and show the (empty/login) page too.
+	// Don't follow redirects on logout: the fake IdP would transparently
+	// re-authenticate, defeating the check.
 	noFollow := &http.Client{Jar: client.Jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 	resp, err = noFollow.Get(server.URL + "/auth/logout")
@@ -415,7 +371,6 @@ func TestFullLoginFlow(t *testing.T) {
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.Equal(t, "/", resp.Header.Get("Location"))
 
-	// And the next request to a protected route is rejected again.
 	resp, err = noFollow.Get(server.URL + "/api/runs")
 	require.NoError(t, err)
 
@@ -423,8 +378,6 @@ func TestFullLoginFlow(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
-// TestTamperedSessionCookie_isRejected covers "a tampered session cookie is
-// denied the same as no cookie, never a 500".
 func TestTamperedSessionCookie_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -438,22 +391,9 @@ func TestTamperedSessionCookie_isRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Swap the FIRST character of the encrypted (base64url) value for a
-	// different one, corrupting the GCM authentication tag while staying
-	// within the base64url alphabet — a raw byte-level XOR risks producing
-	// a byte the HTTP cookie encoder silently strips before the request
-	// even reaches the server, which would test transport encoding rather
-	// than webauth's own tamper detection.
-	//
-	// It must be the first character, not the last: unpadded base64 (as
-	// encoding/base64.RawURLEncoding produces) leaves the final character's
-	// low-order bits unused whenever the decoded length isn't a multiple of
-	// 3 bytes. Swapping the last character then has a real chance — this
-	// was observed flaking in CI, not just a theoretical risk — of only
-	// touching those unused bits, decoding back to the exact same bytes and
-	// silently failing to tamper anything at all. The first character's
-	// bits are always fully used by the first decoded byte, regardless of
-	// the value's total length, so this is deterministic.
+	// Swap the first base64url character, staying in-alphabet so the cookie
+	// encoder doesn't strip it. Not the last: its low bits may be unused
+	// padding, which made this flake in CI.
 	tampered := []byte(value)
 	if first := tampered[0]; first == 'A' {
 		tampered[0] = 'B'
@@ -473,8 +413,6 @@ func TestTamperedSessionCookie_isRejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "a tampered cookie must be rejected, not crash the server")
 }
 
-// TestExpiredSessionCookie_isRejected covers "an expired session is
-// rejected the same as no session at all".
 func TestExpiredSessionCookie_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -500,10 +438,6 @@ func TestExpiredSessionCookie_isRejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
-// TestIdentityFromRequest covers the request-level identity accessor the
-// access-log middleware relies on (cmd/web): a valid session cookie yields the
-// identity, and no cookie / an expired cookie both report ok == false so a
-// caller never distinguishes them.
 func TestIdentityFromRequest(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -549,11 +483,6 @@ func TestIdentityFromRequest(t *testing.T) {
 	})
 }
 
-// TestCrossSiteMutation_isRejected covers the CSRF defence-in-depth check on
-// the mutating API: a state-changing /api/* request a browser labels cross-site
-// (via Sec-Fetch-Site or a mismatched Origin) is refused with 403, while
-// same-origin requests and non-browser clients (no such headers) pass, and safe
-// methods are never blocked.
 func TestCrossSiteMutation_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -586,9 +515,7 @@ func TestCrossSiteMutation_isRejected(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 		},
 		{
-			// A sibling subdomain on the same registrable domain reports
-			// same-site and carries its own (mismatched) Origin — the forgery
-			// vector the guard names. It must NOT be trusted on same-site alone.
+			// Same-site alone must not be trusted.
 			name:       "same-site POST from a sibling subdomain (mismatched Origin) is forbidden",
 			method:     http.MethodPost,
 			headers:    map[string]string{"Sec-Fetch-Site": "same-site", "Origin": "https://evil.example.com"},
@@ -639,10 +566,6 @@ func TestCrossSiteMutation_isRejected(t *testing.T) {
 	}
 }
 
-// TestCallback_stateMismatch_isRejected covers CSRF protection: a callback
-// whose "state" query parameter does not match the value recorded in the
-// state cookie must be rejected — redirected to the login page with an
-// "expired" error, not silently accepted.
 func TestCallback_stateMismatch_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -678,11 +601,6 @@ func TestCallback_stateMismatch_isRejected(t *testing.T) {
 	assert.Contains(t, location, "redirect=%2Fruns%2Fabc")
 }
 
-// TestCallback_noStateCookie_redirectsToLogin covers a callback hit cold
-// (no state cookie at all, e.g. a stale bookmark or a replayed URL after the
-// 10-minute state TTL) failing safely by sending the browser to the login
-// page with an "expired" error (no known redirect target, since the state
-// cookie carrying it is exactly what is missing), rather than erroring.
 func TestCallback_noStateCookie_redirectsToLogin(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -705,9 +623,6 @@ func TestCallback_noStateCookie_redirectsToLogin(t *testing.T) {
 	assert.NotContains(t, location, "redirect=")
 }
 
-// newCookieClient returns an http.Client with a cookie jar, so it behaves
-// like a real browser across the app's origin and the fake IdP's origin
-// during the multi-hop login redirect chain.
 func newCookieClient(t *testing.T) *http.Client {
 	t.Helper()
 
@@ -717,11 +632,6 @@ func newCookieClient(t *testing.T) *http.Client {
 	return &http.Client{Jar: jar}
 }
 
-// TestCallback_idpError_isRejected covers the IdP declining the login
-// (e.g. the user cancels, or the provider rejects the request) reported back
-// as an "error" query parameter on the callback — this must redirect to the
-// login page with the "denied" error (web/src/LoginPage.tsx's
-// error-denied state), not be ignored, and not any other error code.
 func TestCallback_idpError_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -757,9 +667,6 @@ func TestCallback_idpError_isRejected(t *testing.T) {
 	assert.Contains(t, location, "error=denied")
 	assert.Contains(t, location, "redirect=%2Fruns%2Fabc")
 
-	// The provider's own description is carried through to the login page so the
-	// operator can see why the sign-in was refused, rather than only a generic
-	// "not authorized" message.
 	loginURL, err := url.Parse(location)
 	require.NoError(t, err)
 	assert.Equal(t, "User not assigned", loginURL.Query().Get("error_description"))
@@ -801,12 +708,9 @@ func TestSanitizeIdPErrorDescription(t *testing.T) {
 	}
 }
 
-// TestCallback_idpError_isLoggedToAccessLog covers the diagnostic gap behind
-// the prod "authenticated but not authorized" report: when the IdP denies the
-// login (callback carries ?error=...), the app applies no authorization of its
-// own, so the IdP's error code and description are the only cause — and they
-// must reach the access log, not be discarded. The callback is served as a 302,
-// so the record must be raised to warn to stay visible at a raised LOG_LEVEL.
+// TestCallback_idpError_isLoggedToAccessLog covers the prod "authenticated but
+// not authorized" report: the IdP's error is the only diagnostic and must
+// reach the access log at warn despite the 302.
 func TestCallback_idpError_isLoggedToAccessLog(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -815,9 +719,6 @@ func TestCallback_idpError_isLoggedToAccessLog(t *testing.T) {
 	buf := &bytes.Buffer{}
 	logger := slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// The real cmd/web chain: AccessLog wrapping the gated handler — the whole
-	// point is that webauth's callback annotation surfaces through webserver's
-	// access log.
 	server := httptest.NewServer(webserver.AccessLog(logger, nil, authenticator.Wrap(echoHandler())))
 	t.Cleanup(server.Close)
 
@@ -855,10 +756,8 @@ func TestCallback_idpError_isLoggedToAccessLog(t *testing.T) {
 	assert.NotContains(t, buf.String(), "the-state", "the query string (state) must never be logged")
 }
 
-// TestCallback_pkceMismatch_isRejected covers the PKCE verifier in the state
-// cookie not matching the code_challenge presented at the authorization
-// endpoint — the fake IdP's token endpoint enforces RFC 7636 S256 PKCE for
-// real, so this exercises the real rejection path, not a stub.
+// TestCallback_pkceMismatch_isRejected relies on the fake IdP enforcing S256
+// PKCE for real at its token endpoint.
 func TestCallback_pkceMismatch_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -871,8 +770,7 @@ func TestCallback_pkceMismatch_isRejected(t *testing.T) {
 	stateCookieValue, err := authenticator.encrypt(statePurpose, stateClaims{
 		State: "the-state",
 		Nonce: "the-nonce",
-		// Does not match the verifier fakeAuthorize's challenge above was
-		// derived from, so the IdP's PKCE check at the token endpoint fails.
+		// Mismatches the challenge passed to fakeAuthorize.
 		PKCEVerifier: "wrong-verifier",
 		RedirectPath: "/",
 		ExpiresAt:    time.Now().Add(time.Minute).Unix(),
@@ -897,10 +795,6 @@ func TestCallback_pkceMismatch_isRejected(t *testing.T) {
 	assert.Contains(t, location, "error=expired")
 }
 
-// TestCallback_nonceMismatch_isRejected covers the OIDC nonce recorded in
-// the state cookie not matching the nonce embedded in the returned,
-// correctly-signed ID token — the replay/token-substitution defense the
-// nonce exists for.
 func TestCallback_nonceMismatch_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))
@@ -913,8 +807,7 @@ func TestCallback_nonceMismatch_isRejected(t *testing.T) {
 
 	stateCookieValue, err := authenticator.encrypt(statePurpose, stateClaims{
 		State: "the-state",
-		// Does not match the nonce fakeAuthorize embedded in the signed ID
-		// token above.
+		// Mismatches the nonce in the signed ID token.
 		Nonce:        "different-nonce",
 		PKCEVerifier: verifier,
 		RedirectPath: "/",
@@ -940,12 +833,6 @@ func TestCallback_nonceMismatch_isRejected(t *testing.T) {
 	assert.Contains(t, location, "error=expired")
 }
 
-// TestCallback_expiredIDToken_isRejected covers a syntactically valid,
-// correctly-signed ID token that ID-token verification (coreos/go-oidc, not
-// anything hand-rolled in this package) rejects on its merits — expiry here,
-// standing in for the whole class of signature/issuer/audience/expiry
-// checks Verify performs. Must redirect to the login page with the
-// "expired" error, not succeed and not fail the request outright.
 func TestCallback_expiredIDToken_isRejected(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	idp.IDTokenLifetime = -time.Hour // already expired at issuance
@@ -955,9 +842,7 @@ func TestCallback_expiredIDToken_isRejected(t *testing.T) {
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)
 
-	// Follows the redirect chain through the fake IdP (login -> authorize ->
-	// callback) like a real browser, but must NOT follow the final
-	// callback -> /login redirect this test is asserting on.
+	// Stop at the callback's redirect, which is what's asserted on.
 	client := &http.Client{
 		Jar: jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -982,12 +867,8 @@ func TestCallback_expiredIDToken_isRejected(t *testing.T) {
 	assert.Contains(t, location, "error=expired")
 }
 
-// fakeAuthorize drives the fake IdP's authorization endpoint directly (not
-// through webauth's own /auth/login, which would mint its own
-// state/nonce/verifier this test needs to control independently) and returns
-// the issued authorization code, for tests that need a real code tied to a
-// specific nonce/code_challenge they deliberately mismatch against a forged
-// state cookie.
+// fakeAuthorize gets a real code from the fake IdP for a caller-chosen
+// nonce/challenge, bypassing /auth/login.
 func fakeAuthorize(t *testing.T, idp *testutil.FakeOIDCProvider, state, nonce, codeChallenge string) string {
 	t.Helper()
 
@@ -1019,11 +900,6 @@ func fakeAuthorize(t *testing.T, idp *testutil.FakeOIDCProvider, state, nonce, c
 	return code
 }
 
-// TestSanitizeRedirectPath covers the post-login open-redirect defense
-// directly: a same-origin absolute path is preserved, everything else
-// (including a bare "//" and, since browsers normalize "\" to "/" for
-// http(s) URLs per the WHATWG URL spec, a "\"-containing path) defaults to
-// "/".
 func TestSanitizeRedirectPath(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1050,11 +926,6 @@ func TestSanitizeRedirectPath(t *testing.T) {
 	}
 }
 
-// TestCookieSecureFlag_honorsForwardedProto covers the Secure cookie
-// attribute reflecting X-Forwarded-Proto, not just r.TLS — cmd/web never
-// terminates TLS itself (docs/web-ui-design.md §5's TLS-terminating Ingress
-// deployment model), so r.TLS alone would leave Secure permanently false in
-// every real deployment.
 func TestCookieSecureFlag_honorsForwardedProto(t *testing.T) {
 	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
 	authenticator, err := New(t.Context(), testConfig(t, idp))

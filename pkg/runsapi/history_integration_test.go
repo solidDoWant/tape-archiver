@@ -26,33 +26,9 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// TestHistoryEndpointsAgainstRealDryRun drives a complete, real dry-run
-// (issue #273): the actual Backup workflow through real control + data
-// workers against mhvtl and the ephemeral ZFS pool, submitted through POST
-// /api/runs with dryRun=true (the same mhvtl redirection a browser
-// submission gets), then exercises every history-derived endpoint against
-// the finished run's real Temporal event history:
-//
-//   - GET /api/runs/{runID}/phases — all 11 phases completed in order, with
-//     real per-phase facts (archive counts, tapes written) recovered from the
-//     history's real activity payloads.
-//   - GET /api/runs/{runID}/config — the exact submitted config round-trips
-//     (with the age identity redacted).
-//   - GET /api/runs/{runID}/tapes — the written tape's real barcode, indices,
-//     slot, and write-health.
-//   - GET /api/tapes — the aggregate listing includes the run's tape,
-//     attributed back to the run, and returns 200 even though the shared dev
-//     Temporal's visibility also holds this package's *stub* workflow
-//     executions from sibling integration tests (foreign histories degrade
-//     per-run, never failing the listing).
-//   - unknown/malformed run IDs — 404/400, distinct from success.
-//
-// The aged-out-history 410 path cannot be exercised here (it requires
-// Temporal's retention window to actually elapse); its classification is
-// covered by unit tests (TestHistoryEndpointErrorClassification).
-//
-// Driven by `make test-integration`; skips when Temporal, mhvtl, LTFS, ZFS,
-// or the recovery tooling is absent.
+// TestHistoryEndpointsAgainstRealDryRun runs a real dry-run against mhvtl and
+// checks every history-derived endpoint (issue #273). The 410 aged-out path
+// needs retention to elapse, so it is unit-tested only.
 func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	requireTemporalAddress(t)
 	testutil.SkipIfMhvtlUnavailable(t)
@@ -66,8 +42,6 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 		t.Skipf("%s not set; run via `make test-integration`", testutil.EnvTestSnapshot)
 	}
 
-	// A dry-run submission requires the mhvtl env vars on the API server's
-	// environment (runsubmit.ApplyDryRun); make test-integration sets them.
 	for _, name := range []string{"MHVTL_CHANGER_DEV", "MHVTL_DRIVE0_DEV", "MHVTL_DRIVE1_DEV"} {
 		if os.Getenv(name) == "" {
 			t.Skipf("%s not set; run via `make test-integration`", name)
@@ -83,25 +57,16 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	require.GreaterOrEqual(t, len(inventory.Drives), 1, "at least one drive required")
 	require.False(t, inventory.Drives[0].Loaded, "drive 0 must start empty")
 
-	// Storage slot index 3: slots 0-2 are claimed by workflows/backup's
-	// session, tape-path, and e2e integration tests sharing this mhvtl
-	// library (see e2e_integration_test.go's slot comment); -p 1 serializes
-	// the package binaries but leftover state must still not collide.
+	// Slots 0-2 belong to workflows/backup's integration tests on the same
+	// library.
 	require.GreaterOrEqual(t, len(inventory.Slots), 4, "at least four storage slots required")
 	slot := inventory.Slots[3]
 	require.True(t, slot.Full, "slot 3 must hold a tape")
 	require.NotEmpty(t, slot.Barcode, "slot 3 tape must have a barcode")
 
-	// Resolve drive 0's st/sg nodes by SCSI target, not the MHVTL_DRIVE*_DEV
-	// env defaults: the kernel assigns st/sg minors in probe order, which does
-	// not reliably match mhvtl's drive numbering (mhvtl DTE0 is SCSI target 1
-	// but its st node can come up as nst0 OR nst1 across module loads). The
-	// pre-blanking below drives the physical DTE0, so it must use the node
-	// that actually backs it — testutil resolves by target when the env var is
-	// unset. The MHVTL_DRIVE* vars are then re-pointed at the resolved nodes
-	// so the dry-run submission's config matches physical reality too (the
-	// workflow's Load pairs drives to changer elements by unit serial, issue
-	// #137, so it tolerates either order — the pre-blanking cannot).
+	// Resolve drive 0's nodes by SCSI target: st/sg minors follow probe order,
+	// so DTE0 may be nst0 or nst1, and pre-blanking must hit the physical DTE0.
+	// The env vars are then re-pointed so the dry-run config matches.
 	t.Setenv(testutil.EnvDrive0Dev, "")
 	t.Setenv(testutil.EnvDrive1Dev, "")
 	t.Setenv(testutil.EnvDrive0SgDev, "")
@@ -116,12 +81,10 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	slotAddr := slot.Address
 	barcode := slot.Barcode
 
-	// Register cleanup BEFORE touching the drive (mirrors the e2e test):
-	// whatever happens, leave drive 0 empty and the tape back in its slot.
+	// Register cleanup before touching the drive.
 	t.Cleanup(func() { returnTapeToStorageSlot(changer, slotAddr, driveAddr, barcode) })
 
-	// The run must find a blank tape: pre-load, verify readiness, SCSI-erase,
-	// unload — leaving a genuinely blank tape in slot 3.
+	// Blank the tape so the run finds a blank one.
 	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load for blanking")
 	testutil.SkipIfDriveNotReady(t, stDevice)
 	eraseLoadedTape(t.Context(), stDevice, sgDevice)
@@ -159,9 +122,7 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 		Sources: []config.Source{{ZFSPath: &config.ZFSPathSource{Name: source}}},
 		Copies:  1,
 		Library: config.Library{
-			// The changer/drives here are placeholders the dry-run override
-			// replaces with the mhvtl env-var nodes (runsubmit.ApplyDryRun);
-			// the blank slot is a logical position and is used as-is.
+			// Devices are replaced by the dry-run override; the slot is kept.
 			Changer:           testutil.ChangerDev(t),
 			Drives:            []string{stDevice},
 			BlankSlots:        []int{slotAddr},
@@ -184,11 +145,8 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	submitBody, err := json.Marshal(map[string]interface{}{"config": json.RawMessage(configJSON), "dryRun": true})
 	require.NoError(t, err)
 
-	// Submit through the API's own dry-run path. The singleton is freed first
-	// and the submission is then made exactly once: POST /api/runs starts runs
-	// with a FAIL conflict policy, so retrying it against an incumbent cannot
-	// make progress — the old 60s retry loop here reported a held singleton as
-	// the contentless "dry-run submission never started" (issue #338).
+	// Free the singleton, then submit once: POST /api/runs uses a FAIL conflict
+	// policy, so retrying cannot make progress (issue #338).
 	freeBackupSingleton(t, t.Context(), temporalClient)
 
 	status, submitted, raw := postRun(t, server.URL, submitBody)
@@ -197,9 +155,7 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	runID := submitted.RunID
 	require.NotEmpty(t, runID, "dry-run submission returned no run ID: %s", raw)
 
-	// Wait for the real run to complete. The full pipeline against mhvtl
-	// (tar → age → PAR2 → verify → mkltfs → LTFS write → eject → report →
-	// deliver) takes a few minutes; bound it below `go test`'s own timeout.
+	// Bound below `go test`'s own timeout.
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 8*time.Minute)
 	defer cancel()
 
@@ -226,8 +182,7 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 		phaseByName[phase.Name] = phase
 	}
 
-	// Every phase that did real work has a real time window; Burn ran as a
-	// no-op (dry-run disables optical burning).
+	// Burn is a no-op in dry-run.
 	for _, name := range wantOrder {
 		if name == backup.PhaseBurn {
 			continue
@@ -237,7 +192,6 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 		assert.NotNil(t, phaseByName[name].EndTime, "phase %s end time", name)
 	}
 
-	// Spot-check real per-phase facts recovered from the history (AC2).
 	assertFact(t, phaseByName[backup.PhaseResolve].Facts, "archives", "1")
 	assertFact(t, phaseByName[backup.PhasePack].Facts, "logicalTapes", "1")
 	assertFact(t, phaseByName[backup.PhasePack].Facts, "copies", "1")
@@ -257,9 +211,7 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	assert.Equal(t, []string{recipient}, configBody.Config.Encryption.Recipients)
 	assert.NotEqual(t, identity, configBody.Config.Encryption.Identity,
 		"the age private identity must never be returned")
-	// The config endpoint returns the config as *submitted to Temporal* —
-	// which for a dry-run is the post-ApplyDryRun config, mhvtl devices and
-	// no optical burn (the exact run configuration the workflow executed).
+	// A dry-run's stored config is the post-ApplyDryRun one.
 	assert.Equal(t, os.Getenv("MHVTL_CHANGER_DEV"), configBody.Config.Library.Changer,
 		"a dry-run's stored config carries the mhvtl override it actually ran with")
 
@@ -303,8 +255,6 @@ func TestHistoryEndpointsAgainstRealDryRun(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, badStatus, "a malformed run ID is 400")
 }
 
-// getJSON GETs url and decodes the response body into T, returning the
-// status code and decoded body.
 func getJSON[T any](t *testing.T, url string) (int, T) {
 	t.Helper()
 
@@ -320,7 +270,6 @@ func getJSON[T any](t *testing.T, url string) (int, T) {
 	return response.StatusCode, body
 }
 
-// assertFact asserts facts contains key with the given value.
 func assertFact(t *testing.T, facts []runsapi.PhaseFact, key, want string) {
 	t.Helper()
 
@@ -335,7 +284,6 @@ func assertFact(t *testing.T, facts []runsapi.PhaseFact, key, want string) {
 	t.Errorf("fact %q not found among %+v", key, facts)
 }
 
-// requireBinaries skips the test when any named tool is not on PATH.
 func requireBinaries(t *testing.T, names ...string) {
 	t.Helper()
 
@@ -346,9 +294,8 @@ func requireBinaries(t *testing.T, names ...string) {
 	}
 }
 
-// generateAgeKeypair generates a fresh post-quantum age keypair for the run's
-// encryption config (the Report phase verifies the escrow identity matches a
-// recipient, so a hardcoded fake would fail the run).
+// generateAgeKeypair makes a real keypair: Report verifies the identity matches
+// a recipient.
 func generateAgeKeypair(t *testing.T) (identity, recipient string) {
 	t.Helper()
 
@@ -373,9 +320,7 @@ func generateAgeKeypair(t *testing.T) (identity, recipient string) {
 	return string(contents), recipient
 }
 
-// eraseLoadedTape issues a short SCSI ERASE to the loaded tape, resetting
-// mhvtl's in-memory state to blank (the same best-effort helper the
-// workflows/backup integration tests use).
+// eraseLoadedTape issues a best-effort short SCSI ERASE to blank the tape.
 func eraseLoadedTape(ctx context.Context, stDevice, sgDevice string) {
 	rewindCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	_ = exec.CommandContext(rewindCtx, "mt", "-f", stDevice, "rewind").Run()
@@ -386,9 +331,8 @@ func eraseLoadedTape(ctx context.Context, stDevice, sgDevice string) {
 		"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
 }
 
-// returnTapeToStorageSlot restores the library after the run: drive 0 empty
-// and the tape back in its storage slot (from the drive if the run failed
-// mid-write, or from the I/O station where Eject parked it). Best-effort.
+// returnTapeToStorageSlot best-effort returns the tape from the drive or I/O
+// station to its slot.
 func returnTapeToStorageSlot(changer *tape.Changer, slotAddr, driveAddr int, barcode tape.Barcode) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -413,5 +357,4 @@ func returnTapeToStorageSlot(changer *tape.Changer, slotAddr, driveAddr int, bar
 	}
 }
 
-// floatPointer returns a pointer to f, for optional config fields.
 func floatPointer(f float64) *float64 { return &f }

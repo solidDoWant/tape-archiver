@@ -11,8 +11,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/logging"
 )
 
-// decodeSingleRecord captures fn's structured output, asserts it produced exactly
-// one JSON log line, and returns it decoded.
 func decodeSingleRecord(t *testing.T, fn func()) map[string]any {
 	t.Helper()
 
@@ -26,10 +24,8 @@ func decodeSingleRecord(t *testing.T, fn func()) map[string]any {
 	return record
 }
 
-// TestSetupTagsRecordsWithRunContext is the core of #303: a line logged with a
-// context carrying run identity carries the WorkflowID/RunID attributes the web
-// UI's log query filters on. The attribute keys are asserted verbatim because a
-// rename silently empties the run-detail log panels.
+// TestSetupTagsRecordsWithRunContext asserts the keys verbatim because a rename
+// silently empties the run-detail log panels (#303).
 func TestSetupTagsRecordsWithRunContext(t *testing.T) {
 	record := decodeSingleRecord(t, func() {
 		logging.Setup("info")
@@ -43,8 +39,6 @@ func TestSetupTagsRecordsWithRunContext(t *testing.T) {
 	assert.Equal(t, "run-uuid-abc", record["RunID"])
 }
 
-// TestSetupWithoutRunContextAddsNoTags confirms the enrichment is inert outside a
-// run: process-global logging (cmd/web, worker startup) is unchanged.
 func TestSetupWithoutRunContextAddsNoTags(t *testing.T) {
 	record := decodeSingleRecord(t, func() {
 		logging.Setup("info")
@@ -55,9 +49,6 @@ func TestSetupWithoutRunContextAddsNoTags(t *testing.T) {
 	assert.NotContains(t, record, "RunID")
 }
 
-// TestSetupOmitsEmptyRunTags confirms a partially-populated context contributes
-// only the fields it actually has, rather than emitting empty-string tags that
-// would match nothing.
 func TestSetupOmitsEmptyRunTags(t *testing.T) {
 	record := decodeSingleRecord(t, func() {
 		logging.Setup("info")
@@ -70,9 +61,8 @@ func TestSetupOmitsEmptyRunTags(t *testing.T) {
 	assert.Equal(t, "run-only", record["RunID"])
 }
 
-// TestSetupTagsSurviveDerivedLoggers confirms run-tag enrichment is preserved
-// through slog.With, the same mechanism the Temporal SDK's structured logger uses
-// to attach its own tags — so a derived logger does not drop run identity.
+// TestSetupTagsSurviveDerivedLoggers covers slog.With, which the Temporal SDK
+// uses to attach its own tags.
 func TestSetupTagsSurviveDerivedLoggers(t *testing.T) {
 	record := decodeSingleRecord(t, func() {
 		logging.Setup("info")

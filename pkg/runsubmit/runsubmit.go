@@ -1,10 +1,5 @@
-// Package runsubmit is the shared path for submitting a backup run to
-// Temporal: the dry-run device override (mhvtl redirection + optical-burn
-// disablement) and the fixed submission options/error translation. It is
-// imported by both `cmd/tapectl` (`tapectl run [--dry-run]`) and
-// `pkg/runsapi` (`POST /api/runs`) so the two front doors to Temporal — CLI
-// and browser — can never drift on what "dry run" means or how a
-// singleton-conflict is reported (docs/web-ui-design.md §2, §8 item 3).
+// Package runsubmit submits backup runs to Temporal, shared by tapectl and
+// the web API so they cannot drift on dry-run semantics or conflict handling.
 package runsubmit
 
 import (
@@ -22,25 +17,16 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// mhvtl device environment variables. A dry-run points the worker at the mhvtl
-// virtual tape library instead of the real library (SPEC §12). There is no
-// hardware default: the fallback nodes (`/dev/sch0`, `/dev/nstX`) are
-// byte-identical to the real library, so a missing override would silently
-// aim a dry-run at real hardware. Instead every variable is required, and a
-// dry-run with any of them unset fails fast (see ApplyDryRun).
+// mhvtl device environment variables. All are required for a dry-run: there is
+// no default because the fallback nodes are identical to the real library's.
 const (
 	MHVTLChangerEnv = "MHVTL_CHANGER_DEV"
 	MHVTLDrive0Env  = "MHVTL_DRIVE0_DEV"
 	MHVTLDrive1Env  = "MHVTL_DRIVE1_DEV"
 )
 
-// MissingMHVTLEnvError is returned by ApplyDryRun when one or more of the
-// mhvtl device environment variables are unset. It is a distinguishable type
-// (rather than a bare fmt.Errorf) so a caller that needs to present this
-// specific condition differently — e.g. cmd/tapectl naming the `--dry-run`
-// flag it corresponds to, which this generic, caller-agnostic message
-// deliberately does not — can detect it via errors.As instead of matching on
-// message text.
+// MissingMHVTLEnvError is returned by ApplyDryRun when mhvtl device variables
+// are unset.
 type MissingMHVTLEnvError struct {
 	Missing []string
 }
@@ -52,36 +38,11 @@ func (e *MissingMHVTLEnvError) Error() string {
 		strings.Join(e.Missing, ", "), pluralIsAre(len(e.Missing)))
 }
 
-// ApplyDryRun rewrites the library device targets to the mhvtl virtual library
-// so the run exercises virtual hardware instead of the real changer and drives.
-// The two mhvtl drives replace whatever drives the config named; the blank
-// slots are left untouched, as they are logical positions in the library.
-//
-// The mhvtl device nodes must be named explicitly via the environment. Because
-// the fallback nodes would be indistinguishable from the real library — and the
-// devices are opened worker-side while these variables are read client-side, so
-// the submitted config carries no dry-run marker the worker could honor — a
-// dry-run with any variable unset returns an actionable error and rewrites
-// nothing, rather than silently targeting real hardware (CLAUDE.md Hardware and
-// Safety; SPEC §12).
-//
-// ApplyDryRun also disables optical burning. mhvtl provides no virtual optical
-// burner, so — unlike the tape library — there is no safe device to redirect to,
-// and the submitted config carries no dry-run marker the worker could honor. Left
-// in place, delivery.opticalBurn keeps OpticalBurn.Enabled() true and the worker
-// would probe, pause on, blank, and irreversibly burn the operator's real burner
-// during what is meant to be a hardware-free test. Neutralizing the section
-// (rather than refusing the whole config) keeps the tape path — which mhvtl can
-// exercise end to end — dry-runnable for configs that also configure burning; the
-// run then completes exactly as a no-optical-burn run (burnPhase is a no-op). An
-// advisory is written to warnOut so the operator/caller knows burning was skipped
-// for the dry-run; pass io.Discard to suppress it (e.g. a server-side caller with
-// no place to surface a stderr-shaped advisory).
-//
-// Finally, ApplyDryRun re-validates cfg: the override changes the device set, so
-// the result must satisfy the same invariants (e.g. copies <= drives) as the
-// original config. Callers do not need a separate cfg.Validate() call after this
-// returns nil.
+// ApplyDryRun redirects the changer and drives to mhvtl, disables optical
+// burning, and re-validates cfg. The config carries no dry-run marker the
+// worker could honor, so this is the only safety net against touching real
+// hardware: it fails if any mhvtl variable is unset, and drops optical burn
+// because mhvtl has no virtual burner (an advisory goes to warnOut).
 func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writer) error {
 	changer := getenv(MHVTLChangerEnv)
 	drive0 := getenv(MHVTLDrive0Env)
@@ -105,12 +66,8 @@ func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writ
 		return &MissingMHVTLEnvError{Missing: missing}
 	}
 
-	// Record the real changer before redirecting, so the data worker can make the
-	// virtual library mirror it and the rehearsal meets the same slot conditions
-	// the real run would (see config.Library.MirrorSourceChanger). This is the one
-	// place both the real and virtual devices are known. Skipped when the config
-	// already targets the mhvtl changer (a dev deployment with no real library),
-	// where there is nothing to mirror from.
+	// Record the real changer so the worker can mirror its slots into mhvtl;
+	// this is the one place both devices are known.
 	if cfg.Library.Changer != "" && cfg.Library.Changer != changer {
 		cfg.Library.MirrorSourceChanger = cfg.Library.Changer
 	}
@@ -118,14 +75,8 @@ func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writ
 	cfg.Library.Changer = changer
 	cfg.Library.Drives = []string{drive0, drive1}
 
-	// Disable optical burning: there is no virtual burner to redirect to, so the
-	// only safe target is off. Enabled() is nil-safe, so this is a no-op when the
-	// section is absent or already disabled.
 	if cfg.Delivery.OpticalBurn.Enabled() {
-		// Best-effort advisory: a failed write to warnOut must not fail the
-		// dry-run. The "tapectl: " prefix matches tapectl's own diagnostic
-		// convention; pkg/runsapi passes io.Discard here, so the exact text is
-		// only ever observed on the CLI path.
+		// Best-effort; pkg/runsapi passes io.Discard.
 		_, _ = fmt.Fprintln(warnOut, "tapectl: dry-run: optical burning disabled — mhvtl provides no "+
 			"virtual optical burner, so delivery.opticalBurn is skipped and the real burner is "+
 			"never probed, blanked, or written")
@@ -140,7 +91,6 @@ func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writ
 	return nil
 }
 
-// pluralIsAre returns the correct verb form for the count of missing variables.
 func pluralIsAre(count int) string {
 	if count == 1 {
 		return "is"
@@ -149,56 +99,33 @@ func pluralIsAre(count int) string {
 	return "are"
 }
 
-// TemporalClient is the subset of client.Client needed to submit a backup
-// run. Both cmd/tapectl's full client.Client and pkg/runsapi's minimal
-// TemporalClient satisfy it, so this package never forces either caller to
-// depend on more of the SDK surface than it already does.
+// TemporalClient is the subset of client.Client needed to submit a backup run.
 type TemporalClient interface {
 	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) (client.WorkflowRun, error)
 }
 
-// Compile-time assertion that the real Temporal SDK client satisfies
-// TemporalClient.
 var _ TemporalClient = client.Client(nil)
 
-// MemoKeyDryRun is the Temporal memo field recording whether a run was
-// submitted as a dry-run. A dry-run's mhvtl override (ApplyDryRun) rewrites the
-// config's library devices, but nothing else in the persisted run distinguishes
-// it from a production run — so this memo is the one durable, submit-time signal
-// that survives into Temporal visibility/history for both `tapectl` and the web
-// UI to read back (runsapi.toRunSummary decodes it). Memos ride along on every
-// ListWorkflowExecutions/DescribeWorkflowExecution result, so no search-attribute
-// registration is needed for display.
+// MemoKeyDryRun is the memo field recording whether a run was a dry-run; it is
+// the only durable signal distinguishing one from a production run.
 const MemoKeyDryRun = "dryRun"
 
-// StartOptions returns the fixed Temporal StartWorkflowOptions every backup
-// run submission must use: the singleton workflow ID on the control task
-// queue, with a conflict policy that fails a second submission while one is
-// already running rather than queuing or replacing it (SPEC §4.2 — a run is
-// a singleton, one data worker on one storage host). dryRun records the
-// submitter's dry-run intent as a memo (MemoKeyDryRun) so run-viewing surfaces
-// can label it after the fact.
+// StartOptions returns the options every backup submission must use: the
+// singleton workflow ID, failing if a run is already in progress (SPEC §4.2).
 func StartOptions(dryRun bool) client.StartWorkflowOptions {
 	return client.StartWorkflowOptions{
 		ID:        backup.WorkflowID,
 		TaskQueue: backup.TaskQueue,
 		Memo:      map[string]interface{}{MemoKeyDryRun: dryRun},
-		// Refuse to start a second run while one is already running, but allow a
-		// fresh run once the previous one has closed. WorkflowExecutionError-
-		// WhenAlreadyStarted makes ExecuteWorkflow return the conflict as an
-		// error rather than silently handing back the running run.
+		// Surface the conflict as an error rather than returning the running run.
 		WorkflowIDConflictPolicy:                 enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
 		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
 		WorkflowExecutionErrorWhenAlreadyStarted: true,
 	}
 }
 
-// Submit starts the backup workflow with cfg as its argument, under the
-// fixed singleton StartOptions. dryRun records whether the submitter applied
-// the dry-run override (ApplyDryRun), recorded as a memo so run-viewing
-// surfaces can label the run afterwards. Any error — including a singleton
-// conflict — is translated via TranslateSubmitError into an operator-facing
-// message before being returned.
+// Submit starts the backup workflow with cfg under StartOptions, translating
+// errors via TranslateSubmitError.
 func Submit(ctx context.Context, temporalClient TemporalClient, cfg *config.Config, dryRun bool) (client.WorkflowRun, error) {
 	run, err := temporalClient.ExecuteWorkflow(ctx, StartOptions(dryRun), backup.WorkflowType, cfg)
 	if err != nil {
@@ -208,15 +135,8 @@ func Submit(ctx context.Context, temporalClient TemporalClient, cfg *config.Conf
 	return run, nil
 }
 
-// TranslateSubmitError converts the error returned by ExecuteWorkflow into an
-// operator-facing message. A conflict with an already-running backup (the
-// singleton guard firing) is reported as an actionable message naming the
-// in-progress run rather than an opaque Temporal error; every other error is
-// wrapped verbatim via %w. The already-started case uses submitConflictError
-// instead of %w so its Error() text stays exactly the crafted sentence (no
-// raw Temporal error text appended) while its Unwrap() still exposes the
-// original error, so a caller that needs to classify the error further (e.g.
-// pkg/runsapi mapping it to an HTTP status) can still errors.As through it.
+// TranslateSubmitError converts an ExecuteWorkflow error into an
+// operator-facing message, naming the in-progress run on a singleton conflict.
 func TranslateSubmitError(err error) error {
 	var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
 	if errors.As(err, &alreadyStarted) {
@@ -231,10 +151,8 @@ func TranslateSubmitError(err error) error {
 	return fmt.Errorf("submit backup workflow: %w", err)
 }
 
-// submitConflictError is TranslateSubmitError's already-started case: its
-// Error() is exactly the crafted operator-facing sentence, with no trailing
-// raw Temporal error text, while Unwrap() still exposes the original error
-// for errors.As-based classification.
+// submitConflictError keeps Error() free of raw Temporal text while Unwrap()
+// still exposes the original error.
 type submitConflictError struct {
 	msg string
 	err error

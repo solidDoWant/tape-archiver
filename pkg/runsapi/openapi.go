@@ -1,34 +1,10 @@
 package runsapi
 
-// This file adds an OpenAPI 3.1 description of the /api/* surface plus a
-// browsable docs page, without changing how any endpoint is actually served.
-//
-// The endpoints in runsapi.go (and its sibling files) are hand-written
-// net/http handlers with their own error envelope ({"error": "..."}), SSE
-// stream, and validation. Rewriting them into github.com/danielgtaylor/huma's
-// operation model — the way a from-scratch Huma service is built — would touch
-// every handler and its tests and change the on-the-wire error shape, so
-// instead this file uses Huma only as a *describe-only* layer:
-//
-//   - A dedicated http.ServeMux (docsMux) is handed to a Huma API purely so
-//     huma.Register can introspect Go request/response structs and assemble an
-//     OpenAPI document. The operation handlers registered here are never
-//     invoked — the real handlers in newMux serve /api/runs et al. — so they
-//     are inert stubs; Huma only needs their I/O *types* at registration time.
-//   - newMux mounts only Huma's spec/docs routes (the generated /api/openapi.*,
-//     /api/docs, and /api/schemas/* served off docsMux); the stub data routes
-//     Huma also registered on docsMux are never mounted, so they can never
-//     shadow the real ones.
-//
-// Response schemas reuse the exact structs the real handlers return
-// (RunDetail, RunTapesResponse, …), so the documented response bodies cannot
-// drift from what is served. The few request/config bodies whose Go type does
-// not reflect cleanly as JSON (a json.RawMessage run config, the whole
-// internal/config.Config) are described with a purpose-built object plus a
-// pointer to GET /api/config/schema, which is the authoritative schema for
-// them. openapi_test.go asserts every route newMux serves has a matching
-// documented operation, so a new endpoint that forgets its docs fails the
-// build.
+// OpenAPI docs for /api/*, using Huma as a describe-only layer: operations are
+// registered with inert stub handlers on a private docsMux, and newMux mounts
+// only the spec/docs routes, so the real hand-written handlers keep serving.
+// Response schemas reuse the real handlers' structs so they cannot drift;
+// openapi_test.go fails if a served route lacks a documented operation.
 
 import (
 	"context"
@@ -42,22 +18,15 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/buildinfo"
 )
 
-// Doc/spec route paths, mounted by newMux onto the real /api/ mux. These are
-// the only parts of docsMux exposed; the stub operation routes Huma also
-// registers on docsMux are deliberately left unmounted (see this file's doc
-// comment).
+// Doc/spec routes: the only parts of docsMux that newMux mounts.
 const (
 	openAPIPathBase = "/api/openapi" // Huma serves ".json"/".yaml" (+ 3.0 variants) off this.
 	docsPath        = "/api/docs"
 	schemasPath     = "/api/schemas" // Huma serves "/{schema}" off this.
 )
 
-// apiError mirrors runsapi's real JSON error envelope (errorResponse:
-// {"error": "..."}). Huma's own default error model is RFC7807 problem+json,
-// which these endpoints do not emit, so NewDocsHandler overrides
-// huma.NewError to build this instead — making the error responses the
-// generated spec documents match what clients actually receive. The status is
-// unexported so it drives GetStatus without appearing in the body.
+// apiError mirrors the real {"error": "..."} envelope so documented errors
+// match what clients receive, rather than Huma's RFC7807 default.
 type apiError struct {
 	status  int
 	Message string `json:"error" doc:"Human-readable error message."`
@@ -65,9 +34,6 @@ type apiError struct {
 
 func (e *apiError) Error() string  { return e.Message }
 func (e *apiError) GetStatus() int { return e.status }
-
-// path/query inputs describing how a route is parameterized. Only the tags
-// matter to Huma; the values are never read (the stub handlers ignore them).
 
 type runIDInput struct {
 	RunID string `path:"runID" doc:"Temporal run ID (a UUID) identifying one execution of the singleton backup workflow." example:"9f8b1c2d-3e4f-5a6b-7c8d-9e0f1a2b3c4d"`
@@ -96,10 +62,7 @@ type submitRunInput struct {
 	}
 }
 
-// output wrappers. Body is the exact struct the real handler encodes, so the
-// documented response schema cannot drift from what is served — except the two
-// config-bearing bodies, whose config field is an opaque object pointing at
-// GET /api/config/schema (see this file's doc comment).
+// Config-bearing bodies use an opaque object pointing at GET /api/config/schema.
 
 type runsOutput struct{ Body RunsResponse }
 type runDetailOutput struct{ Body RunDetail }
@@ -132,10 +95,7 @@ type configSchemaOutput struct {
 	Body map[string]any `doc:"The committed run-config JSON Schema (schemas/run-config.schema.json), which describes the POST /api/runs config body."`
 }
 
-// meOutput and buildInfoOutput describe the two auth-package endpoints
-// (webauth.Identity and its build-info sibling) that share the /api/ surface.
-// Their structs are re-declared here rather than imported so this file does not
-// couple to pkg/webauth's internals; the JSON shapes match webauth's.
+// meOutput re-declares pkg/webauth's JSON shape to avoid coupling to its internals.
 type meOutput struct {
 	Body struct {
 		Subject string `json:"subject" doc:"OIDC subject (stable per-user identifier)."`
@@ -151,21 +111,14 @@ type buildInfoOutput struct {
 	}
 }
 
-// noContentInput is the empty input for endpoints that take no path/query
-// parameters and no request body.
 type noContentInput struct{}
 
-// newDocsHandler builds the describe-only Huma API and returns the http.Handler
-// (docsMux) that serves its generated OpenAPI documents and docs page. See this
-// file's doc comment for why the operation handlers registered here are inert.
+// newDocsHandler returns docsMux, which serves the generated spec and docs page.
 func newDocsHandler() http.Handler {
 	installHumaErrorModel()
 
 	docsMux := http.NewServeMux()
 
-	// Version is the binary's own embedded build version — the same source the
-	// run report and UI footer use, including its "unknown" placeholder when no
-	// VCS info is stamped in (e.g. `go test`).
 	config := huma.DefaultConfig("Tape Archiver Web API", buildinfo.ToolVersion())
 	config.OpenAPIPath = openAPIPathBase
 	config.DocsPath = docsPath
@@ -189,19 +142,12 @@ func newDocsHandler() http.Handler {
 	return docsMux
 }
 
-// humaErrorModelOnce guards the one-time, process-global override of
-// huma.NewError below. newDocsHandler can be called more than once (production
-// builds one docs handler; tests build several, some in parallel), and
-// huma.NewError is a plain package-level var, so writing it on every call would
-// race concurrent builders. Setting it exactly once, before any docs handler
-// serves, is both sufficient (the value is identical every time) and race-free.
+// humaErrorModelOnce guards the process-global huma.NewError write, which
+// would race when tests build docs handlers in parallel.
 var humaErrorModelOnce sync.Once
 
-// installHumaErrorModel makes Huma's generated error responses use runsapi's
-// real {"error": "..."} envelope (apiError) instead of Huma's RFC7807 default.
-// This is a documented Huma extension point (a package-level var); it is safe to
-// set process-wide from here because this process uses Huma only to build these
-// docs, never to serve real requests.
+// installHumaErrorModel is safe process-wide because Huma here only builds
+// docs, never serves real requests.
 func installHumaErrorModel() {
 	humaErrorModelOnce.Do(func() {
 		huma.NewError = func(status int, message string, _ ...error) huma.StatusError {
@@ -210,10 +156,7 @@ func installHumaErrorModel() {
 	})
 }
 
-// stub is a no-op operation handler: Huma needs a function of the right I/O
-// types at registration to build the schema, but these handlers are never
-// invoked (the real handlers in newMux serve the traffic), so each simply
-// returns the zero output.
+// stub is never invoked; Huma only needs its I/O types.
 func stub[I, O any](context.Context, *I) (*O, error) { return new(O), nil }
 
 const (

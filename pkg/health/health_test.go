@@ -14,7 +14,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/health"
 )
 
-// freeAddr returns a local TCP address with an available port.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 
@@ -27,8 +26,6 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-// get issues a GET against the given health path and returns the status code.
-// It uses t.Context so the request is cancelled if the test ends early.
 func get(t *testing.T, addr, path string) int {
 	t.Helper()
 
@@ -43,10 +40,8 @@ func get(t *testing.T, addr, path string) int {
 	return response.StatusCode
 }
 
-// shutdownCleanup registers a cleanup that shuts the server down. It uses
-// context.Background rather than t.Context because t.Context is already
-// cancelled by the time cleanup functions run, which would abort the graceful
-// shutdown.
+// shutdownCleanup uses context.Background because t.Context is already
+// cancelled when cleanups run.
 func shutdownCleanup(t *testing.T, server *health.Server) {
 	t.Helper()
 

@@ -24,8 +24,7 @@ const validConfigJSON = `{
   "delivery": {"webhookUrl": "https://discord.com/api/webhooks/123/abc"}
 }`
 
-// opticalBurnConfigJSON is validConfigJSON with optical burning enabled, naming a
-// real burner device. A dry-run must never leave this device in the submitted config.
+// opticalBurnConfigJSON names a real burner a dry-run must never keep.
 const opticalBurnConfigJSON = `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 2,
@@ -75,9 +74,6 @@ func TestApplyDryRun(t *testing.T) {
 
 		require.NoError(t, ApplyDryRun(cfg, func(name string) string { return env[name] }, &bytes.Buffer{}))
 
-		// The run now targets the virtual library, but remembers the real one so
-		// the data worker can mirror its slot inventory and the rehearsal meets
-		// the conditions the real run would have met.
 		assert.Equal(t, "/dev/sch9", cfg.Library.Changer)
 		assert.Equal(t, "/dev/sch0", cfg.Library.MirrorSourceChanger,
 			"the real changer must be recorded before it is overwritten")
@@ -85,9 +81,7 @@ func TestApplyDryRun(t *testing.T) {
 
 	t.Run("records no mirror source when already targeting the virtual library", func(t *testing.T) {
 		cfg := parseConfig(t, validConfigJSON)
-		// A dev deployment whose configured library IS the mhvtl one: there is no
-		// real library to mirror from, so mirroring must stay off rather than
-		// pointlessly mirror the virtual library onto itself.
+		// A dev deployment whose configured library IS the mhvtl one.
 		cfg.Library.Changer = "/dev/sch9"
 
 		env := map[string]string{
@@ -167,10 +161,7 @@ func TestApplyDryRun(t *testing.T) {
 	})
 
 	t.Run("re-validates the config after the override", func(t *testing.T) {
-		// Copies=2 but the dry-run always leaves exactly 2 mhvtl drives, so this
-		// case exists mainly to prove Validate is actually invoked post-override;
-		// a config with an invariant the override itself would break is exercised
-		// implicitly by every other subtest succeeding.
+		// Proves Validate runs post-override.
 		cfg := parseConfig(t, validConfigJSON)
 		cfg.Copies = 0 // Trips Config.Validate's "copies: must be at least 1" rule.
 
@@ -199,8 +190,6 @@ func TestTranslateSubmitError(t *testing.T) {
 		assert.Contains(t, message, "run-abc")
 		assert.Contains(t, message, "`tapectl status`")
 
-		// The original serviceerror survives the translation via %w, so callers
-		// can still classify it (e.g. pkg/runsapi mapping it to 409).
 		var alreadyStarted *serviceerror.WorkflowExecutionAlreadyStarted
 		assert.True(t, errors.As(err, &alreadyStarted))
 	})
@@ -214,8 +203,6 @@ func TestTranslateSubmitError(t *testing.T) {
 	})
 }
 
-// fakeSubmitClient is a hand-rolled fake of TemporalClient, exercising Submit's
-// logic without a real Temporal connection.
 type fakeSubmitClient struct {
 	run      client.WorkflowRun
 	err      error
