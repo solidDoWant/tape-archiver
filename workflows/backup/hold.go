@@ -2,11 +2,13 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/pkg/zfs"
@@ -21,6 +23,14 @@ const (
 	holdTagPrefix = "tape-archiver-hold-"
 
 	holdTimeout = 5 * time.Minute
+
+	// holdMaxAttempts bounds hold and release retries: unbounded, a vanished
+	// snapshot wedges the run, and the release defer blocks the failure alert
+	// and staging cleanup behind it (#387).
+	holdMaxAttempts = 3
+
+	// snapshotNotFoundErrorType marks a resolved snapshot destroyed before its hold.
+	snapshotNotFoundErrorType = "snapshot-not-found"
 )
 
 // HoldTag returns the run-scoped ZFS hold tag for a Temporal run id.
@@ -65,7 +75,12 @@ type HoldInput struct {
 func (a *HoldActivities) HoldSnapshots(ctx context.Context, input HoldInput) error {
 	for _, snapshot := range input.Snapshots {
 		if err := a.holder.Hold(ctx, input.Tag, snapshot); err != nil {
-			return fmt.Errorf("hold snapshot %s with tag %s: %w", snapshot, input.Tag, err)
+			err = fmt.Errorf("hold snapshot %s with tag %s: %w", snapshot, input.Tag, err)
+			if errors.Is(err, zfs.ErrNotExist) {
+				return temporal.NewNonRetryableApplicationError(err.Error(), snapshotNotFoundErrorType, err)
+			}
+
+			return err
 		}
 	}
 
@@ -76,12 +91,18 @@ func (a *HoldActivities) HoldSnapshots(ctx context.Context, input HoldInput) err
 }
 
 // ReleaseSnapshots removes the run's hold from every snapshot; an absent hold is
-// a no-op.
+// a no-op. One failure does not stop the others from being released.
 func (a *HoldActivities) ReleaseSnapshots(ctx context.Context, input HoldInput) error {
+	var errs []error
+
 	for _, snapshot := range input.Snapshots {
 		if err := a.holder.Release(ctx, input.Tag, snapshot); err != nil {
-			return fmt.Errorf("release snapshot %s tag %s: %w", snapshot, input.Tag, err)
+			errs = append(errs, fmt.Errorf("release snapshot %s tag %s: %w", snapshot, input.Tag, err))
 		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
 
 	slog.InfoContext(ctx, "hold: released the run's holds on source snapshots",
@@ -131,6 +152,7 @@ func holdSnapshots(ctx workflow.Context, state *runState) error {
 	actx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: holdTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: holdMaxAttempts},
 	})
 
 	var activities *HoldActivities
@@ -158,6 +180,7 @@ func releaseSnapshots(ctx workflow.Context, state *runState) {
 	actx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: holdTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: holdMaxAttempts},
 	})
 
 	var activities *HoldActivities

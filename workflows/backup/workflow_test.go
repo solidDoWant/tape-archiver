@@ -376,3 +376,50 @@ func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string
 
 	t.Fatalf("failPhase does not support phase %q (Report and Deliver are mocked to succeed)", name)
 }
+
+// TestBackupHoldFailureAlertsDespiteFailingRelease (#387): a hold and release
+// that keep failing are bounded, so the run closes and the alert fires.
+func TestBackupHoldFailureAlertsDespiteFailingRelease(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+
+	archives := []ResolvedArchive{{Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/a@snap1"}}}}
+
+	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
+		Return([]ResolvedArchive(nil), nil)
+	env.OnActivity((&ResolveDataActivities{}).ResolveAndCheck, mock.Anything, mock.Anything).
+		Return(archives, nil)
+
+	holds, releases := 0, 0
+
+	env.OnActivity((&HoldActivities{}).HoldSnapshots, mock.Anything, mock.Anything).
+		Return(func(context.Context, HoldInput) error {
+			holds++
+
+			return errors.New("hold boom")
+		})
+	env.OnActivity((&HoldActivities{}).ReleaseSnapshots, mock.Anything, mock.Anything).
+		Return(func(context.Context, HoldInput) error {
+			releases++
+
+			return errors.New("release boom")
+		})
+
+	var alerted FailureInput
+
+	env.OnActivity((&FailureActivities{}).NotifyFailure, mock.Anything, mock.Anything).
+		Return(func(_ context.Context, input FailureInput) error {
+			alerted = input
+
+			return nil
+		})
+
+	env.ExecuteWorkflow(Backup, validBackupConfig())
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.ErrorContains(t, env.GetWorkflowError(), "phase Hold")
+	assert.Equal(t, holdMaxAttempts, holds)
+	assert.Equal(t, holdMaxAttempts, releases)
+	assert.Equal(t, PhaseHold, alerted.Phase)
+}

@@ -3,6 +3,7 @@ package backup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
+
+	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 )
 
 // recordingHolder records holds and releases by tag. holdErr fails Hold (from
@@ -24,6 +27,9 @@ type recordingHolder struct {
 	holdErrAfter int
 	holdBlocks   bool
 	holds        int
+	// releaseErr fails every Release of that snapshot; releases counts attempts.
+	releaseErr map[string]error
+	releases   map[string]int
 }
 
 func newRecordingHolder() *recordingHolder {
@@ -60,9 +66,26 @@ func (r *recordingHolder) Release(_ context.Context, tag, snapshot string) error
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	if r.releases == nil {
+		r.releases = map[string]int{}
+	}
+
+	r.releases[snapshot]++
+
+	if err := r.releaseErr[snapshot]; err != nil {
+		return err
+	}
+
 	r.released[tag] = append(r.released[tag], snapshot)
 
 	return nil
+}
+
+func (r *recordingHolder) releaseAttempts(snapshot string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.releases[snapshot]
 }
 
 func (r *recordingHolder) heldFor(tag string) []string {
@@ -345,4 +368,61 @@ func TestHoldActivitiesIterate(t *testing.T) {
 		holdErr:  errors.New("boom"),
 	}}
 	require.Error(t, failing.HoldSnapshots(t.Context(), input))
+}
+
+// TestHoldVanishedSnapshotFailsPromptly (#387): a snapshot pruned before the hold
+// fails the hold without retrying, and every snapshot is still released.
+func TestHoldVanishedSnapshotFailsPromptly(t *testing.T) {
+	t.Parallel()
+
+	holder := newRecordingHolder()
+	holder.holdErr = fmt.Errorf("zfs hold: %w", zfs.ErrNotExist)
+	holder.holdErrAfter = 3
+
+	env := newHoldEnv(holder)
+
+	archives := []ResolvedArchive{{Snapshots: []ResolvedSnapshot{
+		{ZFSPath: "pool/a@snap1"},
+		{ZFSPath: "pool/b@snap2"},
+		{ZFSPath: "pool/c@snap3"},
+	}}}
+
+	env.ExecuteWorkflow(holdTestWorkflow, holdTestParam{Archives: archives, Mode: "success"})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.ErrorContains(t, env.GetWorkflowError(), "does not exist")
+	assert.Equal(t, 3, holder.holds, "a vanished snapshot must not be retried")
+
+	tags := holder.releasedTags()
+	require.Len(t, tags, 1)
+	assert.ElementsMatch(t, []string{"pool/a@snap1", "pool/b@snap2", "pool/c@snap3"}, holder.releasedFor(tags[0]))
+}
+
+// TestHoldReleaseFailureIsBounded (#387): a release that keeps failing is retried
+// a bounded number of times, does not stop the other snapshots' release, and the
+// workflow still closes.
+func TestHoldReleaseFailureIsBounded(t *testing.T) {
+	t.Parallel()
+
+	holder := newRecordingHolder()
+	holder.releaseErr = map[string]error{"pool/b@snap2": errors.New("pool busy")}
+
+	env := newHoldEnv(holder)
+
+	archives := []ResolvedArchive{{Snapshots: []ResolvedSnapshot{
+		{ZFSPath: "pool/a@snap1"},
+		{ZFSPath: "pool/b@snap2"},
+		{ZFSPath: "pool/c@snap3"},
+	}}}
+
+	env.ExecuteWorkflow(holdTestWorkflow, holdTestParam{Archives: archives, Mode: "fail"})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.ErrorContains(t, env.GetWorkflowError(), "boom", "the run's own error survives the failed release")
+	assert.Equal(t, holdMaxAttempts, holder.releaseAttempts("pool/b@snap2"))
+
+	tags := holder.releasedTags()
+	require.Len(t, tags, 1)
+	assert.Contains(t, holder.releasedFor(tags[0]), "pool/a@snap1")
+	assert.Contains(t, holder.releasedFor(tags[0]), "pool/c@snap3")
 }

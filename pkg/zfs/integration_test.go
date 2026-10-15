@@ -286,6 +286,10 @@ func TestHoldReleaseIntegration(t *testing.T) {
 	assert.NotContains(t, holds, tag, "the hold is gone after release")
 
 	require.NoError(t, runZFS(t, ctx, "destroy", snapshot), "an unheld snapshot can be destroyed")
+
+	// #387: a pruned snapshot fails the hold as ErrNotExist; releasing it is a no-op.
+	require.ErrorIs(t, zfs.Hold(ctx, tag, snapshot), zfs.ErrNotExist)
+	require.NoError(t, zfs.Release(ctx, tag, snapshot), "a destroyed snapshot holds nothing to release")
 }
 
 func requireZFS(t *testing.T, ctx context.Context, args ...string) {
