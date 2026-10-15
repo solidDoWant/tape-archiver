@@ -73,7 +73,7 @@ test-integration: fmt vet temporal-up mhvtl-up zpool-up ## Run integration tests
 	    TAPE_TEST_SNAPSHOT=test-snap TAPE_TEST_MIN_BYTES=7969177 \
 	    TEMPORAL_ADDRESS=localhost:7233 TEMPORAL_NAMESPACE=default \
 	    PATH="$$PATH" GOCACHE="$$gocache" GOMODCACHE="$$(go env GOMODCACHE)" \
-	    go test -race -count=1 -p 1 -tags integration ./...; \
+	    go test -race -count=1 -p 1 -v -tags integration ./...; \
 	}
 
 .PHONY: test-e2e
