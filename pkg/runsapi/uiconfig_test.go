@@ -10,11 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGetUIConfig checks GET /api/config/ui reports exactly the Temporal Web UI
-// base URL and namespace supplied via WithTemporalUI and the deploy-owned
-// library devices/webhook supplied via WithDeployConfig, so the SPA can build a
-// correct workflow deep-link (and omit it when no UI is configured) and source
-// the guided form's device/webhook values from deploy config (issue #304).
 func TestGetUIConfig(t *testing.T) {
 	t.Parallel()
 
@@ -55,16 +50,12 @@ func TestGetUIConfig(t *testing.T) {
 			expectedBaseURL:   "",
 			expectedNamespace: "",
 			expectedChanger:   "",
-			// An unconfigured drive set is normalized to a non-nil empty
-			// slice so the JSON is [] (an array the SPA can map over), never
-			// null.
+			// Unconfigured sets must serialize as [], never null.
 			expectedDrives:            []string{},
 			expectedWebhookConfigured: false,
-			// Same [] (never null) normalization for the burner drives.
+
 			expectedOpticalBurnDrive: []string{},
-			// An undeclared topology reports a 0 slot count and empty (not
-			// null) reserved-slot arrays, so the SPA's picker shows the
-			// "not configured" state.
+
 			expectedSlotCount:      0,
 			expectedCleaningSlots:  []int{},
 			expectedIOStationSlots: []int{},

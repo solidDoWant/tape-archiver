@@ -25,19 +25,13 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// sseFrame is one parsed "event: NAME\ndata: JSON\n\n" Server-Sent Event
-// frame, mirroring pkg/runsapi's own test helper of the same shape — kept as
-// a small local duplicate rather than exported cross-package machinery,
-// since this file is the only place outside pkg/runsapi that needs it.
+// sseFrame is one parsed "event: NAME\ndata: JSON\n\n" SSE frame.
 type sseFrame struct {
 	event string
 	data  string
 }
 
-// readSSEFrames parses body as a stream of SSE frames on a background
-// goroutine, delivering each one on the returned channel, which closes once
-// body hits EOF or another read error — in particular, once the server
-// closes the connection after its final "done" event.
+// readSSEFrames streams parsed frames; the channel closes on EOF or error.
 func readSSEFrames(body io.Reader) <-chan sseFrame {
 	frames := make(chan sseFrame, 16)
 
@@ -86,21 +80,8 @@ func waitForFrame(t *testing.T, frames <-chan sseFrame, timeout time.Duration) s
 	}
 }
 
-// TestSSERunEventsAgainstRealTemporal proves GET /api/events/runs/{runID}
-// works end to end through cmd/web's real, fully-composed stack — Temporal
-// wiring, pkg/webauth's session gate, pkg/webserver, and pkg/runsapi's SSE
-// handler together — not just pkg/runsapi's own unit tests, which never
-// drive a real Temporal connection or the auth middleware wrapper. This is
-// the specific combination the epic's tracking notes flagged as untested so
-// far: a long-lived text/event-stream response passing through
-// pkg/webauth.Authenticator.Wrap. It proves: an unauthenticated request is
-// rejected (401, same as any other gated /api/ route — the SSE route is not
-// a second, unauthenticated path), an authenticated request receives a live
-// "update" event reflecting the real running workflow's status/phase
-// (answered by the real backup.LastCompletedPhaseQuery handler, not a
-// fixture), and once the workflow actually completes the stream delivers a
-// final "update" + "done" pair and the server closes the connection on its
-// own.
+// TestSSERunEventsAgainstRealTemporal covers SSE through the full stack,
+// including a long-lived event stream passing through webauth's Wrap.
 func TestSSERunEventsAgainstRealTemporal(t *testing.T) {
 	requireBuiltFrontend(t)
 
@@ -151,9 +132,6 @@ func TestSSERunEventsAgainstRealTemporal(t *testing.T) {
 
 	eventsURL := "http://" + addr + "/api/events/runs/" + workflowRun.GetRunID()
 
-	// An unauthenticated request must be rejected the same way any other
-	// gated /api/ route is — proving the SSE route is mounted through
-	// pkg/webauth's real gate, not a second, unauthenticated path.
 	unauthResp, err := http.Get(eventsURL)
 	require.NoError(t, err)
 
@@ -181,11 +159,7 @@ func TestSSERunEventsAgainstRealTemporal(t *testing.T) {
 	assert.Equal(t, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING.String(), firstDetail.Status)
 	assert.Equal(t, stubPhase, firstDetail.LastCompletedPhase)
 
-	// Finish the workflow; the stream must observe the resulting status
-	// change and deliver a final "update" + "done" pair, then the server
-	// closes the connection on its own — this is real server-side polling
-	// against the production 2-second poll interval, so this step alone can
-	// take a little while.
+	// Real 2s server-side polling, so this step can take a while.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 
 	second := waitForFrame(t, frames, 30*time.Second)
@@ -217,28 +191,14 @@ func TestSSERunEventsAgainstRealTemporal(t *testing.T) {
 }
 
 // TestShutdownWithOpenSSEConnectionIsBounded is issue #270's acceptance
-// criterion, verbatim: Given cmd/web is running and serving at least one
-// open SSE connection, When it receives SIGTERM (its NotifyContext being
-// cancelled — the identical code path), Then it exits within a small bound,
-// cleanly. Before the fix this took the full 10s shutdownTimeout AND
-// returned a "shutdown: context deadline exceeded" error (an open SSE
-// response never goes idle, so srv.Shutdown could only ever give up), and
-// with METRICS_SCRAPE_WAIT_TIMEOUT unset the no-SSE path additionally hung
-// on a 60s final-scrape wait no scraper was going to satisfy. After the fix
-// the drain context ends the stream immediately and cmd/web's scrape-wait
-// default is 0, so both failure modes are covered by the single bound
-// asserted here.
+// criterion: with an open SSE connection, shutdown exits cleanly and quickly.
 func TestShutdownWithOpenSSEConnectionIsBounded(t *testing.T) {
 	requireBuiltFrontend(t)
 
 	webListenAddr := freeAddr(t)
 	setupEnv(t, webListenAddr)
 
-	// setupEnv pins METRICS_SCRAPE_WAIT_TIMEOUT=0s so other tests never sit
-	// through run()'s scrape wait; this test is specifically about cmd/web's
-	// own built-in shutdown bound, so exercise the real production default
-	// (env unset — cmd/web must skip the wait on its own). setupEnv's
-	// t.Setenv cleanup restores the variable when this test ends.
+	// Exercise the production default (unset) rather than setupEnv's 0s.
 	require.NoError(t, os.Unsetenv("METRICS_SCRAPE_WAIT_TIMEOUT"))
 
 	ctx := t.Context()
@@ -295,12 +255,9 @@ func TestShutdownWithOpenSSEConnectionIsBounded(t *testing.T) {
 
 	frames := readSSEFrames(resp.Body)
 
-	// The stream is live (initial snapshot delivered) and the run is still
-	// RUNNING, so nothing but shutdown will end it server-side.
 	first := waitForFrame(t, frames, 15*time.Second)
 	require.Equal(t, "update", first.event)
 
-	// Deliver the shutdown signal and time run()'s exit.
 	shutdownStart := time.Now()
 
 	cancelWeb()
@@ -312,12 +269,10 @@ func TestShutdownWithOpenSSEConnectionIsBounded(t *testing.T) {
 		require.NoError(t, err, "shutdown with an open SSE stream must complete cleanly, not by exhausting the drain deadline")
 		assert.Less(t, elapsed, 5*time.Second, "shutdown must be bounded well under shutdownTimeout, took %s", elapsed)
 	case <-time.After(9 * time.Second):
-		// Just under shutdownTimeout: reaching the 10s drain deadline at all
-		// is the failure this test exists to catch.
+		// Just under the 10s shutdownTimeout.
 		t.Fatal("run did not return within the bounded shutdown window after ctx cancellation")
 	}
 
-	// The server must have ended the SSE stream itself as part of draining.
 	select {
 	case _, ok := <-frames:
 		assert.False(t, ok, "expected the SSE stream to be closed by the draining server without further frames")
@@ -325,14 +280,9 @@ func TestShutdownWithOpenSSEConnectionIsBounded(t *testing.T) {
 		t.Fatal("SSE stream was not closed by the draining server")
 	}
 
-	// Finish the stub workflow while its worker is still running (the
-	// deferred backupWorker.Stop has not run yet) and wait for it to actually
-	// complete. The finish-signal t.Cleanup above is not enough on its own:
-	// cleanups run after the deferred worker Stop, so the signal would sit
-	// unprocessed forever and this test would leave the singleton "backup"
-	// workflow Running — which blocks any later test that submits a run
-	// against the same dev Temporal (pkg/runsapi's dry-run submission
-	// integration tests fail with "dry-run submission never started").
+	// Complete the run while the worker still polls: t.Cleanup runs after
+	// backupWorker.Stop, and a leaked run blocks later tests on the singleton
+	// workflow ID.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 	require.NoError(t, workflowRun.Get(ctx, nil), "stub workflow must complete so the singleton workflow ID is free for later tests")
 }

@@ -9,10 +9,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// historyFromEvents parses a synthetic event slice into a runHistory the same
-// way fetchRunHistory does (applyHistoryEvent + populateFailingPhase), without a
-// fake Temporal client — so the derivation unit tests can drive derivePause /
-// deriveLastCompletedPhase against a runHistory directly.
+// historyFromEvents parses events the same way fetchRunHistory does.
 func historyFromEvents(events []*historypb.HistoryEvent) runHistory {
 	var history runHistory
 
@@ -27,12 +24,8 @@ func historyFromEvents(events []*historypb.HistoryEvent) runHistory {
 	return history
 }
 
-// pausedRunHistory builds the history of a run that has progressed through a
-// completed Load and then blocked on an operator pause, with alertName's alert
-// activity (carrying input) as the last thing scheduled and the workflow still
-// open — the exact shape a run awaiting the operator has in Temporal history
-// while no worker is polling (issue #329). Returned as raw events so it doubles
-// as a fakeTemporalClient.historyFunc fixture.
+// pausedRunHistory builds an open run that completed Load and then blocked on
+// alertName's pause, as seen while no worker is polling (issue #329).
 func pausedRunHistory(t *testing.T, alertName string, input interface{}) []*historypb.HistoryEvent {
 	t.Helper()
 
@@ -48,9 +41,6 @@ func pausedRunHistory(t *testing.T, alertName string, input interface{}) []*hist
 	return builder.events
 }
 
-// TestDerivePause covers reconstructing a run's currently-active operator pause
-// from raw history — the fallback GET /api/runs/{runID} and the resume/abort
-// handlers use when the live CurrentPauseQuery cannot be answered (issue #329).
 func TestDerivePause(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -104,8 +94,7 @@ func TestDerivePause(t *testing.T) {
 				builder.started(t, testConfig)
 				alertID := builder.scheduled(t, notifyWritePathPauseActivity, backup.WritePathPauseInput{Phase: backup.PhaseWrite})
 				builder.completed(t, alertID, struct{}{})
-				// The operator resumed: the run re-drove the failed tapes, so a
-				// real activity is scheduled after the alert.
+				// Resumed: a real activity follows the alert.
 				builder.scheduled(t, "Load", struct{}{})
 
 				return builder.events
@@ -147,16 +136,10 @@ func TestDerivePause(t *testing.T) {
 	}
 }
 
-// TestDerivePauseDecodeFailureDegradesToKind proves that an alert input this
-// version of the code cannot decode (e.g. an older workflow build whose payload
-// shape differs) still surfaces the pause Kind — the operator learns the run is
-// paused and which kind, rather than the pause vanishing — matching history.go's
-// decode-failure-degrades-not-fails convention.
 func TestDerivePauseDecodeFailureDegradesToKind(t *testing.T) {
 	builder := newEventBuilder()
 	builder.started(t, testConfig)
-	// Encode a payload with a shape the WritePathPauseInput decode target
-	// rejects (a bare string where a struct is expected).
+	// A bare string cannot decode into WritePathPauseInput.
 	alertID := builder.scheduled(t, notifyWritePathPauseActivity, "not-a-write-path-pause-input")
 	builder.completed(t, alertID, struct{}{})
 
@@ -166,9 +149,6 @@ func TestDerivePauseDecodeFailureDegradesToKind(t *testing.T) {
 	assert.Empty(t, got.AffectedTapes, "details are simply absent when the input cannot be decoded")
 }
 
-// TestDeriveLastCompletedPhase covers the phase-side history fallback: it must
-// report the furthest completed pipeline phase, consistent with the
-// GET /api/runs/{runID}/phases timeline.
 func TestDeriveLastCompletedPhase(t *testing.T) {
 	t.Run("a write-failure pause reports Load as the last completed phase", func(t *testing.T) {
 		events := pausedRunHistory(t, notifyWritePathPauseActivity, backup.WritePathPauseInput{Phase: backup.PhaseWrite})

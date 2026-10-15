@@ -12,14 +12,9 @@ import (
 	"go.temporal.io/sdk/client"
 )
 
-// flushTimeout caps how long a test will wait for tally's reporting
-// goroutine to push values into the Prometheus registry. Tally flushes on a
-// fixed interval; the closer also blocks until a final flush completes.
 const flushTimeout = 5 * time.Second
 
-// buildHandler wires a tally-backed MetricsHandler against a fresh
-// Prometheus registry and returns both, alongside a flush function that
-// drains pending samples synchronously by closing the tally scope.
+// buildHandler returns a handler, its registry, and a synchronous flush func.
 func buildHandler(t *testing.T) (client.MetricsHandler, *prometheus.Registry, func()) {
 	t.Helper()
 

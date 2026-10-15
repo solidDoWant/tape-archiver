@@ -27,19 +27,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// setEventPollInterval overrides the package-level eventPollInterval for the
-// duration of a test, restored via t.Cleanup. Overriding the same
-// interval a real stream polls at is what makes exercising "push only on
-// change" and "close on terminal" behavior fast (milliseconds) rather than
-// tied to the real 2-second production interval.
-//
-// Call it before constructing the handler under test (New/newHandler/
-// newRunBroker): each broker captures eventPollInterval into
-// runBroker.pollInterval at construction and the poll goroutine reads only
-// that field, never this global. That capture — and the t.Cleanup restore
-// below — both run on the test goroutine, so no server-spawned goroutine ever
-// races the global, which -race would otherwise flag (the cleanup restore has
-// no happens-before edge to a still-terminating poll goroutine).
+// setEventPollInterval must be called before constructing the handler, which
+// captures the interval; otherwise poll goroutines race the cleanup restore.
 func setEventPollInterval(t *testing.T, interval time.Duration) {
 	t.Helper()
 
@@ -58,14 +47,8 @@ func setSSEHeartbeatInterval(t *testing.T, interval time.Duration) {
 	t.Cleanup(func() { sseHeartbeatInterval = original })
 }
 
-// dynamicTemporalClient is a TemporalClient fake whose DescribeWorkflowExecution
-// and QueryWorkflow answers reflect a status/phase that a test can change at
-// will (setState) while a stream is connected — standing in for a run whose
-// state actually evolves over time, which a static fixture (like
-// fakeTemporalClient elsewhere in this package) cannot represent. Embedding
-// fakeTemporalClient supplies harmless zero-value ListWorkflow/ExecuteWorkflow
-// implementations (unused by streamRunEvents) without hand-rolling a second
-// full TemporalClient fake.
+// dynamicTemporalClient is a fake whose run state a test can change while a
+// stream is connected.
 type dynamicTemporalClient struct {
 	fakeTemporalClient
 
@@ -87,10 +70,6 @@ func (c *dynamicTemporalClient) setState(status enumspb.WorkflowExecutionStatus,
 	c.phase = phase
 }
 
-// setPause changes the pause state a subsequent CurrentPauseQuery answers
-// with, so a test can simulate an operator-in-the-loop pause starting or
-// clearing while a stream is connected — the same "state a test can change
-// at will" role setState plays for status/phase.
 func (c *dynamicTemporalClient) setPause(pause backup.CurrentPause) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -98,12 +77,6 @@ func (c *dynamicTemporalClient) setPause(pause backup.CurrentPause) {
 	c.pause = pause
 }
 
-// setPauseErr makes a subsequent CurrentPauseQuery fail with err (nil to go
-// back to answering normally with the current setPause value) — a test can
-// toggle this to simulate a transient query blip mid-stream without
-// disturbing DescribeWorkflowExecution/LastCompletedPhaseQuery, the same way
-// a real transient "no worker polling" failure would only ever affect the
-// one query that hit it.
 func (c *dynamicTemporalClient) setPauseErr(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -111,13 +84,6 @@ func (c *dynamicTemporalClient) setPauseErr(err error) {
 	c.pauseErr = err
 }
 
-// setPhaseErr makes a subsequent LastCompletedPhaseQuery fail with err (nil to
-// go back to answering normally with the current setState phase) — the
-// phase-side analogue of setPauseErr, letting a test simulate a transient
-// phase-query blip mid-stream without disturbing
-// DescribeWorkflowExecution/CurrentPauseQuery, the same way a real transient
-// "no worker polling" failure would only ever affect the one query that hit it
-// (issue #323).
 func (c *dynamicTemporalClient) setPhaseErr(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -125,12 +91,8 @@ func (c *dynamicTemporalClient) setPhaseErr(err error) {
 	c.phaseErr = err
 }
 
-// setHistoryErr makes a subsequent GetWorkflowHistory fail with err (nil to go
-// back to serving an empty history). fetchRunDetail falls back to raw history
-// whenever a live query fails (issue #329), so a test simulating a query blip
-// that must still surface as Unknown — the case #325's carry-forward guards —
-// has to fail history too: with history readable, the fallback would resolve
-// the blip authoritatively and Unknown would never be reported.
+// setHistoryErr is needed to simulate an Unknown query result: with history
+// readable, fetchRunDetail's fallback (issue #329) would resolve it.
 func (c *dynamicTemporalClient) setHistoryErr(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -179,11 +141,6 @@ func (c *dynamicTemporalClient) DescribeWorkflowExecution(_ context.Context, _, 
 	return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: info}, nil
 }
 
-// QueryWorkflow routes by queryType — backup.CurrentPauseQuery answers with
-// the dynamic pause state (setPause), anything else (LastCompletedPhaseQuery
-// in practice) with the dynamic phase (setState) — mirroring how the real
-// workflow answers two independent query handlers rather than collapsing
-// both onto one fixture value.
 func (c *dynamicTemporalClient) QueryWorkflow(_ context.Context, _, _, queryType string, _ ...interface{}) (converter.EncodedValue, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -203,16 +160,12 @@ func (c *dynamicTemporalClient) QueryWorkflow(_ context.Context, _, _, queryType
 	return fakeEncodedValue{value: c.phase}, nil
 }
 
-// sseFrame is one parsed "event: NAME\ndata: JSON\n\n" frame.
 type sseFrame struct {
 	event string
 	data  string
 }
 
-// readSSEFrames parses body as a stream of SSE frames on a background
-// goroutine, delivering each one on the returned channel, which is closed
-// once body hits EOF or another read error (in particular, once the server
-// closes the connection).
+// readSSEFrames closes the returned channel when the server closes the stream.
 func readSSEFrames(body io.Reader) <-chan sseFrame {
 	frames := make(chan sseFrame, 16)
 
@@ -232,7 +185,6 @@ func readSSEFrames(body io.Reader) <-chan sseFrame {
 				return
 			}
 
-			// The blank line terminating the frame.
 			if _, err := reader.ReadString('\n'); err != nil {
 				return
 			}
@@ -247,8 +199,6 @@ func readSSEFrames(body io.Reader) <-chan sseFrame {
 	return frames
 }
 
-// waitForFrame reads one frame from frames, failing the test if none arrives
-// within timeout or the stream closes first.
 func waitForFrame(t *testing.T, frames <-chan sseFrame, timeout time.Duration) sseFrame {
 	t.Helper()
 
@@ -264,8 +214,6 @@ func waitForFrame(t *testing.T, frames <-chan sseFrame, timeout time.Duration) s
 	}
 }
 
-// requireNoFrame asserts no frame arrives on frames within window, proving a
-// quiescent (unchanged) run does not produce redundant events.
 func requireNoFrame(t *testing.T, frames <-chan sseFrame, window time.Duration) {
 	t.Helper()
 
@@ -278,8 +226,6 @@ func requireNoFrame(t *testing.T, frames <-chan sseFrame, window time.Duration) 
 	}
 }
 
-// assertFrame decodes frame's data as a RunDetail and checks it against the
-// expected event name, status, and phase.
 func assertFrame(t *testing.T, frame sseFrame, wantEvent string, wantStatus enumspb.WorkflowExecutionStatus, wantPhase string) {
 	t.Helper()
 
@@ -292,11 +238,6 @@ func assertFrame(t *testing.T, frame sseFrame, wantEvent string, wantStatus enum
 	assert.Equal(t, wantPhase, detail.LastCompletedPhase)
 }
 
-// TestStreamRunEventsInitialError covers every way the very first poll can
-// fail: the response must be a normal JSON error with the same
-// statusForTemporalError classification getRun uses, on a plain
-// "application/json" response — never a 200 text/event-stream that then
-// fails inside the stream body.
 func TestCurrentPauseEqual(t *testing.T) {
 	base := CurrentPauseInfo{
 		Kind:          "write-failure",
@@ -306,9 +247,7 @@ func TestCurrentPauseEqual(t *testing.T) {
 	}
 
 	t.Run("nil and empty slices are the same state (no spurious update)", func(t *testing.T) {
-		// backup.CurrentPauseQuery can return either a nil or an empty slice for
-		// the same "nothing affected" state across polls; the delta check must not
-		// treat that as a change (reflect.DeepEqual did).
+		// CurrentPauseQuery may return either for "nothing affected".
 		withNil := CurrentPauseInfo{Kind: "eject"}
 		withEmpty := CurrentPauseInfo{Kind: "eject", AffectedTapes: []string{}, ReloadSlots: []int{}, Devices: []string{}}
 
@@ -334,11 +273,8 @@ func TestCurrentPauseEqual(t *testing.T) {
 	})
 }
 
-// TestStreamRunEventsHeartbeatKeepsIdleStreamAlive proves a run that stays
-// RUNNING with no state change still emits periodic SSE comment lines, so an
-// idle-timeout intermediary does not silently drop the stream (events.go's
-// sseHeartbeatInterval). A comment frame is not an event, so this reads the raw
-// stream rather than readSSEFrames.
+// TestStreamRunEventsHeartbeatKeepsIdleStreamAlive reads the raw stream because
+// comment lines are not events.
 func TestStreamRunEventsHeartbeatKeepsIdleStreamAlive(t *testing.T) {
 	setEventPollInterval(t, time.Hour) // no state-change frames during the test
 	setSSEHeartbeatInterval(t, 15*time.Millisecond)
@@ -386,6 +322,8 @@ func TestStreamRunEventsHeartbeatKeepsIdleStreamAlive(t *testing.T) {
 	}
 }
 
+// TestStreamRunEventsInitialError requires a JSON error status, never a 200
+// event stream, when the first poll fails.
 func TestStreamRunEventsInitialError(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -426,13 +364,6 @@ func TestStreamRunEventsInitialError(t *testing.T) {
 	}
 }
 
-// TestStreamRunEventsPushesOnlyOnChangeThenClosesOnTerminal drives a real SSE
-// connection (httptest.NewServer, a real client) against a run whose state a
-// dynamicTemporalClient lets the test control mid-stream: it proves an
-// unchanged run produces no redundant frames, a real status/phase change
-// produces exactly one new "update" frame, and reaching a terminal status
-// produces a final "update" followed by a "done" frame and then the server
-// closes the connection on its own (no forever-open stream).
 func TestStreamRunEventsPushesOnlyOnChangeThenClosesOnTerminal(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
@@ -454,8 +385,6 @@ func TestStreamRunEventsPushesOnlyOnChangeThenClosesOnTerminal(t *testing.T) {
 	first := waitForFrame(t, frames, 2*time.Second)
 	assertFrame(t, first, sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "")
 
-	// The run's state has not changed: several poll intervals must pass with
-	// no further frame.
 	requireNoFrame(t, frames, 150*time.Millisecond)
 
 	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
@@ -471,8 +400,6 @@ func TestStreamRunEventsPushesOnlyOnChangeThenClosesOnTerminal(t *testing.T) {
 	fourth := waitForFrame(t, frames, 2*time.Second)
 	assertFrame(t, fourth, sseEventDone, enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, "Verify")
 
-	// The server must close the connection itself once terminal, not leave
-	// it open forever waiting on the client.
 	select {
 	case _, ok := <-frames:
 		assert.False(t, ok, "expected no further frames after the done event")
@@ -481,15 +408,8 @@ func TestStreamRunEventsPushesOnlyOnChangeThenClosesOnTerminal(t *testing.T) {
 	}
 }
 
-// TestStreamRunEventsPushesOnPauseChangeAlone covers the CurrentPause half of
-// streamRunEvents' delta check (events.go): an operator-in-the-loop pause
-// starting or clearing pushes a new "update" event even when neither Status
-// nor LastCompletedPhase changes at the same moment — exactly the case a
-// Load/Write-failure or Eject pause is (SPEC §4.3): the run stays RUNNING and
-// the last *completed* phase does not advance while paused mid-phase. Without
-// the CurrentPause comparison in the delta check, a client watching the live
-// stream would never learn a pause started (or cleared) until some other,
-// unrelated field happened to change too.
+// TestStreamRunEventsPushesOnPauseChangeAlone covers pauses, which start and
+// clear mid-phase without Status or LastCompletedPhase changing.
 func TestStreamRunEventsPushesOnPauseChangeAlone(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
@@ -510,9 +430,6 @@ func TestStreamRunEventsPushesOnPauseChangeAlone(t *testing.T) {
 	first := waitForFrame(t, frames, 2*time.Second)
 	assertFrame(t, first, sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
 
-	// Status and phase are unchanged for the rest of this test — only the
-	// pause state moves — so any further frame must come from the
-	// CurrentPause comparison, not the Status/LastCompletedPhase one.
 	requireNoFrame(t, frames, 150*time.Millisecond)
 
 	client.setPause(backup.CurrentPause{
@@ -541,13 +458,8 @@ func TestStreamRunEventsPushesOnPauseChangeAlone(t *testing.T) {
 	assert.Equal(t, "", clearedDetail.CurrentPause.Kind, "the pause clearing (on resume) must push a new event too")
 }
 
-// TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy covers a
-// review finding on #250/PR #252: a transient CurrentPauseQuery failure
-// mid-stream must never make a genuinely paused run look like it cleared.
-// fetchRunDetail reports this tick's CurrentPause as Unknown rather than
-// empty, and streamRunEvents must carry the last known real pause state
-// forward into the event it pushes (triggered here by an unrelated phase
-// change), not silently report "not paused".
+// TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy: a transient pause
+// query failure must not make a paused run look cleared (PR #252).
 func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
@@ -573,16 +485,9 @@ func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
 	require.Equal(t, "write-failure", initial.CurrentPause.Kind, "test setup: the stream must start out reporting the real pause")
 	require.False(t, initial.CurrentPause.Unknown)
 
-	// Simulate the query blip, then force an observable event by changing
-	// the phase — if fetchRunDetail's Unknown result were compared directly
-	// (instead of being carried forward), this would push CurrentPause.Kind
-	// == "" alongside the phase change, exactly the bug being guarded
-	// against here.
+	// Blip the pause query, then force an event via a phase change.
 	client.setPauseErr(assertError{"no worker polling"})
-	// Fail history too: with it readable, fetchRunDetail's history fallback
-	// (issue #329) would resolve the pause authoritatively and Unknown would
-	// never arise — this test exercises the deeper case (both live query and
-	// history unreadable) that still reaches #325's carry-forward.
+	// Fail history too, or the #329 fallback would resolve the pause.
 	client.setHistoryErr(assertError{"history unavailable"})
 	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
 
@@ -597,7 +502,6 @@ func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
 	assert.False(t, duringBlip.CurrentPause.Unknown,
 		"the carried-forward value is the last known GOOD state, not an unknown one, once it's been folded into an emitted event")
 
-	// The query recovers; a real pause-clear is still detected normally.
 	client.setPauseErr(nil)
 	client.setHistoryErr(nil)
 	client.setPause(backup.CurrentPause{})
@@ -610,12 +514,7 @@ func TestStreamRunEventsPauseQueryFailureDoesNotFabricateHealthy(t *testing.T) {
 }
 
 // TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty is the phase-side
-// analogue of the pause test above (issue #323): a transient
-// LastCompletedPhaseQuery failure mid-stream must never make a run that has
-// completed a phase look like it regressed to no phase at all. fetchRunDetail
-// reports this tick's phase as unknown; streamRunEvents must carry the last
-// known phase (and its known flag) forward into the event it pushes (triggered
-// here by an unrelated pause change), not emit an empty phase.
+// analogue of the pause test above (issue #323).
 func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
@@ -640,16 +539,9 @@ func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
 	require.Equal(t, "Generate PAR2", initial.LastCompletedPhase, "test setup: the stream must start out reporting the real phase")
 	require.False(t, initial.LastCompletedPhaseUnknown)
 
-	// Simulate the phase-query blip (a long PAR2/tape activity with no
-	// workflow-task traffic — exactly issue #323's trigger), then force an
-	// observable event by starting a pause — if fetchRunDetail's unknown phase
-	// were compared directly instead of carried forward, this would push an
-	// empty LastCompletedPhase alongside the pause change.
+	// Blip the phase query, then force an event via a pause.
 	client.setPhaseErr(assertError{"no poller seen for task queue recently, worker may be down"})
-	// Fail history too, so this tick truly cannot determine the phase and
-	// reaches #325's carry-forward; with history readable the #329 fallback
-	// would resolve the phase instead. The pause query still answers, so the
-	// pause change below is what triggers the event.
+	// Fail history too, or the #329 fallback would resolve the phase.
 	client.setHistoryErr(assertError{"history unavailable"})
 	client.setPause(backup.CurrentPause{Kind: backup.PauseEject, AwaitingExport: 1})
 
@@ -664,7 +556,6 @@ func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
 	assert.False(t, duringBlip.LastCompletedPhaseUnknown,
 		"the carried-forward phase is the last known GOOD state, not an unknown one, once it's been folded into an emitted event")
 
-	// The query recovers; a genuine phase advance is still detected normally.
 	client.setPhaseErr(nil)
 	client.setHistoryErr(nil)
 	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
@@ -677,13 +568,9 @@ func TestStreamRunEventsPhaseQueryFailureDoesNotRegressToEmpty(t *testing.T) {
 	assert.False(t, recovered.LastCompletedPhaseUnknown)
 }
 
-// TestStreamRunEventsInitialPhaseQueryFailureReportsUnknown covers the case the
-// carry-forward cannot help: a stream whose very first poll already fails the
-// LastCompletedPhaseQuery has no last-known phase to fall back to, so it must
-// emit LastCompletedPhaseUnknown == true (not a silent empty phase) so a fresh
-// page load during a long-activity blip renders "phase unavailable", not
-// "not started" (issue #323). History fails too here, so the #329 history
-// fallback cannot resolve the phase either — Unknown is the correct last resort.
+// TestStreamRunEventsInitialPhaseQueryFailureReportsUnknown: with nothing to
+// carry forward, the first poll must report Unknown, not an empty phase
+// (issue #323).
 func TestStreamRunEventsInitialPhaseQueryFailureReportsUnknown(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
@@ -712,11 +599,6 @@ func TestStreamRunEventsInitialPhaseQueryFailureReportsUnknown(t *testing.T) {
 		"an initial phase-query failure must report unknown, not a silent empty phase, so the UI shows 'unavailable' not 'not started'")
 }
 
-// TestStreamRunEventsStopsPollingOnClientDisconnect proves the server-side
-// poll loop actually stops — rather than leaking a goroutine that polls
-// Temporal forever — once the client disconnects, by observing that
-// DescribeWorkflowExecution call growth stops shortly after the client
-// closes its side of the connection.
 func TestStreamRunEventsStopsPollingOnClientDisconnect(t *testing.T) {
 	setEventPollInterval(t, 10*time.Millisecond)
 
@@ -732,12 +614,8 @@ func TestStreamRunEventsStopsPollingOnClientDisconnect(t *testing.T) {
 	frames := readSSEFrames(resp.Body)
 	waitForFrame(t, frames, 2*time.Second)
 
-	// Disconnect from the client side.
 	require.NoError(t, resp.Body.Close())
 
-	// Give the server a generous window to observe the disconnect and stop
-	// polling, then confirm the call count has actually stopped growing —
-	// not just slowed down.
 	require.Eventually(t, func() bool {
 		before := client.callCount()
 
@@ -747,17 +625,8 @@ func TestStreamRunEventsStopsPollingOnClientDisconnect(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond, "server never stopped polling after the client disconnected")
 }
 
-// TestStreamRunEventsSurvivesServerWriteTimeout proves the fix for the exact
-// interaction this sub-issue flagged as untested: net/http's
-// Server.WriteTimeout deadline is computed once, when a request's headers
-// are read (confirmed against Go's net/http source), and is never reset per
-// Write — so without streamRunEvents explicitly clearing it via
-// http.ResponseController.SetWriteDeadline, an SSE connection would be
-// killed by the server the moment that deadline elapsed, no matter how
-// active the stream still was. A short (150ms) WriteTimeout that an
-// actively-polling, 300ms+ -long stream survives here is conclusive: this
-// would fail immediately, at ~150ms, without the fix — it cannot pass by
-// accident.
+// TestStreamRunEventsSurvivesServerWriteTimeout: Server.WriteTimeout is an
+// absolute deadline, so a stream outliving it proves the per-write override.
 func TestStreamRunEventsSurvivesServerWriteTimeout(t *testing.T) {
 	setEventPollInterval(t, 20*time.Millisecond)
 
@@ -784,8 +653,6 @@ func TestStreamRunEventsSurvivesServerWriteTimeout(t *testing.T) {
 	first := waitForFrame(t, frames, time.Second)
 	assertFrame(t, first, sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "")
 
-	// Stay connected, observing real updates, for well past the server's
-	// 150ms WriteTimeout.
 	time.Sleep(300 * time.Millisecond)
 
 	client.setState(enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
@@ -802,13 +669,8 @@ func TestStreamRunEventsSurvivesServerWriteTimeout(t *testing.T) {
 	assertFrame(t, fourth, sseEventDone, enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED, "Verify")
 }
 
-// TestStreamRunEventsClosesOnDrain proves an open, healthy SSE stream over a
-// still-RUNNING run ends promptly once the WithDrainContext context is
-// cancelled — the mechanism cmd/web uses so a graceful SIGTERM drain
-// (http.Server.Shutdown) is not held at its full deadline by open browser
-// tabs (issue #270). Without the drain case in streamRunEvents' select, this
-// test would hang at the final read until its timeout: nothing else ends a
-// healthy stream over a running run.
+// TestStreamRunEventsClosesOnDrain: open streams must not hold graceful
+// shutdown open (issue #270).
 func TestStreamRunEventsClosesOnDrain(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
@@ -829,16 +691,11 @@ func TestStreamRunEventsClosesOnDrain(t *testing.T) {
 
 	frames := readSSEFrames(resp.Body)
 
-	// The stream is established and healthy: the initial snapshot arrives.
 	first := waitForFrame(t, frames, 2*time.Second)
 	assertFrame(t, first, sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "")
 
-	// Begin the graceful drain, exactly as cmd/web does right before
-	// srv.Shutdown.
 	startDrain()
 
-	// The server must close the still-RUNNING stream on its own, promptly,
-	// without any further frames.
 	select {
 	case frame, ok := <-frames:
 		assert.False(t, ok, "expected the stream to close without further frames on drain, got %+v", frame)
@@ -847,10 +704,6 @@ func TestStreamRunEventsClosesOnDrain(t *testing.T) {
 	}
 }
 
-// TestStreamRunEventsBroadcastsToMultipleConnections proves the shared poll loop
-// fans a single run's updates out to every connection watching it: two
-// concurrent streams over the same run both see the initial snapshot and a
-// mid-stream change (issue #250 review — one poller, many subscribers).
 func TestStreamRunEventsBroadcastsToMultipleConnections(t *testing.T) {
 	setEventPollInterval(t, 15*time.Millisecond)
 
@@ -871,8 +724,7 @@ func TestStreamRunEventsBroadcastsToMultipleConnections(t *testing.T) {
 	framesA := readSSEFrames(respA.Body)
 	framesB := readSSEFrames(respB.Body)
 
-	// Both connections receive the initial snapshot; waiting for both here also
-	// guarantees both are subscribed before the state change below.
+	// Waiting for both snapshots ensures both are subscribed before the change.
 	assertFrame(t, waitForFrame(t, framesA, 2*time.Second), sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
 	assertFrame(t, waitForFrame(t, framesB, 2*time.Second), sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Load")
 
@@ -882,10 +734,6 @@ func TestStreamRunEventsBroadcastsToMultipleConnections(t *testing.T) {
 	assertFrame(t, waitForFrame(t, framesB, 2*time.Second), sseEventUpdate, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING, "Verify")
 }
 
-// TestRunBrokerCoalescesPollersPerRun is a white-box check that the SSE broker
-// runs one shared poll loop per run no matter how many connections watch it, and
-// tears a run's poller down once its last subscriber leaves — the mechanism that
-// makes N browser tabs cost one interval of Temporal load, not N.
 func TestRunBrokerCoalescesPollersPerRun(t *testing.T) {
 	broker := newRunBroker(func(context.Context, string) (RunDetail, error) {
 		return RunDetail{RunSummary: RunSummary{Status: runningStatus}}, nil

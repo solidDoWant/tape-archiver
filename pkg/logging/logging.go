@@ -1,9 +1,5 @@
-// Package logging configures the global slog handler for the project. Setup
-// installs a structured JSON handler that writes to stderr; every other package
-// logs through the standard library slog default. The JSON handler is wrapped in
-// a contextHandler that lifts Temporal run identity (WorkflowID/RunID) carried by
-// the log context onto every record, so bulk activity logging is attributable to
-// its run (see context_handler.go and #303).
+// Package logging configures the global slog JSON handler, which tags records
+// with the Temporal run identity carried by the log context (#303).
 package logging
 
 import (
@@ -12,11 +8,8 @@ import (
 	"strings"
 )
 
-// Setup configures the global slog default handler to emit structured JSON to
-// stderr at the given level. Recognized levels (case-insensitive) are debug,
-// info, warn (or warning), and error. An empty string defaults to info; any
-// other string falls back to info and logs a warning. Setup never panics or
-// returns an error.
+// Setup installs a JSON stderr handler at level (debug, info, warn, error);
+// unrecognized levels fall back to info with a warning.
 func Setup(level string) {
 	lvl, unrecognized := parseLevel(level)
 
@@ -28,9 +21,6 @@ func Setup(level string) {
 	}
 }
 
-// parseLevel maps a level string to a slog.Level. The second return value is
-// true when the input was not a recognized level (and info is used as the
-// fallback).
 func parseLevel(level string) (slog.Level, bool) {
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "", "info":

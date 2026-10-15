@@ -29,9 +29,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// validSubmitConfigJSON is a minimal valid run-config document (same shape
-// cmd/tapectl's integration tests submit) for exercising POST /api/runs
-// against a real Temporal.
 const validSubmitConfigJSON = `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 2,
@@ -42,17 +39,13 @@ const validSubmitConfigJSON = `{
 }`
 
 const (
-	// stubPhase is the value the stub workflow reports for the last completed
-	// phase query, standing in for a real phase name (SPEC §4.3).
+	// stubPhase is what the stub reports for LastCompletedPhaseQuery.
 	stubPhase = "Verify"
 	// stubFinishSignal unblocks the stub workflow so it completes.
 	stubFinishSignal = "finish"
 )
 
-// stubBackupWorkflow stands in for the real backup workflow: it registers
-// under backup.WorkflowType on backup.TaskQueue and answers
-// backup.LastCompletedPhaseQuery, then stays running until signalled — the
-// same shape cmd/tapectl's integration tests use.
+// stubBackupWorkflow answers LastCompletedPhaseQuery and runs until signalled.
 func stubBackupWorkflow(ctx workflow.Context, _ interface{}) error {
 	phase := stubPhase
 
@@ -67,8 +60,6 @@ func stubBackupWorkflow(ctx workflow.Context, _ interface{}) error {
 	return nil
 }
 
-// requireTemporalAddress skips the test unless a Temporal server is reachable
-// at TEMPORAL_ADDRESS. make test-integration arranges this via temporal-up.
 func requireTemporalAddress(t *testing.T) {
 	t.Helper()
 
@@ -77,10 +68,7 @@ func requireTemporalAddress(t *testing.T) {
 	}
 }
 
-// isolateTemporalConfig points TEMPORAL_CONFIG_FILE at a fresh empty TOML
-// file so envconfig does not pick up a stray
-// ~/.config/temporalio/temporal.toml on the host, mirroring
-// pkg/temporalclient's own integration tests.
+// isolateTemporalConfig keeps envconfig from reading a stray host temporal.toml.
 func isolateTemporalConfig(t *testing.T) {
 	t.Helper()
 
@@ -90,12 +78,6 @@ func isolateTemporalConfig(t *testing.T) {
 	t.Setenv("TEMPORAL_PROFILE", "")
 }
 
-// TestListAndGetRunAgainstRealTemporal exercises runsapi.New's handlers
-// against a real dev Temporal (make temporal-up): it submits a stub backup
-// workflow, then proves GET /api/runs lists it (newest-first, via real
-// visibility) and GET /api/runs/{runID} describes it including the phase
-// answered by the real query handler — the behavior no fake client can
-// prove.
 func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 	requireTemporalAddress(t)
 	isolateTemporalConfig(t)
@@ -113,12 +95,8 @@ func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 
 	defer backupWorker.Stop()
 
-	// TERMINATE_EXISTING guarantees a clean fresh execution starts in one
-	// call, atomically replacing any leftover run from a previous failed
-	// test — a best-effort pre-signal is racy when the leftover run's own
-	// worker process has already exited: the signal is durably recorded but
-	// never processed (no poller left to receive it), so the ID never
-	// actually frees up on its own.
+	// TERMINATE_EXISTING: a pre-signal to a leftover run whose worker exited
+	// is never processed, so the ID would never free up.
 	run, err := temporalClient.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:                       backup.WorkflowID,
 		TaskQueue:                backup.TaskQueue,
@@ -135,8 +113,7 @@ func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 
 	defer server.Close()
 
-	// Visibility is eventually consistent, so both the list and the phase
-	// query are retried until they observe the running workflow.
+	// Visibility is eventually consistent.
 	require.Eventually(t, func() bool {
 		resp, err := http.Get(server.URL + "/api/runs")
 		if err != nil {
@@ -186,7 +163,6 @@ func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 		return detail.LastCompletedPhase == stubPhase
 	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never reported the stub's phase")
 
-	// A well-formed (UUID-shaped) run ID that was never submitted is a 404.
 	resp, err := http.Get(server.URL + "/api/runs/00000000-0000-0000-0000-000000000000")
 	require.NoError(t, err)
 
@@ -194,10 +170,7 @@ func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 
-	// A malformed run ID (Temporal run IDs are UUIDs) is a 400, not a 404 —
-	// the real server reports this as InvalidArgument, distinct from
-	// NotFound, and the API maps the distinction through rather than
-	// collapsing both into one status.
+	// The real server reports a malformed run ID as InvalidArgument.
 	badResp, err := http.Get(server.URL + "/api/runs/not-a-uuid")
 	require.NoError(t, err)
 
@@ -205,38 +178,17 @@ func TestListAndGetRunAgainstRealTemporal(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, badResp.StatusCode)
 
-	// Unblock the stub so it completes rather than lingering past the test.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 }
 
-// setPauseSignal is a test-only signal (not part of workflows/backup's real
-// contract) that stubPausableBackupWorkflow uses to let a test set the pause
-// state CurrentPauseQuery should report next.
+// setPauseSignal is a test-only signal setting the stub's reported pause.
 const setPauseSignal = "setPause"
 
-// lastSignalQuery is a test-only query (not part of workflows/backup's real
-// contract) that reports which of OperatorResumeSignal/OperatorAbortSignal
-// stubPausableBackupWorkflow most recently received, so a test can prove the
-// real signal was actually delivered and processed — not just that the pause
-// state happened to change for some other reason.
+// lastSignalQuery is a test-only query proving which signal was actually delivered.
 const lastSignalQuery = "lastSignal"
 
-// stubPausableBackupWorkflow extends stubBackupWorkflow with a settable pause
-// state and the real OperatorResumeSignal/OperatorAbortSignal names, so
-// TestResumeAndAbortAgainstRealTemporal can drive POST
-// /api/runs/{runID}/resume and /abort against a real Temporal server and
-// observe the real signal being delivered and acted on — behavior no fake
-// client can prove. It is a test-only stand-in, not the real workflow: the
-// pre-existing resume/abort signal-handling behavior (drainStalePauseSignals
-// etc.) is covered by workflows/backup's own tests, and the real workflow's
-// three pause sites setting/clearing CurrentPause around their existing wait
-// calls are covered by workflows/backup's own unit tests plus, for the Eject
-// pause specifically, eject_pause_integration_test.go's real-mhvtl
-// TestEjectAutoResumeOnAccess. This stub proves only the HTTP layer's own
-// logic: that it queries backup.CurrentPauseQuery and sends the correct
-// signal to the correct run — the same "stub the workflow, drive the real
-// Temporal + HTTP layer" pattern stubBackupWorkflow above already uses for
-// GET/POST /api/runs.
+// stubPausableBackupWorkflow adds a settable pause and the real resume/abort
+// signals; it tests only the HTTP layer, not the real workflow's pause logic.
 func stubPausableBackupWorkflow(ctx workflow.Context, _ interface{}) error {
 	phase := stubPhase
 	pause := backup.CurrentPause{}
@@ -295,8 +247,6 @@ func stubPausableBackupWorkflow(ctx workflow.Context, _ interface{}) error {
 	return nil
 }
 
-// getRunDetail fetches and decodes GET /api/runs/{runID}, failing the test on
-// a transport error but leaving status/body assertions to the caller.
 func getRunDetail(t *testing.T, serverURL, runID string) (int, runsapi.RunDetail) {
 	t.Helper()
 
@@ -312,8 +262,6 @@ func getRunDetail(t *testing.T, serverURL, runID string) (int, runsapi.RunDetail
 	return resp.StatusCode, detail
 }
 
-// postAction POSTs to serverURL+"/api/runs/"+runID+"/"+action (resume or
-// abort) and returns the status code.
 func postAction(t *testing.T, serverURL, runID, action string) int {
 	t.Helper()
 
@@ -325,11 +273,8 @@ func postAction(t *testing.T, serverURL, runID, action string) int {
 	return resp.StatusCode
 }
 
-// queryLastSignal asks the stub workflow directly (bypassing the HTTP layer)
-// which of resume/abort it most recently received, so a test can prove a
-// rejected request never reached the workflow at all — a 409 alone does not
-// distinguish "correctly rejected" from "sent, then coincidentally had no
-// effect".
+// queryLastSignal bypasses HTTP so a test can prove a rejected request never
+// reached the workflow.
 func queryLastSignal(t *testing.T, temporalClient client.Client, ctx context.Context, runID string) string {
 	t.Helper()
 
@@ -342,16 +287,6 @@ func queryLastSignal(t *testing.T, temporalClient client.Client, ctx context.Con
 	return signal
 }
 
-// TestResumeAndAbortAgainstRealTemporal exercises POST
-// /api/runs/{runID}/resume and /abort against a real dev Temporal (make
-// temporal-up): a request against an unpaused run is rejected (409) and never
-// reaches the workflow; once paused, resume/abort actually deliver the real
-// OperatorResumeSignal/OperatorAbortSignal and the workflow observes them
-// (CurrentPauseQuery clears, lastSignalQuery records which arrived); and an
-// abort against an Eject pause is rejected client-side and never reaches the
-// workflow at all — proving the "web API is stricter than tapectl"
-// pause-state check (signalPausedRun's doc comment) actually holds against a
-// real server, not just the fakeTemporalClient unit tests.
 func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 	requireTemporalAddress(t)
 	isolateTemporalConfig(t)
@@ -387,33 +322,20 @@ func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 
 	runID := run.GetRunID()
 
-	// Wait for the run to be visible AND for stubPausableBackupWorkflow's
-	// first workflow task to actually execute and register its query
-	// handlers, not just for DescribeWorkflowExecution to succeed:
-	// fetchRunDetail degrades gracefully when a query fails (a deliberate
-	// property this same PR added, see CurrentPauseInfo.Unknown), so GET
-	// /api/runs/{runID} can return 200 with a placeholder LastCompletedPhase
-	// before CurrentPauseQuery/lastSignalQuery exist yet — driving resume/abort
-	// that early hits "unknown queryType" against a real server instead of the
-	// behavior under test. All three query handlers are registered
-	// synchronously in the same first workflow task, so waiting for
-	// LastCompletedPhase to report the real stub value proves the others are
-	// registered too.
+	// GET can return 200 before the query handlers exist (it degrades on query
+	// failure); the real phase proves all three handlers are registered.
 	require.Eventually(t, func() bool {
 		status, detail := getRunDetail(t, server.URL, runID)
 
 		return status == http.StatusOK && detail.LastCompletedPhase == stubPhase
 	}, 30*time.Second, 250*time.Millisecond, "GET /api/runs/{runID} never reported the stub workflow's query handlers as ready")
 
-	// Not yet paused: both actions are rejected with 409, not sent into the
-	// void.
 	assert.Equal(t, http.StatusConflict, postAction(t, server.URL, runID, "resume"),
 		"resume against an unpaused run must be rejected")
 	assert.Equal(t, http.StatusConflict, postAction(t, server.URL, runID, "abort"),
 		"abort against an unpaused run must be rejected")
 	assert.Empty(t, queryLastSignal(t, temporalClient, ctx, runID), "no signal must have reached the workflow yet")
 
-	// Simulate a write-failure pause and resume it through the API.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", setPauseSignal,
 		backup.CurrentPause{Kind: backup.PauseWriteFailure, Phase: backup.PhaseWrite, AffectedTapes: []string{"TA0001L6"}}))
 
@@ -433,7 +355,6 @@ func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 	_, detail := getRunDetail(t, server.URL, runID)
 	assert.Equal(t, "", detail.CurrentPause.Kind, "the pause clears once the workflow processes the resume")
 
-	// Simulate a burn pause and abort it through the API.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", setPauseSignal,
 		backup.CurrentPause{Kind: backup.PauseBurn, Devices: []string{"/dev/sr0"}}))
 
@@ -450,9 +371,6 @@ func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 		return queryLastSignal(t, temporalClient, ctx, runID) == "abort"
 	}, 30*time.Second, 250*time.Millisecond, "the workflow never observed the real abort signal")
 
-	// Simulate an Eject pause and confirm abort is rejected client-side,
-	// never reaching the workflow (lastSignalQuery stays "abort" from the
-	// burn pause above, not overwritten).
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", setPauseSignal,
 		backup.CurrentPause{Kind: backup.PauseEject, AffectedTapes: []string{"TA0002L6"}, AwaitingExport: 1}))
 
@@ -467,7 +385,6 @@ func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 	assert.Equal(t, "abort", queryLastSignal(t, temporalClient, ctx, runID),
 		"the rejected eject-pause abort must never reach the workflow (lastSignal is unchanged from the burn-pause abort)")
 
-	// Resume still applies to an eject pause.
 	assert.Equal(t, http.StatusAccepted, postAction(t, server.URL, runID, "resume"),
 		"resume against an eject pause must succeed")
 
@@ -480,16 +397,8 @@ func TestResumeAndAbortAgainstRealTemporal(t *testing.T) {
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 }
 
-// postRun POSTs body to serverURL+"/api/runs" and returns the status code, the
-// decoded body, and the raw response body.
-//
-// The raw body is returned because a non-201 decodes into an empty
-// SubmitRunResponse, discarding the server's own explanation: the singleton
-// guard's 409, for instance, names the workflow and run ID holding the ID, and
-// runsapi passes 4xx messages through to the client verbatim
-// (clientFacingMessage). Callers must put it in their failure message —
-// asserting on the status alone produces a failure that says nothing about why
-// the submission was refused (issue #338).
+// postRun also returns the raw body so callers can put the server's refusal
+// reason in their failure message (issue #338).
 func postRun(t *testing.T, serverURL string, body []byte) (int, runsapi.SubmitRunResponse, string) {
 	t.Helper()
 
@@ -508,24 +417,12 @@ func postRun(t *testing.T, serverURL string, body []byte) (int, runsapi.SubmitRu
 	return resp.StatusCode, submitBody, strings.TrimSpace(string(raw))
 }
 
-// freeBackupSingleton makes the singleton `backup` workflow ID available for a
-// submission that goes through the real API, which starts runs with a FAIL
-// conflict policy (pkg/runsubmit.StartOptions) and so cannot displace an
-// incumbent the way this package's other tests do with TERMINATE_EXISTING.
-//
-// A run that is genuinely still closing is waited out. A run that is merely
-// stranded is not: as traced on issue #338, an orphaned stub run left by an
-// earlier package (cmd/tapectl) gets adopted by the next worker to poll the
-// shared `control` queue, executed part-way as a real backup, and abandoned
-// RUNNING with no worker — a state no amount of waiting resolves. Terminating it
-// is what the sibling tests' TERMINATE_EXISTING already does implicitly; doing it
-// explicitly here lets the leak be logged rather than silently absorbed, so a
-// future regression is still visible in the test output.
+// freeBackupSingleton frees the singleton ID for a FAIL-policy API submit,
+// waiting out a closing run and terminating (with a log) a stranded one: an
+// orphaned run can be abandoned RUNNING with no worker forever (issue #338).
 func freeBackupSingleton(t *testing.T, ctx context.Context, temporalClient client.Client) {
 	t.Helper()
 
-	// Give a legitimately-closing run time to finish on its own before
-	// concluding it is stranded.
 	const grace = 15 * time.Second
 
 	deadline := time.Now().Add(grace)
@@ -533,8 +430,7 @@ func freeBackupSingleton(t *testing.T, ctx context.Context, temporalClient clien
 	for {
 		description, err := temporalClient.DescribeWorkflowExecution(ctx, backup.WorkflowID, "")
 		if err != nil {
-			// No such workflow: the ID has never been used, or its history has
-			// aged out. Either way it is free.
+			// Never used or aged out: free.
 			return
 		}
 
@@ -559,15 +455,8 @@ func freeBackupSingleton(t *testing.T, ctx context.Context, temporalClient clien
 	}
 }
 
-// TestSubmitRunAgainstRealTemporal exercises POST /api/runs against a real
-// dev Temporal (make temporal-up): a valid submission actually starts the
-// backup workflow (observable via GET /api/runs), a second submission while
-// the first is still running is refused with 409 rather than silently
-// queued or replacing the in-flight run (the singleton guard, SPEC §4.2),
-// and once the first run closes a fresh submission succeeds again — the
-// same submit/conflict semantics `tapectl run` has via
-// TestConcurrentRunGuard (cmd/tapectl/main_integration_test.go), proving the
-// pkg/runsubmit extraction did not let the two front doors drift.
+// TestSubmitRunAgainstRealTemporal checks the singleton guard (SPEC §4.2)
+// matches `tapectl run`'s TestConcurrentRunGuard.
 func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	requireTemporalAddress(t)
 	isolateTemporalConfig(t)
@@ -585,19 +474,11 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 
 	defer backupWorker.Stop()
 
-	// Best-effort safety net: unblock whatever backup run is current so a
-	// failed assertion does not leave the singleton ID occupied for later
-	// tests/runs.
 	t.Cleanup(func() {
 		_ = temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil)
 	})
 
-	// A production (non-dry-run) submit requires the deployment to own the
-	// library devices *and* the delivery webhook (runsapi.requireDeviceOwnership,
-	// issue #304): validSubmitConfigJSON carries a delivery.webhookUrl, which a
-	// production run may not deliver its escrow-key-bearing report to unless the
-	// deployment owns a webhook (which then overrides the client's). Declare both
-	// so this test's production submissions are accepted.
+	// Production submits require deploy-owned devices and webhook (issue #304).
 	handler := runsapi.New(temporalClient, runsapi.WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "https://discord.com/api/webhooks/deploy/deploy"))
 	server := httptest.NewServer(handler)
 
@@ -605,9 +486,7 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 
 	submitBody := []byte(`{"config": ` + validSubmitConfigJSON + `}`)
 
-	// Start the first run. Free the singleton first, then submit once:
-	// retrying a FAIL-policy submit against an incumbent cannot make progress
-	// on its own (issue #338).
+	// Retrying a FAIL-policy submit against an incumbent cannot progress (issue #338).
 	freeBackupSingleton(t, ctx, temporalClient)
 
 	firstStatus, firstBody, firstRaw := postRun(t, server.URL, submitBody)
@@ -616,13 +495,9 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	firstRunID := firstBody.RunID
 	require.NotEmpty(t, firstRunID, "first submission returned no run ID: %s", firstRaw)
 
-	// A second concurrent submission is refused with 409, not a 500 and not
-	// a silent replace of the in-progress run.
 	status, _, raw := postRun(t, server.URL, submitBody)
 	assert.Equal(t, http.StatusConflict, status, "second concurrent submission must be refused with 409: %s", raw)
 
-	// GET /api/runs/{runID} still reports the first run as RUNNING — the
-	// refused second submission left it untouched.
 	require.Eventually(t, func() bool {
 		resp, err := http.Get(server.URL + "/api/runs/" + firstRunID)
 		if err != nil {
@@ -642,16 +517,11 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 		return detail.Status == enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING.String()
 	}, 30*time.Second, 250*time.Millisecond, "the first run must still be running after the refused second submission")
 
-	// Finish the first run and wait for it to actually close. Awaiting the
-	// closure rather than retrying the submission until it happens to be
-	// accepted is what makes the next step's failure meaningful: a FAIL-policy
-	// submit that is refused here is refused for a reason worth reading, not
-	// because the incumbent had not drained yet.
+	// Await closure so a refusal below is meaningful, not a drain race.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 	require.NoError(t, temporalClient.GetWorkflow(ctx, backup.WorkflowID, firstRunID).Get(ctx, nil),
 		"the first run must close so the singleton workflow ID frees up")
 
-	// Once the first run has closed, a fresh submission succeeds again.
 	thirdStatus, thirdBody, thirdRaw := postRun(t, server.URL, submitBody)
 	require.Equal(t, http.StatusCreated, thirdStatus,
 		"a new submission after the first run closed failed: %s", thirdRaw)
@@ -660,21 +530,13 @@ func TestSubmitRunAgainstRealTemporal(t *testing.T) {
 	require.NotEmpty(t, thirdRunID, "the new submission returned no run ID: %s", thirdRaw)
 	assert.NotEqual(t, firstRunID, thirdRunID, "a fresh submission must start a new execution")
 
-	// Unblock the run started by the post-close check and wait for it to
-	// actually complete while the stub worker is still polling. This is the
-	// last test in this file, so a leaked run here is never drained by a later
-	// test in this package and would survive into the next package's binary.
-	// The t.Cleanup/defer backupWorker.Stop safety nets above are not enough on
-	// their own: cleanups run after the deferred Stop, so a signal sent there
-	// would sit unprocessed and this test would leave the singleton "backup"
-	// workflow Running for a later package's test to trip over.
+	// Complete it while the worker still polls: cleanups run after the
+	// deferred Stop, so a leaked run would survive into the next package.
 	require.NoError(t, temporalClient.SignalWorkflow(ctx, backup.WorkflowID, "", stubFinishSignal, nil))
 	require.NoError(t, temporalClient.GetWorkflow(ctx, backup.WorkflowID, thirdRunID).Get(ctx, nil),
 		"stub workflow must complete so the singleton workflow ID is free for later tests")
 }
 
-// stubLoadWorkflow schedules a "Load" activity on the task queue it is given
-// and waits for it, standing in for the real workflow's Load on the data queue.
 func stubLoadWorkflow(ctx workflow.Context, dataQueue string) error {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           dataQueue,
@@ -684,7 +546,6 @@ func stubLoadWorkflow(ctx workflow.Context, dataQueue string) error {
 	return workflow.ExecuteActivity(ctx, "Load").Get(ctx, nil)
 }
 
-// getLoadPhase fetches GET /api/runs/{runID}/phases and returns the Load phase.
 func getLoadPhase(t *testing.T, serverURL, runID string) (runsapi.PhaseInfo, bool) {
 	t.Helper()
 
@@ -702,11 +563,7 @@ func getLoadPhase(t *testing.T, serverURL, runID string) (runsapi.PhaseInfo, boo
 	return runsapi.PhaseInfo{}, false
 }
 
-// TestPhasesWaitingForWorkerAgainstRealTemporal proves, against a real
-// Temporal, that an activity scheduled on a queue nobody polls reads as waiting
-// for a worker on that queue (with no pollers, and not yet stalled during the
-// cold-start grace), and that it reads as plainly active once a worker picks it
-// up (issue #344).
+// TestPhasesWaitingForWorkerAgainstRealTemporal covers issue #344.
 func TestPhasesWaitingForWorkerAgainstRealTemporal(t *testing.T) {
 	requireTemporalAddress(t)
 	isolateTemporalConfig(t)

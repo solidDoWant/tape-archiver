@@ -1,43 +1,21 @@
-// This file reconstructs a run's *current* operator-pause and last-completed
-// phase from raw Temporal workflow history, the fallback GET /api/runs/{runID}
-// and the resume/abort handlers use when the live workflow queries
-// (backup.CurrentPauseQuery / backup.LastCompletedPhaseQuery) cannot be
-// answered because no control worker is polling the task queue.
-//
-// That "no poller" case is not exotic: the control worker is a KEDA ScaledJob
-// that scales on the control task queue's *workflow-task backlog*, and a run
-// paused awaiting an operator is blocked on a signal with zero pending workflow
-// tasks — so KEDA scales the worker to zero for the whole (often long) idle
-// wait. A Temporal query needs a live worker to replay against, so every
-// CurrentPauseQuery then fails and the run's overview renders "Pause status
-// unavailable" precisely while the pause needs operator action (issue #329).
-//
-// History, unlike a query, is served by the Temporal frontend directly and
-// needs no worker. Like the #273 history endpoints (see history.go's doc
-// comment) this reads the immutable event stream rather than replaying workflow
-// code, so it is robust across the multiple deployed workflow versions a run's
-// history can span.
+// History-derived fallbacks for CurrentPauseQuery / LastCompletedPhaseQuery.
+// A paused run has no workflow-task backlog, so KEDA scales the control worker
+// to zero and live queries fail exactly while the pause needs an operator
+// (issue #329). History needs no worker.
 package runsapi
 
 import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// Pause-alert activity type names: the best-effort operator-alert activity each
-// pause site schedules immediately before it blocks on the operator
-// (writepause.go's notifyWritePathPause, library.go's notifyOperatorPause,
-// burnpause.go's notifyBurnPause). The alert always schedules — "best-effort"
-// only swallows the webhook send's error, the activity itself always runs — so
-// every pause records exactly one of these in history, carrying the same detail
-// in its Input that the live CurrentPause exposes.
+// Pause-alert activity names. Every pause site always schedules exactly one of
+// these right before blocking, carrying the same detail as CurrentPause.
 const (
 	notifyWritePathPauseActivity = "NotifyWritePathPause"
 	notifyOperatorPauseActivity  = "NotifyOperatorPause"
 	notifyBurnPauseActivity      = "NotifyBurnPause"
 )
 
-// isPauseAlert reports whether name is one of the three operator-pause alert
-// activities.
 func isPauseAlert(name string) bool {
 	switch name {
 	case notifyWritePathPauseActivity, notifyOperatorPauseActivity, notifyBurnPauseActivity:
@@ -47,32 +25,13 @@ func isPauseAlert(name string) bool {
 	}
 }
 
-// derivePause reconstructs a run's currently-active operator pause from its raw
-// workflow history, returning PauseNone when the run is not paused right now. It
-// is the history-derived stand-in for backup.CurrentPauseQuery when no worker
-// can answer the live query (issue #329).
+// derivePause reports a pause as active iff the run is open and its most
+// recently scheduled activity is a pause alert: every exit from a pause either
+// schedules another activity or closes the workflow.
 //
-// A pause is active iff the run is still open AND the most recently scheduled
-// activity is a pause alert. Each pause site schedules its alert immediately
-// before blocking on the operator, and every exit from that wait either
-// schedules the next real activity — an operator resume and the Eject
-// auto-resume both continue the pipeline (loadPhase / runEject / a burn retry) —
-// or closes the workflow (abort and timeout fail it). So a pause alert sitting
-// as the last activity of an open run is, unambiguously, the pause the run is
-// blocked on now; any activity scheduled after it, or a closed workflow, means
-// that pause has already resolved.
-//
-// This deliberately never inspects WorkflowExecutionSignaled events. The
-// stale-signal drain (writepause.go's drainStalePauseSignals) consumes buffered
-// resume/abort signals with a deterministic ReceiveAsync loop that records no
-// history event, so signal events in history do not reliably indicate a pause
-// resolved — "did a real activity follow the alert" does, and it is immune to
-// buffered or drained signals in either direction.
-//
-// During the brief window between an operator sending resume and a worker
-// actually replaying it (KEDA still spawning the worker), no follow-on activity
-// exists yet, so this still reports the pause active — which is correct: the run
-// is paused until the resume is processed.
+// Signal events are deliberately ignored: drainStalePauseSignals consumes
+// buffered signals without recording history, so they are not a reliable
+// indicator of resolution.
 func derivePause(history runHistory) backup.CurrentPause {
 	if history.Closed {
 		return backup.CurrentPause{}
@@ -86,8 +45,7 @@ func derivePause(history runHistory) backup.CurrentPause {
 		}
 	}
 
-	// No pause alert, or a real activity was scheduled after the last one (the
-	// run moved past that pause): not paused.
+	// A real activity scheduled after the last alert means that pause resolved.
 	if lastAlert == -1 || lastAlert != len(history.Activities)-1 {
 		return backup.CurrentPause{}
 	}
@@ -95,13 +53,8 @@ func derivePause(history runHistory) backup.CurrentPause {
 	return pauseFromAlert(history.Activities[lastAlert])
 }
 
-// pauseFromAlert rebuilds the CurrentPause the workflow set for a pause from its
-// alert activity's recorded Input — the same fields the live query would report
-// (the pause sites build state.currentPause from these very values). A decode
-// failure (an older workflow version whose alert Input shape predates a field)
-// degrades to the pause Kind alone rather than dropping the pause: the operator
-// still learns the run is paused and which kind, just with less detail, matching
-// history.go's decode-failure-degrades-not-fails convention.
+// pauseFromAlert decodes the alert's Input. An undecodable Input (older
+// workflow version) degrades to the pause Kind alone rather than dropping it.
 func pauseFromAlert(record activityRecord) backup.CurrentPause {
 	switch record.Name {
 	case notifyWritePathPauseActivity:
@@ -147,13 +100,8 @@ func pauseFromAlert(record activityRecord) backup.CurrentPause {
 	}
 }
 
-// deriveLastCompletedPhase reconstructs backup.LastCompletedPhaseQuery's result
-// — the name of the most recently completed pipeline phase — from history, the
-// phase-side fallback for GET /api/runs/{runID} when no worker can answer the
-// live query (issue #329, the analogue of derivePause). It reuses the phase
-// timeline (buildPhaseTimeline) so the value stays consistent with the
-// GET /api/runs/{runID}/phases endpoint, and returns the furthest phase that
-// reads completed, or "" when none has completed yet.
+// deriveLastCompletedPhase reuses the phase timeline so it stays consistent
+// with GET /api/runs/{runID}/phases.
 func deriveLastCompletedPhase(history runHistory) string {
 	timeline := buildPhaseTimeline(history, deriveTapeOutcomes(history.Activities))
 

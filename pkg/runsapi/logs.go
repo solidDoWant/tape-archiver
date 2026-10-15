@@ -1,36 +1,8 @@
-// This file implements GET /api/runs/{runID}/logs (issue #274): a
-// server-side proxy over VictoriaLogs (LogsQL, https://docs.victoriametrics.com/victorialogs/logsql/)
-// that returns the log lines an external collector shipped for one run (the
-// whole run, or one of the 11 pipeline phases — SPEC §4.3), never a raw
-// LogsQL passthrough. The VictoriaLogs URL/credentials are configured
-// server-side only (VICTORIALOGS_URL, VICTORIALOGS_STREAM_FILTER,
-// VICTORIALOGS_FIELD_PREFIX — see docs/configuration.md) and never reach the
-// browser.
-//
-// The default field mapping this endpoint assumes is the one
-// docker-compose.web-dev.yml's vector shipper produces: a worker's slog JSON
-// keys land as TOP-LEVEL VictoriaLogs fields (RunID, level, Error/error) with
-// the message in _msg (_msg_field=msg, _time_field=time). Not every real
-// collector produces that shape — a fluentbit/fluentd kubernetes filter with
-// Merge_Log On + Merge_Log_Key nests every parsed key under a prefix
-// ("<key>.RunID", ...) and leaves _msg holding the raw JSON line — so
-// VICTORIALOGS_FIELD_PREFIX (empty by default) shifts every worker-originated
-// field reference to that prefix in both the query and the response
-// projection. See its doc comment below.
-//
-// This is a plain JSON endpoint, not a Server-Sent Events stream like
-// events.go's GET /api/events/runs/{runID}: the browser's EventSource API
-// gives calling JS no access to a failed connection's HTTP status code, so
-// an SSE-based design cannot distinguish "VictoriaLogs unconfigured/
-// unreachable" (503, issue #274 AC1/AC2) from an ordinary transient network
-// hiccup — exactly the distinction these ACs require. A plain fetch surfaces
-// the status via api.ts's ApiError cleanly instead. The frontend log panel
-// (web/src/LogPanel.tsx) gets "live update without a full page reload" (AC4)
-// by polling this endpoint on an interval with ?since=<last line's time>
-// while the response's "live" field is true, and stopping once it is false
-// — a deliberate, documented departure from events.go's server-push
-// precedent (used there to avoid many browser tabs each independently
-// polling Temporal; VictoriaLogs has no equivalent concern here).
+// This file implements GET /api/runs/{runID}/logs (issue #274): a server-side
+// proxy over VictoriaLogs returning one run's (or one phase's) log lines. It is a
+// plain JSON endpoint polled by the frontend rather than SSE, because EventSource
+// cannot expose the HTTP status needed to distinguish a 503 "unavailable" from a
+// transient network error.
 package runsapi
 
 import (
@@ -49,141 +21,72 @@ import (
 	"time"
 )
 
-// Environment variables read via handler.getenv (the same injectable getenv
-// New wires to os.Getenv — see runsapi.go's "MHVTL_*" precedent), documented
-// in docs/configuration.md.
+// Environment variables, documented in docs/configuration.md.
 const (
-	// victoriaLogsURLEnv, when unset or empty, means VictoriaLogs is not
-	// configured at all: getRunLogs reports 503 "unavailable" (issue #274
-	// AC1) before making any Temporal or VictoriaLogs call.
+	// victoriaLogsURLEnv unset or empty means VictoriaLogs is not configured.
 	victoriaLogsURLEnv = "VICTORIALOGS_URL"
-	// victoriaLogsStreamFilterEnv is an operator-controlled LogsQL filter
-	// fragment ANDed onto every query this file issues (e.g. to scope
-	// queries to a specific VictoriaLogs tenant/stream in a shared
-	// deployment). It is server-side configuration, never client input, so
-	// it is not validated/escaped the way runID and phase are below.
+	// victoriaLogsStreamFilterEnv is an operator-controlled LogsQL fragment ANDed
+	// onto every query. It is server-side config, so it is not escaped.
 	victoriaLogsStreamFilterEnv = "VICTORIALOGS_STREAM_FILTER"
-	// defaultVictoriaLogsStreamFilter matches every stream — the sensible
-	// default for the common case of one VictoriaLogs instance dedicated to
-	// this deployment.
+	// defaultVictoriaLogsStreamFilter matches every stream.
 	defaultVictoriaLogsStreamFilter = "*"
-	// victoriaLogsFieldPrefixEnv adapts every field reference that originates
-	// from a worker's slog JSON (RunID/level/msg/Error/error) to a collector
-	// that nests those keys under a prefix instead of shipping them as
-	// top-level VictoriaLogs fields. The canonical case is a fluentbit/fluentd
-	// kubernetes filter with Merge_Log On + Merge_Log_Key <key>: it parses each
-	// JSON line and lands every parsed key under "<key>.<name>" (VictoriaLogs
-	// flattens the nested object to dotted field names), with _msg holding the
-	// raw JSON line rather than the human message. Setting this to, e.g.,
-	// "log_fields." makes buildLogsQLQuery filter on "log_fields.RunID" and
-	// parseLogsQLRecord read "log_fields.level"/"log_fields.msg"/... instead.
-	// Empty (the default) preserves exactly the top-level-field behavior this
-	// endpoint shipped with. Fields VictoriaLogs itself owns (_time, _stream,
-	// _stream_id) and the operator-supplied VICTORIALOGS_STREAM_FILTER are
-	// never prefixed. See docs/configuration.md "Live run logs".
+	// victoriaLogsFieldPrefixEnv prefixes every worker-originated field name
+	// (RunID/level/msg/Error/error), for collectors such as fluentbit with
+	// Merge_Log_Key that nest parsed keys (e.g. "log_fields.RunID") and leave _msg
+	// holding the raw JSON line. VictoriaLogs-owned fields are never prefixed.
 	victoriaLogsFieldPrefixEnv = "VICTORIALOGS_FIELD_PREFIX"
 )
 
-// maxLogLines hard-caps how many lines a single request can return,
-// regardless of how many actually matched. There is deliberately no
-// client-facing "limit" query parameter (issue #274's security note: "a
-// bounded limit") — this is the only bound, applied server-side to every
-// request the same way, which is simpler and safer than trusting a
-// client-supplied value. 5000 lines comfortably covers one phase's or one
-// run's console output for an operator glancing at recent activity (this
-// is not a log search/analytics UI — see issue #274's non-goals) while
-// keeping a single response bounded in size.
-//
-// When a window holds more than this many matching lines, buildLogsQLQuery
-// keeps the NEWEST maxLogLines, not the oldest: an operator opening the
-// console on a failed run wants the tail (the error and the lines around it),
-// which lives at the end of the window — returning the oldest 5000 and
-// truncating the tail would hide exactly what they came to see. A live tail
-// still walks forward from the last line via ?since=, so this cap only ever
-// discards the far-older head of an over-long window, never recent activity.
+// maxLogLines is the server-side cap on returned lines; there is deliberately
+// no client-supplied limit (issue #274 security note). When exceeded, the
+// NEWEST lines are kept so a failed run's trailing error is never truncated.
 const maxLogLines = 5000
 
 // victoriaLogsQueryPath is VictoriaLogs' LogsQL query HTTP API.
 // https://docs.victoriametrics.com/victorialogs/querying/#http-api
 const victoriaLogsQueryPath = "/select/logsql/query"
 
-// vlQueryTimeout bounds a single VictoriaLogs HTTP request, well inside
-// requestTimeout so a slow or unreachable VictoriaLogs cannot itself exhaust
-// the whole request's budget before getRunLogs gets a chance to degrade to
-// 503 — mirroring metrics.go's vmQueryTimeout for the VictoriaMetrics path.
+// vlQueryTimeout is well inside requestTimeout so a slow VictoriaLogs still
+// leaves time to degrade to 503.
 const vlQueryTimeout = 5 * time.Second
 
-// runIDPattern matches a Temporal run ID's UUID form. getRunLogs rejects
-// anything else with 400 before runID is ever interpolated into a LogsQL
-// query string (buildLogsQLQuery) or passed to Temporal — this is stricter
-// than every other /api/runs/{runID}/* route (which just let a malformed ID
-// surface as Temporal's own InvalidArgument), because unlike those routes
-// this one builds a *query language* string from runID rather than only
-// ever passing it as an opaque RPC argument. Restricting it to hex digits
-// and hyphens makes LogsQL injection structurally impossible regardless of
-// any nuance in LogsQL's own string-quoting rules, rather than relying
-// solely on %q-style escaping being correct for VictoriaLogs' syntax.
+// runIDPattern restricts runID to a UUID before it is interpolated into a
+// LogsQL string, making query injection structurally impossible rather than
+// relying on escaping.
 var runIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// errVictoriaLogsUnavailable is the stable, distinguishable error
-// getRunLogs reports (as a 503) whether VictoriaLogs is unconfigured
-// (VICTORIALOGS_URL unset) or configured but unreachable/erroring — issue
-// #274 AC1/AC2 treat both the same way ("an explicit unavailable state"),
-// so collapsing them here is correct, not a shortcut: a client cannot do
-// anything different for one case versus the other anyway.
+// errVictoriaLogsUnavailable covers both unconfigured and unreachable
+// VictoriaLogs; issue #274 AC1/AC2 treat them identically.
 var errVictoriaLogsUnavailable = errors.New("victorialogs is not configured or is unreachable")
 
-// LogLine is one matched log line, projected down from VictoriaLogs' own
-// record (which also carries stream labels, the ingest-assigned
-// "_stream_id", and any other field the worker happened to log) to just
-// what the log panel renders — issue #274's non-goals exclude a general log
-// search/filter UI, so there is no reason to forward the rest to the
-// browser.
+// LogLine is one matched log line, projected to the fields the log panel renders.
 type LogLine struct {
 	Time    time.Time `json:"time"`
 	Level   string    `json:"level,omitempty"`
 	Message string    `json:"message"`
-	// Error is the log entry's error detail, when it carries one. Many of the
-	// most operator-relevant lines — a failing/retrying activity above all —
-	// log a terse _msg ("Activity error.") and put the actual cause in a
-	// structured field rather than the message text, so projecting _msg alone
-	// (as this endpoint first did) hid it. This surfaces that field so the log
-	// panel can show the cause without every call site having to inline it into
-	// its message: the Temporal SDK's own logger names it "Error", and this
-	// repo's slog error logs conventionally use "error" (slog.Error(msg,
-	// "error", err)); parseLogsQLResponse reads whichever is present. Empty when
-	// the line logged no error field.
+	// Error is the entry's structured error field ("Error" from the Temporal SDK
+	// logger, "error" from this repo's slog calls), since many failure lines log
+	// only a terse message like "Activity error.".
 	Error string `json:"error,omitempty"`
 }
 
 // RunLogsResponse is the GET /api/runs/{runID}/logs response body.
 type RunLogsResponse struct {
 	RunID string `json:"runId"`
-	// Phase is the phase name the request was scoped to, or "" for the
-	// whole-run window (no ?phase= given).
+	// Phase is the requested phase, or "" for the whole run.
 	Phase string `json:"phase,omitempty"`
-	// Lines are the matched log lines, oldest first (LogsQL's own "sort by
-	// (_time)" — VictoriaLogs, not this handler, orders them).
+	// Lines are the matched log lines, oldest first.
 	Lines []LogLine `json:"lines"`
-	// Live is true while more lines can still arrive for this exact window
-	// (the run, or the requested phase, has not finished yet) — the signal
-	// web/src/LogPanel.tsx polls on to decide whether to keep re-fetching
-	// with ?since=<last line's time>, or stop.
+	// Live is true while more lines can still arrive for this window; the
+	// frontend keeps polling with ?since= while it is set.
 	Live bool `json:"live"`
 }
 
-// getRunLogs implements GET /api/runs/{runID}/logs?phase=&since=.
-//
-// phase, if given, must be one of the 11 pipeline phase names (phaseOrder);
-// omitted, the window is the whole run. since, if given, is an RFC3339
-// timestamp: only lines at or after it (inclusive — see buildLogsQLQuery's
-// doc comment for why not exclusive) are returned, letting a client
-// (LogPanel's poll loop) fetch just the new tail rather than the whole
-// window again; a polling caller must therefore deduplicate lines sharing
-// its since timestamp.
+// getRunLogs implements GET /api/runs/{runID}/logs?phase=&since=. since is an
+// inclusive RFC3339 lower bound, so polling callers must deduplicate lines at
+// that timestamp.
 func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
-	// Checked first, before any Temporal RPC: the cheapest possible way to
-	// answer "is this even configured" (issue #274 AC1).
+	// Checked before any Temporal RPC (issue #274 AC1).
 	victoriaLogsURL := strings.TrimSuffix(h.getenv(victoriaLogsURLEnv), "/")
 	if victoriaLogsURL == "" {
 		writeError(w, http.StatusServiceUnavailable, errVictoriaLogsUnavailable)
@@ -239,16 +142,8 @@ func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !ok {
-		// The requested phase has not started yet (or, for the whole-run
-		// case, this branch is unreachable — a run always has a start
-		// time). This is a genuinely empty result, not an availability
-		// problem: LogPanel shows its own distinct "no log lines yet"
-		// empty state for Lines == []. Live still carries the run's own
-		// liveness (resolveLogWindow sets it from the run being open), so a
-		// phase that simply has not been reached yet on a still-running run
-		// keeps the client polling until it starts, rather than looking like
-		// a finished window the poll loop stops tailing (window.live is
-		// false only once the run itself has closed without reaching it).
+		// The phase has not started. Live carries the run's liveness so the
+		// client keeps polling until the phase starts or the run closes.
 		writeJSON(w, http.StatusOK, RunLogsResponse{RunID: runID, Phase: phase, Lines: []LogLine{}, Live: window.live})
 
 		return
@@ -263,11 +158,7 @@ func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 
 	lines, err := queryVictoriaLogs(ctx, victoriaLogsURL, streamFilter, fieldPrefix, runID, window.start, window.end, since, window.spans, maxLogLines)
 	if err != nil {
-		// Any failure to reach or parse VictoriaLogs' response, now that
-		// VICTORIALOGS_URL is confirmed set, is reported exactly like an
-		// unconfigured VictoriaLogs (issue #274 AC2: "unreachable" and
-		// "unconfigured" show the same explicit state) rather than as a
-		// generic 502/500 — a client cannot act on the distinction anyway.
+		// Unreachable is reported like unconfigured (issue #274 AC2).
 		slog.WarnContext(ctx, "runsapi: victorialogs query failed", "run_id", runID, "phase", phase, "error", err)
 		writeError(w, http.StatusServiceUnavailable, errVictoriaLogsUnavailable)
 
@@ -281,38 +172,25 @@ func (h *handler) getRunLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, RunLogsResponse{RunID: runID, Phase: phase, Lines: lines, Live: window.live})
 }
 
-// logWindow is the [start, end] time range getRunLogs queries VictoriaLogs
-// over, whether that range can still grow, and — for a phase-scoped
-// request — the disjoint sub-ranges within it that actually belong to the
-// phase.
+// logWindow is the time range getRunLogs queries and whether it can still grow.
 type logWindow struct {
 	start time.Time
-	end   *time.Time // nil means "still open" (the run/phase has not closed)
+	end   *time.Time // nil means still open
 	live  bool
-	// spans, when non-nil, are the phase's own disjoint per-activity time
-	// ranges within [start, end]. The tape path interleaves Load/Write/Eject
-	// per drive-set (SPEC §4.3 phases 6-8, and a Load/Write-failure pause
-	// retries onto fresh blanks), so one phase's activities are NOT
-	// contiguous: on a run whose first Write failed and was retried after a
-	// pause, "Load"'s single [earliest, latest] envelope would swallow the
-	// failed Write's and the pause's log lines, and vice versa. getRunLogs
-	// therefore issues ONE VictoriaLogs query over the whole envelope (a
-	// per-span query fan-out buys nothing) and post-filters the results to
-	// lines falling inside any of these spans (filterLinesToSpans). nil (the
-	// whole-run mode) means no filtering — every line in the window belongs.
+	// spans, when non-nil, are the phase's own per-activity ranges. The tape
+	// path interleaves Load/Write/Eject per drive-set (and retries after a
+	// pause), so a phase's [earliest, latest] envelope would swallow other
+	// phases' lines; results are post-filtered to these spans.
 	spans []timeSpan
 }
 
-// timeSpan is one activity's [start, end] range. A zero end means the
-// activity has not reached a terminal state yet — the span is still open.
+// timeSpan is one activity's range; a zero end means it is still open.
 type timeSpan struct {
 	start time.Time
 	end   time.Time
 }
 
-// filterLinesToSpans keeps only the lines whose timestamp falls inside at
-// least one span (inclusive on both ends — a line logged at the exact
-// scheduled/terminal instant belongs to the activity).
+// filterLinesToSpans keeps lines inside at least one span (inclusive both ends).
 func filterLinesToSpans(lines []LogLine, spans []timeSpan) []LogLine {
 	filtered := make([]LogLine, 0, len(lines))
 
@@ -335,21 +213,8 @@ func filterLinesToSpans(lines []LogLine, spans []timeSpan) []LogLine {
 	return filtered
 }
 
-// resolveLogWindow determines the time window to query for runID/phase,
-// reusing the same run/phase-status machinery the rest of this package
-// already exposes rather than deriving it a third way:
-//   - phase == "": the whole run's window, via fetchRunDetail (the same
-//     call GET /api/runs/{runID} and its SSE stream make) — StartTime to
-//     CloseTime, open (live) while CloseTime is nil.
-//   - phase != "": that phase's window, via fetchRunHistory + the phases.go
-//     timeline builder — StartTime to EndTime, live exactly while the
-//     phase's computed status is PhaseActive.
-//
-// ok is false only when the requested phase has not started yet (no window
-// to query at all yet); err carries a fetchRunDetail/fetchRunHistory
-// failure (unknown run ID, aged-out history, ...), which the caller maps to
-// an HTTP status using the same classification the corresponding
-// non-logs endpoint already uses.
+// resolveLogWindow returns the whole run's window (phase == "") or the phase's
+// window from the phase timeline. ok is false when the phase has not started.
 func (h *handler) resolveLogWindow(ctx context.Context, runID, phase string) (logWindow, bool, error) {
 	if phase == "" {
 		detail, err := fetchRunDetail(ctx, h.temporalClient, runID)
@@ -365,18 +230,13 @@ func (h *handler) resolveLogWindow(ctx context.Context, runID, phase string) (lo
 		return logWindow{}, false, err
 	}
 
-	// outcomes (nil here) only feed PhaseInfo.Facts, which this endpoint
-	// never reads — buildPhaseTimeline ranges over a nil slice harmlessly.
 	for _, info := range buildPhaseTimeline(history, nil) {
 		if info.Name != phase {
 			continue
 		}
 
 		if info.StartTime == nil {
-			// The phase has no window to query yet. If the run is still
-			// running it may still reach this phase and log, so report the
-			// run's liveness so the caller keeps the client polling; only a
-			// closed run makes a never-started phase genuinely final.
+			// A running run may still reach this phase, so keep the client polling.
 			return logWindow{live: !history.Closed}, false, nil
 		}
 
@@ -388,19 +248,12 @@ func (h *handler) resolveLogWindow(ctx context.Context, runID, phase string) (lo
 		}, true, nil
 	}
 
-	// Unreachable: getRunLogs already rejected any phase not in phaseOrder
-	// (phaseIndex(phase) < 0) before calling this, and buildPhaseTimeline
-	// always emits exactly one PhaseInfo per phaseOrder entry.
+	// Unreachable: getRunLogs already validated phase against phaseOrder.
 	return logWindow{}, false, nil
 }
 
-// phaseActivitySpans collects the disjoint per-activity time ranges of one
-// phase's own activities — the same attribution buildPhaseTimeline uses
-// (phaseForActivity, including the NotifyWritePathPause input-based
-// sub-phase routing) — so a phase-scoped log query never swallows the lines
-// another phase's activity emitted inside this phase's overall envelope
-// (see logWindow.spans' doc comment for the interleaved-tape-path case
-// that makes this necessary).
+// phaseActivitySpans collects the per-activity time ranges of one phase's
+// activities, using the same attribution as buildPhaseTimeline.
 func phaseActivitySpans(history runHistory, phase string) []timeSpan {
 	spans := make([]timeSpan, 0)
 
@@ -420,9 +273,7 @@ func phaseActivitySpans(history runHistory, phase string) []timeSpan {
 	return spans
 }
 
-// queryVictoriaLogs issues one LogsQL query (buildLogsQLQuery) against
-// VictoriaLogs' HTTP query API and decodes its newline-delimited JSON
-// response into LogLines, oldest first.
+// queryVictoriaLogs runs one LogsQL query and returns the lines oldest first.
 func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, fieldPrefix, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) ([]LogLine, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, vlQueryTimeout)
 	defer cancel()
@@ -451,50 +302,14 @@ func queryVictoriaLogs(ctx context.Context, baseURL, streamFilter, fieldPrefix, 
 	return parseLogsQLResponse(response.Body, fieldPrefix)
 }
 
-// buildLogsQLQuery composes the LogsQL query string for one request:
-// streamFilter (operator config) ANDed with an exact match on the worker's
-// RunID field (never client-supplied LogsQL — runID is validated as a UUID by
-// the caller before this is ever invoked) and a time-range clause. since, when
-// set and later than start, replaces the lower bound.
+// buildLogsQLQuery composes the LogsQL query for one request.
 //
-// fieldPrefix (VICTORIALOGS_FIELD_PREFIX) shifts the worker-originated RunID
-// field to the collector's naming: empty leaves the top-level "RunID:=" this
-// endpoint shipped with, while e.g. "log_fields." yields
-// "log_fields.RunID":=. The prefixed field name is quoted ("<prefix>RunID")
-// so its dot — and any future prefix character — is a literal field-name
-// character to LogsQL rather than syntax. _time (the time filter/sort pipes
-// below) is VictoriaLogs-native and is never prefixed.
-//
-// When the match set exceeds limit, the query keeps the NEWEST limit lines,
-// then returns them oldest-first (the order the log panel renders and the
-// ?since= poll loop expects — see maxLogLines). LogsQL expresses this in one
-// server-side pass with chained sort pipes: "sort by (_time) desc | limit N"
-// selects the newest N, and a trailing "sort by (_time)" re-orders those N
-// ascending. Doing the truncation newest-first (rather than the plain
-// "sort by (_time) | limit N", which keeps the OLDEST N and drops the tail)
-// is what stops a large failed run's error lines — always at the end of the
-// window — from being truncated away.
-//
-// The lower bound is always INCLUSIVE (">="/"["), even for since — a
-// deliberate choice, not an off-by-one: a caller polling with "since = the
-// last line's own timestamp" would, with an exclusive bound, permanently
-// lose any same-timestamp lines that had not been ingested yet when the
-// previous poll ran (log shipping is asynchronous and batched). Re-sending
-// the boundary lines instead and letting the client deduplicate (LogPanel
-// dedups by time+message identity) means a split same-timestamp batch is
-// eventually complete rather than silently truncated.
-//
-// spans, when non-empty (a phase-scoped request — see logWindow.spans), is the
-// phase's own disjoint per-activity ranges within [start, end]. They are ANDed
-// into the time filter as a disjunction so the server-side "keep newest limit"
-// pass counts only lines that fall inside the phase's own activity, NOT the
-// whole [start, end] envelope. Without this the limit truncates the envelope:
-// on an interleaved tape-path run (a Load envelope stretching across a
-// high-volume Write between two Load attempts), the newest limit envelope lines
-// are dominated by the intervening phase and then filtered out by
-// filterLinesToSpans, so a phase that logged far more than limit lines could
-// return almost nothing. The client-side filterLinesToSpans still runs as an
-// inclusive-boundary safety net.
+// "sort by (_time) desc | limit N | sort by (_time)" keeps the newest N lines,
+// returned oldest first. The lower bound is inclusive even for since: log
+// shipping is asynchronous, so an exclusive bound would permanently lose
+// same-timestamp lines ingested after the previous poll; the client dedups.
+// spans are ANDed in server-side so the limit counts only in-phase lines;
+// otherwise an interleaved high-volume phase could crowd them out entirely.
 func buildLogsQLQuery(streamFilter, fieldPrefix, runID string, start time.Time, end *time.Time, since *time.Time, spans []timeSpan, limit int) string {
 	lower := start
 	if since != nil && since.After(start) {
@@ -515,13 +330,8 @@ func buildLogsQLQuery(streamFilter, fieldPrefix, runID string, start time.Time, 
 	return fmt.Sprintf("(%s) AND %s:=%q AND %s | sort by (_time) desc | limit %d | sort by (_time)", streamFilter, prefixedFieldName(fieldPrefix, "RunID"), runID, timeFilter, limit)
 }
 
-// prefixedFieldName renders a worker-originated slog field's LogsQL field-name
-// reference under fieldPrefix. With no prefix it is the bare name ("RunID"),
-// preserving the original unquoted form. With a prefix it is the quoted,
-// prefixed name ("log_fields.RunID") so the dot separating the merge key from
-// the field — and any other character a future prefix might carry — is a
-// literal field-name character rather than LogsQL syntax. VictoriaLogs-owned
-// fields (_time, _stream, _stream_id) never pass through here.
+// prefixedFieldName returns name under fieldPrefix, quoted when prefixed so the
+// dot is a literal field-name character rather than LogsQL syntax.
 func prefixedFieldName(fieldPrefix, name string) string {
 	if fieldPrefix == "" {
 		return name
@@ -530,14 +340,8 @@ func prefixedFieldName(fieldPrefix, name string) string {
 	return strconv.Quote(fieldPrefix + name)
 }
 
-// spansTimeFilter renders a phase's activity spans as a LogsQL disjunction —
-// "(_time:[a, b] OR _time:[c, d] OR _time:>=e)" — for ANDing into a phase-scoped
-// query's time filter, so the newest-limit truncation counts only in-span lines.
-// A span with a zero end is still open (its activity has not terminated) and
-// becomes an open lower-bound clause. Returns "" for no spans (the whole-run
-// query, which has no spans and needs no disjunction). The overall since/end
-// bounds are applied by the caller's outer time filter, so spans are emitted
-// raw here and their intersection with that window is what the AND selects.
+// spansTimeFilter renders spans as a LogsQL OR of time ranges (an open span
+// becomes a lower-bound clause), or "" when there are none.
 func spansTimeFilter(spans []timeSpan) string {
 	if len(spans) == 0 {
 		return ""
@@ -557,16 +361,11 @@ func spansTimeFilter(spans []timeSpan) string {
 	return "(" + strings.Join(clauses, " OR ") + ")"
 }
 
-// formatVLTime renders t the way LogsQL time-range literals expect
-// (RFC3339, UTC) — verified against a real VictoriaLogs instance (issue
-// #274's task notes).
 func formatVLTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-// parseVLTime parses a timestamp VictoriaLogs itself produced (a query
-// response's "_time" field) or a client-supplied ?since= value, accepting
-// both the fractional-second form VictoriaLogs emits and plain RFC3339.
+// parseVLTime accepts both RFC3339Nano (as VictoriaLogs emits) and RFC3339.
 func parseVLTime(raw string) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
 		return t, nil
@@ -575,21 +374,12 @@ func parseVLTime(raw string) (time.Time, error) {
 	return time.Parse(time.RFC3339, raw)
 }
 
-// maxLogLineBytes bounds one VictoriaLogs NDJSON record. Ordinary log lines
-// are far smaller; a pathological one (e.g. a stack trace or a large manifest
-// embedded in a single structured field) is skipped rather than allowed to
-// allocate without bound. Crucially, skipping it must NOT abort the scan or
-// drop the lines that follow — the previous bufio.Scanner cap turned one
-// over-long line into a whole-response failure (503), blanking the tail an
-// operator opened the console to read — so readBoundedLine streams past it
-// and parsing continues with the next line.
+// maxLogLineBytes bounds one NDJSON record. Oversized records are skipped
+// without aborting the scan, so one huge line cannot blank the whole response.
 const maxLogLineBytes = 1 << 20
 
-// parseLogsQLResponse decodes VictoriaLogs' LogsQL query response: one JSON
-// object per line (https://docs.victoriametrics.com/victorialogs/querying/#json-stream-decoding),
-// not a single JSON array/document. fieldPrefix (VICTORIALOGS_FIELD_PREFIX)
-// shifts the worker-originated field names each record is read under — see
-// parseLogsQLRecord.
+// parseLogsQLResponse decodes VictoriaLogs' newline-delimited JSON response.
+// https://docs.victoriametrics.com/victorialogs/querying/#json-stream-decoding
 func parseLogsQLResponse(body io.Reader, fieldPrefix string) ([]LogLine, error) {
 	lines := make([]LogLine, 0)
 	reader := bufio.NewReader(body)
@@ -615,24 +405,10 @@ func parseLogsQLResponse(body io.Reader, fieldPrefix string) ([]LogLine, error) 
 	}
 }
 
-// parseLogsQLRecord decodes one NDJSON record into a LogLine. ok is false for
-// a malformed record or one with an unparseable time: one bad record must not
-// hide every good line in the window (a single bad record would otherwise
-// blank the console during a live tail, possibly dropping the surrounding
-// error lines an operator is watching for), so the caller skips it and keeps
-// decoding.
-//
-// The record is decoded into a map so the worker-originated fields can be
-// looked up by a name computed at runtime from fieldPrefix
-// (VICTORIALOGS_FIELD_PREFIX) — the static struct tags this used to decode
-// into cannot express a runtime prefix. With no prefix (the default) the
-// vector-shipped shape is read: message from _msg, and level/Error/error as
-// top-level fields — exactly as before. With a prefix (e.g. "log_fields.", a
-// fluentbit merge-key pipeline) level/Error/error are read from their
-// prefixed names, and the human message from "<prefix>msg", falling back to
-// _msg only when that field is absent (under a merge-key pipeline _msg is the
-// raw JSON slog line, not the message, so the prefixed field is preferred).
-// _time is VictoriaLogs-native and is read unprefixed either way.
+// parseLogsQLRecord decodes one NDJSON record. ok is false for a malformed
+// record, which the caller skips so one bad record cannot hide the rest.
+// With a field prefix the message is read from "<prefix>msg", falling back to
+// _msg only when absent (under a merge-key pipeline _msg is the raw JSON line).
 func parseLogsQLRecord(raw []byte, fieldPrefix string) (LogLine, bool) {
 	var fields map[string]json.RawMessage
 
@@ -658,9 +434,6 @@ func parseLogsQLRecord(raw []byte, fieldPrefix string) (LogLine, bool) {
 		errText, _ = stringField(fields, fieldPrefix+"error")
 	}
 
-	// Default/legacy shape: the message is _msg. With a prefix, prefer
-	// "<prefix>msg" (the human message) and fall back to _msg only when that
-	// field is entirely absent — never when it is present but empty.
 	message, _ := stringField(fields, "_msg")
 	if fieldPrefix != "" {
 		if prefixed, present := stringField(fields, fieldPrefix+"msg"); present {
@@ -671,12 +444,8 @@ func parseLogsQLRecord(raw []byte, fieldPrefix string) (LogLine, bool) {
 	return LogLine{Time: parsedTime, Level: level, Message: message, Error: errText}, true
 }
 
-// stringField reads name from a decoded VictoriaLogs record as a string.
-// present is false when the field is absent or is not a JSON string — under
-// the real pipelines this endpoint targets every field it reads (RunID,
-// level, msg, Error/error, _time, _msg) arrives as a string, so a non-string
-// value is treated as absent rather than an error, keeping one odd field from
-// dropping an otherwise-good line.
+// stringField reads a string field; a missing or non-string value reports
+// present == false rather than an error.
 func stringField(fields map[string]json.RawMessage, name string) (value string, present bool) {
 	raw, ok := fields[name]
 	if !ok {
@@ -690,17 +459,12 @@ func stringField(fields map[string]json.RawMessage, name string) (value string, 
 	return value, true
 }
 
-// readBoundedLine reads one '\n'-terminated line from reader, capped at limit
-// bytes. A line longer than limit is fully consumed (through its terminating
-// newline) but returned as tooLong with a nil payload, so one pathological
-// line is skipped without aborting the scan or swallowing the lines after it.
-// err is io.EOF once the final line (which may lack a trailing newline) has
-// been returned.
+// readBoundedLine reads one line capped at limit bytes. A longer line is fully
+// consumed but returned as tooLong with a nil payload. err is io.EOF after the
+// final line.
 func readBoundedLine(reader *bufio.Reader, limit int) (line []byte, tooLong bool, err error) {
 	for {
-		// ReadSlice returns bufio.ErrBufferFull for a line longer than the
-		// reader's buffer, letting this loop stream through an arbitrarily
-		// long line a chunk at a time rather than buffering it whole.
+		// ErrBufferFull lets this stream through an arbitrarily long line.
 		chunk, readErr := reader.ReadSlice('\n')
 
 		if !tooLong {

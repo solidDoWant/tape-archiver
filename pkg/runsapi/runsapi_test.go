@@ -27,9 +27,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// fakeEncodedValue is a minimal converter.EncodedValue standing in for the
-// real SDK payload decoding, so QueryWorkflow can be faked without a real
-// Temporal connection.
 type fakeEncodedValue struct {
 	value interface{}
 	err   error
@@ -50,10 +47,7 @@ func (f fakeEncodedValue) Get(valuePtr interface{}) error {
 	return json.Unmarshal(data, valuePtr)
 }
 
-// fakeTemporalClient is a hand-rolled fake of the TemporalClient interface —
-// exercising handler logic against public HTTP behavior without a real
-// Temporal connection, per the "never mock the component under test" rule
-// (this fakes a dependency, not runsapi itself).
+// fakeTemporalClient fakes the Temporal dependency, not runsapi itself.
 type fakeTemporalClient struct {
 	listResponse *workflowservice.ListWorkflowExecutionsResponse
 	listErr      error
@@ -65,10 +59,7 @@ type fakeTemporalClient struct {
 	queryResult interface{}
 	queryErr    error
 
-	// currentPauseResult/currentPauseErr answer backup.CurrentPauseQuery,
-	// routed separately from queryResult/queryErr above since getRun and
-	// signalPausedRun (resume/abort) now issue both queries against the same
-	// fake client.
+	// currentPauseResult/currentPauseErr answer backup.CurrentPauseQuery.
 	currentPauseResult interface{}
 	currentPauseErr    error
 
@@ -76,10 +67,7 @@ type fakeTemporalClient struct {
 	executeErr      error
 	executeOptions  client.StartWorkflowOptions
 	executeCaptured bool
-	// executeConfig is the run config actually submitted to ExecuteWorkflow —
-	// the exact document that reaches Temporal, after any server-side deploy
-	// override (applyDeployConfig) and dry-run mhvtl override. Tests assert on
-	// it to prove what the run really used, not just what the client sent.
+	// executeConfig is the config that actually reached ExecuteWorkflow, after overrides.
 	executeConfig *config.Config
 
 	signalErr        error
@@ -93,10 +81,7 @@ type fakeTemporalClient struct {
 	cancelWorkflowID string
 	cancelRunID      string
 
-	// historyFunc answers GetWorkflowHistory, keyed by the requested runID —
-	// see history_test.go's fakeHistoryIterator and newHistoryEvent helpers
-	// (used by phases/config/tapes-endpoint tests). nil yields an iterator
-	// with no events and no error (an empty, successfully-fetched history).
+	// historyFunc answers GetWorkflowHistory; nil yields an empty history.
 	historyFunc func(runID string) client.HistoryEventIterator
 
 	taskQueueResponse *workflowservice.DescribeTaskQueueResponse
@@ -138,7 +123,6 @@ func (f *fakeTemporalClient) ExecuteWorkflow(_ context.Context, options client.S
 	f.executeOptions = options
 	f.executeCaptured = true
 
-	// runsubmit.Submit passes the run config as the sole workflow argument.
 	if len(args) == 1 {
 		if cfg, ok := args[0].(*config.Config); ok {
 			f.executeConfig = cfg
@@ -165,9 +149,6 @@ func (f *fakeTemporalClient) CancelWorkflow(_ context.Context, workflowID, runID
 	return f.cancelErr
 }
 
-// fakeWorkflowRun is a minimal client.WorkflowRun standing in for the real
-// SDK type, so submitRun's success path can be exercised without a real
-// Temporal connection.
 type fakeWorkflowRun struct {
 	workflowID string
 	runID      string
@@ -326,9 +307,7 @@ func TestListRuns(t *testing.T) {
 
 		require.NotNil(t, captured)
 		assert.Contains(t, captured.GetQuery(), backup.WorkflowID)
-		// Sorting is done in Go (see listRuns' doc comment), not via "ORDER
-		// BY" in the query: Temporal's standard (non-Elasticsearch)
-		// visibility store rejects that clause as unsupported.
+		// SQL visibility rejects ORDER BY.
 		assert.NotContains(t, captured.GetQuery(), "ORDER BY")
 	})
 
@@ -381,9 +360,6 @@ func TestListRuns(t *testing.T) {
 	})
 }
 
-// spyClient wraps a TemporalClient and records the ListWorkflow request, so
-// the newest-first-ordering test can assert on the query sent without a fake
-// hand-coding request capture itself.
 type spyClient struct {
 	TemporalClient
 	onList func(*workflowservice.ListWorkflowExecutionsRequest)
@@ -436,12 +412,7 @@ func TestGetRun(t *testing.T) {
 			wantPauseKind: "write-failure",
 		},
 		{
-			// A failed CurrentPauseQuery must not be indistinguishable from
-			// "confirmed not paused" (CurrentPause.Unknown exists exactly to
-			// prevent that). The request still succeeds, since the phase query
-			// answered fine; the pause field says "unknown" only when the raw-
-			// history fallback (issue #329) cannot resolve it either — here the
-			// history read also fails, the sole remaining unavailable case.
+			// Unknown only when the history fallback (issue #329) also fails.
 			name:  "a failed current-pause query with unreadable history is reported unknown, not none",
 			runID: "run-1",
 			client: &fakeTemporalClient{
@@ -460,13 +431,7 @@ func TestGetRun(t *testing.T) {
 			wantPauseUnknown: true,
 		},
 		{
-			// The headline #329 case: the live CurrentPauseQuery fails (no
-			// control worker polling — KEDA scaled it to zero for the idle
-			// operator wait), but the run genuinely is paused. The history
-			// fallback reconstructs the pause from the alert activity's own
-			// recorded input, so the run reports its real pause and Unknown is
-			// cleared — the operator sees the pause and can act, instead of
-			// "Pause status unavailable".
+			// Issue #329: no worker polling (KEDA at zero) but the run is paused.
 			name:  "a failed current-pause query falls back to the history-derived pause",
 			runID: "run-1",
 			client: &fakeTemporalClient{
@@ -513,13 +478,7 @@ func TestGetRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			// A failed LastCompletedPhaseQuery must not be indistinguishable from
-			// a successful query reporting an empty phase (nothing completed
-			// yet): the request still succeeds, since Describe answered fine,
-			// but LastCompletedPhaseUnknown must say "couldn't read" so a client
-			// surfaces a transient "phase unavailable" marker rather than a
-			// definitive empty phase (issue #323) — the phase-side analogue of
-			// the current-pause case above.
+			// Issue #323: a read failure must not look like "nothing completed".
 			name:  "a failed phase query with unreadable history reports empty and unknown",
 			runID: "run-1",
 			client: &fakeTemporalClient{
@@ -567,19 +526,12 @@ func TestGetRun(t *testing.T) {
 	}
 }
 
-// TestResumeRun covers POST /api/runs/{runID}/resume: it must send
-// backup.OperatorResumeSignal only when the run is actually paused (any pause
-// kind), and never signal an unpaused or nonexistent run.
 func TestResumeRun(t *testing.T) {
 	tests := []struct {
 		name       string
 		client     *fakeTemporalClient
 		wantStatus int
-		// wantSignalAttempted is whether SignalWorkflow is called at all — true
-		// both when the request succeeds and when the signal RPC itself fails
-		// (the request is still rejected, but only after genuinely attempting
-		// the signal); false when the handler rejects the request before ever
-		// reaching SignalWorkflow (not paused, or the run does not exist).
+		// wantSignalAttempted is whether SignalWorkflow was called, even if it failed.
 		wantSignalAttempted bool
 		errAssert           require.ErrorAssertionFunc
 	}{
@@ -608,11 +560,7 @@ func TestResumeRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			// A pause query that fails because no worker is polling (KEDA scaled
-			// it to zero for the idle wait) must not block the operator's resume:
-			// the handler falls back to the history-derived pause (issue #329),
-			// confirms the run is paused, and sends the signal — which itself
-			// wakes a worker to process it.
+			// Issue #329: no worker polling must not block resume.
 			name: "a failed pause query falls back to history and resumes anyway",
 			client: &fakeTemporalClient{
 				currentPauseErr: assertError{"no worker polling"},
@@ -626,9 +574,7 @@ func TestResumeRun(t *testing.T) {
 			wantSignalAttempted: true,
 		},
 		{
-			// Both the live query and the history fallback fail: a truly
-			// unreachable run. The original NotFound is preserved for
-			// classification, so this stays a 404 (not a spurious 409).
+			// The live-query NotFound is preserved for classification.
 			name: "an unknown run returns 404, not a 500 or hang",
 			client: &fakeTemporalClient{
 				currentPauseErr: &serviceerror.NotFound{Message: "not found"},
@@ -689,17 +635,12 @@ func TestResumeRun(t *testing.T) {
 	}
 }
 
-// TestAbortRun covers POST /api/runs/{runID}/abort: it must send
-// backup.OperatorAbortSignal only for a pause kind abort actually applies to
-// (write-failure, burn) — never for an eject pause (workflows/backup's
-// waitForIOCleared never listens for the abort signal) or an unpaused run.
 func TestAbortRun(t *testing.T) {
 	tests := []struct {
 		name       string
 		client     *fakeTemporalClient
 		wantStatus int
-		// wantSignalAttempted is whether SignalWorkflow is called at all — see
-		// TestResumeRun's identically-named field for the full rationale.
+		// wantSignalAttempted is whether SignalWorkflow was called, even if it failed.
 		wantSignalAttempted bool
 		errAssert           require.ErrorAssertionFunc
 	}{
@@ -728,9 +669,7 @@ func TestAbortRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			// The abort analogue of the resume fallback: a pause query that
-			// fails for want of a polling worker falls back to the history-
-			// derived pause (issue #329) and aborts anyway.
+			// Issue #329: no worker polling must not block abort.
 			name: "a failed pause query falls back to history and aborts anyway",
 			client: &fakeTemporalClient{
 				currentPauseErr: assertError{"no worker polling"},
@@ -783,10 +722,6 @@ func TestAbortRun(t *testing.T) {
 	}
 }
 
-// TestCancelRun covers POST /api/runs/{runID}/cancel: it must call
-// CancelWorkflow (never a pause signal) for any still-Running execution —
-// paused or not — but reject an already-closed run (409) and a missing run
-// (404) before requesting cancellation.
 func TestCancelRun(t *testing.T) {
 	start := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
 	closeTime := start.Add(time.Hour)
@@ -802,11 +737,7 @@ func TestCancelRun(t *testing.T) {
 		name       string
 		client     *fakeTemporalClient
 		wantStatus int
-		// wantCancelAttempted is whether CancelWorkflow is called at all — true
-		// both when the request succeeds and when the cancel RPC itself fails
-		// (the request is still rejected, but only after genuinely attempting
-		// the cancel); false when the handler rejects the request before ever
-		// reaching CancelWorkflow (already closed, or the run does not exist).
+		// wantCancelAttempted is whether CancelWorkflow was called, even if it failed.
 		wantCancelAttempted bool
 		errAssert           require.ErrorAssertionFunc
 	}{
@@ -902,9 +833,7 @@ func TestWriteErrorSanitizesUpstreamFaults(t *testing.T) {
 	})
 }
 
-// decodeAPIError decodes a non-2xx response's JSON error body into an error,
-// so table-driven tests can assert on it with a require.ErrorAssertionFunc
-// like any other error-returning call, per this repo's testing style.
+// decodeAPIError turns a JSON error body into an error for require.ErrorAssertionFunc.
 func decodeAPIError(t *testing.T, recorder *httptest.ResponseRecorder) error {
 	t.Helper()
 
@@ -916,15 +845,10 @@ func decodeAPIError(t *testing.T, recorder *httptest.ResponseRecorder) error {
 	return errors.New(body.Error)
 }
 
-// assertError is a minimal error type distinct from any serviceerror, so
-// tests can assert on error-wrapping behavior without depending on gRPC
-// status construction.
 type assertError struct{ msg string }
 
 func (e assertError) Error() string { return e.msg }
 
-// validSubmitConfigJSON is a minimal valid run-config document, the same
-// shape cmd/tapectl's tests use, for exercising POST /api/runs.
 const validSubmitConfigJSON = `{
   "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
   "copies": 2,
@@ -933,10 +857,6 @@ const validSubmitConfigJSON = `{
   "encryption": {"recipients": ["age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4"], "identity": "AGE-SECRET-KEY-PQ-1EXAMPLEONLYNOTAREAL"}
 }`
 
-// postJSON issues method/path with body as the raw request body, decoding a
-// non-nil response destination the same way doJSON does. Kept separate from
-// doJSON (which always sends a nil body) since only POST /api/runs needs a
-// request body among this package's endpoints.
 func postJSON(t *testing.T, handler http.Handler, path string, body []byte, response interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -952,10 +872,7 @@ func postJSON(t *testing.T, handler http.Handler, path string, body []byte, resp
 }
 
 func TestListAllBackupExecutionsBoundsEmptyTokenedPages(t *testing.T) {
-	// A visibility store that keeps returning a NextPageToken with no rows must
-	// not page until the request deadline: maxVisibilityPages bounds it. The
-	// fake ignores the token and returns the same tokened empty page every
-	// call, so without the page cap this loops forever.
+	// The fake returns the same tokened empty page forever; only the page cap ends it.
 	client := &fakeTemporalClient{listResponse: &workflowservice.ListWorkflowExecutionsResponse{
 		NextPageToken: []byte("more"),
 	}}
@@ -982,9 +899,7 @@ func TestListAllBackupExecutionsBoundsEmptyTokenedPages(t *testing.T) {
 }
 
 func TestRunExistsInVisibilityBoundsEmptyTokenedPages(t *testing.T) {
-	// The 404-vs-410 path (writeHistoryError) pages visibility too and must be
-	// bounded the same way: a store that keeps returning a NextPageToken with no
-	// rows must terminate (via maxVisibilityPages), not loop until the deadline.
+	// writeHistoryError's 404-vs-410 path must be bounded by the page cap too.
 	client := &fakeTemporalClient{listResponse: &workflowservice.ListWorkflowExecutionsResponse{
 		NextPageToken: []byte("more"),
 	}}
@@ -1024,8 +939,6 @@ func TestSubmitRun(t *testing.T) {
 		}
 	}
 
-	// ownedDevices is a deployment that owns the physical library devices,
-	// required for any production (non-dry-run) submit (requireDeviceOwnership).
 	ownedDevices := []Option{WithDeployConfig("/dev/sch0", []string{"/dev/nst0", "/dev/nst1"}, "")}
 
 	tests := []struct {
@@ -1046,9 +959,7 @@ func TestSubmitRun(t *testing.T) {
 			wantStatus: http.StatusCreated,
 		},
 		{
-			// A production run whose devices the deployment does not own is
-			// refused: the config alone must not aim a real run at
-			// client-supplied device nodes (CLAUDE.md Hardware and Safety).
+			// CLAUDE.md Hardware and Safety: no client-supplied real devices.
 			name:       "a production run without deploy-owned devices is rejected",
 			body:       []byte(`{"config": ` + validSubmitConfigJSON + `}`),
 			getenv:     func(string) string { return "" },
@@ -1064,9 +975,7 @@ func TestSubmitRun(t *testing.T) {
 			wantStatus: http.StatusCreated,
 		},
 		{
-			// AC: dry-run must fail closed rather than fall back to device
-			// nodes indistinguishable from the real library (CLAUDE.md
-			// Hardware and Safety).
+			// AC: dry-run fails closed rather than falling back to real devices.
 			name:       "dry-run without mhvtl env fails closed and submits nothing",
 			body:       []byte(`{"config": ` + validSubmitConfigJSON + `, "dryRun": true}`),
 			getenv:     func(string) string { return "" },
@@ -1099,8 +1008,7 @@ func TestSubmitRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			// Trailing content after the single JSON object must be rejected,
-			// not silently accepted with only the first value decoded.
+			// Must not silently decode only the first value.
 			name:       "trailing content after the JSON object is rejected",
 			body:       []byte(`{"config": ` + validSubmitConfigJSON + `} {"config": ` + validSubmitConfigJSON + `}`),
 			getenv:     func(string) string { return "" },
@@ -1109,10 +1017,7 @@ func TestSubmitRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			// AC: a misspelled/unrecognized envelope key (e.g. "isDryRun"
-			// instead of "dryRun") must fail the request rather than silently
-			// defaulting dryRun to false and submitting a real run (CLAUDE.md
-			// Hardware and Safety).
+			// AC: a misspelled dryRun must not silently submit a real run.
 			name:       "an unrecognized envelope field is rejected, not silently ignored",
 			body:       []byte(`{"config": ` + validSubmitConfigJSON + `, "isDryRun": true}`),
 			getenv:     func(string) string { return "" },
@@ -1121,10 +1026,7 @@ func TestSubmitRun(t *testing.T) {
 			errAssert:  require.Error,
 		},
 		{
-			// Padding lives inside the recognized "config" field (as an
-			// oversized JSON string value) rather than an extra top-level
-			// key, so this exercises the size cap in isolation from the
-			// unrecognized-field rejection above.
+			// Padding is inside "config" to isolate the size cap from unknown-field rejection.
 			name:       "a request body over the size cap is rejected as 413, not a generic 400",
 			body:       []byte(`{"config": "` + strings.Repeat("x", maxSubmitBodyBytes) + `"}`),
 			getenv:     func(string) string { return "" },
@@ -1170,11 +1072,7 @@ func TestSubmitRun(t *testing.T) {
 				return
 			}
 
-			// Every rejection here except the 409 happens before Temporal is
-			// ever contacted (client/server-side validation and the dry-run
-			// env gate all run first, mirroring `tapectl run`'s validate-
-			// before-connect order); the 409 case is the one where Temporal
-			// was contacted and refused the submission.
+			// Only the 409 case reaches Temporal; all other rejections precede it.
 			wantExecuted := test.wantStatus == http.StatusConflict
 			assert.Equal(t, wantExecuted, test.client.executeCaptured)
 
@@ -1182,15 +1080,9 @@ func TestSubmitRun(t *testing.T) {
 		})
 	}
 
-	// The deploy-owned library devices and Discord webhook (issue #304) are host
-	// properties, not per-run choices: whatever config a client submits, the
-	// server overwrites them with this deployment's values before submit, so no
-	// client — the config page's JSON/paste mode or a raw POST — can target a
-	// changer, drive, or webhook the host does not own. Hiding the Form-mode
-	// inputs (#309) alone did not enforce this; this does.
+	// Issue #304: deploy-owned devices/webhook override whatever a client submits.
 	t.Run("deploy config overrides the submitted library devices and webhook", func(t *testing.T) {
-		// A config deliberately naming devices/webhook different from the
-		// deployment's, as an operator could via JSON/paste mode or curl.
+		// Devices/webhook deliberately differ from the deployment's.
 		rogue := []byte(`{"config": {
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
 		  "copies": 2,
@@ -1214,10 +1106,7 @@ func TestSubmitRun(t *testing.T) {
 		assert.Equal(t, "https://discord.com/api/webhooks/deploy/deploy", fake.executeConfig.Delivery.WebhookURL)
 	})
 
-	// A dry run redirects to mhvtl devices (runsubmit.ApplyDryRun). Deploy config
-	// is real hardware, so its device override must NOT win over mhvtl — a dry
-	// run must never touch real hardware (CLAUDE.md Hardware and Safety). The
-	// deploy override runs first so ApplyDryRun still has the last word here.
+	// A dry run must never touch real hardware (CLAUDE.md Hardware and Safety).
 	t.Run("a dry-run's mhvtl override wins over deploy config devices", func(t *testing.T) {
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-dry-deploy"}}
 		handler := newMux(newHandler(fake, mhvtlEnv,
@@ -1231,10 +1120,6 @@ func TestSubmitRun(t *testing.T) {
 		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, fake.executeConfig.Library.Drives)
 	})
 
-	// A production run may not fall back to client-supplied device paths: with
-	// no deploy-owned devices the submission is rejected before Temporal
-	// (requireDeviceOwnership), rather than aiming a real run at whatever the
-	// client sent.
 	t.Run("a production run with no deploy-owned devices is rejected before Temporal", func(t *testing.T) {
 		fake := &fakeTemporalClient{}
 		handler := newMux(newHandler(fake, func(string) string { return "" }))
@@ -1245,11 +1130,7 @@ func TestSubmitRun(t *testing.T) {
 		assert.False(t, fake.executeCaptured)
 	})
 
-	// The delivery webhook is deploy-owned too (issue #304): the report it
-	// receives embeds the escrow private key, so a production run may not deliver
-	// it to a client-supplied webhook. With the deployment owning the devices but
-	// no webhook configured, a submitted delivery.webhookUrl is refused before
-	// Temporal rather than silently honored.
+	// The report embeds the escrow private key, so it must not go to a client webhook.
 	t.Run("a client-supplied webhook on a production run without a deploy webhook is rejected", func(t *testing.T) {
 		configWithWebhook := `{
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
@@ -1270,9 +1151,6 @@ func TestSubmitRun(t *testing.T) {
 		assert.False(t, fake.executeCaptured)
 	})
 
-	// The same client-supplied webhook is fine as a dry-run: dry runs are exempt
-	// from deploy-ownership (they target mhvtl and never deliver a production
-	// report), the same way the physical-device checks exempt them.
 	t.Run("a client-supplied webhook is allowed on a dry-run submit", func(t *testing.T) {
 		configWithWebhook := `{
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
@@ -1292,9 +1170,6 @@ func TestSubmitRun(t *testing.T) {
 		require.Equal(t, http.StatusCreated, recorder.Code)
 	})
 
-	// A deployment that misconfigures its devices (here duplicate drive paths)
-	// must fail the submission before Temporal is contacted, not push an invalid
-	// config through the override.
 	t.Run("an invalid deploy override is rejected before Temporal contact", func(t *testing.T) {
 		fake := &fakeTemporalClient{}
 		handler := newMux(newHandler(fake, func(string) string { return "" },
@@ -1306,10 +1181,6 @@ func TestSubmitRun(t *testing.T) {
 		assert.False(t, fake.executeCaptured)
 	})
 
-	// The deploy-owned optical burner drives (issue #317) are a host property too,
-	// so a run that enables optical burn has its opticalBurn.drives overwritten
-	// with the deployment's list — no client can burn on a device the host does
-	// not own, whatever it submitted.
 	t.Run("deploy config overrides a burn-enabled run's optical burner drives", func(t *testing.T) {
 		burnConfig := `{
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
@@ -1333,11 +1204,7 @@ func TestSubmitRun(t *testing.T) {
 		assert.Equal(t, []string{"/dev/sr0", "/dev/sr1"}, fake.executeConfig.Delivery.OpticalBurn.Drives)
 	})
 
-	// A disabled optical-burn block (copies:0 — never burns) that still carries
-	// client-supplied burner drives must be refused on a deployment that owns no
-	// burner: OpticalBurn.Enabled() is false for copies:0, so applyDeployConfig
-	// never overrides the drives and the client device path would otherwise
-	// survive into a production config targeting a device the host does not own.
+	// copies:0 is not Enabled(), so the client drive path would otherwise survive.
 	t.Run("client-supplied burner drives on a disabled burn block are rejected without a deploy burner", func(t *testing.T) {
 		disabledBurnConfig := `{
 		  "sources": [{"zfsPath": {"name": "bulk-pool-01/archive@snap"}}],
@@ -1358,9 +1225,6 @@ func TestSubmitRun(t *testing.T) {
 		assert.False(t, fake.executeCaptured)
 	})
 
-	// A run that does not enable optical burn (no opticalBurn block) must never
-	// gain a spurious one just because the deployment configured burner drives —
-	// the override only replaces drives on an already-present block.
 	t.Run("deploy burner drives add no opticalBurn block to a burn-off run", func(t *testing.T) {
 		fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-noburn"}}
 		handler := newMux(newHandler(fake, func(string) string { return "" },

@@ -1,16 +1,8 @@
 //go:build integration
 
-// TestGetRunLogsAgainstRealVictoriaLogs (issue #274) exercises
-// pkg/runsapi's log-panel endpoint against a real VictoriaLogs instance —
-// `make web-dev-observability-up` (docker-compose.web-dev.yml), never
-// `make test-integration`'s own Temporal/mhvtl stack, so this skips cleanly
-// (like the MHVTL-gated tests elsewhere in this package) whenever
-// VICTORIALOGS_URL is not set, which is always true for a plain
-// `make test-integration` run. Temporal itself is faked (fakeTemporalClient)
-// — only the VictoriaLogs half of this endpoint needs to be real, and the
-// dev observability stack is deliberately not wired into the Temporal
-// integration stack (Makefile: "never a dependency of
-// test-integration/test-e2e").
+// These tests (issue #274) need a real VictoriaLogs from `make
+// web-dev-observability-up` and skip unless VICTORIALOGS_URL is set; Temporal
+// is faked.
 package runsapi
 
 import (
@@ -27,12 +19,8 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 )
 
-// TestGetRunLogsAgainstRealVictoriaLogs inserts a few synthetic slog-shaped
-// lines directly into a real VictoriaLogs instance under a unique fake
-// RunID, then drives them back out through GET /api/runs/{runID}/logs —
-// proving the LogsQL this package builds (buildLogsQLQuery) is actually
-// valid VictoriaLogs syntax, not just something this package's own
-// httptest-fake VL server (logs_test.go) happens to accept.
+// TestGetRunLogsAgainstRealVictoriaLogs proves the generated LogsQL is valid
+// against a real VictoriaLogs, not just the httptest fake.
 func TestGetRunLogsAgainstRealVictoriaLogs(t *testing.T) {
 	victoriaLogsURL := os.Getenv(victoriaLogsURLEnv)
 	if victoriaLogsURL == "" {
@@ -56,9 +44,7 @@ func TestGetRunLogsAgainstRealVictoriaLogs(t *testing.T) {
 	}
 	handler := newMux(newHandler(temporalClient, getenv))
 
-	// VictoriaLogs ingestion is asynchronous; a real instance is fast but
-	// not synchronous with the insert HTTP call returning, so poll briefly
-	// rather than assuming the lines are queryable immediately.
+	// Ingestion is asynchronous, so poll.
 	var body RunLogsResponse
 
 	require.Eventually(t, func() bool {
@@ -80,13 +66,8 @@ func TestGetRunLogsAgainstRealVictoriaLogs(t *testing.T) {
 	assert.True(t, body.Lines[0].Time.Before(body.Lines[1].Time))
 }
 
-// TestGetRunLogsFieldPrefixAgainstRealVictoriaLogs is the merge-key
-// counterpart to the test above: it ingests records whose worker fields are
-// nested under a "log_fields." prefix (the shape a fluentbit kubernetes filter
-// with Merge_Log_Key produces) and _msg holds the raw slog line, then drives
-// them back out with VICTORIALOGS_FIELD_PREFIX=log_fields. set — proving the
-// prefixed "log_fields.RunID":= filter and the log_fields.msg projection are
-// valid against a real VictoriaLogs instance, not just this package's fake.
+// TestGetRunLogsFieldPrefixAgainstRealVictoriaLogs is the merge-key-shaped
+// counterpart, run with VICTORIALOGS_FIELD_PREFIX=log_fields.
 func TestGetRunLogsFieldPrefixAgainstRealVictoriaLogs(t *testing.T) {
 	victoriaLogsURL := os.Getenv(victoriaLogsURLEnv)
 	if victoriaLogsURL == "" {
@@ -141,10 +122,7 @@ type syntheticLine struct {
 	Msg   string
 }
 
-// insertSyntheticLines POSTs lines to VictoriaLogs' JSON stream ingestion
-// API, matching the field mapping docker-compose.web-dev.yml's vector
-// shipper uses in the real dev stack (docs/web-ui.md): _msg_field=msg,
-// _time_field=time, streamed on WorkflowID/RunID.
+// insertSyntheticLines ingests lines with the dev vector shipper's field mapping.
 func insertSyntheticLines(t *testing.T, victoriaLogsURL, runID string, lines []syntheticLine) {
 	t.Helper()
 
@@ -165,18 +143,12 @@ func insertSyntheticLines(t *testing.T, victoriaLogsURL, runID string, lines []s
 	require.Equal(t, http.StatusOK, response.StatusCode)
 }
 
-// insertPrefixedLines ingests lines in the fluentbit merge-key shape: the
-// worker's slog fields nested under a "<prefix without the dot>" object (which
-// VictoriaLogs flattens to "<prefix>time"/"<prefix>level"/... dotted field
-// names) and _msg holding the byte-exact raw slog line, exactly as a
-// kubernetes filter with Merge_Log_Key produces. VL's own _time is taken from
-// a top-level ingestTime field so it stays VictoriaLogs-native.
+// insertPrefixedLines ingests lines in the fluentbit Merge_Log_Key shape: slog
+// fields nested under the prefix object and _msg holding the raw slog line.
 func insertPrefixedLines(t *testing.T, victoriaLogsURL, prefix, runID string, lines []syntheticLine) {
 	t.Helper()
 
-	// The merge object's name is the prefix with its trailing dot removed
-	// (e.g. "log_fields." -> "log_fields"): VictoriaLogs flattens {mergeKey:
-	// {level: ...}} to "mergeKey.level".
+	// VictoriaLogs flattens {mergeKey: {level: ...}} to "mergeKey.level".
 	mergeKey := strings.TrimSuffix(prefix, ".")
 
 	var builder strings.Builder

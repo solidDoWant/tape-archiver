@@ -1,14 +1,6 @@
-// Package temporalclient builds a Temporal SDK client configured via the
-// envconfig package, with two extensions on top:
-//
-//   - file:// API keys: when the resolved API key has the form
-//     "file:///absolute/path", the path is read on every RPC via
-//     [client.NewAPIKeyDynamicCredentials], so external rotators that update
-//     the file in place are picked up without a process restart.
-//   - Startup health check: [New] verifies the gRPC connection to the
-//     frontend before returning. The underlying [client.Dial] is lazy and
-//     would otherwise return a healthy-looking client even when the server
-//     is unreachable.
+// Package temporalclient builds an envconfig-configured Temporal client. A
+// "file:///path" API key is re-read on every RPC so rotation needs no restart,
+// and [New] health-checks the connection because [client.Dial] is lazy.
 package temporalclient
 
 import (
@@ -21,20 +13,11 @@ import (
 	"go.temporal.io/sdk/contrib/envconfig"
 )
 
-// healthCheckTimeout is how long New waits for the startup CheckHealth probe.
 const healthCheckTimeout = 10 * time.Second
 
-// New loads Temporal client options via envconfig, expands a file:// API key
-// into dynamic credentials when present, verifies the gRPC connection via
-// CheckHealth, and bridges Temporal SDK metrics onto reg so they appear on
-// the same /metrics endpoint as application metrics. Pass nil for reg to
-// disable SDK metrics entirely.
-//
-// The returned shutdown function must be deferred by the caller. It flushes
-// pending SDK metric samples, stops the tally reporter goroutine, and closes
-// the Temporal client. It is safe to call more than once. When New returns
-// a non-nil error the shutdown is a no-op so callers can `defer shutdown()`
-// unconditionally.
+// New dials and health-checks a Temporal client, registering SDK metrics on
+// reg (nil disables them). The returned shutdown is idempotent and safe to
+// defer even on error.
 func New(ctx context.Context, reg prometheus.Registerer) (client.Client, func(), error) {
 	metricsHandler, metricsCloser := newMetricsHandler(reg)
 
@@ -70,9 +53,7 @@ func New(ctx context.Context, reg prometheus.Registerer) (client.Client, func(),
 
 		closed = true
 
-		// Close the client first so any SDK metrics emitted during its
-		// teardown land in the tally scope, then close the scope to flush
-		// those final samples through to the Prometheus registry.
+		// Close the client first so its teardown metrics are flushed.
 		c.Close()
 		_ = metricsCloser.Close()
 	}
@@ -80,20 +61,12 @@ func New(ctx context.Context, reg prometheus.Registerer) (client.Client, func(),
 	return c, shutdown, nil
 }
 
-// noopShutdown is returned alongside non-nil errors so callers can always
-// `defer shutdown()` without a nil check.
 func noopShutdown() {}
 
-// defaultNamespace is what ResolveNamespace reports when the loaded client
-// config profile names no namespace — Temporal's own built-in default.
 const defaultNamespace = "default"
 
-// ResolveNamespace loads the Temporal client config profile from the same
-// envconfig sources New dials with (the TEMPORAL_* env vars and/or the file at
-// TEMPORAL_CONFIG_FILE) and returns the namespace it resolves to. cmd/web uses
-// it to label Temporal Web UI deep-links with the namespace runs actually
-// execute in, without duplicating New's profile-loading. Returns
-// defaultNamespace when the profile specifies none.
+// ResolveNamespace returns the namespace the envconfig profile used by New
+// resolves to.
 func ResolveNamespace() (string, error) {
 	profile, err := envconfig.LoadClientConfigProfile(envconfig.LoadClientConfigProfileOptions{})
 	if err != nil {
@@ -112,9 +85,6 @@ func ResolveNamespace() (string, error) {
 	return opts.Namespace, nil
 }
 
-// buildOptions loads client.Options via envconfig, replacing a file:// API
-// key with dynamic credentials backed by os.ReadFile, and wiring the SDK's
-// MetricsHandler/Logger to the host application's observability stack.
 func buildOptions(metricsHandler client.MetricsHandler) (client.Options, error) {
 	profile, err := envconfig.LoadClientConfigProfile(envconfig.LoadClientConfigProfileOptions{})
 	if err != nil {

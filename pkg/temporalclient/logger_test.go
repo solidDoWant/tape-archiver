@@ -9,9 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// withSlogDefault swaps slog.Default for the duration of the test and routes
-// its output to the returned buffer so tests can inspect what the SDK logger
-// actually emitted at the configured level.
+// withSlogDefault routes slog.Default to the returned buffer for the test.
 func withSlogDefault(t *testing.T, level slog.Level) *bytes.Buffer {
 	t.Helper()
 

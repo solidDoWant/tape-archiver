@@ -12,11 +12,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/schemas"
 )
 
-// TestGetConfigSchema checks GET /api/config/schema returns exactly the
-// committed run-config JSON Schema (schemas.RunConfigSchema — the same bytes
-// `make generate-schema` writes to schemas/run-config.schema.json), so the
-// web UI's config page can never validate against a copy that has drifted
-// from it.
 func TestGetConfigSchema(t *testing.T) {
 	t.Parallel()
 

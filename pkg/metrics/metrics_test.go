@@ -16,7 +16,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/metrics"
 )
 
-// freeAddr returns a local TCP address with an available port.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 
@@ -29,9 +28,6 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-// scrape performs a GET against the provider's /metrics endpoint and returns
-// the response body. It uses t.Context so the request is cancelled if the test
-// ends early.
 func scrape(t *testing.T, addr string) string {
 	t.Helper()
 
@@ -51,10 +47,8 @@ func scrape(t *testing.T, addr string) string {
 	return string(body)
 }
 
-// shutdownCleanup registers a cleanup that shuts the provider down. It uses
-// context.Background rather than t.Context because t.Context is already
-// cancelled by the time cleanup functions run, which would abort the graceful
-// shutdown.
+// shutdownCleanup uses context.Background because t.Context is already
+// cancelled when cleanups run.
 func shutdownCleanup(t *testing.T, provider *metrics.Provider) {
 	t.Helper()
 
@@ -83,7 +77,6 @@ func TestPrometheusEndpoint_Enabled_ExposesRuntimeMetrics(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, response.StatusCode)
 
-	// The response must be in the Prometheus text exposition format.
 	contentType := response.Header.Get("Content-Type")
 	assert.True(t, strings.HasPrefix(contentType, "text/plain"),
 		"metrics endpoint should return Prometheus text exposition format, got: %s", contentType)
@@ -91,8 +84,6 @@ func TestPrometheusEndpoint_Enabled_ExposesRuntimeMetrics(t *testing.T) {
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 
-	// The standard Go runtime metrics must be present because New registers the
-	// Go runtime collector on the registry.
 	assert.Contains(t, string(body), "go_goroutines",
 		"scrape should expose Go runtime metrics")
 }
@@ -101,18 +92,13 @@ func TestPrometheusEndpoint_Disabled(t *testing.T) {
 	provider, err := metrics.New()
 	require.NoError(t, err)
 
-	// PrometheusRegisterer must be nil so downstream consumers can detect
-	// "metrics off" and short-circuit to a noop.
 	require.Nil(t, provider.PrometheusRegisterer())
 
-	// Shutdown and WaitForScrape must be safe no-ops.
 	require.NoError(t, provider.Shutdown(t.Context()))
 	require.NoError(t, provider.WaitForScrape(t.Context()))
 }
 
-// unsetEnv removes an environment variable for the duration of the test,
-// restoring its prior value (set or unset) on cleanup. t.Setenv cannot express
-// "unset", so tests that must distinguish unset from empty use this helper.
+// unsetEnv unsets key for the test; t.Setenv cannot express "unset".
 func unsetEnv(t *testing.T, key string) {
 	t.Helper()
 
@@ -134,7 +120,6 @@ func TestNewFromEnv_FallsBackToDefaultAddr(t *testing.T) {
 	addr := freeAddr(t)
 	unsetEnv(t, "METRICS_ADDR")
 
-	// NewFromEnv binds the supplied default when METRICS_ADDR is unset.
 	provider, shutdown, err := metrics.NewFromEnv(addr)
 	require.NoError(t, err)
 	t.Cleanup(shutdown)
@@ -147,15 +132,12 @@ func TestNewFromEnv_EmptyAddr_DisablesEndpoint(t *testing.T) {
 	addr := freeAddr(t)
 	t.Setenv("METRICS_ADDR", "")
 
-	// An explicitly empty METRICS_ADDR disables the endpoint even when a
-	// non-empty defaultAddr is supplied: no HTTP server, nil registry.
 	provider, shutdown, err := metrics.NewFromEnv(addr)
 	require.NoError(t, err)
 	t.Cleanup(shutdown)
 
 	require.Nil(t, provider.PrometheusRegisterer())
 
-	// Nothing must be listening on the default address.
 	_, err = net.DialTimeout("tcp", addr, 250*time.Millisecond)
 	require.Error(t, err, "no /metrics server should be listening when METRICS_ADDR is empty")
 }
@@ -163,8 +145,6 @@ func TestNewFromEnv_EmptyAddr_DisablesEndpoint(t *testing.T) {
 func TestNewFromEnv_EmptyDefault_KeepsMetricsDisabled(t *testing.T) {
 	t.Setenv("METRICS_ADDR", "")
 
-	// Empty defaultAddr leaves the endpoint disabled when METRICS_ADDR is also
-	// unset.
 	provider, shutdown, err := metrics.NewFromEnv("")
 	require.NoError(t, err)
 	t.Cleanup(shutdown)
@@ -195,7 +175,6 @@ func TestNewFromEnv_InvalidScrapeWaitTimeout_ReturnsError(t *testing.T) {
 func TestWaitForScrape_ReturnsWhenScrapeArrives(t *testing.T) {
 	addr := freeAddr(t)
 
-	// Generous configured timeout — the test must not hit it on the happy path.
 	provider, err := metrics.New(
 		metrics.WithMetricsAddr(addr),
 		metrics.WithScrapeWaitTimeout(5*time.Second),
@@ -203,10 +182,7 @@ func TestWaitForScrape_ReturnsWhenScrapeArrives(t *testing.T) {
 	require.NoError(t, err)
 	shutdownCleanup(t, provider)
 
-	// Issue an initial synchronous scrape before starting WaitForScrape so the
-	// notify-buffer is in a known pre-filled state. WaitForScrape's drain step
-	// then deterministically clears that buffered tick, leaving the second
-	// scrape (issued below) as the only event that can satisfy the wait.
+	// Pre-fill the notify buffer so only the second scrape can satisfy the wait.
 	scrape(t, addr)
 
 	waitErr := make(chan error, 1)
@@ -241,14 +217,13 @@ func TestWaitForScrape_HonorsTimeout(t *testing.T) {
 
 	require.Error(t, err, "WaitForScrape should return an error when no scrape arrives before the timeout")
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
-	// Sanity-bound the elapsed time so we know the timeout actually fired.
+	// The timeout actually fired.
 	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond)
 	assert.Less(t, elapsed, 2*time.Second, "WaitForScrape should return shortly after the configured timeout")
 }
 
 func TestWaitForScrape_NoOpWhenNoHTTPServer(t *testing.T) {
-	// No metrics address configured → no Prometheus HTTP server, so
-	// WaitForScrape must return nil immediately rather than blocking.
+	// No metrics address, so WaitForScrape must not block.
 	provider, err := metrics.New(metrics.WithScrapeWaitTimeout(10 * time.Second))
 	require.NoError(t, err)
 	shutdownCleanup(t, provider)
@@ -264,8 +239,6 @@ func TestWaitForScrape_NoOpWhenNoHTTPServer(t *testing.T) {
 func TestWaitForScrape_DisabledByExplicitZero(t *testing.T) {
 	addr := freeAddr(t)
 
-	// Explicit zero must short-circuit the wait rather than fall back to the
-	// default. This distinguishes "not provided" from "explicitly disabled".
 	provider, err := metrics.New(
 		metrics.WithMetricsAddr(addr),
 		metrics.WithScrapeWaitTimeout(0),
@@ -303,9 +276,6 @@ func TestNewFromEnv_DefaultOptions_DisableScrapeWait(t *testing.T) {
 	t.Setenv("METRICS_ADDR", addr)
 	unsetEnv(t, "METRICS_SCRAPE_WAIT_TIMEOUT")
 
-	// Caller-supplied defaults apply when the corresponding env var is unset:
-	// cmd/web passes WithScrapeWaitTimeout(0) this way so its SIGTERM drain
-	// never waits for a final scrape by default (issue #270).
 	provider, shutdown, err := metrics.NewFromEnv("", metrics.WithScrapeWaitTimeout(0))
 	require.NoError(t, err)
 	t.Cleanup(shutdown)
@@ -323,10 +293,7 @@ func TestNewFromEnv_EnvOverridesDefaultOptions(t *testing.T) {
 	t.Setenv("METRICS_ADDR", addr)
 	t.Setenv("METRICS_SCRAPE_WAIT_TIMEOUT", "100ms")
 
-	// METRICS_SCRAPE_WAIT_TIMEOUT must win over a caller-supplied default of
-	// "disabled": with the gate re-enabled at 100ms and no scrape arriving,
-	// WaitForScrape must block until that timeout rather than return
-	// immediately.
+	// The env var must win over the caller's default.
 	provider, shutdown, err := metrics.NewFromEnv("", metrics.WithScrapeWaitTimeout(0))
 	require.NoError(t, err)
 	t.Cleanup(shutdown)

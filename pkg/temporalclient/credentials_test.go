@@ -87,10 +87,7 @@ func TestDecodeJWTClaims(t *testing.T) {
 		payload, err := json.Marshal(claims)
 		require.NoError(t, err)
 
-		// Use placeholder header and signature segments — decodeJWTClaims only
-		// inspects the middle segment, so the other two need only be present
-		// and base64-url decodable to the parser. The signature is intentionally
-		// an arbitrary value: this code path never verifies it.
+		// Only the middle segment is inspected; the others are placeholders.
 		return strings.Join([]string{
 			base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)),
 			base64.RawURLEncoding.EncodeToString(payload),

@@ -1,9 +1,5 @@
-// Package metrics provides a registry-based Prometheus provider with an
-// optional /metrics HTTP server. Downstream packages register their collectors
-// against the registry returned by Provider.PrometheusRegisterer; the same
-// registry backs the /metrics endpoint. When no metrics address is configured
-// the Provider is a pure no-op: nil registry, no HTTP server, and safe no-op
-// Shutdown/WaitForScrape.
+// Package metrics provides a Prometheus registry with an optional /metrics
+// server; with no address configured it is a no-op.
 package metrics
 
 import (
@@ -20,18 +16,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// DefaultScrapeWaitTimeout is the default upper bound for Provider.WaitForScrape
-// when no explicit timeout is configured via WithScrapeWaitTimeout or
-// METRICS_SCRAPE_WAIT_TIMEOUT.
+// DefaultScrapeWaitTimeout is the default upper bound for Provider.WaitForScrape.
 const DefaultScrapeWaitTimeout = 60 * time.Second
 
-// Provider exposes a Prometheus /metrics endpoint backed by a
-// prometheus.Registry. Application code registers collectors against the
-// registry via PrometheusRegisterer; the same registry serves /metrics.
-// When the metrics address is empty, PrometheusRegisterer returns nil so
-// downstream consumers can detect "metrics off" and short-circuit to a noop,
-// the HTTP server is not started, and Shutdown + WaitForScrape are safe
-// no-ops.
+// Provider exposes a Prometheus registry and its /metrics endpoint.
 type Provider struct {
 	promRegistry      *prometheus.Registry
 	shutdown          func(context.Context) error
@@ -47,37 +35,24 @@ type config struct {
 // Option configures Provider construction.
 type Option func(*config)
 
-// WithMetricsAddr sets the TCP address for the Prometheus /metrics HTTP server
-// (e.g. ":9090"). When not supplied, no HTTP server is started.
+// WithMetricsAddr sets the listen address; without it no server is started.
 func WithMetricsAddr(addr string) Option {
 	return func(c *config) { c.metricsAddr = addr }
 }
 
-// WithScrapeWaitTimeout sets the upper bound for Provider.WaitForScrape.
-// When this option is not supplied at all, DefaultScrapeWaitTimeout is used.
-// A non-positive value (e.g. 0) disables the gate: WaitForScrape returns nil
-// immediately rather than blocking. Distinguishing "not provided" from
-// "explicitly zero" lets operators short-circuit the wait via
-// METRICS_SCRAPE_WAIT_TIMEOUT=0s without falling back to the default.
+// WithScrapeWaitTimeout bounds Provider.WaitForScrape; a non-positive value
+// disables the wait (distinct from omitting the option).
 func WithScrapeWaitTimeout(d time.Duration) Option {
 	return func(c *config) { c.scrapeWaitTimeout = &d }
 }
 
-// New creates a Provider. When WithMetricsAddr is not supplied, the returned
-// Provider has a nil registry, starts no HTTP server, and Shutdown +
-// WaitForScrape are safe no-ops. When an address is supplied, the Go runtime
-// collector is registered against the registry so the standard runtime metrics
-// appear on scrape even before any application collectors are added.
+// New creates a Provider, serving /metrics immediately when an address is set.
 func New(opts ...Option) (*Provider, error) {
 	cfg := &config{}
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
-	// Resolve the configured timeout. nil → not provided → use the default.
-	// A non-nil value (including zero or negative) is honored as-is;
-	// WaitForScrape treats a non-positive timeout as "gate disabled" and
-	// returns nil immediately.
 	scrapeWaitTimeout := DefaultScrapeWaitTimeout
 	if cfg.scrapeWaitTimeout != nil {
 		scrapeWaitTimeout = *cfg.scrapeWaitTimeout
@@ -92,8 +67,6 @@ func New(opts ...Option) (*Provider, error) {
 
 	promRegistry := prometheus.NewRegistry()
 
-	// A fresh registry is empty; register the Go runtime collector so standard
-	// runtime metrics (go_goroutines, go_memstats_*, ...) are present on scrape.
 	if err := promRegistry.Register(collectors.NewGoCollector()); err != nil {
 		return nil, fmt.Errorf("register Go runtime collector: %w", err)
 	}
@@ -103,9 +76,7 @@ func New(opts ...Option) (*Provider, error) {
 		return nil, fmt.Errorf("listen on metrics addr %s: %w", cfg.metricsAddr, err)
 	}
 
-	// Buffered notify channel signals that a /metrics scrape has been served.
-	// Buffer size 1 is enough: WaitForScrape drains any pending tick before
-	// it blocks, so only fresh post-drain scrapes can satisfy the wait.
+	// Size 1 suffices: WaitForScrape drains stale ticks before blocking.
 	scrapeNotify := make(chan struct{}, 1)
 	promHandler := promhttp.HandlerFor(promRegistry, promhttp.HandlerOpts{})
 
@@ -134,15 +105,8 @@ func New(opts ...Option) (*Provider, error) {
 	}, nil
 }
 
-// PrometheusRegisterer returns the Prometheus registry collectors should be
-// registered against, or nil when the Provider is in no-op mode (no metrics
-// address). The same registry backs the /metrics endpoint when one is enabled.
-// The nil return lets downstream consumers detect "metrics off" and
-// short-circuit.
-//
-// The return type is the prometheus.Registerer interface; a nil *Registry
-// is mapped to a nil interface so callers can use a plain `if reg == nil`
-// check without falling into the typed-nil interface gotcha.
+// PrometheusRegisterer returns the registry, or an untyped nil when metrics are
+// off (avoiding the typed-nil interface gotcha).
 func (p *Provider) PrometheusRegisterer() prometheus.Registerer {
 	if p.promRegistry == nil {
 		return nil
@@ -152,22 +116,13 @@ func (p *Provider) PrometheusRegisterer() prometheus.Registerer {
 }
 
 // Shutdown stops the metrics HTTP server, if one was started.
-// It should be called before the process exits.
 func (p *Provider) Shutdown(ctx context.Context) error {
 	return p.shutdown(ctx)
 }
 
-// WaitForScrape blocks until the /metrics HTTP handler serves a request after
-// this call begins, the configured scrape-wait timeout elapses, or ctx is
-// cancelled (whichever happens first). It returns nil immediately when no
-// Prometheus HTTP server is configured or when the configured timeout is
-// non-positive (gate explicitly disabled).
-//
-// Intended use: invoke after process drain but before exporter shutdown so
-// Prometheus has the opportunity to collect a final scrape covering
-// end-of-lifecycle metrics. The HTTP server is left running for the duration
-// of the wait. Callers should pass a non-cancelled parent context (typically
-// context.Background()) — passing a SIGTERM-cancelled context defeats the gate.
+// WaitForScrape blocks until a /metrics scrape starts after this call, the
+// timeout elapses, or ctx ends, so Prometheus can collect final metrics before
+// shutdown. Pass a non-cancelled ctx: a SIGTERM-cancelled one defeats the wait.
 func (p *Provider) WaitForScrape(ctx context.Context) error {
 	if p.scrapeNotify == nil {
 		return nil
@@ -177,8 +132,7 @@ func (p *Provider) WaitForScrape(ctx context.Context) error {
 		return nil
 	}
 
-	// Drain any tick buffered by a scrape that arrived before this call so
-	// only a fresh post-drain scrape can satisfy the wait.
+	// Drop a tick from a scrape that predates this call.
 	select {
 	case <-p.scrapeNotify:
 	default:
@@ -195,38 +149,17 @@ func (p *Provider) WaitForScrape(ctx context.Context) error {
 	}
 }
 
-// NewFromEnv creates a Provider using standard environment variables.
-// METRICS_ADDR sets the Prometheus /metrics HTTP listen address. It distinguishes
-// unset from explicitly empty: when METRICS_ADDR is unset, defaultAddr is used;
-// when it is set to the empty string, the endpoint is disabled (no HTTP server,
-// nil registry) regardless of defaultAddr. Pass "" as defaultAddr to keep the
-// endpoint disabled when METRICS_ADDR is also unset.
-// METRICS_SCRAPE_WAIT_TIMEOUT (a Go duration string) bounds
-// Provider.WaitForScrape.
-//
-// defaults are caller-supplied Options applied before the env-derived ones,
-// so the environment always wins over them. They exist because the right
-// built-in scrape-wait default differs per binary: a batch worker's
-// end-of-run metrics only exist at exit, so waiting up to
-// DefaultScrapeWaitTimeout for a final scrape is worth it, while a
-// long-running web server loses at most one scrape interval's worth of
-// counter increments and must not hold its SIGTERM drain open for a scrape
-// that may never come (issue #270) — cmd/web passes WithScrapeWaitTimeout(0)
-// here, and METRICS_SCRAPE_WAIT_TIMEOUT still overrides it.
-//
-// The returned shutdown func must be deferred by the caller. It stops the
-// metrics HTTP server with a 10-second deadline and writes any error to
-// stderr.
+// NewFromEnv creates a Provider listening on METRICS_ADDR, or defaultAddr when
+// it is unset; an empty address disables it. METRICS_SCRAPE_WAIT_TIMEOUT
+// overrides the caller's defaults. The caller must defer the returned shutdown.
 func NewFromEnv(defaultAddr string, defaults ...Option) (*Provider, func(), error) {
-	// LookupEnv distinguishes unset (fall back to defaultAddr) from an explicit
-	// empty value (disable the endpoint), mirroring health.NewFromEnv.
+	// Explicitly empty disables the endpoint; unset falls back to defaultAddr.
 	addr, set := os.LookupEnv("METRICS_ADDR")
 	if !set {
 		addr = defaultAddr
 	}
 
-	// Caller defaults first; env-derived options are appended after them so
-	// the environment takes precedence (Options apply in order).
+	// Env-derived options come last so they take precedence.
 	opts := append([]Option{}, defaults...)
 	if addr != "" {
 		opts = append(opts, WithMetricsAddr(addr))

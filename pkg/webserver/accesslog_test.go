@@ -14,13 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// captureLogger returns a logger writing JSON to buf at debug level (so no
-// record is filtered out by level), for tests that inspect the emitted record.
 func captureLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-// decodeRecord unmarshals the single JSON log line in buf.
 func decodeRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
 	t.Helper()
 
@@ -34,8 +31,7 @@ func decodeRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
 	return record
 }
 
-// handlerWriting returns a handler that sets status (via WriteHeader unless it
-// is 0) and writes body.
+// handlerWriting writes body after WriteHeader(status), skipped when status is 0.
 func handlerWriting(status int, body string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if status != 0 {
@@ -67,8 +63,7 @@ func TestAccessLogRecord(t *testing.T) {
 
 func TestAccessLogDefaultStatusOK(t *testing.T) {
 	buf := &bytes.Buffer{}
-	// A handler that writes a body without an explicit WriteHeader implicitly
-	// sends 200; the recorder must report that, not a zero status.
+	// No explicit WriteHeader: net/http implies 200.
 	handler := AccessLog(captureLogger(buf), nil, handlerWriting(0, "body"))
 
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
@@ -78,9 +73,8 @@ func TestAccessLogDefaultStatusOK(t *testing.T) {
 	assert.Equal(t, float64(len("body")), record["bytes"])
 }
 
-// TestAccessLogNeverLogsQuery is the security-critical case: the OIDC callback
-// URL carries the authorization code and state in its query string, and those
-// single-use secrets must never reach the log — only the path is recorded.
+// TestAccessLogNeverLogsQuery is security-critical: the OIDC callback query
+// carries the single-use authorization code and state.
 func TestAccessLogNeverLogsQuery(t *testing.T) {
 	buf := &bytes.Buffer{}
 	handler := AccessLog(captureLogger(buf), nil, handlerWriting(http.StatusFound, ""))
@@ -207,9 +201,7 @@ func TestAccessLogRemoteAddr(t *testing.T) {
 func TestAccessLogAnnotate(t *testing.T) {
 	t.Run("annotated fields are merged and the record is raised to warn", func(t *testing.T) {
 		buf := &bytes.Buffer{}
-		// A handler that annotates and then responds with a 302 — the shape of a
-		// failed OIDC callback: its status alone would keep it at info, but the
-		// annotation must surface it at warn so it is not hidden at LOG_LEVEL=warn.
+		// The shape of a failed OIDC callback: annotated, then a 302.
 		inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			Annotate(r.Context(),
 				slog.String("auth_error", "identity provider returned an error"),
@@ -243,33 +235,25 @@ func TestAccessLogAnnotate(t *testing.T) {
 	})
 }
 
-// TestAnnotateWithoutMiddleware verifies Annotate is a safe no-op when the
-// context did not come through AccessLog, so a handler can call it
-// unconditionally (e.g. in a unit test that exercises it directly).
 func TestAnnotateWithoutMiddleware(t *testing.T) {
 	assert.NotPanics(t, func() {
 		Annotate(context.Background(), slog.String("reason", "nowhere to go"))
 	})
 }
 
-// TestAccessLogPreservesFlush guards the SSE path: pkg/runsapi drives its
-// live-monitoring stream through http.NewResponseController(w).Flush, which
-// finds the underlying Flusher only if the wrapper exposes it via Unwrap. If
-// this breaks, run monitoring silently buffers instead of streaming.
+// TestAccessLogPreservesFlush guards the SSE path: without Unwrap, run
+// monitoring silently buffers instead of streaming.
 func TestAccessLogPreservesFlush(t *testing.T) {
 	var flushReached bool
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		// The recorder handed to the inner handler is the *statusRecorder;
-		// the controller must be able to reach the real Flusher through it.
+		// w is the *statusRecorder; Flush must unwrap past it.
 		err := http.NewResponseController(w).Flush()
 		require.NoError(t, err, "Flush must reach the underlying ResponseWriter through the wrapper")
 
 		flushReached = true
 	})
 
-	// httptest.ResponseRecorder implements http.Flusher, so a successful Flush
-	// proves the controller unwrapped past statusRecorder to it.
 	handler := AccessLog(captureLogger(&bytes.Buffer{}), nil, inner)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/runs/x/events", nil))
 

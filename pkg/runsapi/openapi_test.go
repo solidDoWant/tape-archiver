@@ -11,12 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// documentedRoutes is the canonical list of every /api route the OpenAPI
-// document is expected to describe: the data routes newMux serves plus the two
-// auth-package routes (/api/me, /api/build-info) that share the /api surface.
-// It is the single source of truth both directions of coverage below check
-// against, so adding an /api endpoint without documenting it — or documenting
-// one that is not served — fails the build.
+// documentedRoutes is every /api route the spec must describe, including the
+// two webauth routes. Coverage is checked in both directions.
 var documentedRoutes = []struct {
 	method string
 	path   string
@@ -43,7 +39,6 @@ var documentedRoutes = []struct {
 	{http.MethodGet, "/api/build-info"},
 }
 
-// fetchSpec serves GET /api/openapi.json off the docs handler and decodes it.
 func fetchSpec(t *testing.T) map[string]any {
 	t.Helper()
 
@@ -76,7 +71,6 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 	paths, ok := spec["paths"].(map[string]any)
 	require.True(t, ok)
 
-	// Build a case-normalized lookup of the operations the spec declares.
 	declared := make(map[string]bool)
 
 	for path, item := range paths {
@@ -88,24 +82,17 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 		}
 	}
 
-	// Every documented route must appear in the spec (methods in an OpenAPI
-	// document are lower-case).
+	// OpenAPI methods are lower-case.
 	for _, route := range documentedRoutes {
 		key := strings.ToLower(route.method) + " " + route.path
 		assert.Truef(t, declared[key], "route %s %s is missing from the OpenAPI spec", route.method, route.path)
 	}
 
-	// And the spec must not declare an operation outside the documented set:
-	// the spec/docs plumbing routes (openapi.json, docs, schemas) are served but
-	// deliberately not self-described, so the two sets must match exactly.
+	// The spec/docs plumbing routes are not self-described, so the sets match exactly.
 	assert.Lenf(t, declared, len(documentedRoutes),
 		"spec declares %d operations but %d are documented — update documentedRoutes", len(declared), len(documentedRoutes))
 }
 
-// TestDocumentedRoutesAreServed proves documentedRoutes reflects reality: every
-// data route it lists actually resolves on the real API mux (a nonexistent
-// route would 404 with no path match). It excludes the two auth-package routes,
-// which newMux does not serve (webauth's own mux does).
 func TestDocumentedRoutesAreServed(t *testing.T) {
 	mux := newMux(newHandler(&fakeTemporalClient{}, func(string) string { return "" }))
 
@@ -114,23 +101,17 @@ func TestDocumentedRoutesAreServed(t *testing.T) {
 			continue // served by webauth, not runsapi's mux.
 		}
 
-		// Substitute concrete values for path wildcards so the request matches a
-		// registered pattern rather than 404-ing on the template.
 		concrete := requestPath(route.path)
 
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, httptest.NewRequest(route.method, concrete, nil))
 
-		// The handler may fail against the fake Temporal client, but the route
-		// must exist — so any status except 404 Not Found proves it is served.
+		// The handler may fail against the fake client; anything but 404 proves the route exists.
 		assert.NotEqualf(t, http.StatusNotFound, recorder.Code,
 			"documented route %s %s does not resolve on the API mux", route.method, concrete)
 	}
 }
 
-// TestMuxServesDocRoutes proves the real API mux (newMux) delegates the
-// spec/docs paths to the docs handler — the wiring in runsapi.go — rather than
-// only the standalone docs handler serving them.
 func TestMuxServesDocRoutes(t *testing.T) {
 	mux := newMux(newHandler(&fakeTemporalClient{}, func(string) string { return "" }))
 
@@ -148,7 +129,7 @@ func TestDocsPageIsServed(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 	assert.Contains(t, recorder.Header().Get("Content-Type"), "text/html")
-	// The docs page points its renderer at this API's own generated spec.
+	// The docs page renders this API's own spec.
 	assert.Contains(t, recorder.Body.String(), "/api/openapi")
 }
 
@@ -160,9 +141,6 @@ func TestOpenAPIYAMLIsServed(t *testing.T) {
 	assert.Contains(t, recorder.Body.String(), "openapi:")
 }
 
-// TestOpenAPIErrorEnvelopeMatchesReal asserts the documented default error
-// response uses runsapi's real {"error": "..."} envelope (via the huma.NewError
-// override in newDocsHandler), not Huma's RFC7807 default.
 func TestOpenAPIErrorEnvelopeMatchesReal(t *testing.T) {
 	spec := fetchSpec(t)
 
@@ -181,8 +159,7 @@ func TestOpenAPIErrorEnvelopeMatchesReal(t *testing.T) {
 	assert.Contains(t, required, "error")
 }
 
-// requestPath replaces {wildcard} path segments with concrete sample values so
-// a request matches its registered ServeMux pattern.
+// requestPath substitutes sample values for {wildcard} segments.
 func requestPath(pattern string) string {
 	switch pattern {
 	case "/api/runs/{runID}":
