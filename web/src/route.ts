@@ -83,10 +83,17 @@ export function parseRoute(rawPath: string): Route {
 // function (which re-validates it again before ever using it to build an
 // IdP redirect; this copy exists so the SPA never even hands a malformed or
 // cross-origin value to history.pushState / window.location.assign in the
-// first place). See that function's doc comment for why "//" and "\" are
-// rejected specifically.
+// first place). See that function's doc comment for why "//", "\" and ASCII
+// control characters are rejected specifically.
 export function sanitizeRedirectPath(path: string | null | undefined): string {
-  if (!path || !path.startsWith('/') || path.startsWith('//') || path.includes('\\')) {
+  if (
+    !path ||
+    !path.startsWith('/') ||
+    path.startsWith('//') ||
+    path.includes('\\') ||
+    // eslint-disable-next-line no-control-regex
+    /[\x00-\x1f\x7f]/.test(path)
+  ) {
     return '/'
   }
 

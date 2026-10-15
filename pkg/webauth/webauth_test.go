@@ -54,8 +54,9 @@ func echoHandler() http.Handler {
 		identity, _ := IdentityFromContext(r.Context())
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"path":     r.URL.Path,
-			"identity": identity,
+			"path":       r.URL.Path,
+			"requestURI": r.URL.RequestURI(),
+			"identity":   identity,
 		})
 	})
 }
@@ -376,6 +377,46 @@ func TestFullLoginFlow(t *testing.T) {
 
 	_ = resp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+// TestLoginRedirectRejectsControlCharacters (issue #383): browsers strip tab,
+// CR and LF from URLs, so "/\t/evil.example" would become "//evil.example".
+func TestLoginRedirectRejectsControlCharacters(t *testing.T) {
+	idp := testutil.NewFakeOIDCProvider(t, "client-1", "secret-1")
+	server, _ := newGatedServerWithRealRedirect(t, idp)
+
+	tests := []struct {
+		name     string
+		redirect string
+		want     string
+	}{
+		{name: "tab", redirect: "/%09/evil.example", want: "/"},
+		{name: "line feed", redirect: "/%0a/evil.example", want: "/"},
+		{name: "carriage return", redirect: "/%0d/evil.example", want: "/"},
+		{name: "NUL", redirect: "/%00/evil.example", want: "/"},
+		{name: "DEL", redirect: "/%7f/evil.example", want: "/"},
+		{name: "control character in the query", redirect: "/runs/abc%3Ftab%3D%09", want: "/"},
+		{name: "a normal same-origin path with a query", redirect: "/runs/abc%3Ftab%3Dlogs", want: "/runs/abc?tab=logs"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newCookieClient(t)
+
+			resp, err := client.Get(server.URL + "/auth/login?redirect=" + test.redirect)
+			require.NoError(t, err)
+
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode, "login flow did not complete: %s", body)
+
+			var final struct {
+				RequestURI string `json:"requestURI"`
+			}
+			require.NoError(t, json.Unmarshal(body, &final))
+			assert.Equal(t, test.want, final.RequestURI)
+		})
+	}
 }
 
 func TestTamperedSessionCookie_isRejected(t *testing.T) {
