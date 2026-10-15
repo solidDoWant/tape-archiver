@@ -10,7 +10,10 @@
 #                                  BinariesDir points here; it stages this dir's
 #                                  top-level regular files into the ISO's /bin)
 #   $out/src/<tool>-<version>.*    the matching upstream source archives (a
-#                                  subdirectory recoverykit skips)
+#                                  subdirectory recoverykit skips); age's
+#                                  includes vendor/ so it builds offline
+#   $out/src/<spec>                the age format spec and the HPKE documents
+#                                  its post-quantum recipient builds on (SPEC §7)
 #
 # Versions come from the flake's pinned nixpkgs — the single shared source of
 # truth — so the sibling data-worker image, referencing the same `pkgs`, bundles
@@ -23,8 +26,10 @@
 {
   lib,
   stdenvNoCC,
+  fetchurl,
   pkgsStatic,
   binutils,
+  go,
 }:
 let
   # Each tool: the static package, the single binary name to stage (the packages
@@ -38,6 +43,9 @@ let
       drv = pkgsStatic.age;
       bin = "age";
       checks = [ pkgsStatic.age.version ];
+      # `go mod vendor` output, pinned by the package's vendorHash: the module
+      # dependencies (incl. filippo.io/hpke) the bare upstream tree lacks.
+      vendor = pkgsStatic.age.goModules;
     }
     {
       drv = pkgsStatic.par2cmdline-turbo;
@@ -55,6 +63,32 @@ let
       checks = [ pkgsStatic.gnutar.version ];
     }
   ];
+
+  # The age format spec (C2SP, incl. the mlkem768x25519 recipient) and the
+  # HPKE documents it references, so a decryptor can be written from the disc.
+  specs = [
+    {
+      name = "age-spec-c2sp-fc7f312.md";
+      file = fetchurl {
+        url = "https://raw.githubusercontent.com/C2SP/C2SP/fc7f312aff098ed080f3dd5a3da4fd820be17a2e/age.md";
+        hash = "sha256-sKdnuRoYTFNuigQAL3u6dSE4j+45ifWJHiPMGqoAIy8=";
+      };
+    }
+    {
+      name = "draft-ietf-hpke-pq-03.txt";
+      file = fetchurl {
+        url = "https://www.ietf.org/archive/id/draft-ietf-hpke-pq-03.txt";
+        hash = "sha256-/eCr50BaxbdW28czf67Kr+T+dzncPImP05e3CwPND3o=";
+      };
+    }
+    {
+      name = "rfc9180.txt";
+      file = fetchurl {
+        url = "https://www.rfc-editor.org/rfc/rfc9180.txt";
+        hash = "sha256-9FqLfDAjGybWaLHoFoB05atRSxdNZWtn6FmJURfx+PY=";
+      };
+    }
+  ];
 in
 stdenvNoCC.mkDerivation {
   name = "recovery-binaries";
@@ -62,8 +96,9 @@ stdenvNoCC.mkDerivation {
   # Nothing to unpack — this derivation only assembles already-built inputs.
   dontUnpack = true;
 
-  # readelf, to prove each staged binary is statically linked.
-  nativeBuildInputs = [ binutils ];
+  # readelf, to prove each staged binary is statically linked; go, to prove the
+  # staged age source rebuilds offline.
+  nativeBuildInputs = [ binutils go ];
 
   installPhase = ''
     runHook preInstall
@@ -73,9 +108,15 @@ stdenvNoCC.mkDerivation {
     # Stage a tool's upstream source as an archive under $out/src. A git source
     # is a directory (re-archived deterministically); an upstream tarball is a
     # file (copied verbatim, with the nix store hash prefix stripped from its
-    # name).
+    # name). A Go module's vendor tree, if given, is added as vendor/.
     stageSource() {
-      local src="$1" name="$2"
+      local src="$1" name="$2" vendor="''${3:-}"
+      if [ -n "$vendor" ]; then
+        cp -r "$src" "$TMPDIR/$name"
+        chmod -R u+w "$TMPDIR/$name"
+        cp -r "$vendor" "$TMPDIR/$name/vendor"
+        src="$TMPDIR/$name"
+      fi
       if [ -d "$src" ]; then
         tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
           -cf - -C "$src" . | gzip -n > "$out/src/$name.tar.gz"
@@ -87,8 +128,12 @@ stdenvNoCC.mkDerivation {
 
     ${lib.concatMapStrings (tool: ''
       install -Dm755 ${lib.getExe' tool.drv tool.bin} "$out/bin/${tool.bin}"
-      stageSource ${tool.drv.src} "${tool.drv.pname}-${tool.drv.version}"
+      stageSource ${tool.drv.src} "${tool.drv.pname}-${tool.drv.version}" ${tool.vendor or ""}
     '') tools}
+
+    ${lib.concatMapStrings (spec: ''
+      install -m444 ${spec.file} "$out/src/${spec.name}"
+    '') specs}
 
     runHook postInstall
   '';
@@ -135,6 +180,26 @@ stdenvNoCC.mkDerivation {
     ${lib.concatMapStrings (
       tool: "checkBinary ${lib.escapeShellArgs ([ tool.bin ] ++ tool.checks)}\n"
     ) tools}
+
+    # The staged age source rebuilds with no network (the build sandbox has
+    # none), and the rebuilt age decrypts what the shipped age encrypts to a
+    # post-quantum recipient.
+    echo "rebuilding age offline from the staged source"
+    rebuild="$TMPDIR/age-rebuild"
+    mkdir -p "$rebuild/src" "$rebuild/bin"
+    tar -xzf "$out/src/${pkgsStatic.age.pname}-${pkgsStatic.age.version}.tar.gz" -C "$rebuild/src"
+    (
+      cd "$rebuild/src"
+      HOME="$rebuild" GOPATH="$rebuild/gopath" GOCACHE="$rebuild/cache" \
+        GOFLAGS=-mod=vendor GOPROXY=off GOTOOLCHAIN=local CGO_ENABLED=0 \
+        go build -o "$rebuild/bin/" ./cmd/age ./cmd/age-keygen
+    )
+    "$rebuild/bin/age-keygen" -pq -o "$rebuild/identity.txt" 2>/dev/null
+    recipient="$("$rebuild/bin/age-keygen" -y "$rebuild/identity.txt")"
+    echo "recovery probe" > "$rebuild/plain"
+    "$out/bin/age" -r "$recipient" -o "$rebuild/plain.age" "$rebuild/plain"
+    grep -q mlkem768x25519 "$rebuild/plain.age"
+    "$rebuild/bin/age" -d -i "$rebuild/identity.txt" "$rebuild/plain.age" | cmp - "$rebuild/plain"
 
     runHook postInstallCheck
   '';
