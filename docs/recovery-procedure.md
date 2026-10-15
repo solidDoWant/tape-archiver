@@ -142,15 +142,15 @@ file** out of an archive:
 
 4. **Verify and repair with PAR2.** `par2 repair` checks every slice against the
    recovery set and reconstructs the exact original bytes when damage is within
-   the PAR2 redundancy. The `-p` flag purges PAR2's own artifacts once the repair
-   succeeds — the `.par2` volume files and any `archive.NNN.1` pre-repair backups
-   it makes of a damaged slice — leaving only the clean slice files so the
-   reassembly glob in step 5 matches them and nothing else (this only touches the
-   writable staging copy; the tape is untouched, so you can always re-stage and
-   retry):
+   the PAR2 redundancy. When it repairs a slice it first renames the damaged copy
+   to a pre-repair backup (`archive.NNN.1`); step 5 skips those backups, so leave
+   them. Do **not** add `-p`: it deletes the `.par2` files even when nothing needed
+   repair, which breaks the cross-check below and leaves nothing to retry with
+   (this only touches the writable staging copy; the tape is untouched, so you can
+   always re-stage and retry):
 
    ```
-   bin/par2 repair -p /scratch/NNN-<label>/archive.par2
+   bin/par2 repair /scratch/NNN-<label>/archive.par2
    ```
 
    As an independent SHA-256 cross-check, use the disc's `manifest.sha256` — it
@@ -187,11 +187,14 @@ file** out of an archive:
    `archive.001`, …). Every slice in one archive shares a single zero-padded
    suffix width — three digits by default, widened to fit the archive's slice
    count (e.g. `archive.0000` … `archive.1004` once there are more than 1000
-   slices) — so the glob below expands in numeric order. `manifest.json` remains
-   authoritative if you ever need to confirm the order:
+   slices) — so sorting the names gives numeric order. The command below takes
+   only names that are exactly `archive.` followed by digits, so it never picks
+   up a step-4 `archive.NNN.1` backup (which holds the **damaged** bytes) or a
+   `.par2` file. `manifest.json` remains authoritative if you ever need to
+   confirm the order:
 
    ```
-   cat /scratch/NNN-<label>/archive.[0-9]* > /scratch/archive.age
+   (cd /scratch/NNN-<label> && ls | grep -xE 'archive\.[0-9]+' | sort | xargs cat) > /scratch/archive.age
    ```
 
 6. **Decrypt** with the escrowed identity:
@@ -322,10 +325,10 @@ below are **recovery-time**.
 
 | Symptom | What it means | What to do |
 |---------|---------------|------------|
-| A slice or PAR2 file fails its checksum, but only a little | Media damage **within** the PAR2 redundancy | `bin/par2 repair archives/NNN-<label>/archive.par2` reconstructs the exact bytes; continue. |
+| A slice or PAR2 file fails its checksum, but only a little | Media damage **within** the PAR2 redundancy | `bin/par2 repair /scratch/NNN-<label>/archive.par2` (step 4, without `-p`) reconstructs the exact bytes; continue with step 5, which skips the `archive.NNN.1` backup of the damaged slice. |
 | `par2 repair` cannot repair (damage **exceeds** PAR2 capacity) | Too much of one region is gone | Recover that archive from **another copy, if the run wrote one** (the report lists every copy by barcode). Blast radius is bounded — one bad region damages at most one slice. |
 | `age -d` aborts partway with a stream error | `age` authenticates each ~64 KiB chunk and stops at the first uncorrectable one, so the archive is truncated there | PAR2-repair first; if that is not enough, decrypt **another copy, if the run wrote one** (the report lists them by barcode). |
-| A file's digest does not match `manifest.sha256` / on-tape `manifest.json` | That file is corrupt | Identify the slice, `par2 repair` it, or use another copy if the run wrote one. |
+| A file's digest does not match `manifest.sha256` / on-tape `manifest.json` | That file is corrupt | Repair its archive with step 4's `par2 repair` (no `-p`) and reassemble with step 5, or use another copy if the run wrote one. |
 | A tape has **no `manifest.json`** at its LTFS root | The tape was **not completely written** (the manifest is written last as the completeness signal) | Discard that tape and recover from another copy if the run wrote one. |
 | The barcode label is unreadable | You cannot identify the tape by its label | The LTFS **volume name equals the barcode** (`mkltfs` sets it); read it from the mounted volume or the captured index, then cross-reference the report. |
 

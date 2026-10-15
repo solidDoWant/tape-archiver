@@ -139,7 +139,7 @@ func TestSplitUniformWidthBeyond999(t *testing.T) {
 	sort.Strings(sorted)
 	assert.Equal(t, paths, sorted, "lexical filename order must equal slice order")
 
-	// filepath.Glob mirrors the shell's lexical `cat archive.[0-9]*`.
+	// Lexical glob order mirrors the recovery procedure's sorted reassembly.
 	matches, err := filepath.Glob(filepath.Join(dir, "archive.[0-9]*"))
 	require.NoError(t, err)
 	require.Len(t, matches, sliceCount)
@@ -154,7 +154,7 @@ func TestSplitUniformWidthBeyond999(t *testing.T) {
 	}
 
 	assert.True(t, bytes.Equal(data, reconstructed),
-		"documented archive.[0-9]* reassembly must reconstruct the input")
+		"documented sorted reassembly must reconstruct the input")
 }
 
 // TestSplitCancelledMidSlice: only per-read cancellation lets Split return

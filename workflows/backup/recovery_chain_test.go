@@ -33,14 +33,14 @@ const (
 func TestRecoveryChain_PAR2RepairsWithinCapacity(t *testing.T) {
 	requireRecoveryTools(t)
 
-	dir := t.TempDir()
+	scratch := t.TempDir()
 	identityPath, recipient := generateAgeKeypair(t)
-	slices, want := buildArchive(t, dir, recipient)
+	slices, want := buildArchive(t, docArchiveDirPath(t, scratch), recipient)
 
 	// Corrupt a small run of bytes in one slice — well within 30% redundancy.
 	corruptFile(t, slices[len(slices)/2], 128, 200)
 
-	got := recoverArchive(t, dir, identityPath, true)
+	got := recoverArchive(t, scratch, identityPath, docCodeBlock(t, "bin/par2 repair"))
 	assert.Equal(t, want, got, "PAR2 repair must reconstruct the exact bytes, so the archive recovers fully")
 }
 
@@ -141,30 +141,28 @@ func buildArchive(t *testing.T, dir, recipient string) (slices []string, payload
 	return slices, payload
 }
 
-// recoverArchive runs the documented recovery and returns payload.bin's bytes.
-func recoverArchive(t *testing.T, dir, identityPath string, repair bool) []byte {
+// recoverArchive runs repairCommand (if set) and the documented step-5
+// reassembly against scratch's archive directory, then decrypts and unpacks the
+// result and returns payload.bin's bytes.
+func recoverArchive(t *testing.T, scratch, identityPath, repairCommand string) []byte {
 	t.Helper()
 
-	if repair {
-		// -p (documented step 4) purges PAR2 artifacts so the archive.[0-9]*
-		// reassembly glob matches only clean slices.
-		runRecoveryCmd(t, dir, "par2", "repair", "-p", "archive.par2")
+	if repairCommand != "" {
+		runDocSnippet(t, scratch, repairCommand)
 	}
 
-	slices := parSlices(t, dir)
-	stream := concatSlices(t, slices)
+	runDocSnippet(t, scratch, docCodeBlock(t, "> /scratch/archive.age"))
 
-	agePath := filepath.Join(dir, "archive.age")
-	require.NoError(t, os.WriteFile(agePath, stream, 0o644))
+	agePath := filepath.Join(scratch, "archive.age")
 
-	zstPath := filepath.Join(dir, "archive.tar.zst")
-	runRecoveryCmd(t, dir, "age", "-d", "-i", identityPath, "-o", zstPath, agePath)
+	zstPath := filepath.Join(scratch, "archive.tar.zst")
+	runRecoveryCmd(t, scratch, "age", "-d", "-i", identityPath, "-o", zstPath, agePath)
 
-	tarPath := filepath.Join(dir, "archive.tar")
-	runRecoveryCmd(t, dir, "zstd", "-d", "-f", zstPath, "-o", tarPath)
+	tarPath := filepath.Join(scratch, "archive.tar")
+	runRecoveryCmd(t, scratch, "zstd", "-d", "-f", zstPath, "-o", tarPath)
 
 	out := t.TempDir()
-	runRecoveryCmd(t, dir, "tar", "-xf", tarPath, "-C", out)
+	runRecoveryCmd(t, scratch, "tar", "-xf", tarPath, "-C", out)
 
 	got, err := os.ReadFile(filepath.Join(out, "payload.bin"))
 	require.NoError(t, err)
@@ -219,17 +217,6 @@ func runRecoveryCmd(t *testing.T, dir, name string, args ...string) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	require.NoErrorf(t, err, "%s %v: %s", name, args, out)
-}
-
-// parSlices returns the archive.NNN slice files in dir, sorted by name.
-func parSlices(t *testing.T, dir string) []string {
-	t.Helper()
-
-	matches, err := filepath.Glob(filepath.Join(dir, "archive.[0-9]*"))
-	require.NoError(t, err)
-	require.NotEmpty(t, matches)
-
-	return matches
 }
 
 // concatSlices concatenates the slice files in order and returns the bytes.
