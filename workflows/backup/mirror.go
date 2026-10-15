@@ -14,14 +14,13 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// mirrorTimeout bounds the reprovision: it regenerates media for every mirrored
-// barcode and then waits for vtllibrary to re-read its config.
+// mirrorTimeout bounds the mirror: library moves plus regenerating every
+// mirrored volume.
 const mirrorTimeout = 10 * time.Minute
 
 // runMirrorLibrary makes the virtual library mirror the real one before the tape
-// path runs. It is a no-op on a real run — cfg.Library.MirrorSourceChanger is set
-// only by runsubmit.ApplyDryRun, and only for a dry run — so a real run never
-// dispatches this activity at all.
+// path runs. cfg.Library.MirrorSourceChanger is set only by
+// runsubmit.ApplyDryRun, so a real run never dispatches this activity.
 func runMirrorLibrary(ctx workflow.Context, cfg config.Config) error {
 	if cfg.Library.MirrorSourceChanger == "" {
 		return nil
@@ -51,33 +50,16 @@ func runMirrorLibrary(ctx workflow.Context, cfg config.Config) error {
 	return nil
 }
 
-// The MirrorLibrary activity (dry runs only) makes the virtual mhvtl library the
-// run targets mirror the real library's slot inventory, so a dry run rehearses
-// the conditions the real run would actually meet. It runs once, before the tape
-// path, because every later phase (Load in particular) reconciles against the
-// library's contents and must see the mirrored state.
-//
-// It is gated entirely on config.Library.MirrorSourceChanger, which only
-// runsubmit.ApplyDryRun sets and only on a dry run. A real run leaves it empty
-// and the workflow skips this activity outright.
-//
-// Safety: the source (real) changer is only ever read — READ ELEMENT STATUS. All
-// mutation lands on mhvtl's own library_contents/media and its own daemon (see
-// pkg/mhvtl), so this cannot disturb real media even if pointed at the wrong
-// device.
-
 // MirrorLibraryInput identifies the real library to mirror from and the virtual
 // library to mirror onto.
 type MirrorLibraryInput struct {
 	// SourceChanger is the REAL changer device to read the inventory from.
 	SourceChanger string
-	// TargetChanger is the VIRTUAL (mhvtl) changer the run targets, polled to
-	// confirm the reload landed.
+	// TargetChanger is the VIRTUAL (mhvtl) changer the run targets.
 	TargetChanger string
 }
 
-// MirrorLibraryResult reports what the mirror produced, for the run log and the
-// report's dry-run provenance.
+// MirrorLibraryResult reports what the mirror produced.
 type MirrorLibraryResult struct {
 	// OccupiedSlots is how many storage slots hold a tape after mirroring.
 	OccupiedSlots int
@@ -88,16 +70,11 @@ type MirrorLibraryResult struct {
 // MirrorActivities hosts the MirrorLibrary activity.
 type MirrorActivities struct{}
 
-// newMirrorActivities returns the mirror activities.
 func newMirrorActivities() *MirrorActivities { return &MirrorActivities{} }
 
-// MirrorLibrary reads the real library's inventory and rewrites the virtual
-// library to match, then waits for the virtual changer to report the mirrored
-// contents before returning — so the tape path never starts against a
-// half-reloaded slot map.
-//
-// MaximumAttempts is 1: it rewrites media and signals a daemon, and a blind retry
-// on a partially-applied reprovision is not obviously safer than failing the run.
+// MirrorLibrary rearranges the virtual library to match the real one's slot
+// inventory. The real changer is only read. Not retried: a partly applied mirror
+// is better reported than blindly redone.
 func (a *MirrorActivities) MirrorLibrary(
 	ctx context.Context,
 	input MirrorLibraryInput,
@@ -120,17 +97,8 @@ func (a *MirrorActivities) MirrorLibrary(
 		"sourceChanger", input.SourceChanger, "targetChanger", input.TargetChanger,
 		"occupiedSlots", occupied, "totalSlots", len(source.Slots))
 
-	reprovisioner := mhvtl.New()
-
-	if err := reprovisioner.Mirror(ctx, source); err != nil {
-		return MirrorLibraryResult{}, err
-	}
-
-	target := tape.NewChanger(input.TargetChanger)
-	if err := reprovisioner.WaitReady(ctx, target, source); err != nil {
-		return MirrorLibraryResult{}, fmt.Errorf(
-			"virtual library %s did not come back with the mirrored contents: %w",
-			input.TargetChanger, err)
+	if err := mhvtl.New().Mirror(ctx, tape.NewChanger(input.TargetChanger), source); err != nil {
+		return MirrorLibraryResult{}, fmt.Errorf("mirror onto virtual library %s: %w", input.TargetChanger, err)
 	}
 
 	slog.InfoContext(ctx, "dry run: virtual library now mirrors the real one",

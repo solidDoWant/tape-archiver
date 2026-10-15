@@ -1,19 +1,12 @@
 # tape-archiver data worker — REFERENCE unit for ubuntu-storage-host-01.
 #
-# This is executable documentation, not blessed production config. It is a
-# correct-by-default starting point for the single known storage host, kept in
-# tree so the runtime requirements in SPEC §4.1 and docs/data-worker-image.md
-# cannot drift from prose. The host's copy is "managed out-of-band" — an
-# operator installs and tunes it (see deploy/data-worker/README.md).
+# Executable documentation of the runtime requirements in SPEC §4.1. The host's
+# copy is managed out-of-band (see README.md). systemd is the sole supervisor:
+# `docker run` in the foreground with --rm.
 #
-# It runs the Nix-built data-worker OCI image directly via `docker run` with
-# systemd as the SOLE supervisor: foreground (no `-d`), Type=simple, `--rm`.
-# No docker-compose — a single container needs no orchestration, and a second
-# supervisor would fight systemd over restarts.
-#
-# Before enabling: install /etc/tape-archiver/data-worker.env (copy
-# data-worker.env.example), pin TAPE_ARCHIVER_IMAGE below to the exact tag built
-# by `make build-images`, and confirm the drives' /dev/sg* nodes with `lsscsi`.
+# Before enabling: install /etc/tape-archiver/data-worker.env, pin
+# TAPE_ARCHIVER_IMAGE, and set REQUIRED_DEVICES to this host's real tape nodes
+# (`lsscsi -g`; sg numbers follow discovery order).
 
 [Unit]
 Description=tape-archiver data worker (reference unit for ubuntu-storage-host-01)
@@ -21,123 +14,70 @@ Documentation=https://github.com/solidDoWant/tape-archiver/blob/master/docs/data
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
+# A persistently broken host lands in `failed` instead of restarting forever.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
 
 [Service]
 Type=simple
 
-# Content-anchored image tag — the short nixpkgs revision or a release version
-# emitted by `make build-images`. NEVER a floating `:latest`, and `--pull=never`
-# below means the tag must already be present in the local Docker daemon; the
-# unit never reaches out to a registry on start.
+# Content-anchored tag; --pull=never means it must already be loaded.
 Environment=TAPE_ARCHIVER_IMAGE=ghcr.io/soliddowant/tape-archiver/data-worker:REPLACE_WITH_PINNED_TAG
+# The real library's nodes. A missing one fails the start, naming it.
+Environment="REQUIRED_DEVICES=/dev/nst0 /dev/nst1 /dev/sch0 /dev/sg0 /dev/sg1 /dev/sg2 /dev/zfs /dev/fuse"
 
-# All run configuration lives in the env file, never hardcoded in this unit.
-# ROLE=data, the Temporal connection, and TAPE_STAGING_DIR are supplied there and
-# passed through with --env-file (the recovery set is baked into the image, so no
-# TAPE_RECOVERY_*_DIR need be set). EnvironmentFile makes
-# ${TAPE_ARCHIVER_STOP_TIMEOUT} (below) overridable from the same file.
 EnvironmentFile=/etc/tape-archiver/data-worker.env
 
-# The pool bind mount only propagates the on-demand .zfs/snapshot/<snap>/
-# automounts into the container when the host mount is a shared mount. This is
-# THE silent-data-loss footgun: get it wrong and snapshot contents are simply
-# invisible inside the container — no error, just missing files. Make the pool
-# subtree rshared before every start so bind-propagation=rslave has effect.
-ExecStartPre=/bin/mount --make-rshared /mnt/bulk-pool-01
-# Clear any leftover container from an unclean stop (ignore failure if none).
-ExecStartPre=-/usr/bin/docker rm -f tape-archiver-data-worker
+RuntimeDirectory=tape-archiver-data-worker
+ExecStartPre=/bin/sh -c 'F=""; for d in $REQUIRED_DEVICES; do \
+      [ -e "$d" ] || { echo "required device $d is missing" >&2; exit 1; }; \
+      F="$F --device $d"; \
+    done; \
+    echo "DEVICE_FLAGS=$F" > /run/tape-archiver-data-worker/devices.env'
+EnvironmentFile=-/run/tape-archiver-data-worker/devices.env
 
-# --- Dry-run (mhvtl virtual library) support — OPTIONAL ----------------------
-# A dry run exercises the full tape path against the mhvtl virtual library
-# instead of the real one (docs/tapectl.md). So that a dry run is a true
-# rehearsal, the worker makes the virtual library mirror the real one before the
-# tape path runs; that needs three things beyond the virtual library's own SCSI
-# nodes:
+# Optional dry-run support (docs/tapectl.md): the mhvtl virtual library, passed
+# through only when all of it is present — a one-drive virtual library cannot
+# rehearse a two-copy run. Nodes are resolved from the stable /dev/mhvtl/* udev
+# symlinks and mapped at both their kernel path and the stable path. The mirror
+# also needs /etc/mhvtl, the media home (MHVTL_HOME_PATH in mhvtl.conf, mounted
+# at the same path), and --ipc=host to reach the daemons' message queue.
 #
-#   * /dev/mhvtl<id> control devices — char major 236, minor = the daemon queue
-#     ID in /etc/mhvtl/device.conf (10 = library, 11/12 = drives).
-#   * /etc/mhvtl and the media home bind-mounted read-write, so the worker can
-#     rewrite library_contents.<id> and regenerate media with make_vtl_media.
-#     That tooling is BUNDLED IN THE IMAGE (nix/data-worker-image.nix) — no
-#     mhvtl userspace, and no version/path coupling, is required on the host.
-#     The media home is NOT hardcoded here: it is whatever MHVTL_HOME_PATH in
-#     /etc/mhvtl/mhvtl.conf says, which is a per-host choice (this project's
-#     storage host puts it on the bulk pool, since a dry run writes real volumes
-#     and would otherwise fill the root disk). The ExecStartPre below reads that
-#     file the same way mhvtl's own tooling does — by sourcing it — and mounts
-#     the result at the same path inside the container, which is the path the
-#     worker will resolve from the same mhvtl.conf (pkg/mhvtl). Mounting a
-#     guessed path instead produced a worker that wrote a full set of media into
-#     its own ephemeral filesystem and reported success (issue #335).
-#     If the media home already sits under another bind mount (the bulk pool,
-#     say), this extra mount is redundant but harmless.
-#   * --pid=host, so the worker can send SIGHUP to the host's vtllibrary daemon.
-#     SIGHUP makes vtllibrary re-read library_contents.<id> in place
-#     (rereadconfig() in usr/cmd/vtllibrary.c). The daemon is NOT restarted and
-#     the kernel module is NOT reloaded, so /dev/sch*, /dev/st*, and /dev/sg*
-#     keep their numbers and this container's --device passthrough stays valid.
-#     Reloading the module instead would invalidate the passed-through nodes,
-#     which are mknod'd into the container by major:minor at start.
-#
-# Nothing here can touch a real library: the reprovision only rewrites mhvtl's
-# own config/media and signals its own daemon — it issues no destructive SCSI.
-#
-# All of it is optional. The flags stay empty on a host with no mhvtl, and
-# dry-run submissions already fail closed unless the MHVTL_* env vars are set.
-# Verify the virtual library's node numbers on THIS host with `lsscsi -g`; like
-# the real ones they are assigned by discovery order. Prefer stable udev
-# symlinks if the host defines them.
-#
-# NOTE: ExecStart references this as unbraced $MHVTL_DEVICE_FLAGS deliberately —
-# systemd word-splits $VAR into separate arguments but passes ${VAR} as a single
-# one, so the braced form would hand docker one giant unparseable argument (and
-# an empty value must expand to zero arguments, not one empty one).
-EnvironmentFile=-/run/tape-archiver-data-worker/mhvtl.env
-ExecStartPre=/bin/sh -c 'D=/run/tape-archiver-data-worker; mkdir -p "$D"; F=""; \
-    if [ -e /dev/mhvtl10 ]; then \
-      for d in /dev/mhvtl10 /dev/mhvtl11 /dev/mhvtl12 \
-               /dev/sch2 /dev/nst2 /dev/nst3 /dev/sg22 /dev/sg23 /dev/sg24; do \
-        [ -e "$d" ] && F="$F --device $d"; \
-      done; \
-      F="$F --pid=host"; \
-      F="$F --mount type=bind,source=/etc/mhvtl,target=/etc/mhvtl"; \
+# After restarting mhvtl, check `systemctl status vtltape@11 vtltape@12` and
+# `lsscsi -g`: vtltape@.service uses KillMode=none, so an old daemon can survive
+# a stop and make its replacement exit.
+ExecStartPre=/bin/sh -c 'F=""; N="changer drive0 drive1 sg-changer sg-drive0 sg-drive1"; P=0; \
+    for n in $N; do [ -e "/dev/mhvtl/$n" ] && P=$((P+1)); done; \
+    if [ "$P" = 6 ]; then \
+      for n in $N; do R=$(readlink -f "/dev/mhvtl/$n"); F="$F --device $R --device $R:/dev/mhvtl/$n"; done; \
+      F="$F --ipc=host --mount type=bind,source=/etc/mhvtl,target=/etc/mhvtl"; \
       H=$(. /etc/mhvtl/mhvtl.conf >/dev/null 2>&1; echo "$MHVTL_HOME_PATH"); \
       [ -d "$H" ] && F="$F --mount type=bind,source=$H,target=$H"; \
+    elif [ "$P" != 0 ]; then \
+      echo "mhvtl is only partly present ($P of 6 /dev/mhvtl nodes); dry runs are disabled" >&2; \
     fi; \
-    echo "MHVTL_DEVICE_FLAGS=$F" > "$D/mhvtl.env"'
+    echo "MHVTL_DEVICE_FLAGS=$F" > /run/tape-archiver-data-worker/mhvtl.env'
+EnvironmentFile=-/run/tape-archiver-data-worker/mhvtl.env
 
-# Device passthrough (SPEC §4.1): both drives' non-rewinding nodes, the changer,
-# and the drives' generic SCSI (/dev/sg*) nodes for raw SG_IO. Verify the sg*
-# numbers on THIS host with `lsscsi -g` — they are assigned by discovery order
-# and differ between hosts. /dev/zfs is read-only ioctls for `zfs get`; /dev/fuse
-# is required because LTFS is FUSE-based.
-#
-# Capabilities: SYS_ADMIN — LTFS/FUSE cannot mount without it. SYS_RAWIO — the
-# changer, `sg_raw`, and LTFS issue raw SCSI via SG_IO (e.g. READ ELEMENT
-# STATUS); without it library moves fail with EPERM.
+# Snapshot automounts under .zfs/snapshot only reach the container if the host
+# mount is shared; without this they are silently invisible.
+ExecStartPre=/bin/mount --make-rshared /mnt/bulk-pool-01
+ExecStartPre=-/usr/bin/docker rm -f tape-archiver-data-worker
+
+# SYS_ADMIN: LTFS is FUSE. SYS_RAWIO: SG_IO for the changer, sg_raw and LTFS.
+# The flag variables are unbraced so systemd word-splits them.
 ExecStart=/usr/bin/docker run --rm --name tape-archiver-data-worker \
     --pull=never \
     --env-file /etc/tape-archiver/data-worker.env \
-    --device /dev/nst0 \
-    --device /dev/nst1 \
-    --device /dev/sch0 \
-    --device /dev/sg0 \
-    --device /dev/sg1 \
-    --device /dev/sg2 \
-    --device /dev/zfs \
-    --device /dev/fuse \
+    $DEVICE_FLAGS \
+    $MHVTL_DEVICE_FLAGS \
     --cap-add SYS_ADMIN \
     --cap-add SYS_RAWIO \
     --mount type=bind,source=/mnt/bulk-pool-01,target=/mnt/bulk-pool-01,bind-propagation=rslave \
-    $MHVTL_DEVICE_FLAGS \
     ${TAPE_ARCHIVER_IMAGE}
 
-# Graceful shutdown: SIGTERM lets the worker stop polling and drain its in-flight
-# activity instead of being killed mid-write at Docker's 10 s default. The stop
-# timeout defaults generously; raise TAPE_ARCHIVER_STOP_TIMEOUT (in the env file)
-# and TimeoutStopSec together for hosts that write very large tapes and need the
-# current activity to fully complete before reboot. TimeoutStopSec must exceed
-# the `docker stop` timeout so systemd does not SIGKILL the container first.
+# Let an in-flight activity drain. TimeoutStopSec must exceed the docker stop
+# timeout so systemd does not SIGKILL first.
 ExecStop=/bin/sh -c '/usr/bin/docker stop --time="$${TAPE_ARCHIVER_STOP_TIMEOUT:-300}" tape-archiver-data-worker'
 TimeoutStopSec=360
 

@@ -85,15 +85,8 @@ let
     mt-st # `mt` — drive control on the non-rewinding nst nodes
     sg3_utils # sg_logs (TapeAlert / log pages), sg_turs (readiness) (SPEC §3)
     lsscsi # enumerate SCSI tape/changer devices
-    mhvtlUserspace # make_vtl_media / mktape — dry runs only. Before a dry run
-    # the worker reprovisions the mhvtl virtual library so it mirrors the real
-    # one, making the rehearsal faithful (a real library short of blanks fails
-    # the dry run too). Bundling the tooling here rather than requiring it on
-    # the host keeps its version pinned by this same nixpkgs, like every other
-    # tool above, instead of coupling the worker to whatever the host happens to
-    # have installed. The vtllibrary/vtltape daemons are NOT run from here —
-    # they stay host-side; the worker only rewrites library_contents.<id>,
-    # regenerates media, and SIGHUPs the daemon to re-read it in place. Inert on
+    mhvtlUserspace # make_vtl_media / mktape, for the dry-run mirror of the real
+    # library onto mhvtl (pkg/mhvtl). The mhvtl daemons stay host-side. Inert on
     # a deployment with no virtual library.
     zfs # `zfs get` — the data-side Resolve/Verify/Prepare activities read
     # dataset properties (logicalreferenced, mountpoint, user properties) and
