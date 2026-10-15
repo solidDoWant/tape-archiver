@@ -38,7 +38,7 @@ buildNpmPackage {
   # Pinned npm dependency hash: refresh with `make update-dependencies` (or by
   # setting this to lib.fakeHash and reading the value nix reports on the
   # failed build) whenever web/package-lock.json changes.
-  npmDepsHash = "sha256-rkn5FDYe0io2PrlLUlnf2gljmG21jL5C/SYPdVhkbNM=";
+  npmDepsHash = "sha256-H0xfLRC3AbbwPPkcBMGujiarhqFCBX+6R81SPjY7ts4=";
 
   # `npm run build` runs `tsc -b && vite build` (web/package.json).
   # web/vite.config.ts hardcodes build.outDir to ../cmd/web/dist (relative to
