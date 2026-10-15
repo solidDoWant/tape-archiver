@@ -1,0 +1,35 @@
+--- a/src/libltfs/tape.c	2026-10-15 03:26:07.207225717 +0000
++++ b/src/libltfs/tape.c	2026-10-15 03:26:07.225542419 +0000
+@@ -2529,6 +2529,7 @@
+ 	bool reload = false;
+ 	bool loaded = false;
+ 	bool supported = true;
++	bool relock = false;
+ 	unsigned char mp_dev_config_ext[TC_MP_DEV_CONFIG_EXT_SIZE];
+ 
+ 	CHECK_ARG_NULL(dev, -LTFS_NULL_ARG);
+@@ -2558,6 +2559,11 @@
+ 	/* If cartridge is loaded and append-only mode is to be disabled,
+ 	   the cartridge has to be unloaded before sending mode select. */
+ 	if (loaded && !enable && (mp_dev_config_ext[21]& 0xF0) == 0x10) {
++		/* tape_load_tape() holds PREVENT MEDIUM REMOVAL; release it or the unload
++		   fails with EDEV_MEDIUM_LOCKED on real drives. */
++		relock = dev->medium_locked;
++		tape_allow_medium_removal(dev, false);
++
+ 		ret = dev->backend->unload(dev->backend_data, &dev->position);
+ 		if (ret == -EDEV_CLEANING_REQUIRED) {
+ 			/* Ignore cleaning sense */
+@@ -2605,6 +2611,12 @@
+ 			ltfsmsg(LTFS_ERR, 17152E, "Reload", ret);
+ 			return ret;
+ 		}
++
++		if (relock) {
++			ret = tape_prevent_medium_removal(dev);
++			if (ret < 0)
++				return ret;
++		}
+ 	}
+ 
+ 	if (supported) {
