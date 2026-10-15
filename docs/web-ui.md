@@ -344,7 +344,8 @@ All of this updates in place as the run progresses — no manual reload. Status,
 pause changes are backed by a live server-sent event stream (the phase rail refreshes
 from it too), so the moment something changes the page reflects it within a couple of
 seconds. If the underlying connection drops, the page shows a "connection lost" notice
-and keeps retrying automatically.
+and keeps retrying automatically with backoff, including when a reconnect is rejected
+with an HTTP error (e.g. a 502 during a web rollout).
 
 A phase whose next step has been handed to Temporal but never picked up by a worker is
 not shown as simply running. Once it has waited more than 60 seconds — longer than a
