@@ -909,3 +909,93 @@ func TestWritePathPauseCancelIsNotTimeout(t *testing.T) {
 		})
 	}
 }
+
+// TestWritePathOrchestrationFaultReturnsTapes pins #389: a Write-phase fault
+// after Load (bad barcode, no session) returns the drive-set's tapes to their
+// slots and the error says where they were left.
+func TestWritePathOrchestrationFaultReturnsTapes(t *testing.T) {
+	tests := []struct {
+		name           string
+		barcodes       []tape.Barcode
+		noSession      bool
+		returnErr      error
+		wantSubstrings []string
+	}{
+		{
+			name:           "empty barcode",
+			barcodes:       []tape.Barcode{"TA0100L6", ""},
+			wantSubstrings: []string{"empty barcode", "returned to their storage slots", "slot 100", "slot 101"},
+		},
+		{
+			name:           "duplicate barcode",
+			barcodes:       []tape.Barcode{"BC-DUP", "BC-DUP"},
+			wantSubstrings: []string{"duplicate barcode", "returned to their storage slots", "slot 100", "slot 101"},
+		},
+		{
+			name:           "session creation fails",
+			barcodes:       []tape.Barcode{"TA0100L6", "TA0101L6"},
+			noSession:      true,
+			wantSubstrings: []string{"session", "returned to their storage slots", "slot 100", "slot 101"},
+		},
+		{
+			name:           "returning the tapes fails",
+			barcodes:       []tape.Barcode{"TA0100L6", ""},
+			returnErr:      errors.New("move medium: robot jammed"),
+			wantSubstrings: []string{"empty barcode", "may still be in the drives", "robot jammed"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+
+			env := suite.NewTestWorkflowEnvironment()
+			env.RegisterWorkflow(writePauseTestWorkflow)
+
+			if !test.noSession {
+				env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+			}
+
+			env.RegisterActivity(newLoadActivities())
+			env.RegisterActivity(newEjectActivities())
+
+			registry := newMountRegistry()
+			env.RegisterActivity(newWriteActivities(registry, t.TempDir()))
+			env.RegisterActivity(newTeardownActivities(registry))
+
+			env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
+					loaded := make([]LoadedTape, len(input.Tapes))
+					for i, assignment := range input.Tapes {
+						loaded[i] = loadedFromAssignment(assignment)
+						loaded[i].Barcode = test.barcodes[i]
+					}
+
+					return loaded, nil
+				})
+
+			var returned []LoadedTape
+
+			env.OnActivity((&LoadActivities{}).ReturnToSlots, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input ReturnToSlotsInput) error {
+					returned = append(returned, input.Tapes...)
+
+					return test.returnErr
+				})
+
+			env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: twoDriveConfig(3600), Set: twoTapeSet()})
+
+			require.True(t, env.IsWorkflowCompleted())
+
+			err := env.GetWorkflowError()
+			require.Error(t, err)
+
+			for _, want := range test.wantSubstrings {
+				assert.ErrorContains(t, err, want)
+			}
+
+			require.Len(t, returned, 2, "every tape of the drive-set is returned")
+			assert.Equal(t, []int{100, 101}, []int{returned[0].SourceSlot, returned[1].SourceSlot})
+		})
+	}
+}

@@ -160,6 +160,47 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) (_ []LoadedT
 	return loaded, nil
 }
 
+// ReturnToSlotsInput is the payload for the ReturnToSlots activity.
+type ReturnToSlotsInput struct {
+	Changer string
+	Tapes   []LoadedTape
+}
+
+// ReturnToSlots unloads loaded tapes back to their source slots after a fault
+// that stops the drive-set before Write (#389). Drives are paired by identity,
+// not barcode, so an empty or duplicate barcode still unloads the right drive;
+// an already-empty drive is skipped. Single attempt.
+func (a *LoadActivities) ReturnToSlots(ctx context.Context, input ReturnToSlotsInput) error {
+	changer := tape.NewChanger(input.Changer)
+
+	inv, err := changer.Inventory(ctx)
+	if err != nil {
+		return fmt.Errorf("inventory for returning tapes: %w", err)
+	}
+
+	var errs []error
+
+	for _, lt := range input.Tapes {
+		de, err := driveElementFor(ctx, tape.NewDrive(lt.STDevice), inv)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("drive %d (%s): %w", lt.DriveIndex, lt.STDevice, err))
+
+			continue
+		}
+
+		if !de.Loaded {
+			continue
+		}
+
+		if err := changer.Unload(ctx, lt.SourceSlot, de.Address); err != nil {
+			errs = append(errs, fmt.Errorf("unload tape %q from drive %d to slot %d: %w",
+				lt.Barcode, lt.DriveIndex, lt.SourceSlot, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // driveElementFor pairs a drive node to its changer data-transfer element by
 // unit serial (INQUIRY VPD 0x80, no media motion) vs. the changer's DVCID
 // (#137). It never falls back to set position.
@@ -522,6 +563,36 @@ func loadPhase(ctx workflow.Context, cfg config.Config, set driveSet) ([]LoadedT
 	}
 
 	return loaded, nil
+}
+
+// returnLoadedTapes returns a drive-set's loaded tapes to their slots after a
+// fault that stops it before Write, and annotates cause with where they were
+// left (#389). Disconnected so a cancelled run still unloads.
+func returnLoadedTapes(ctx workflow.Context, cfg config.Config, loaded []LoadedTape, cause error) error {
+	disconnected, cancel := workflow.NewDisconnectedContext(ctx)
+	defer cancel()
+
+	dataCtx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: ejectTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+	})
+
+	var acts *LoadActivities
+
+	input := ReturnToSlotsInput{Changer: cfg.Library.Changer, Tapes: loaded}
+	if err := workflow.ExecuteActivity(dataCtx, acts.ReturnToSlots, input).Get(dataCtx, nil); err != nil {
+		return fmt.Errorf("%w; returning the drive-set's tapes to their storage slots also failed, "+
+			"so they may still be in the drives: %w", cause, err)
+	}
+
+	where := make([]string, 0, len(loaded))
+	for _, lt := range loaded {
+		where = append(where, fmt.Sprintf("%q from drive %d to slot %d", lt.Barcode, lt.DriveIndex, lt.SourceSlot))
+	}
+
+	return fmt.Errorf("%w; the drive-set's tapes were returned to their storage slots: %s",
+		cause, strings.Join(where, ", "))
 }
 
 // EjectInput is the payload for the Eject activity.

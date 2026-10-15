@@ -78,8 +78,9 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 
 		written, failed, err := writePhase(ctx, cfg, state, loaded)
 		if err != nil {
-			// An orchestration fault that touched no tape: fail rather than pause.
-			return err
+			// An orchestration fault that wrote no tape: fail rather than pause,
+			// but never leave the loaded tapes in the drives.
+			return returnLoadedTapes(ctx, cfg, loaded, err)
 		}
 
 		// Eject the failed tapes too, freeing their drives and slots for fresh

@@ -789,6 +789,7 @@ func TestRunTapePathRejectsBadBarcodesBeforeMount(t *testing.T) {
 
 					return loaded, nil
 				})
+			env.OnActivity((&LoadActivities{}).ReturnToSlots, mock.Anything, mock.Anything).Return(nil)
 
 			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
 				func(_ context.Context, _ FormatInput) error {
