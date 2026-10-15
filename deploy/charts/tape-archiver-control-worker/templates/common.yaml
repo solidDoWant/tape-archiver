@@ -217,6 +217,16 @@ mTLS or CA verification.
   {{- $_ := set $env "DISCORD_FAILURE_WEBHOOK_URL" $webhookValue -}}
 {{- end -}}
 
+{{/* METRICS_SCRAPE_WAIT_TIMEOUT: no wait unless a PodMonitor will scrape. The grace
+   period below covers it plus shutdown so SIGTERM never ends in SIGKILL (#390). */}}
+{{- $scrapeWaitSeconds := 0 -}}
+{{- if not (kindIs "invalid" .Values.config.controlWorker.metricsScrapeWaitSeconds) -}}
+  {{- $scrapeWaitSeconds = int .Values.config.controlWorker.metricsScrapeWaitSeconds -}}
+{{- else if .Values.config.controlWorker.metrics.enabled -}}
+  {{- $scrapeWaitSeconds = 60 -}}
+{{- end -}}
+{{- $_ := set $env "METRICS_SCRAPE_WAIT_TIMEOUT" (printf "%ds" $scrapeWaitSeconds) -}}
+
 {{/* TAPE_K8S_DATASET_PARENT: only set when configured (SPEC §3). */}}
 {{- if .Values.config.controlWorker.k8sDatasetParent -}}
   {{- $_ := set $env "TAPE_K8S_DATASET_PARENT" .Values.config.controlWorker.k8sDatasetParent -}}
@@ -352,7 +362,7 @@ mTLS or CA verification.
     "env" $env
   ))
   "pod" (dict
-    "terminationGracePeriodSeconds" 60
+    "terminationGracePeriodSeconds" (add $scrapeWaitSeconds 30)
   )
   "podDisruptionBudget" (dict "enabled" (gt ($replicas | int) 1) "minAvailable" 1)
 -}}

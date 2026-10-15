@@ -301,6 +301,16 @@ chart-lint: ## Fetch chart deps, lint, and render the control-worker chart shape
 		| grep -q '^kind: ScaledJob' || { echo "chart-lint: ScaledJob not rendered on the scaledjob path"; exit 1; }
 	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $(CHART_LINT_SCALEDJOB_ARGS) \
 		| grep -q '^kind: Deployment' && { echo "chart-lint: Deployment leaked onto the scaledjob path"; exit 1; } || true
+	# The grace period must cover the final-scrape wait plus 30s of shutdown, or every
+	# SIGTERM ends in SIGKILL (issue #390).
+	@for args in "" "--set config.controlWorker.metrics.enabled=true" \
+	  "--set config.controlWorker.metrics.enabled=true --set config.controlWorker.metricsScrapeWaitSeconds=120"; do \
+	  out=$$(helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) $$args) || exit 1; \
+	  grace=$$(echo "$$out" | sed -n 's/^ *terminationGracePeriodSeconds: *//p'); \
+	  wait=$$(echo "$$out" | { grep -A1 'name: METRICS_SCRAPE_WAIT_TIMEOUT' || true; } | sed -n 's/^ *value: *"\{0,1\}\([0-9][0-9]*\)s"\{0,1\} *$$/\1/p'); \
+	  { [ -n "$$grace" ] && [ -n "$$wait" ] && [ "$$grace" -ge $$((wait + 30)) ]; } \
+	    || { echo "chart-lint: control-worker grace '$$grace' does not cover scrape wait '$$wait's + 30s ($$args)"; exit 1; }; \
+	done
 	# Enabling scaledjob without a KEDA credential renders a plaintext ScaledJob (for an
 	# unauthenticated Temporal): it must succeed and emit NO TriggerAuthentication.
 	helm template $(CONTROL_WORKER_CHART) --set config.temporal.address=$(CHART_LINT_ADDRESS) --set resources.controllers.main.type=scaledjob >/dev/null \
