@@ -100,7 +100,12 @@ func runBurnPath(ctx workflow.Context, cfg config.Config, state *runState) error
 
 	for setIndex, set := range sets {
 		if setIndex > 0 {
-			switch waitForBurnOperator(ctx, cfg, state, devicesOf(set), nil) {
+			outcome, cancelErr := waitForBurnOperator(ctx, cfg, state, devicesOf(set), nil)
+			if cancelErr != nil {
+				return cancelErr
+			}
+
+			switch outcome {
 			case pauseResumed:
 			case pauseAborted:
 				return fmt.Errorf("run aborted by operator before burning disc-set %d of %d", setIndex+1, len(sets))
@@ -134,7 +139,12 @@ func runBurnSet(ctx workflow.Context, cfg config.Config, state *runState, set bu
 
 		cause := joinFailedDiscs(failed)
 
-		switch waitForBurnOperator(ctx, cfg, state, devicesOfFailed(failed), cause) {
+		outcome, cancelErr := waitForBurnOperator(ctx, cfg, state, devicesOfFailed(failed), cause)
+		if cancelErr != nil {
+			return cancelErr
+		}
+
+		switch outcome {
 		case pauseResumed:
 			pending = retryBurnSet(failed)
 

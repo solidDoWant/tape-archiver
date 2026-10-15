@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 
@@ -864,4 +865,44 @@ func TestBurnPhaseDisabledIsNoOp(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 	require.NoError(t, env.GetWorkflowError())
+}
+
+// TestBurnPauseCancelIsNotTimeout pins #388: cancelling during a burn-failure or
+// between-set swap pause ends the run cancelled, not as a burn-wait timeout.
+func TestBurnPauseCancelIsNotTimeout(t *testing.T) {
+	tests := []struct {
+		name      string
+		copies    int
+		burnFails bool
+	}{
+		{name: "burn failure", copies: 1, burnFails: true},
+		{name: "between-set swap", copies: 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := burnConfig(test.copies, []string{"/dev/sr0"}, false, 3600)
+			env := newBurnPauseEnv(t)
+
+			var burnErr error
+			if test.burnFails {
+				burnErr = errors.New("optical burn failed")
+			}
+
+			env.OnActivity((&BurnActivities{}).BurnDisc, mock.Anything, mock.Anything).Return(BurnResult{}, burnErr)
+			env.OnActivity((&BurnActivities{}).VerifyDisc, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&FailureActivities{}).NotifyBurnPause, mock.Anything, mock.Anything).Return(nil)
+
+			env.RegisterDelayedCallback(env.CancelWorkflow, 30*time.Second)
+
+			env.ExecuteWorkflow(burnPauseTestWorkflow, cfg)
+
+			require.True(t, env.IsWorkflowCompleted())
+
+			err := env.GetWorkflowError()
+			require.Error(t, err)
+			assert.True(t, temporal.IsCanceledError(err), "the run ends cancelled, got: %v", err)
+			assert.NotContains(t, err.Error(), "did not resume or abort")
+		})
+	}
 }

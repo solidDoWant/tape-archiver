@@ -11,7 +11,8 @@ import (
 
 // waitForBurnOperator alerts the operator to a Burn-phase pause and waits for
 // resume, abort, or the burn-wait timeout. cause is nil for a between-set disc swap.
-func waitForBurnOperator(ctx workflow.Context, cfg config.Config, state *runState, devices []string, cause error) pauseOutcome {
+// A non-nil error is the run's cancellation.
+func waitForBurnOperator(ctx workflow.Context, cfg config.Config, state *runState, devices []string, cause error) (pauseOutcome, error) {
 	// Drain before the alert is dispatched so only genuinely-stale (pre-alert)
 	// resumes/aborts are discarded and a resume or abort prompted by this alert
 	// survives (issues #216, #254).
@@ -30,40 +31,11 @@ func waitForBurnOperator(ctx workflow.Context, cfg config.Config, state *runStat
 		ErrorSummary: errSummary,
 	}
 
-	outcome := waitForBurnCleared(ctx, cfg)
+	outcome, err := waitForPauseCleared(ctx, cfg.Delivery.OpticalBurn.EffectiveBurnWaitTimeout())
 
 	state.currentPause = CurrentPause{}
 
-	return outcome
-}
-
-// waitForBurnCleared blocks until the operator resumes or aborts, or the burn-wait
-// timeout elapses. There is no library state to poll, so resume is always explicit.
-func waitForBurnCleared(ctx workflow.Context, cfg config.Config) pauseOutcome {
-	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
-	abortCh := workflow.GetSignalChannel(ctx, OperatorAbortSignal)
-	timeoutTimer := workflow.NewTimer(ctx, cfg.Delivery.OpticalBurn.EffectiveBurnWaitTimeout())
-
-	outcome := pauseTimedOut
-
-	selector := workflow.NewSelector(ctx)
-	selector.AddReceive(resumeCh, func(c workflow.ReceiveChannel, _ bool) {
-		c.Receive(ctx, nil)
-
-		outcome = pauseResumed
-	})
-	selector.AddReceive(abortCh, func(c workflow.ReceiveChannel, _ bool) {
-		c.Receive(ctx, nil)
-
-		outcome = pauseAborted
-	})
-	selector.AddFuture(timeoutTimer, func(workflow.Future) {
-		outcome = pauseTimedOut
-	})
-
-	selector.Select(ctx)
-
-	return outcome
+	return outcome, err
 }
 
 // notifyBurnPause sends the best-effort burn-pause alert; failures are only logged
