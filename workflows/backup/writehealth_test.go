@@ -308,10 +308,10 @@ func TestMeasureWriteHealthRecordsMetrics(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.InDelta(t, 40.0, testutil.ToFloat64(activities.metrics.throughput.WithLabelValues("TAPE0002L6")), 0.01)
-	assert.InDelta(t, 1.0, testutil.ToFloat64(activities.metrics.belowFloor.WithLabelValues("TAPE0002L6")), 0.001)
-	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.repositions.WithLabelValues("TAPE0002L6")), 0.001)
-	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.tapeAlerts.WithLabelValues("TAPE0002L6")), 0.001)
+	assert.InDelta(t, 40.0, testutil.ToFloat64(activities.metrics.throughput.WithLabelValues("TAPE0002L6", "false")), 0.01)
+	assert.InDelta(t, 1.0, testutil.ToFloat64(activities.metrics.belowFloor.WithLabelValues("TAPE0002L6", "false")), 0.001)
+	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.repositions.WithLabelValues("TAPE0002L6", "false")), 0.001)
+	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.tapeAlerts.WithLabelValues("TAPE0002L6", "false")), 0.001)
 }
 
 // TestMeasureWriteHealthUnmeasurableMetrics: a write too small to judge exports
@@ -345,8 +345,45 @@ func TestMeasureWriteHealthUnmeasurableMetrics(t *testing.T) {
 	assert.True(t, measurement.Health.ThroughputUnmeasurable)
 	assert.Equal(t, 0, testutil.CollectAndCount(activities.metrics.throughput),
 		"an unmeasurable write must not export a throughput reading")
-	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.belowFloor.WithLabelValues(barcode)), 0.001,
+	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.belowFloor.WithLabelValues(barcode, "false")), 0.001,
 		"an unmeasurable write is not below floor")
+}
+
+// TestMeasureWriteHealthDryRunKeepsRealSeries: a dry run writes a virtual tape
+// carrying a real barcode; its reading must not overwrite the real tape's (#412).
+func TestMeasureWriteHealthDryRunKeepsRealSeries(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	activities := newWriteHealthActivities(reg)
+	require.NotNil(t, activities.metrics)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	const barcode = "JCY632L5"
+
+	// Real write: 6 GB in 60 s = 100 MB/s.
+	_, err := activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
+		Device: "/dev/does-not-exist", Barcode: barcode,
+		BytesWritten: 6_000_000_000, Elapsed: 60 * time.Second, FloorMBps: 40, FloorKnown: true,
+	})
+	require.NoError(t, err)
+
+	// Dry run of the same barcode: 2.4 GB in 120 s = 20 MB/s, below floor.
+	_, err = activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
+		Device: "/dev/does-not-exist", Barcode: barcode,
+		BytesWritten: 2_400_000_000, Elapsed: 120 * time.Second, FloorMBps: 40, FloorKnown: true,
+		DryRun: true,
+	})
+	require.NoError(t, err)
+
+	assert.InDelta(t, 100.0, testutil.ToFloat64(activities.metrics.throughput.WithLabelValues(barcode, "false")), 0.01,
+		"a dry run must not overwrite the real tape's throughput")
+	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.belowFloor.WithLabelValues(barcode, "false")), 0.001,
+		"a dry run must not mark the real tape below floor")
+	assert.InDelta(t, 20.0, testutil.ToFloat64(activities.metrics.throughput.WithLabelValues(barcode, "true")), 0.01)
+	assert.InDelta(t, 1.0, testutil.ToFloat64(activities.metrics.belowFloor.WithLabelValues(barcode, "true")), 0.001)
 }
 
 // TestNewWriteHealthActivitiesNilRegisterer asserts a nil registry is a safe no-op.
@@ -357,7 +394,7 @@ func TestNewWriteHealthActivitiesNilRegisterer(t *testing.T) {
 	assert.Nil(t, activities.metrics, "a nil registry disables the gauges")
 
 	assert.NotPanics(t, func() {
-		activities.metrics.record("TAPE0001L6", WriteHealth{Measured: true, ThroughputMBps: 100})
+		activities.metrics.record("TAPE0001L6", false, WriteHealth{Measured: true, ThroughputMBps: 100})
 	})
 }
 

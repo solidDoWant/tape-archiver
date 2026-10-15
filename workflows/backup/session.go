@@ -607,6 +607,7 @@ func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWri
 		Elapsed:      elapsed,
 		FloorMBps:    floorMBps,
 		FloorKnown:   floorKnown,
+		DryRun:       isDryRun(gctx),
 	}).Get(healthCtx, &measurement); err != nil {
 		workflow.GetLogger(gctx).Warn("tape measurement failed; tape recorded without it",
 			"drive", lt.DriveIndex, "barcode", lt.Barcode, "error", err)

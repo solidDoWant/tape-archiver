@@ -903,3 +903,55 @@ func TestRunTapePathWriteHealthTimesStreamOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestRunTapePathWriteHealthLabelsDryRun: MeasureWriteHealth learns whether the
+// run is a dry run, so its gauges never overwrite a real tape's (#412).
+func TestRunTapePathWriteHealthLabelsDryRun(t *testing.T) {
+	t.Parallel()
+
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dryRun=%t", dryRun), func(t *testing.T) {
+			t.Parallel()
+
+			env := newTapePathEnv(t)
+			require.NoError(t, env.SetMemoOnStart(map[string]interface{}{MemoKeyDryRun: dryRun}))
+
+			var (
+				mu           sync.Mutex
+				loadSetSizes []int
+				labels       []bool
+			)
+
+			mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
+
+			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(WriteTreeResult{}, nil)
+			env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return("/stage/indexes/tape.xml", nil)
+			env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input MeasureWriteHealthInput) (TapeMeasurement, error) {
+					mu.Lock()
+
+					labels = append(labels, input.DryRun)
+					mu.Unlock()
+
+					return TapeMeasurement{}, nil
+				})
+			env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+
+			plan, staged, par2 := seededPlan(1, 1)
+
+			env.ExecuteWorkflow(tapePathTestWorkflow, tapePathTestParams{
+				Cfg: tapePathConfig(1, 1, 1), Plan: plan, Staged: staged, PAR2: par2,
+			})
+
+			require.True(t, env.IsWorkflowCompleted())
+			require.NoError(t, env.GetWorkflowError())
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			assert.Equal(t, []bool{dryRun}, labels)
+		})
+	}
+}

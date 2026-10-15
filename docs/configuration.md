@@ -863,7 +863,7 @@ recovered without a catalog, which is by design (SPEC §4.2).
 /api/runs/{runID}/metrics/drives/{barcode}/history` (issue #275) are a thin, read-only
 proxy over VictoriaMetrics for the write-health gauges the data worker already exports
 (`workflows/backup/writehealth.go`'s `tape_archiver_write_throughput_mbps`/
-`repositions`/`tapealert_flags`/`below_floor`, all labeled `barcode`) — no new metric
+`repositions`/`tapealert_flags`/`below_floor`, all labeled `barcode` and `dry_run`; each run reads only series of its own kind) — no new metric
 instrumentation is added anywhere. `cmd/web` never becomes an open PromQL proxy: every
 query is built server-side from a fixed metric-name allowlist and a barcode the
 requested run's own Temporal history actually loaded, and the sparkline range/step are
