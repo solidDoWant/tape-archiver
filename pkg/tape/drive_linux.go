@@ -482,3 +482,23 @@ func timeoutMs(ctx context.Context, def time.Duration) uint32 {
 
 	return uint32(ms)
 }
+
+// testUnitReady reports whether the drive at sgDevice has a medium ready.
+func testUnitReady(ctx context.Context, sgDevice string) error {
+	return withSGFile(sgDevice, func(f *os.File) error {
+		cdb := []byte{0x00, 0, 0, 0, 0, 0}
+		sense := make([]byte, senseBufferLen)
+
+		hdr := sgIOHdr{
+			interfaceID:    'S',
+			dxferDirection: sgDxferNone,
+			cmdLen:         uint8(len(cdb)),
+			mxSbLen:        uint8(len(sense)),
+			cmdp:           uintptr(unsafe.Pointer(&cdb[0])),
+			sbp:            uintptr(unsafe.Pointer(&sense[0])),
+			timeout:        timeoutMs(ctx, 30*time.Second),
+		}
+
+		return sgCommand(ctx, f, &hdr, cdb, sense, nil, "TEST UNIT READY")
+	})
+}
