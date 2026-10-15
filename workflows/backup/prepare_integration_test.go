@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
 )
@@ -33,4 +34,8 @@ func TestZFSLocatorUnmountedDataset(t *testing.T) {
 	_, err = locator.SnapshotDir(t.Context(), snapshot)
 	require.Error(t, err, "an unmounted dataset must not resolve to its shadow mountpoint")
 	assert.Contains(t, err.Error(), dataset, "the error should identify the unmounted dataset")
+
+	var appErr *temporal.ApplicationError
+	require.ErrorAs(t, err, &appErr)
+	assert.True(t, appErr.NonRetryable(), "an unmounted dataset must fail Prepare without retrying (#385)")
 }

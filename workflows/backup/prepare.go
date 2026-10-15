@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,14 @@ const (
 	// prepareTimeout is generous because Prepare streams full snapshot contents
 	// (potentially terabytes); the stages honor cancellation per read buffer.
 	prepareTimeout = 24 * time.Hour
+
+	// prepareMaxAttempts bounds retries so a deterministic failure fails the run
+	// instead of re-staging every earlier archive forever (#385); a heartbeat
+	// timeout from a worker restart is still retried.
+	prepareMaxAttempts = 3
+
+	// datasetNotMountedErrorType marks a raw dataset source that is not mounted.
+	datasetNotMountedErrorType = "dataset-not-mounted"
 
 	stagingDirPerm = 0o755
 
@@ -73,7 +82,9 @@ func (zfsLocator) SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (s
 		}
 
 		if !mounted {
-			return "", fmt.Errorf("raw ZFS dataset %q is not mounted; refusing to archive its (shadow) mountpoint %q", dataset, mount)
+			return "", temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+				"raw ZFS dataset %q is not mounted; refusing to archive its (shadow) mountpoint %q", dataset, mount),
+				datasetNotMountedErrorType, nil)
 		}
 
 		return mount, nil
@@ -328,7 +339,19 @@ func (a *PrepareActivities) PrepareArchives(ctx context.Context, input PrepareIn
 		return err
 	})
 
-	return staged, err
+	return staged, liftNonRetryable(err)
+}
+
+// liftNonRetryable re-raises a wrapped non-retryable ApplicationError at the
+// activity boundary: Temporal only inspects the top-level error, so fmt.Errorf
+// wrapping would otherwise make it retryable.
+func liftNonRetryable(err error) error {
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || !appErr.NonRetryable() || err == error(appErr) {
+		return err
+	}
+
+	return temporal.NewNonRetryableApplicationError(err.Error(), appErr.Type(), err)
 }
 
 // logPrepareProgress inlines the numbers into the message because the web log
@@ -584,6 +607,7 @@ func preparePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: prepareTimeout,
 		HeartbeatTimeout:    activityHeartbeatTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: prepareMaxAttempts},
 	})
 
 	var activities *PrepareActivities

@@ -549,7 +549,11 @@ must never mask the original error — a webhook failure is logged, not raised.
 This is implemented with Temporal's standard on-failure pattern: a deferred handler in
 the backup workflow runs the alert activity on a `workflow.NewDisconnectedContext` so it
 fires even when the workflow is cancelled. The alert uses the same `pkg/webhook` client
-as success delivery.
+as success delivery. For the alert to fire at all, the Resolve, Prepare, Pack, Generate
+PAR2, Report and Deliver activities run under a bounded retry policy (Temporal's default
+is unlimited attempts): a transient fault such
+as a data-worker restart is retried, while a deterministic failure (a source too large
+for one tape, an unmounted raw dataset) fails its phase without retrying.
 
 Operational alert text is shortened to fit Discord's 2000-character content limit: the
 variable error/reason summary is trimmed (with a `[…truncated; see logs]` marker) so the
