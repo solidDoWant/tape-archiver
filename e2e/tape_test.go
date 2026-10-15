@@ -74,11 +74,13 @@ func prepareBlankTapeAt(t *testing.T, slotIndex int) tapeFixture {
 	}
 
 	// Restore the library before touching the drive, so even an early failure or a
-	// readiness skip leaves drive 0 empty and the tape back in its slot.
+	// readiness failure leaves drive 0 empty and the tape back in its slot.
 	t.Cleanup(func() { returnTapeToSlot(fixture) })
 
 	require.NoError(t, changer.Load(t.Context(), fixture.slotAddr, fixture.driveAddr), "pre-load for readiness/blanking")
-	testutil.SkipIfDriveNotReady(t, stDev)
+	// TestMain already proved this kernel can ready the drive, so a drive that
+	// does not ready now has wedged: fail rather than skip.
+	testutil.RequireDriveReady(t, stDev)
 	eraseLoadedTape(t.Context(), stDev, sgDev)
 	require.NoError(t, changer.Unload(t.Context(), fixture.slotAddr, fixture.driveAddr), "unload after blanking")
 

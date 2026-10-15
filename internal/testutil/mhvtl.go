@@ -4,6 +4,7 @@ package testutil
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
@@ -62,28 +65,33 @@ func ChangerDev(t *testing.T) string {
 func Drive0Dev(t *testing.T) string {
 	t.Helper()
 
-	return resolveDev(t, EnvDrive0Dev, scsiTapeClass, baseTapeNodeRe, 0, defaultDrive0Dev)
+	return resolveDev(EnvDrive0Dev, scsiTapeClass, baseTapeNodeRe, 0, defaultDrive0Dev)
 }
 
 // Drive1Dev returns drive 1's non-rewinding tape node.
 func Drive1Dev(t *testing.T) string {
 	t.Helper()
 
-	return resolveDev(t, EnvDrive1Dev, scsiTapeClass, baseTapeNodeRe, 1, defaultDrive1Dev)
+	return resolveDev(EnvDrive1Dev, scsiTapeClass, baseTapeNodeRe, 1, defaultDrive1Dev)
+}
+
+// ResolveDrive0Dev is Drive0Dev for callers without a *testing.T (TestMain).
+func ResolveDrive0Dev() string {
+	return resolveDev(EnvDrive0Dev, scsiTapeClass, baseTapeNodeRe, 0, defaultDrive0Dev)
 }
 
 // Drive0SgDev returns drive 0's SCSI generic node.
 func Drive0SgDev(t *testing.T) string {
 	t.Helper()
 
-	return resolveDev(t, EnvDrive0SgDev, scsiGenericClass, baseSgNodeRe, 0, defaultDrive0SgDev)
+	return resolveDev(EnvDrive0SgDev, scsiGenericClass, baseSgNodeRe, 0, defaultDrive0SgDev)
 }
 
 // Drive1SgDev returns drive 1's SCSI generic node.
 func Drive1SgDev(t *testing.T) string {
 	t.Helper()
 
-	return resolveDev(t, EnvDrive1SgDev, scsiGenericClass, baseSgNodeRe, 1, defaultDrive1SgDev)
+	return resolveDev(EnvDrive1SgDev, scsiGenericClass, baseSgNodeRe, 1, defaultDrive1SgDev)
 }
 
 const (
@@ -101,9 +109,7 @@ var (
 // resolveDev prefers the env override, then the node at the drive's SCSI
 // address, then fallback. Kernel minor numbers follow probe order, which need
 // not match mhvtl's drive numbering, so the SCSI address is authoritative.
-func resolveDev(t *testing.T, env, class string, nodeRe *regexp.Regexp, driveIndex int, fallback string) string {
-	t.Helper()
-
+func resolveDev(env, class string, nodeRe *regexp.Regexp, driveIndex int, fallback string) string {
 	if dev := os.Getenv(env); dev != "" {
 		return dev
 	}
@@ -169,25 +175,25 @@ func parseHCTL(hctl string) (channel, target, lun int, ok bool) {
 	return channel, target, lun, true
 }
 
-// SkipIfDriveNotReady waits for the drive to complete a rewind and skips the
-// test if it never does (environments lacking the mhvtl ioctl fix). It uses
-// rewind rather than `mt status`, which reports the st driver's cached state
-// without probing the drive.
-func SkipIfDriveNotReady(t *testing.T, dev string) {
-	t.Helper()
+// driveReadyTimeout bounds WaitDriveReady.
+const driveReadyTimeout = 30 * time.Second
 
-	deadline := time.Now().Add(30 * time.Second)
+// WaitDriveReady waits up to 30s for a rewind on dev to succeed, returning the
+// last rewind error if it never does. It uses rewind rather than `mt status`,
+// which reports the st driver's cached state without probing the drive.
+func WaitDriveReady(ctx context.Context, dev string) error {
+	deadline := time.Now().Add(driveReadyTimeout)
 
 	var lastErr error
 
 	for time.Now().Before(deadline) {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		err := exec.CommandContext(ctx, "mt", "-f", dev, "rewind").Run()
+		rewindCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := exec.CommandContext(rewindCtx, "mt", "-f", dev, "rewind").Run()
 
 		cancel()
 
 		if err == nil {
-			return
+			return nil
 		}
 
 		lastErr = err
@@ -195,6 +201,25 @@ func SkipIfDriveNotReady(t *testing.T, dev string) {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	t.Skipf("tape drive %s did not become ready within 30s after load"+
-		" (kernel/mhvtl ioctl incompatibility — last rewind error: %v)", dev, lastErr)
+	return fmt.Errorf("tape drive %s did not become ready within %s after load: last rewind error: %w",
+		dev, driveReadyTimeout, lastErr)
+}
+
+// SkipIfDriveNotReady skips the test if the loaded drive never becomes ready
+// (environments lacking the mhvtl ioctl fix).
+func SkipIfDriveNotReady(t *testing.T, dev string) {
+	t.Helper()
+
+	if err := WaitDriveReady(t.Context(), dev); err != nil {
+		t.Skipf("%v (kernel/mhvtl ioctl incompatibility)", err)
+	}
+}
+
+// RequireDriveReady fails the test if the loaded drive never becomes ready. Use
+// it once the environment has already proven it can ready a drive, so a drive
+// that wedges mid-suite fails instead of silently skipping.
+func RequireDriveReady(t *testing.T, dev string) {
+	t.Helper()
+
+	require.NoError(t, WaitDriveReady(t.Context(), dev))
 }
