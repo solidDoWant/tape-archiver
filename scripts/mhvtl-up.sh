@@ -55,8 +55,17 @@ done
 # test starts. /sys/module/mhvtl exists iff the module is loaded; no pipe, no
 # race.
 if [ -d /sys/module/mhvtl ]; then
-  echo "mhvtl module already loaded; mhvtl-up is a no-op"
-  exit 0
+  # A loaded module is only usable if its daemons are alive and the changer
+  # answers; otherwise every later test times out against a dead library.
+  if pgrep -x vtllibrary > /dev/null && pgrep -x vtltape > /dev/null \
+    && timeout 10 sudo sg_raw -r 96 /dev/sch0 B8 10 00 00 FF FF 00 00 00 60 00 00 > /dev/null 2>&1; then
+    echo "mhvtl module already loaded and answering; mhvtl-up is a no-op"
+    exit 0
+  fi
+  echo "error: the mhvtl module is loaded but its library is not answering." >&2
+  echo "       Run 'make mhvtl-reset'; if mhvtl-down then reports the module in use," >&2
+  echo "       a daemon died without releasing its LU and only a reboot recovers it." >&2
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------
