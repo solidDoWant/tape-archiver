@@ -170,8 +170,13 @@ write window.
    released on every exit path (success, failure, cancellation). The hold tag is derived
    from the Temporal run id (`tape-archiver-hold-<run-id>`), so it introduces no
    cross-run state (§4.2) and is reconstructable from the run alone. A hold failure
-   fails the run here, before staging. Raw bare-dataset sources have no snapshot and are
-   not held.
+   fails the run here, before staging; a snapshot already pruned before its hold fails
+   it without retrying. Releasing a pruned snapshot is a no-op. A release that keeps
+   failing is retried with backoff for a bounded window of a few minutes, enough to ride
+   out transient faults. After that the hold is leaked: the release failure is logged
+   and, on a failed run, appended to the failure alert. It never blocks the failure
+   alert or the run from closing. Raw bare-dataset sources have no snapshot and
+   are not held.
 2. **Prepare.** For each archive: `tar` the snapshot contents → optional `zstd`
    compression → `age`-encrypt → split into fixed-size slices → compute SHA-256
    checksums. All output is staged to disk and its exact size measured.

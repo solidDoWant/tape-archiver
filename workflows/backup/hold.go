@@ -2,11 +2,13 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/solidDoWant/tape-archiver/pkg/zfs"
@@ -21,6 +23,24 @@ const (
 	holdTagPrefix = "tape-archiver-hold-"
 
 	holdTimeout = 5 * time.Minute
+
+	// holdMaxAttempts bounds hold retries: unbounded, a vanished snapshot wedges
+	// the run before staging (#387).
+	holdMaxAttempts = 3
+
+	// Release retries ride out transient zfs or data-worker faults for a few
+	// minutes (1s doubling to 1m, ~4m of backoff), then give up so the release
+	// defer cannot block the failure alert and staging cleanup forever (#387).
+	// A vanished snapshot is already a no-op, so only transients are retried.
+	releaseInitialInterval = time.Second
+	releaseMaxInterval     = time.Minute
+	releaseMaxAttempts     = 10
+	// releaseWindow caps the whole release, including time spent waiting for an
+	// unreachable data worker.
+	releaseWindow = 15 * time.Minute
+
+	// snapshotNotFoundErrorType marks a resolved snapshot destroyed before its hold.
+	snapshotNotFoundErrorType = "snapshot-not-found"
 )
 
 // HoldTag returns the run-scoped ZFS hold tag for a Temporal run id.
@@ -65,7 +85,12 @@ type HoldInput struct {
 func (a *HoldActivities) HoldSnapshots(ctx context.Context, input HoldInput) error {
 	for _, snapshot := range input.Snapshots {
 		if err := a.holder.Hold(ctx, input.Tag, snapshot); err != nil {
-			return fmt.Errorf("hold snapshot %s with tag %s: %w", snapshot, input.Tag, err)
+			err = fmt.Errorf("hold snapshot %s with tag %s: %w", snapshot, input.Tag, err)
+			if errors.Is(err, zfs.ErrNotExist) {
+				return temporal.NewNonRetryableApplicationError(err.Error(), snapshotNotFoundErrorType, err)
+			}
+
+			return err
 		}
 	}
 
@@ -76,12 +101,18 @@ func (a *HoldActivities) HoldSnapshots(ctx context.Context, input HoldInput) err
 }
 
 // ReleaseSnapshots removes the run's hold from every snapshot; an absent hold is
-// a no-op.
+// a no-op. One failure does not stop the others from being released.
 func (a *HoldActivities) ReleaseSnapshots(ctx context.Context, input HoldInput) error {
+	var errs []error
+
 	for _, snapshot := range input.Snapshots {
 		if err := a.holder.Release(ctx, input.Tag, snapshot); err != nil {
-			return fmt.Errorf("release snapshot %s tag %s: %w", snapshot, input.Tag, err)
+			errs = append(errs, fmt.Errorf("release snapshot %s tag %s: %w", snapshot, input.Tag, err))
 		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
 
 	slog.InfoContext(ctx, "hold: released the run's holds on source snapshots",
@@ -131,6 +162,7 @@ func holdSnapshots(ctx workflow.Context, state *runState) error {
 	actx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: holdTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: holdMaxAttempts},
 	})
 
 	var activities *HoldActivities
@@ -139,12 +171,13 @@ func holdSnapshots(ctx workflow.Context, state *runState) error {
 }
 
 // releaseSnapshots releases the run's holds on a disconnected context, so it
-// also fires on cancellation. It logs but never returns an error, so a leaked
-// hold (manually clearable, docs/maintenance.md) cannot mask the run's outcome.
-func releaseSnapshots(ctx workflow.Context, state *runState) {
+// also fires on cancellation. An exhausted release is logged and returned for
+// the caller to surface; it must never replace the run's own outcome. The hold
+// is then leaked (manually clearable, docs/maintenance.md).
+func releaseSnapshots(ctx workflow.Context, state *runState) error {
 	snapshots := holdSnapshotPaths(state)
 	if len(snapshots) == 0 {
-		return
+		return nil
 	}
 
 	input := HoldInput{
@@ -156,8 +189,15 @@ func releaseSnapshots(ctx workflow.Context, state *runState) {
 	defer cancel()
 
 	actx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
-		TaskQueue:           DataTaskQueue,
-		StartToCloseTimeout: holdTimeout,
+		TaskQueue:              DataTaskQueue,
+		StartToCloseTimeout:    holdTimeout,
+		ScheduleToCloseTimeout: releaseWindow,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    releaseInitialInterval,
+			BackoffCoefficient: 2,
+			MaximumInterval:    releaseMaxInterval,
+			MaximumAttempts:    releaseMaxAttempts,
+		},
 	})
 
 	var activities *HoldActivities
@@ -166,5 +206,9 @@ func releaseSnapshots(ctx workflow.Context, state *runState) {
 			"tag", input.Tag,
 			"error", err,
 		)
+
+		return fmt.Errorf("release source-snapshot hold %s (leaked; clear it by hand): %w", input.Tag, err)
 	}
+
+	return nil
 }

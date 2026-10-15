@@ -4,6 +4,7 @@ package zfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -162,8 +163,12 @@ func UserProperty(ctx context.Context, dataset, property string) (string, error)
 	return strings.TrimSpace(string(out)), nil
 }
 
+// ErrNotExist reports that the named dataset or snapshot does not exist.
+var ErrNotExist = errors.New("dataset does not exist")
+
 // Hold places user hold tag on snapshot so external pruning cannot destroy it
-// mid-run (SPEC.md §4.3). Idempotent: "tag already exists" is success.
+// mid-run (SPEC.md §4.3). Idempotent: "tag already exists" is success. A missing
+// snapshot wraps ErrNotExist.
 func Hold(ctx context.Context, tag, snapshot string) error {
 	cmd := exec.CommandContext(ctx, "zfs", "hold", tag, snapshot)
 
@@ -177,6 +182,10 @@ func Hold(ctx context.Context, tag, snapshot string) error {
 			return nil
 		}
 
+		if strings.Contains(msg, ErrNotExist.Error()) {
+			return fmt.Errorf("%s: %w: %s", cmd, ErrNotExist, msg)
+		}
+
 		if msg != "" {
 			return fmt.Errorf("%s: %w: %s", cmd, err, msg)
 		}
@@ -188,7 +197,8 @@ func Hold(ctx context.Context, tag, snapshot string) error {
 }
 
 // Release removes user hold tag from snapshot. Runs release on every exit path,
-// so "no such tag" is treated as success.
+// so "no such tag" is treated as success, as is a destroyed snapshot (it holds
+// nothing).
 func Release(ctx context.Context, tag, snapshot string) error {
 	cmd := exec.CommandContext(ctx, "zfs", "release", tag, snapshot)
 
@@ -198,7 +208,7 @@ func Release(ctx context.Context, tag, snapshot string) error {
 
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
-		if strings.Contains(msg, "no such tag") {
+		if strings.Contains(msg, "no such tag") || strings.Contains(msg, ErrNotExist.Error()) {
 			return nil
 		}
 
