@@ -101,7 +101,8 @@ type Library struct {
 	// MirrorSourceChanger is the real changer whose slot inventory the mhvtl library
 	// in Changer mirrors before the tape path, so a dry run meets the real run's
 	// conditions. Set only on dry runs by runsubmit.ApplyDryRun. It authorizes no
-	// destructive SCSI: only mhvtl's own state is rewritten.
+	// destructive SCSI: only mhvtl's own state is rewritten. Cleared on real runs
+	// at submission and ignored by the workflow unless the run is a dry run.
 	MirrorSourceChanger string `json:"mirrorSourceChanger,omitempty"`
 }
 

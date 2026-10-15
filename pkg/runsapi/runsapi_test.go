@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1121,6 +1122,35 @@ func TestSubmitRun(t *testing.T) {
 		require.NotNil(t, fake.executeConfig)
 		assert.Equal(t, "/dev/sch9", fake.executeConfig.Library.Changer)
 		assert.Equal(t, []string{"/dev/nst8", "/dev/nst9"}, fake.executeConfig.Library.Drives)
+	})
+
+	// Issue #382: only the dry-run override may choose a mirror source.
+	t.Run("a client-supplied mirror source never reaches the workflow", func(t *testing.T) {
+		rogueMirror := strings.Replace(validSubmitConfigJSON, `"changer": "/dev/sch0",`,
+			`"changer": "/dev/sch0", "mirrorSourceChanger": "/dev/rogue-sch",`, 1)
+
+		tests := []struct {
+			name   string
+			dryRun bool
+			want   string
+		}{
+			{name: "production run", want: ""},
+			{name: "dry run", dryRun: true, want: "/dev/sch0"},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				fake := &fakeTemporalClient{executeRun: fakeWorkflowRun{workflowID: backup.WorkflowID, runID: "run-mirror"}}
+				handler := newMux(newHandler(fake, mhvtlEnv, ownedDevices...))
+
+				body := fmt.Sprintf(`{"config": %s, "dryRun": %t}`, rogueMirror, test.dryRun)
+				recorder := postJSON(t, handler, "/api/runs", []byte(body), nil)
+
+				require.Equal(t, http.StatusCreated, recorder.Code)
+				require.NotNil(t, fake.executeConfig)
+				assert.Equal(t, test.want, fake.executeConfig.Library.MirrorSourceChanger)
+			})
+		}
 	})
 
 	t.Run("a production run with no deploy-owned devices is rejected before Temporal", func(t *testing.T) {

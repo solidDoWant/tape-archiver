@@ -67,7 +67,9 @@ func ApplyDryRun(cfg *config.Config, getenv func(string) string, warnOut io.Writ
 	}
 
 	// Record the real changer so the worker can mirror its slots into mhvtl;
-	// this is the one place both devices are known.
+	// this is the one place both devices are known. A client-supplied value is
+	// never trusted.
+	cfg.Library.MirrorSourceChanger = ""
 	if cfg.Library.Changer != "" && cfg.Library.Changer != changer {
 		cfg.Library.MirrorSourceChanger = cfg.Library.Changer
 	}
@@ -124,8 +126,14 @@ func StartOptions(dryRun bool) client.StartWorkflowOptions {
 }
 
 // Submit starts the backup workflow with cfg under StartOptions, translating
-// errors via TranslateSubmitError.
+// errors via TranslateSubmitError. A production run's MirrorSourceChanger is
+// cleared: only ApplyDryRun may set it, and the mirror moves tapes in the target
+// library (issue #382).
 func Submit(ctx context.Context, temporalClient TemporalClient, cfg *config.Config, dryRun bool) (client.WorkflowRun, error) {
+	if !dryRun {
+		cfg.Library.MirrorSourceChanger = ""
+	}
+
 	run, err := temporalClient.ExecuteWorkflow(ctx, StartOptions(dryRun), backup.WorkflowType, cfg)
 	if err != nil {
 		return nil, TranslateSubmitError(err)

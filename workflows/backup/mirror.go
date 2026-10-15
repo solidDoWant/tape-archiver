@@ -19,10 +19,18 @@ import (
 const mirrorTimeout = 10 * time.Minute
 
 // runMirrorLibrary makes the virtual library mirror the real one before the tape
-// path runs. cfg.Library.MirrorSourceChanger is set only by
-// runsubmit.ApplyDryRun, so a real run never dispatches this activity.
+// path runs. Gated on the dry-run memo as well as MirrorSourceChanger: the
+// mirror moves tapes in the target library, so a real run must never dispatch it
+// whatever its config carries (issue #382).
 func runMirrorLibrary(ctx workflow.Context, cfg config.Config) error {
 	if cfg.Library.MirrorSourceChanger == "" {
+		return nil
+	}
+
+	if !isDryRun(ctx) {
+		workflow.GetLogger(ctx).Warn("ignoring library.mirrorSourceChanger on a non-dry run",
+			"mirrorSourceChanger", cfg.Library.MirrorSourceChanger)
+
 		return nil
 	}
 

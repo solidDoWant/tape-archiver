@@ -95,6 +95,34 @@ func TestApplyDryRun(t *testing.T) {
 		assert.Empty(t, cfg.Library.MirrorSourceChanger)
 	})
 
+	t.Run("ignores a client-supplied mirror source", func(t *testing.T) {
+		env := map[string]string{
+			MHVTLChangerEnv: "/dev/sch9",
+			MHVTLDrive0Env:  "/dev/nst8",
+			MHVTLDrive1Env:  "/dev/nst9",
+		}
+
+		tests := []struct {
+			name    string
+			changer string
+			want    string
+		}{
+			{name: "real changer configured", changer: "/dev/sch0", want: "/dev/sch0"},
+			{name: "virtual changer configured", changer: "/dev/sch9", want: ""},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				cfg := parseConfig(t, validConfigJSON)
+				cfg.Library.Changer = test.changer
+				cfg.Library.MirrorSourceChanger = "/dev/rogue-sch"
+
+				require.NoError(t, ApplyDryRun(cfg, func(name string) string { return env[name] }, &bytes.Buffer{}))
+				assert.Equal(t, test.want, cfg.Library.MirrorSourceChanger)
+			})
+		}
+	})
+
 	t.Run("errors naming exactly the missing variable(s)", func(t *testing.T) {
 		cfg := parseConfig(t, validConfigJSON)
 
@@ -207,11 +235,17 @@ type fakeSubmitClient struct {
 	run      client.WorkflowRun
 	err      error
 	options  client.StartWorkflowOptions
+	config   *config.Config
 	captured bool
 }
 
-func (f *fakeSubmitClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ interface{}, _ ...interface{}) (client.WorkflowRun, error) {
+func (f *fakeSubmitClient) ExecuteWorkflow(_ context.Context, options client.StartWorkflowOptions, _ interface{}, args ...interface{}) (client.WorkflowRun, error) {
 	f.options = options
+
+	if len(args) == 1 {
+		f.config, _ = args[0].(*config.Config)
+	}
+
 	f.captured = true
 
 	return f.run, f.err
@@ -244,6 +278,18 @@ func TestSubmit(t *testing.T) {
 			assert.Equal(t, dryRun, fake.options.Memo[MemoKeyDryRun],
 				"memo %q should carry the submitted dry-run value", MemoKeyDryRun)
 		}
+	})
+
+	t.Run("a production run never carries a mirror source", func(t *testing.T) {
+		cfg := parseConfig(t, validConfigJSON)
+		cfg.Library.MirrorSourceChanger = "/dev/sch2"
+		fake := &fakeSubmitClient{err: errors.New("connection refused")}
+
+		_, err := Submit(t.Context(), fake, cfg, false)
+		require.Error(t, err)
+
+		require.NotNil(t, fake.config)
+		assert.Empty(t, fake.config.Library.MirrorSourceChanger)
 	})
 
 	t.Run("a singleton conflict is translated, not returned raw", func(t *testing.T) {
