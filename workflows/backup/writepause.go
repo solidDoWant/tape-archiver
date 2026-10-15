@@ -3,6 +3,7 @@ package backup
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
@@ -48,7 +49,12 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 				affected, reload = []string{barcode}, []int{slot}
 			}
 
-			switch waitForOperator(ctx, cfg, state, PhaseLoad, affected, reload, err) {
+			outcome, cancelErr := waitForOperator(ctx, cfg, state, PhaseLoad, affected, reload, err)
+			if cancelErr != nil {
+				return cancelErr
+			}
+
+			switch outcome {
 			case pauseResumed:
 				continue
 			case pauseAborted:
@@ -95,7 +101,12 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 		*failingPhase = PhaseWrite
 		cause := joinFailed(failed)
 
-		switch waitForOperator(ctx, cfg, state, PhaseWrite, barcodesOfFailed(failed), reloadSlots(failed), cause) {
+		outcome, cancelErr := waitForOperator(ctx, cfg, state, PhaseWrite, barcodesOfFailed(failed), reloadSlots(failed), cause)
+		if cancelErr != nil {
+			return cancelErr
+		}
+
+		switch outcome {
 		case pauseResumed:
 			pending = retrySet(cfg, failed)
 
@@ -111,8 +122,8 @@ func runDriveSet(ctx workflow.Context, cfg config.Config, state *runState, set d
 
 // waitForOperator alerts the operator to a Load/Write-failure pause and waits
 // for resume, abort or the wait-timeout, exposing the pause via
-// state.currentPause meanwhile.
-func waitForOperator(ctx workflow.Context, cfg config.Config, state *runState, phase string, affectedBarcodes []string, reloadSlots []int, cause error) pauseOutcome {
+// state.currentPause meanwhile. A non-nil error is the run's cancellation.
+func waitForOperator(ctx workflow.Context, cfg config.Config, state *runState, phase string, affectedBarcodes []string, reloadSlots []int, cause error) (pauseOutcome, error) {
 	// Drain before the alert: buffered signals predate it and are stale, while a
 	// reply to the alert lands afterwards and survives (#216, #254).
 	drainStalePauseSignals(ctx)
@@ -132,21 +143,24 @@ func waitForOperator(ctx workflow.Context, cfg config.Config, state *runState, p
 		ErrorSummary:  errSummary,
 	}
 
-	outcome := waitForWritePathCleared(ctx, cfg)
+	outcome, err := waitForPauseCleared(ctx, cfg.Library.EffectiveWriteFailureWaitTimeout())
 
 	state.currentPause = CurrentPause{}
 
-	return outcome
+	return outcome, err
 }
 
-// waitForWritePathCleared blocks until resume, abort, or the wait-timeout
-// (SPEC §4.3). There is no station to poll, so resume is always explicit.
-func waitForWritePathCleared(ctx workflow.Context, cfg config.Config) pauseOutcome {
+// waitForPauseCleared blocks until resume, abort, or timeout (SPEC §4.3).
+// There is no state to poll, so resume is always explicit. A non-nil error is
+// the run's cancellation, which must not be reported as a timeout (#388).
+func waitForPauseCleared(ctx workflow.Context, timeout time.Duration) (pauseOutcome, error) {
 	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	abortCh := workflow.GetSignalChannel(ctx, OperatorAbortSignal)
-	timeoutTimer := workflow.NewTimer(ctx, cfg.Library.EffectiveWriteFailureWaitTimeout())
+	timeoutTimer := workflow.NewTimer(ctx, timeout)
 
 	outcome := pauseTimedOut
+
+	var timerErr error
 
 	selector := workflow.NewSelector(ctx)
 	selector.AddReceive(resumeCh, func(c workflow.ReceiveChannel, _ bool) {
@@ -159,13 +173,13 @@ func waitForWritePathCleared(ctx workflow.Context, cfg config.Config) pauseOutco
 
 		outcome = pauseAborted
 	})
-	selector.AddFuture(timeoutTimer, func(workflow.Future) {
-		outcome = pauseTimedOut
+	selector.AddFuture(timeoutTimer, func(f workflow.Future) {
+		timerErr = f.Get(ctx, nil)
 	})
 
 	selector.Select(ctx)
 
-	return outcome
+	return outcome, timerErr
 }
 
 // drainStalePauseSignals discards resume/abort signals already buffered when a

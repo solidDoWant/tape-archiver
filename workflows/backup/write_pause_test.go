@@ -858,3 +858,54 @@ func TestWritePathLoadNonBlankPauseNamesTape(t *testing.T) {
 	assert.Equal(t, []string{"USED01L5"}, alert.AffectedTapes)
 	assert.Equal(t, []int{101}, alert.ReloadSlots)
 }
+
+// TestWritePathPauseCancelIsNotTimeout pins #388: cancelling during a Load or
+// Write failure pause ends the run cancelled, not as an operator timeout.
+func TestWritePathPauseCancelIsNotTimeout(t *testing.T) {
+	tests := []struct {
+		name          string
+		loadFails     bool
+		formatFailsOn string
+	}{
+		{name: "load failure", loadFails: true},
+		{name: "write failure", formatFailsOn: "/dev/sg1"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := twoDriveConfig(3600)
+			env := newWritePauseEnv(t)
+			expectHealthyWriteExceptFormat(env)
+
+			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
+				func(_ context.Context, input FormatInput) error {
+					if input.Device == test.formatFailsOn {
+						return errors.New("mkltfs: drive reported a hard write error")
+					}
+
+					return nil
+				})
+
+			if test.loadFails {
+				env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
+					nil, errors.New("move medium: source slot empty"))
+			} else {
+				mockLoadFromSet(env, cfg)
+			}
+
+			env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
+			env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
+
+			env.RegisterDelayedCallback(env.CancelWorkflow, 30*time.Second)
+
+			env.ExecuteWorkflow(writePauseTestWorkflow, writePauseParams{Cfg: cfg, Set: twoTapeSet()})
+
+			require.True(t, env.IsWorkflowCompleted())
+
+			err := env.GetWorkflowError()
+			require.Error(t, err)
+			assert.True(t, temporal.IsCanceledError(err), "the run ends cancelled, got: %v", err)
+			assert.NotContains(t, err.Error(), "did not resume or abort")
+		})
+	}
+}
