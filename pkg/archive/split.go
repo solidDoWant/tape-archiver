@@ -12,8 +12,8 @@ import (
 
 // Split writes src to dir as sliceSize-byte files "baseName.NNN" and returns
 // their paths in order. All slices share one zero-padded width (at least three
-// digits) so lexical order equals numeric order and the recovery glob
-// (archive.[0-9]*) reassembles correctly. Slicing bounds a damaged tape region's
+// digits) so lexical order equals numeric order and the recovery procedure's
+// sorted reassembly is correct. Slicing bounds a damaged tape region's
 // blast radius to one slice (SPEC §8).
 func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName string) ([]string, error) {
 	if sliceSize <= 0 {

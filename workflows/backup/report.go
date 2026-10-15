@@ -82,7 +82,10 @@ on this disc.
     verifies everything copied so far in one pass.)
     If any archive slice or its PAR2 files are corrupt, repair with:
         bin/par2 repair <barcode>/archives/NNN-<label>/archive.par2
-5.  Concatenate an archive's slices in order to reconstruct its age stream:
+    (Do not add -p. A repaired slice's damaged original is kept as archive.NNN.1;
+    leave it out of step 5.)
+5.  Concatenate an archive's slices (archive.NNN only) in order to reconstruct its
+    age stream:
         cat <barcode>/archives/NNN-<label>/archive.000 <barcode>/archives/NNN-<label>/archive.001 ... > archive.age
 6.  Decrypt with the escrowed identity (save it to identity.txt first):
         bin/age -d -i identity.txt -o archive.tar.zst archive.age
