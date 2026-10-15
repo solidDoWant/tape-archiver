@@ -9,31 +9,19 @@ import (
 	"unsafe"
 )
 
-// This file issues SCSI INQUIRY directly via SG_IO, reusing the cgo-free plumbing
-// shared with the changer and blank-check code (sgIOHdr, sgCommand, withSGFile,
-// timeoutMs, and the dxfer constants). The response decoders it feeds are in the
-// platform-independent inquiry.go.
-
 const (
 	opcodeInquiry = 0x12 // INQUIRY
 	inquiryEVPD   = 0x01 // EVPD bit in INQUIRY byte 1 (request a vital product data page)
 	vpdUnitSerial = 0x80 // Unit Serial Number VPD page code
 
-	// inquiryBufSize bounds the INQUIRY transfer. The standard INQUIRY identity
-	// strings end at byte 36 and a unit serial number is short; 252 is the
-	// conventional allocation length and leaves ample headroom.
 	inquiryBufSize = 252
 
-	// inquiryTimeout bounds an INQUIRY. It is a control command answered from the
-	// device's own tables with no media motion, so it returns near-instantly; the
-	// timeout only bounds a wedged bus.
+	// inquiryTimeout only bounds a wedged bus; INQUIRY involves no media motion.
 	inquiryTimeout = 30 * time.Second
 )
 
-// Inquire reads the drive's SCSI identity (vendor/product/revision and unit
-// serial) via INQUIRY, for recording as provenance in the run report (SPEC §9).
-// INQUIRY is answered by the drive itself with no media motion, so no tape need
-// be loaded and the tape is never repositioned.
+// Inquire reads the drive's SCSI identity for the report (SPEC §9). It needs no
+// tape and never repositions one.
 func (d *Drive) Inquire(ctx context.Context) (DeviceInfo, error) {
 	sgDevice, err := d.SGDevice()
 	if err != nil {
@@ -43,8 +31,7 @@ func (d *Drive) Inquire(ctx context.Context) (DeviceInfo, error) {
 	return inquireSG(ctx, sgDevice)
 }
 
-// Inquire reads the library/changer's SCSI identity (vendor/product/revision and
-// unit serial) via INQUIRY, for recording as provenance in the run report.
+// Inquire reads the changer's SCSI identity for the report.
 func (c *Changer) Inquire(ctx context.Context) (DeviceInfo, error) {
 	sgDevice, err := c.sgNode()
 	if err != nil {
@@ -54,10 +41,8 @@ func (c *Changer) Inquire(ctx context.Context) (DeviceInfo, error) {
 	return inquireSG(ctx, sgDevice)
 }
 
-// inquireSG issues a standard INQUIRY on the sg node and decodes the identity,
-// then makes a best-effort read of the Unit Serial Number VPD page (0x80): not
-// every device implements it, so a failure there leaves Serial empty rather than
-// failing the whole INQUIRY.
+// inquireSG reads the standard INQUIRY plus a best-effort VPD 0x80 serial, which
+// not every device implements.
 func inquireSG(ctx context.Context, sgDevice string) (DeviceInfo, error) {
 	var info DeviceInfo
 
@@ -82,9 +67,6 @@ func inquireSG(ctx context.Context, sgDevice string) (DeviceInfo, error) {
 	return info, nil
 }
 
-// scsiInquiry issues INQUIRY (0x12) — the standard page when evpd is false, or
-// the given vital-product-data page when true — and returns the response bytes
-// actually transferred.
 func scsiInquiry(ctx context.Context, f *os.File, evpd bool, page byte) ([]byte, error) {
 	buf := make([]byte, inquiryBufSize)
 	sense := make([]byte, senseBufferLen)

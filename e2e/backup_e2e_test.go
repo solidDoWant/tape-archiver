@@ -22,16 +22,9 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// TestBackupEndToEnd_FullRun drives the whole backup workflow through the
-// production-shaped deployment — control worker in kind (Helm chart + image),
-// data worker as its OCI container on the host, real dev Temporal, mhvtl, and a
-// real ZFS snapshot — then inspects the delivered artifacts.
-//
-//   - AC1: the run completes with all ten phases in order and delivers exactly one
-//     artifact — the PDF report (report-only delivery, SPEC §5; the recovery ISO's
-//     durable home is the burned disc, not a Discord upload — commit 7e3ea2b).
-//   - AC2: the delivered PDF report carries the run ID, the archive manifest, the
-//     tape barcode, and the age private identity.
+// TestBackupEndToEnd_FullRun runs a full backup through the deployment and
+// asserts all phases run in order (AC1), exactly the report is delivered
+// (SPEC §5), and the report carries the expected contents (AC2).
 func TestBackupEndToEnd_FullRun(t *testing.T) {
 	h := requireHarness(t)
 
@@ -62,10 +55,10 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"workflow must complete successfully")
 
-	// AC1: every phase ran to completion, in order.
+	// AC1.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
-	// AC1: the run delivered exactly the report (report-only delivery, SPEC §5).
+	// AC1: report-only delivery (SPEC §5).
 	uploads := h.rec.uploadsFor(runID)
 	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
@@ -73,26 +66,18 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 
 	assertReportContents(t, report, temporalRunID(t, temporalClient), string(fixture.barcode))
 
-	// Staging cleanup (issue #333): on this successful run the staged archive
-	// slices and PAR2 recovery files are reclaimed, while the durable report
-	// survives on the data worker's staging volume (not just the Discord upload
-	// asserted above) — the retained artifact the annual disc-verification
-	// cadence and a future re-burn rely on.
+	// Issue #333: bulk staging is reclaimed but the report survives on disk for
+	// disc verification and re-burns.
 	assertStagingCleaned(t, filepath.Join(h.stagingHostDir, temporalRunID(t, temporalClient)))
 }
 
-// TestBackupEndToEnd_MultipleDriveSets drives a run whose copy count exceeds the
-// library's drive count through the full deployment, so the tape path writes the
-// copies across successive drive-sets (issue #66). With a single drive and two
-// copies of one logical tape, the run writes two physical tapes in two drive-sets,
-// one after the other, and delivers a report naming both. Skips (via the fixture
-// and harness) when mhvtl, the ZFS pool, or the deployment is unavailable.
+// TestBackupEndToEnd_MultipleDriveSets writes two copies on one drive, i.e. two
+// successive drive-sets (issue #66), and expects both barcodes in the report.
 func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 	h := requireHarness(t)
 
 	source := testutil.PoolDataset(t) + "@" + testutil.TestSnapshot(t)
-	// Two blank tapes on a single drive; Copies=2 makes the run span two drive-sets.
-	// Slots 8 and 9 avoid the FullRun (2), verify-fault (2), and k8s-source (3) tests.
+	// Slots 8 and 9 avoid the other tests' slots.
 	fixture := prepareBlankTapesAt(t, 8, 9)
 	temporalClient := dialTemporal(t)
 	identity, recipient := generateTestKeypair(t)
@@ -120,16 +105,12 @@ func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"workflow must complete successfully")
 
-	// Every phase ran to completion, in order — the drive-set loop still reports
-	// Load, Write, and Eject once each.
+	// The drive-set loop still reports Load, Write and Eject once each.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
-	// The run delivered the report (report-only delivery, SPEC §5).
 	uploads := h.rec.uploadsFor(runID)
 	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
-	// Both physical copies were written across the two drive-sets, so the report
-	// lists both tape barcodes.
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
 	assert.Contains(t, report, temporalRunID(t, temporalClient), "report must name the run ID")
 
@@ -138,14 +119,9 @@ func TestBackupEndToEnd_MultipleDriveSets(t *testing.T) {
 	}
 }
 
-// TestBackupEndToEnd_IOStationOverflow drives the operator-in-the-loop Eject phase
-// through the full deployment (issue #67, and the user's request that the e2e
-// suite cover this path). It runs a backup whose copies outnumber the library's
-// I/O slots, so the Eject phase fills the station and pauses; the test then
-// simulates the operator removing one exported tape and resumes the run through
-// `tapectl resume`, asserting it completes and delivers a report naming every
-// tape. mhvtl does not report the import/export access bit, so this exercises the
-// signalled-resume path end to end.
+// TestBackupEndToEnd_IOStationOverflow overflows the I/O station so Eject
+// pauses, frees a slot, and resumes via `tapectl resume` (issue #67). mhvtl
+// doesn't report the access bit, so this covers the signalled-resume path.
 func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	h := requireHarness(t)
 
@@ -162,9 +138,8 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 		require.Falsef(t, io.Full, "I/O slot %d must start empty", io.Address)
 	}
 
-	// One more physical copy than the library has I/O slots, so the final eject
-	// overflows the station and pauses. Slots 12+ avoid the FullRun (2),
-	// verify-fault (2), k8s-source (3), and MultipleDriveSets (8, 9) tests.
+	// One more copy than I/O slots, so the final eject overflows and pauses.
+	// Slots 12+ avoid the other tests' slots.
 	copies := ioSlots + 1
 
 	slotIndexes := make([]int, copies)
@@ -198,8 +173,6 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	h.submitRun(t, cfg)
 	terminateOnCleanup(t, temporalClient)
 
-	// The run exports ioSlots tapes into the station, then the next eject fills it
-	// and pauses with the last tape unloaded back to its source slot (drive empty).
 	lastBarcode := fixture.barcodes[copies-1]
 	lastSlot := fixture.library.BlankSlots[copies-1]
 
@@ -228,8 +201,7 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 		return full == ioSlots && lastParked
 	}, 15*time.Minute, 2*time.Second, "the Eject phase must fill the I/O station and pause")
 
-	// Simulate the operator removing one exported tape: move the first exported tape
-	// from its I/O slot back to its source storage slot, freeing an I/O slot.
+	// Simulate the operator freeing an I/O slot.
 	cur, err := changer.Inventory(runCtx)
 	require.NoError(t, err, "inventory at pause")
 
@@ -248,7 +220,6 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	require.NotEqualf(t, -1, ioAddr, "exported tape %s must be in an I/O slot at the pause", firstBarcode)
 	require.NoError(t, changer.Transfer(runCtx, ioAddr, firstSlot), "operator clears one I/O slot")
 
-	// Resume through the operator CLI; the run exports the final tape and completes.
 	h.resumeRun(t)
 
 	var result backup.Result
@@ -268,15 +239,11 @@ func TestBackupEndToEnd_IOStationOverflow(t *testing.T) {
 	}
 }
 
-// stagingRetainedArtifacts are the file names a run's staging directory keeps after
-// cleanup (workflows/backup's retainedRunArtifacts, duplicated here since the e2e
-// package only observes the real worker's on-disk behavior, not its internals).
+// stagingRetainedArtifacts duplicates workflows/backup's retainedRunArtifacts.
 var stagingRetainedArtifacts = []string{"report.pdf", "recovery.iso", "disc-manifest.sha256"}
 
-// assertStagingCleaned asserts that a completed run's staging directory contains no
-// staged bulk data (archive slices, PAR2 recovery files) anywhere beneath it, while
-// report.pdf survives on disk — proving the data worker's staging cleanup ran
-// end-to-end, not just that Deliver received a copy over the webhook.
+// assertStagingCleaned asserts no bulk staging data remains while report.pdf
+// survives on disk.
 func assertStagingCleaned(t *testing.T, runDir string) {
 	t.Helper()
 
@@ -307,8 +274,7 @@ func assertStagingCleaned(t *testing.T, runDir string) {
 	assert.FileExists(t, filepath.Join(runDir, "report.pdf"), "the report survives cleanup on disk")
 }
 
-// findUpload returns the captured upload whose filename matches, failing if it is
-// absent.
+// findUpload returns the upload named filename, failing if absent.
 func findUpload(t *testing.T, uploads []upload, filename string) []byte {
 	t.Helper()
 
@@ -332,13 +298,9 @@ func uploadNames(uploads []upload) []string {
 	return names
 }
 
-// assertReportContents parses the delivered PDF and asserts it carries the run
-// ID, the archive manifest (a PAR2 recovery-set file name), the tape barcode, and
-// the age private identity (AC2).
-//
-// runID is the execution's run id, not the constant backupWorkflowID: the report
-// is the durable index for one specific run, so it must carry the identifier that
-// distinguishes this run from every other (issue #340).
+// assertReportContents asserts the PDF carries the run ID, manifest, barcode and
+// age identity (AC2). runID is the execution's run id, not the singleton
+// workflow ID (issue #340).
 func assertReportContents(t *testing.T, reportPDF []byte, runID, barcode string) {
 	t.Helper()
 

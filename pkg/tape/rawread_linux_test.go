@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fixedSense builds a fixed-format (0x70) SCSI sense buffer with the given sense
-// key, ASC, ASCQ, and filemark flag, matching the layout parseSense decodes.
 func fixedSense(key, asc, ascq byte, filemark bool) []byte {
 	sb := make([]byte, 18)
 	sb[0] = 0x70
@@ -26,16 +24,14 @@ func fixedSense(key, asc, ascq byte, filemark bool) []byte {
 	return sb
 }
 
-// TestDecodeReadBlock exercises the READ(6) decode decision half of scsiReadBlock
-// directly: real drives (and mhvtl) cannot produce status-only completions, so the
-// status gate is only reachable via unit test.
+// TestDecodeReadBlock covers status-only completions, which mhvtl cannot
+// produce.
 func TestDecodeReadBlock(t *testing.T) {
 	t.Parallel()
 
 	const bufLen = 4096
 
-	// dataBuf is a non-zero payload so a returned block is distinguishable from
-	// the zero-filled fabrication the missing status check used to produce.
+	// Non-zero so a real block is distinguishable from a fabricated zero block.
 	dataBuf := make([]byte, bufLen)
 	for i := range dataBuf {
 		dataBuf[i] = byte(i%251) + 1
@@ -74,8 +70,7 @@ func TestDecodeReadBlock(t *testing.T) {
 			errSubstr: "no data block",
 		},
 		"BUSY status-only completion, empty sense, zero resid": {
-			// The core bug: host/driver 0, empty sense, resid 0 → transferred>0.
-			// Without the status gate this fabricated a zero-filled block.
+			// Status-only completion with resid 0 must not fabricate a block.
 			hdr:       sgIOHdr{status: 0x08, dxferLen: bufLen, resid: 0},
 			sense:     nil,
 			assertErr: require.Error,

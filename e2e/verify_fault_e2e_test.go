@@ -23,12 +23,9 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// TestBackupVerifyFault_NoTapeTouched injects a real disk-corruption fault after
-// the Prepare phase — flipping a byte in a staged slice — and asserts the
-// workflow fails at Verify, the control worker's failure webhook fires, and the
-// tape was never loaded or written (AC4). Corruption (rather than a tiny tape
-// capacity) is required because Pack rejects an over-capacity archive before
-// Verify ever runs; a checksum mismatch is the fault Verify is designed to catch.
+// TestBackupVerifyFault_NoTapeTouched corrupts a staged slice after Prepare and
+// asserts the run fails at Verify, alerts, and never touches the tape (AC4).
+// Corruption is used because Pack rejects over-capacity archives before Verify.
 func TestBackupVerifyFault_NoTapeTouched(t *testing.T) {
 	h := requireHarness(t)
 
@@ -55,30 +52,22 @@ func TestBackupVerifyFault_NoTapeTouched(t *testing.T) {
 	h.submitRun(t, cfg)
 	terminateOnCleanup(t, temporalClient)
 
-	// Once Prepare has completed (its slices + recorded checksums exist on disk),
-	// corrupt one slice before Verify recomputes it.
 	corruptAfterPrepare(t, temporalClient, h.stagingHostDir, 4*time.Minute)
 
-	// The run must fail, and the failure must be attributed to the Verify phase.
 	err := temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, new(backup.Result))
 	require.Error(t, err, "run must fail after the injected checksum fault")
 	assert.Contains(t, err.Error(), backup.PhaseVerify, "failure must be attributed to the Verify phase")
 
-	// AC4: the control worker's failure webhook received an alert naming the run
-	// (the singleton workflow ID) and the Verify phase.
+	// AC4.
 	assertFailureAlert(t, h, backupWorkflowID, backup.PhaseVerify)
 
-	// AC4: no tape was loaded or written — Load never ran, so drive 0 is still
-	// empty and the blank tape is still in its storage slot.
+	// AC4: Load never ran.
 	assertTapeUntouched(t, fixture)
 }
 
-// corruptAfterPrepare waits for the run's PrepareArchives activity to complete,
-// then immediately flips a byte in a staged slice so Verify's checksum recompute
-// fails. Prepare -> GeneratePAR2 -> Verify can finish in well under a second, so
-// completion is detected by long-polling the run's history (pushed by Temporal as
-// the event is recorded) rather than by polling a query, which needs a worker
-// round trip per poll and routinely missed the window.
+// corruptAfterPrepare flips a staged byte as soon as PrepareArchives completes.
+// It long-polls history because Prepare -> Verify can take under a second and
+// query polling routinely missed the window.
 func corruptAfterPrepare(t *testing.T, c client.Client, stagingHostDir string, timeout time.Duration) {
 	t.Helper()
 
@@ -109,11 +98,8 @@ func corruptAfterPrepare(t *testing.T, c client.Client, stagingHostDir string, t
 	require.Failf(t, "PrepareArchives never completed", "run %s closed or %s elapsed before PrepareArchives completed", runID, timeout)
 }
 
-// corruptStagedSlice flips one byte in the middle of the largest archive slice
-// (a non-PAR2 file in a per-archive subdirectory) under dir, in place and
-// preserving its size, so the fault is a content (checksum) mismatch rather than
-// a truncation. Top-level files such as report.pdf exist only after Verify, so
-// they are never picked.
+// corruptStagedSlice flips a byte mid-way through the largest archive slice,
+// preserving size, so the fault is a checksum mismatch rather than truncation.
 func corruptStagedSlice(t *testing.T, dir string) {
 	t.Helper()
 
@@ -152,9 +138,7 @@ func corruptStagedSlice(t *testing.T, dir string) {
 	t.Logf("corrupted staged slice %s (%d bytes)", target, size)
 }
 
-// assertFailureAlert asserts the mock failure webhook received exactly the alert
-// for this run, naming the run ID and the failing phase (the SendFailure format
-// is "Backup run <id> failed in phase <phase>: <err>").
+// assertFailureAlert asserts exactly one alert naming the run and failing phase.
 func assertFailureAlert(t *testing.T, h *e2eHarness, workflowID, phase string) {
 	t.Helper()
 
@@ -169,8 +153,7 @@ func assertFailureAlert(t *testing.T, h *e2eHarness, workflowID, phase string) {
 	}, 60*time.Second, 500*time.Millisecond, "failure webhook must receive an alert for run %s naming phase %s", workflowID, phase)
 }
 
-// assertTapeUntouched asserts drive 0 is empty and the fixture's tape is still in
-// its storage slot — proof that Load never ran and nothing was written.
+// assertTapeUntouched asserts drive 0 is empty and the tape is still in its slot.
 func assertTapeUntouched(t *testing.T, fixture tapeFixture) {
 	t.Helper()
 

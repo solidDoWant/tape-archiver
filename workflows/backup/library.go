@@ -18,62 +18,37 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// The Load phase (SPEC §4.3 phase 6) is the gate between staging and tape: it
-// loads blank tapes from their storage slots into the drives and confirms each is
-// blank before any formatting or data transfer begins ("Never write to a non-blank
-// tape", CLAUDE.md). It reads the live changer inventory first and reconciles to
-// the desired state — idempotent for the normal case (drive already has the right
-// blank tape), auto-relocating unexpected tapes, and failing clearly for
-// irrecoverable states.
-//
-// The Eject phase (SPEC §4.3 phase 8) transfers each written tape from its drive
-// to an I/O station slot for physical removal by the operator. Unmounting and
-// capturing the LTFS index happen in the Write phase (FinalizeTape); Eject only
-// issues the changer unload + transfer.
-//
-// Both activities carry MaximumAttempts: 1 — tape moves are physical and
-// non-idempotent. A failure surfaces for an operator decision rather than
-// blindly retrying a potentially destructive changer command.
+// Load (SPEC §4.3 phase 6) moves blank tapes into the drives and confirms each
+// is blank before any write; it reconciles live changer state, so it is
+// idempotent. Eject (phase 8) moves written tapes to the I/O station. Both run a
+// single attempt: tape moves are physical and non-idempotent.
 
 const (
-	// loadTimeout bounds the Load activity: it loads tapes and runs blank checks,
-	// which include rewinds — up to several minutes each on real hardware.
-	loadTimeout = 30 * time.Minute
-	// ejectTimeout bounds the Eject activity: a few changer unload + transfer
-	// moves, each taking seconds on real hardware.
+	// loadTimeout covers loads plus blank-check rewinds, minutes each on real
+	// hardware.
+	loadTimeout  = 30 * time.Minute
 	ejectTimeout = 10 * time.Minute
 )
 
-// LoadInput is the payload for the Load activity. It describes one drive-set: at
-// most len(inv.Drives) physical tapes to load and blank-check in parallel
-// (SPEC §4.3 phase 6). A run spanning more physical tapes than the library has
-// drives is written as a sequence of drive-sets, each a separate Load call.
+// LoadInput is the payload for the Load activity: one drive-set of at most
+// len(inv.Drives) tapes (SPEC §4.3 phase 6).
 type LoadInput struct {
-	// Changer is the changer device node (e.g. /dev/sch0).
 	Changer string
-	// Tapes are the physical tapes in this drive-set, one per drive. Tapes[i] is
-	// loaded into the i-th library drive; its Drive, BlankSlot, and
-	// TapeIndex/CopyIndex assignment come straight from the drive-set plan.
+	// Tapes are the drive-set's physical tapes; Tapes[i] goes into the i-th drive.
 	Tapes []TapeAssignment
-	// AllowNonBlankTapes mirrors Library.AllowNonBlankTapes: when true, a loaded
-	// tape that is not blank is written over (with a warning) instead of failing
-	// the run. The blank check itself always runs; this only changes the non-blank
-	// outcome (SPEC §4.3 step 6).
+	// AllowNonBlankTapes mirrors Library.AllowNonBlankTapes: a non-blank tape is
+	// overwritten with a warning instead of failing the run. The blank check always
+	// runs (SPEC §4.3 step 6).
 	AllowNonBlankTapes bool
 }
 
-// LoadActivities hosts the Load activity, which moves blank tapes into drives and
-// confirms each is blank before any write begins.
+// LoadActivities hosts the Load activity.
 type LoadActivities struct{}
 
-// newLoadActivities returns the Load activities.
 func newLoadActivities() *LoadActivities { return &LoadActivities{} }
 
-// Load moves this drive-set's blank tapes into the drives, reconciling live
-// changer state with the desired state, and performs a blank check on each loaded
-// tape. It returns a LoadedTape per tape in the same order as input.Tapes.
-//
-// MaximumAttempts is 1: tape moves are physical and non-idempotent.
+// Load moves this drive-set's blank tapes into the drives and blank-checks each,
+// returning a LoadedTape per input tape in order. Single attempt.
 func (a *LoadActivities) Load(ctx context.Context, input LoadInput) (_ []LoadedTape, err error) {
 	setSize := len(input.Tapes)
 	if setSize == 0 {
@@ -96,16 +71,10 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) (_ []LoadedT
 
 	slog.InfoContext(ctx, "load: loading blank tapes into drives and blank-checking them", "tapes", setSize)
 
-	// relocated records, per storage slot, the barcode of the unexpected tape a
-	// relocation earlier in this Load moved into it. The inventory is read once
-	// before the loop, so each iteration works from that stale snapshot. The map
-	// serves two purposes: findFreeStorageSlot treats a recorded slot as occupied
-	// (so two drives both holding unexpected tapes never target the same free slot,
-	// whose second MOVE MEDIUM would fail destination-full), and reconcileLoad
-	// consults it when resolving a later assignment's target slot — so a blank
-	// relocated into that slot (e.g. left in an earlier drive by a prior run) is
-	// seen instead of the stale snapshot's still-empty slot (issue #224). Threading
-	// it through avoids any extra changer reads.
+	// relocated maps storage slots filled by this Load's relocations to the barcode
+	// moved there. The inventory is read once, so this keeps two relocations from
+	// targeting the same free slot and lets a later target-slot lookup see a tape
+	// the stale snapshot shows as absent (#224).
 	relocated := make(map[int]tape.Barcode)
 
 	// A failed Load returns what it loaded to the slots they came from, so a
@@ -133,12 +102,8 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) (_ []LoadedT
 
 		drive := tape.NewDrive(stDev)
 
-		// Pair this device node to its changer data-transfer element by the drive's
-		// unit-serial identity — not by its position in the set — so the changer
-		// moves the blank into the very drive the blank check and write then
-		// address. A retry-shaped (non-prefix) set or a kernel probe order that
-		// disagrees with the changer's element order would otherwise load one
-		// physical drive while checking another (issue #137).
+		// Pair by unit serial, not set position: a retry set or kernel probe order
+		// can otherwise load one drive while checking another (#137).
 		de, err := driveElementFor(ctx, drive, inv)
 		if err != nil {
 			return nil, fmt.Errorf("load drive %d (%s): %w", assignment.DriveIndex, stDev, err)
@@ -171,10 +136,8 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) (_ []LoadedT
 					assignment.DriveIndex, stDev, barcode, targetSlot), nonBlankTapeErrorType, nil, string(barcode), targetSlot)
 			}
 
-			// The operator deliberately opted in to reclaiming used tapes
-			// (Library.AllowNonBlankTapes). Record the irreversible overwrite so the
-			// workflow can warn and the run report can note it; blank detection above
-			// is unchanged.
+			// Operator opted in to reclaiming used tapes; record the irreversible
+			// overwrite for the warning and report.
 			overwroteNonBlank = true
 		}
 
@@ -197,12 +160,9 @@ func (a *LoadActivities) Load(ctx context.Context, input LoadInput) (_ []LoadedT
 	return loaded, nil
 }
 
-// driveElementFor pairs a drive device node to its changer data-transfer element
-// by unit-serial identity (issue #137). It reads the drive's serial via INQUIRY
-// (Unit Serial Number VPD page 0x80, answered with no media motion) and returns the
-// inventory element whose DVCID serial matches. It never falls back to set position,
-// which a retry set or a kernel probe-order mismatch can make name a different
-// physical drive, and fails clearly on an unidentifiable or ambiguous drive.
+// driveElementFor pairs a drive node to its changer data-transfer element by
+// unit serial (INQUIRY VPD 0x80, no media motion) vs. the changer's DVCID
+// (#137). It never falls back to set position.
 func driveElementFor(ctx context.Context, drive *tape.Drive, inv tape.Inventory) (tape.DriveElement, error) {
 	info, err := drive.Inquire(ctx)
 	if err != nil {
@@ -212,11 +172,8 @@ func driveElementFor(ctx context.Context, drive *tape.Drive, inv tape.Inventory)
 	return matchDriveElement(inv, info.Serial)
 }
 
-// matchDriveElement returns the single data-transfer element whose DVCID unit
-// serial equals serial. It is the pure pairing rule, split out so it is unit
-// testable without a drive. It errors when serial is empty (neither the drive's
-// INQUIRY nor the changer's DVCID reported an identity, so position cannot be
-// trusted), when no element matches, or when the match is not unique.
+// matchDriveElement returns the single element whose DVCID serial equals
+// serial, failing on an empty serial, no match, or an ambiguous match.
 func matchDriveElement(inv tape.Inventory, serial string) (tape.DriveElement, error) {
 	if serial == "" {
 		return tape.DriveElement{}, errors.New("cannot pair device node to a changer element: " +
@@ -246,8 +203,6 @@ func matchDriveElement(inv tape.Inventory, serial string) (tape.DriveElement, er
 	return inv.Drives[match], nil
 }
 
-// driveSerials renders the changer's per-drive serials for a pairing-failure error,
-// so an operator can see what the library actually reported.
 func driveSerials(inv tape.Inventory) string {
 	parts := make([]string, len(inv.Drives))
 	for i, de := range inv.Drives {
@@ -258,34 +213,21 @@ func driveSerials(inv tape.Inventory) string {
 }
 
 const (
-	// driveReadyTimeout bounds how long the blank check waits for a freshly
-	// loaded drive to become ready. A MOVE MEDIUM completes before the drive has
-	// threaded and calibrated the tape; real LTO drives then report NOT READY /
-	// BECOMING READY for tens of seconds. This is well under loadTimeout.
+	// driveReadyTimeout bounds the wait for a freshly loaded drive: MOVE MEDIUM
+	// returns before the drive has threaded the tape, and real LTO drives report
+	// NOT READY for tens of seconds afterwards.
 	driveReadyTimeout = 3 * time.Minute
-	// driveReadyPoll is the interval between blank-check retries while waiting.
-	driveReadyPoll = 1 * time.Second
+	driveReadyPoll    = 1 * time.Second
 )
 
-// blankChecker is the single drive capability blankCheckWhenReady needs: report
-// whether the loaded tape is blank. *tape.Drive satisfies it in production; a
-// fake in tests drives the NOT-READY retry loop deterministically without a real
-// drive or mhvtl.
+// blankChecker is the drive capability blankCheckWhenReady needs.
 type blankChecker interface {
 	IsBlank(ctx context.Context) (bool, error)
 }
 
-// blankCheckWhenReady runs the blank check, retrying while a freshly loaded
-// drive is still becoming ready. After a load the drive is not ready instantly,
-// so the blank-check rewind can transiently fail with NOT READY; polling until
-// the drive answers keeps a slow-loading drive from aborting the run. The wait
-// is bounded by timeout and honours ctx cancellation; a genuine media or
-// hardware fault persists and surfaces as the final error.
-//
-// timeout and poll are parameters so tests can exercise the retry loop and its
-// bounds deterministically with tiny durations; production passes the
-// driveReadyTimeout / driveReadyPoll consts, so the run-time cadence is
-// unchanged.
+// blankCheckWhenReady runs the blank check, retrying while the drive is still
+// becoming ready after a load, until timeout; a persistent fault surfaces as the
+// final error.
 func blankCheckWhenReady(ctx context.Context, drive blankChecker, timeout, poll time.Duration) (bool, error) {
 	deadline := time.Now().Add(timeout)
 
@@ -307,49 +249,28 @@ func blankCheckWhenReady(ctx context.Context, drive blankChecker, timeout, poll 
 	}
 }
 
-// reconcileLoad ensures the given data-transfer element (already paired to the
-// caller's device node by drive identity, not by set position — issue #137) is
-// loaded with the tape from targetSlot. It reads the current inventory state and
-// issues only the changer moves needed. Returns the barcode of the tape that ends
-// up in the drive.
-//
-// The reconciliation table (from the Load phase design in CLAUDE.md):
-//   - Drive already loaded from targetSlot → skip load (idempotent).
-//   - Drive empty → load from targetSlot.
-//   - Drive loaded with unexpected tape → auto-relocate to a free slot, then load.
-//
-// The blank check always runs after this function, so non-blank tapes are caught
-// regardless of which path was taken.
-//
-// relocated carries the storage slots already consumed by relocations earlier in
-// the same Load, each mapped to the barcode moved there; findFreeStorageSlot
-// excludes those slots so two drives with unexpected tapes never target the same
-// free slot. When this call relocates a tape, it records the chosen slot and its
-// barcode for subsequent drives. It is also consulted when resolving targetSlot,
-// so a blank relocated into that slot earlier in this Load is seen even though the
-// once-read inventory snapshot still shows the slot empty (issue #224).
+// reconcileLoad loads the tape from targetSlot into de (already paired by drive
+// identity, #137), issuing only the moves needed: skip when already loaded,
+// load when empty, relocate an unexpected tape first. It returns the barcode
+// that ends up in the drive; the blank check always follows. relocated is
+// updated and consulted as described in Load (#224).
 func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventory, de tape.DriveElement, targetSlot int, relocated map[int]tape.Barcode) (tape.Barcode, error) {
 	driveAddr := de.Address
 
 	if de.Loaded {
 		if de.SourceSlot == targetSlot {
-			// Tape from the target slot is already in the drive (idempotent).
 			return de.Barcode, nil
 		}
 
-		// Unexpected tape — relocate it to a free storage slot (prefer its home
-		// slot), then load the blank. A tape with an active LTFS mount asserts
-		// SCSI PREVENT MEDIUM REMOVAL, so the unload will fail with a clear
-		// hardware error and the run aborts rather than force-yanking a live tape.
+		// A tape with a live LTFS mount asserts PREVENT MEDIUM REMOVAL, so its unload
+		// fails clearly instead of yanking a live tape.
 		relocateSlot := findFreeStorageSlot(inv, de.SourceSlot, relocated)
 		if relocateSlot == -1 {
 			return "", fmt.Errorf("drive has unexpected tape %s (from slot %d) and no free storage slot to relocate it",
 				de.Barcode, de.SourceSlot)
 		}
 
-		// Record the slot and the barcode moving into it before the move, so a later
-		// drive in this Load cannot be offered the same slot from the stale snapshot
-		// and a later target-slot lookup sees this relocated tape.
+		// Claim before moving so later drives in this Load see it.
 		relocated[relocateSlot] = de.Barcode
 
 		if err := changer.Unload(ctx, relocateSlot, driveAddr); err != nil {
@@ -358,24 +279,16 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 		}
 	}
 
-	// Drive is now empty — confirm the target slot has a tape and load it. Check
-	// this Load's own relocations first: if an earlier drive's unexpected tape was
-	// moved into this slot (e.g. the blank this set needs was left in that drive by
-	// a prior run), the once-read inventory snapshot still shows the slot empty, but
-	// the tape is physically there now (issue #224). The blank check after this
-	// function still runs, so a non-blank relocated tape is caught regardless.
+	// Check this Load's relocations first: the snapshot may show the slot empty
+	// though an earlier relocation filled it (#224).
 	targetBarcode, ok := relocated[targetSlot]
 	if !ok {
 		targetBarcode, ok = slotBarcode(inv, targetSlot)
 	}
 
 	if !ok {
-		// Report where the tapes actually are, not just that this slot is empty.
-		// The usual cause is a configured blank slot that no longer holds a tape —
-		// a previous run left its tapes in the drives or the I/O station, or the
-		// configured slots never matched the library's contents. Naming the
-		// occupied slots makes the run's own error enough to pick valid slots (or
-		// to see that the library needs restocking) without a separate inventory.
+		// Name where the tapes actually are, so the error alone is enough to pick
+		// valid slots or see the library needs restocking.
 		return "", fmt.Errorf(
 			"target slot %d is empty; cannot load a blank tape "+
 				"(storage slots holding tapes: %s; tapes in drives: %d; tapes in I/O station: %d)",
@@ -392,9 +305,8 @@ func reconcileLoad(ctx context.Context, changer *tape.Changer, inv tape.Inventor
 	return targetBarcode, nil
 }
 
-// occupiedStorageSlots returns, in ascending order, the address of every storage
-// slot that holds a tape — including tapes moved into a slot by this Load's own
-// relocations, which the once-read inventory snapshot still shows as empty.
+// occupiedStorageSlots returns the ascending addresses of occupied storage
+// slots, including this Load's relocations.
 func occupiedStorageSlots(inv tape.Inventory, relocated map[int]tape.Barcode) []int {
 	occupied := make(map[int]struct{}, len(inv.Slots))
 
@@ -418,7 +330,6 @@ func occupiedStorageSlots(inv tape.Inventory, relocated map[int]tape.Barcode) []
 	return addresses
 }
 
-// loadedDriveCount returns how many drives currently hold a tape.
 func loadedDriveCount(inv tape.Inventory) int {
 	var count int
 
@@ -431,7 +342,6 @@ func loadedDriveCount(inv tape.Inventory) int {
 	return count
 }
 
-// occupiedIOCount returns how many I/O station slots currently hold a tape.
 func occupiedIOCount(inv tape.Inventory) int {
 	var count int
 
@@ -444,9 +354,8 @@ func occupiedIOCount(inv tape.Inventory) int {
 	return count
 }
 
-// formatSlotRanges renders ascending slot addresses compactly, collapsing
-// consecutive runs into "start-end" so a 47-slot library reads as "1-19, 23-47"
-// rather than a wall of numbers. Returns "none" for an empty list.
+// formatSlotRanges renders ascending slot addresses compactly ("1-19, 23-47"),
+// or "none".
 func formatSlotRanges(addresses []int) string {
 	if len(addresses) == 0 {
 		return "none"
@@ -474,8 +383,6 @@ func formatSlotRanges(addresses []int) string {
 	return strings.Join(parts, ", ")
 }
 
-// formatSlotRange renders one inclusive slot range, collapsing a single-slot
-// range to the bare address.
 func formatSlotRange(start, end int) string {
 	if start == end {
 		return strconv.Itoa(start)
@@ -484,12 +391,8 @@ func formatSlotRange(start, end int) string {
 	return fmt.Sprintf("%d-%d", start, end)
 }
 
-// findFreeStorageSlot returns the address of an empty storage slot, preferring
-// preferSlot if it is empty. Slots already consumed by an earlier relocation in
-// the same Load are treated as occupied and skipped (including the preferred
-// slot), so successive relocations never target the same slot from one stale
-// inventory snapshot. A nil relocated map means nothing is relocated yet. Returns
-// -1 if no free, unclaimed storage slot exists.
+// findFreeStorageSlot returns an empty storage slot, preferring preferSlot and
+// skipping slots claimed in relocated, or -1 if none.
 func findFreeStorageSlot(inv tape.Inventory, preferSlot int, relocated map[int]tape.Barcode) int {
 	for _, slot := range inv.Slots {
 		if _, claimed := relocated[slot.Address]; slot.Address == preferSlot && !slot.Full && !claimed {
@@ -506,8 +409,7 @@ func findFreeStorageSlot(inv tape.Inventory, preferSlot int, relocated map[int]t
 	return -1
 }
 
-// findFreeIOSlot returns the address of an empty I/O station slot, or -1 if all
-// I/O slots are occupied.
+// findFreeIOSlot returns an empty I/O station slot, or -1.
 func findFreeIOSlot(inv tape.Inventory) int {
 	for _, slot := range inv.IOSlots {
 		if !slot.Full {
@@ -518,9 +420,8 @@ func findFreeIOSlot(inv tape.Inventory) int {
 	return -1
 }
 
-// slotBarcode returns the barcode of the tape in the given storage slot address
-// and whether the slot is occupied. It scans the full slot list because slot
-// addresses are not guaranteed to be contiguous or zero-indexed.
+// slotBarcode returns the barcode in storage slot addr, if occupied. Slot
+// addresses are not guaranteed contiguous, so it scans.
 func slotBarcode(inv tape.Inventory, addr int) (tape.Barcode, bool) {
 	for _, slot := range inv.Slots {
 		if slot.Address == addr {
@@ -531,17 +432,10 @@ func slotBarcode(inv tape.Inventory, addr int) (tape.Barcode, bool) {
 	return "", false
 }
 
-// planDriveSets partitions every (logical tape, copy) pair in the plan into
-// drive-sets of at most len(drives) physical tapes (SPEC §4.3 phases 6–8). Pairs
-// are flattened in (tape, copy) order and chunked, so copies of one logical tape
-// stay adjacent and tend to share a set — a set then reads a single staged tree
-// (byte-identical copies), which the ZFS ARC coalesces to near-1× disk reads
-// (SPEC §14). Drives are reused across sets (drive j holds set 0's tape j, then
-// set 1's after eject); each physical tape consumes its own blank slot, so the run
-// needs one blank slot per (tape × copy).
-//
-// It returns an error when the plan cannot be written with the configured drives
-// and blank slots. An empty plan yields no sets (and no error).
+// planDriveSets partitions every (tape, copy) pair into drive-sets of at most
+// len(drives) tapes (SPEC §4.3 phases 6–8). Pairs are chunked in (tape, copy)
+// order so copies of one tape tend to share a set and the ZFS ARC coalesces
+// their identical reads (SPEC §14). Each physical tape needs its own blank slot.
 func planDriveSets(plan TapePlan, drives []string, blankSlots []int) ([]driveSet, error) {
 	total := len(plan.Tapes) * plan.Copies
 	if total == 0 {
@@ -592,9 +486,7 @@ func planDriveSets(plan TapePlan, drives []string, blankSlots []int) ([]driveSet
 	return sets, nil
 }
 
-// loadPhase orchestrates the Load phase (SPEC §4.3 phase 6) for one drive-set: it
-// dispatches the Load activity on the data worker and returns the loaded tapes for
-// the Write and Eject phases. runTapePath calls it once per drive-set.
+// loadPhase runs the Load activity for one drive-set (SPEC §4.3 phase 6).
 func loadPhase(ctx workflow.Context, cfg config.Config, set driveSet) ([]LoadedTape, error) {
 	if len(set) == 0 {
 		return nil, nil
@@ -619,9 +511,8 @@ func loadPhase(ctx workflow.Context, cfg config.Config, set driveSet) ([]LoadedT
 		return nil, err
 	}
 
-	// Overwriting a non-blank tape is deliberate (Library.AllowNonBlankTapes) but
-	// irreversible, so surface it loudly in the run's durable log — naming the
-	// barcode and slot whose existing data is being destroyed (SPEC §4.3 step 6).
+	// Overwriting is deliberate but irreversible: log it loudly with barcode and
+	// slot (SPEC §4.3 step 6).
 	for _, lt := range loaded {
 		if lt.OverwroteNonBlank {
 			workflow.GetLogger(ctx).Warn("overwriting a NON-BLANK tape "+
@@ -635,37 +526,24 @@ func loadPhase(ctx workflow.Context, cfg config.Config, set driveSet) ([]LoadedT
 
 // EjectInput is the payload for the Eject activity.
 type EjectInput struct {
-	// Changer is the changer device node (e.g. /dev/sch0).
-	Changer string
-	// WrittenTapes are the tapes to eject, each carrying its DriveIndex and
-	// SourceSlot for unload + transfer.
+	Changer      string
 	WrittenTapes []WrittenTape
 }
 
 // IOStatusInput is the payload for the IOStationStatus activity.
 type IOStatusInput struct {
-	// Changer is the changer device node (e.g. /dev/sch0).
 	Changer string
 }
 
 // EjectActivities hosts the Eject and IOStationStatus activities.
 type EjectActivities struct{}
 
-// newEjectActivities returns the Eject activities.
 func newEjectActivities() *EjectActivities { return &EjectActivities{} }
 
-// Eject unloads each written tape from its drive back to its source slot and
-// transfers it to a free I/O station slot. It reads live changer state first and
-// reconciles, handling the case where a tape was already unloaded or already
-// transferred before this activity ran.
-//
-// When the I/O station has no free slot, Eject does not fail: it still unloads
-// each tape from its drive to its source storage slot (so no tape is ever left in
-// a drive) and returns the tapes it could not export in EjectResult.Remaining, so
-// the workflow can pause for the operator and retry. Passing that Remaining set
-// back on a later call resumes the export into the freed slots.
-//
-// MaximumAttempts is 1: tape moves are physical and non-idempotent.
+// Eject moves each written tape from its drive to a free I/O station slot,
+// reconciling against live changer state. When the station is full it still
+// unloads every tape to its source slot (never leaving one in a drive) and
+// returns the rest in EjectResult.Remaining for a later retry. Single attempt.
 func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectResult, error) {
 	if len(input.WrittenTapes) == 0 {
 		return EjectResult{}, nil
@@ -681,8 +559,7 @@ func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectRes
 	var remaining []WrittenTape
 
 	for i, wt := range input.WrittenTapes {
-		// Re-read inventory before each move (after the first) so this iteration
-		// sees the freed drive and consumed I/O slot from the previous move.
+		// Re-read so this iteration sees the previous move.
 		if i > 0 {
 			inv, err = changer.Inventory(ctx)
 			if err != nil {
@@ -706,7 +583,6 @@ func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectRes
 		}
 	}
 
-	// Re-read once more to report the tapes now resting in the I/O station.
 	inv, err = changer.Inventory(ctx)
 	if err != nil {
 		return EjectResult{}, fmt.Errorf("inventory after eject: %w", err)
@@ -723,12 +599,9 @@ func (a *EjectActivities) Eject(ctx context.Context, input EjectInput) (EjectRes
 	}, nil
 }
 
-// IOStationStatus reads the changer and returns a read-only snapshot of the
-// import/export station (free slot count and access state). The workflow polls it
-// while paused in Eject to decide whether the operator has cleared and closed the
-// station so the run can resume automatically (SPEC §4.3 phase 8). It moves no
-// media, so it carries the default retry policy — a transient read failure is
-// safe to retry.
+// IOStationStatus returns a read-only snapshot of the I/O station, polled while
+// Eject is paused to detect auto-resume (SPEC §4.3 phase 8). It moves no media,
+// so it is safe to retry.
 func (a *EjectActivities) IOStationStatus(ctx context.Context, input IOStatusInput) (IOStatus, error) {
 	changer := tape.NewChanger(input.Changer)
 
@@ -740,29 +613,18 @@ func (a *EjectActivities) IOStationStatus(ctx context.Context, input IOStatusInp
 	return ioStatus(inv), nil
 }
 
-// ejectTape ejects a single written tape to an I/O station slot and reports
-// whether it reached one. It reconciles the live drive state:
-//   - Tape already in an I/O slot → exported, no move.
-//   - Drive loaded with this tape → unload to SourceSlot, then transfer if a slot
-//     is free.
-//   - Tape already in SourceSlot (drive empty) → transfer if a slot is free.
-//
-// The unload always precedes the I/O-slot check, so a tape is moved out of its
-// drive even when the station is full — it then waits in its source storage slot
-// and is reported as not exported (returns false) for the workflow to retry.
+// ejectTape moves one written tape to an I/O slot and reports whether it got
+// there. The drive is always unloaded first, so even with a full station the
+// tape waits in its source slot rather than a drive.
 func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, wt WrittenTape) (bool, error) {
-	// Check if already in an I/O slot.
 	for _, io := range inv.IOSlots {
 		if io.Full && io.Barcode == wt.Barcode {
 			return true, nil
 		}
 	}
 
-	// Unload from drive to source slot if the drive still holds this tape. Locate
-	// the drive by the tape's own barcode rather than by wt.DriveIndex: DriveIndex
-	// is the config drive index, which is not the changer's element position on a
-	// probe-order-mismatched host (issue #137). The barcode is the tape's canonical
-	// identity (SPEC §6), so scanning for it unloads exactly the drive holding it.
+	// Find the drive by barcode, not wt.DriveIndex: the config index is not the
+	// changer's element position on a probe-order-mismatched host (#137).
 	for _, drive := range inv.Drives {
 		if drive.Loaded && drive.Barcode == wt.Barcode {
 			if err := changer.Unload(ctx, wt.SourceSlot, drive.Address); err != nil {
@@ -774,8 +636,6 @@ func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, w
 		}
 	}
 
-	// Transfer from source slot to a free I/O slot when one is available;
-	// otherwise leave the tape in its source storage slot for a later retry.
 	ioSlot := findFreeIOSlot(inv)
 	if ioSlot == -1 {
 		return false, nil
@@ -789,8 +649,7 @@ func ejectTape(ctx context.Context, changer *tape.Changer, inv tape.Inventory, w
 	return true, nil
 }
 
-// barcodesInIOStation returns the barcodes of every tape currently occupying an
-// I/O-station slot — the tapes ready for the operator to remove.
+// barcodesInIOStation returns the barcodes in the I/O station.
 func barcodesInIOStation(inv tape.Inventory) []tape.Barcode {
 	var inIO []tape.Barcode
 
@@ -803,10 +662,8 @@ func barcodesInIOStation(inv tape.Inventory) []tape.Barcode {
 	return inIO
 }
 
-// ioStatus derives the import/export station snapshot the paused Eject phase polls
-// from a live inventory: the free-slot count and, when the library reports it, the
-// access state (StationClosed is true only when every I/O slot is accessible to
-// the changer robot — the operator has closed the station).
+// ioStatus derives the station snapshot from inv. StationClosed is true only
+// when every I/O slot is accessible to the robot.
 func ioStatus(inv tape.Inventory) IOStatus {
 	free := 0
 	closed := true
@@ -829,35 +686,19 @@ func ioStatus(inv tape.Inventory) IOStatus {
 }
 
 const (
-	// ioStationPollInterval is how often a paused Eject phase re-reads the I/O
-	// station to detect (on libraries that report access state) that the operator
-	// has cleared and closed it, so the run resumes without an explicit signal.
+	// ioStationPollInterval is how often a paused Eject re-reads the I/O station.
 	ioStationPollInterval = 30 * time.Second
-	// ioStatusTimeout bounds one IOStationStatus poll — a single READ ELEMENT STATUS.
-	ioStatusTimeout = 30 * time.Second
-	// ioStatusMaxAttempts retries a transient poll read a few times before giving
-	// up; a persistently unreadable changer during the pause fails the run.
+	ioStatusTimeout       = 30 * time.Second
+	// ioStatusMaxAttempts: a changer that stays unreadable during the pause fails
+	// the run.
 	ioStatusMaxAttempts = 3
 )
 
-// ejectPhase orchestrates the Eject phase (SPEC §4.3 phase 8) for one drive-set:
-// it dispatches the Eject activity on the data worker to transfer this set's
-// written tapes from their drives to I/O station slots for physical removal, and
-// frees the drives for the next drive-set. runTapePath calls it once per set.
-//
-// When the I/O station fills before every tape is exported, the phase becomes
-// operator-in-the-loop: it notifies the operator which tapes to remove, then waits
-// — resuming automatically once the library reports the station cleared and closed
-// (waitForIOCleared), or on the explicit OperatorResumeSignal — and retries
-// the remaining tapes into the freed slots. If the operator never responds within
-// the configured wait, it fails the run; every written tape is by then in an I/O
-// or storage slot and none is in a drive.
-//
-// state.currentPause (read by CurrentPauseQuery) is set to PauseEject for the
-// duration of the wait below and cleared as soon as it returns, on every exit
-// path (resumed, timed out, or the wait itself errors) — a plain struct-field
-// assignment around the pre-existing wait call, with no effect on its timing or
-// signal handling.
+// ejectPhase runs Eject for one drive-set (SPEC §4.3 phase 8). When the I/O
+// station fills, it alerts the operator and waits for the station to be cleared
+// (auto-detected or OperatorResumeSignal), then retries the rest; on timeout it
+// fails with every tape in a slot, none in a drive. state.currentPause is
+// PauseEject for the duration of the wait.
 func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState, written []WrittenTape) error {
 	if len(written) == 0 {
 		return nil
@@ -876,14 +717,9 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState, writte
 			return nil
 		}
 
-		// The I/O station is full with tapes still to export. Alert the operator
-		// which tapes to remove, then pause until the station is cleared. Drain any
-		// stale resume or abort before the alert is dispatched so only genuinely-
-		// stale (pre-alert) signals are discarded while one prompted by this alert
-		// survives (issues #216, #254). waitForIOCleared below never listens on the
-		// abort channel itself (an Eject pause rejects abort), so this drain's only
-		// effect on abort is to stop a stale one from leaking forward onto a later,
-		// unrelated pause.
+		// Drain stale resume/abort before the alert so only pre-alert signals are
+		// discarded (#216, #254). The wait ignores abort (an Eject pause rejects it);
+		// draining keeps a stale abort from leaking onto a later pause.
 		drainStalePauseSignals(ctx)
 
 		notifyOperatorPause(ctx, result.InIOStation, len(remaining))
@@ -910,8 +746,7 @@ func ejectPhase(ctx workflow.Context, cfg config.Config, state *runState, writte
 	}
 }
 
-// runEject dispatches one Eject activity call on the data worker and returns its
-// result. MaximumAttempts is 1: tape moves are physical and non-idempotent.
+// runEject runs one Eject activity on the data worker (single attempt).
 func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (EjectResult, error) {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
@@ -934,33 +769,20 @@ func runEject(ctx workflow.Context, cfg config.Config, tapes []WrittenTape) (Eje
 	return result, nil
 }
 
-// waitForIOCleared pauses the Eject phase until the operator has cleared the I/O
-// station, returning true to resume and false when the configured wait elapses
-// first. The auto-resume poll loop runs in a self-continuing child workflow
-// (ioStationWaitWorkflow) that ContinueAsNew's every maxPollsBeforeContinue polls,
-// so the run's own history grows by only the child start/complete pair per pause,
-// regardless of how long the operator takes (issue #168). The parent keeps the
-// operator-resume and timeout decision in a single O(1) selector: it waits on the
-// OperatorResumeSignal (explicit resume) and the child future. A signal resumes
-// immediately and cancels the child; the child completes true when the station
-// reports it can auto-resume (IOStatus.CanAutoResume) or false when the wait
-// deadline elapses.
-//
-// Stale buffered resumes (and, since issue #254, aborts) are drained by the caller
-// before the pause alert is dispatched (issue #216), not here at wait entry, so a
-// resume the operator sends in response to the alert is never discarded. This wait
-// itself still never listens on the abort channel — an Eject pause rejects abort.
+// waitForIOCleared pauses until the operator clears the I/O station, returning
+// false if the configured wait elapses first. The poll loop runs in a
+// self-continuing child workflow so the run's history grows O(1) per pause
+// (#168); the parent selects on OperatorResumeSignal and the child. Stale
+// signals are drained by the caller before the alert (#216), not here.
 func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
 	signalCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 
-	// Absolute deadline for the whole wait, computed once here and carried through
-	// the child (and its continuations) so the total budget never drifts.
+	// Absolute deadline, carried through the child's continuations so the budget
+	// never drifts.
 	deadline := workflow.Now(ctx).Add(cfg.Library.EffectiveIOWaitTimeout())
 
-	// Run the poll loop as a child so its history — not the run's — absorbs the
-	// per-poll timer + activity events; ParentClosePolicy TERMINATE ties the child
-	// to this run (no cross-run state, SPEC §4.2). A cancellable context lets an
-	// explicit operator resume stop the child promptly.
+	// ParentClosePolicy TERMINATE ties the child to this run (no cross-run state,
+	// SPEC §4.2).
 	childCtx, cancelChild := workflow.WithCancel(ctx)
 	defer cancelChild()
 
@@ -993,7 +815,6 @@ func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
 	selector.Select(ctx)
 
 	if signalled {
-		// Stop the poll loop; the deferred cancel also covers the child-done path.
 		cancelChild()
 
 		return true, nil
@@ -1006,9 +827,8 @@ func waitForIOCleared(ctx workflow.Context, cfg config.Config) (bool, error) {
 	return resumed, nil
 }
 
-// runIOStationStatus dispatches one IOStationStatus poll on the data worker. It
-// moves no media and is safe to retry, so it carries a small retry budget rather
-// than MaximumAttempts: 1.
+// runIOStationStatus runs one IOStationStatus poll with a small retry budget
+// (it moves no media).
 func runIOStationStatus(ctx workflow.Context, cfg config.Config) (IOStatus, error) {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
@@ -1028,10 +848,9 @@ func runIOStationStatus(ctx workflow.Context, cfg config.Config) (IOStatus, erro
 	return status, nil
 }
 
-// notifyOperatorPause alerts the operator that the Eject phase paused because the
-// I/O station filled (SPEC §4.3 phase 8, §11). It runs the operational alert on
-// the control worker and is best-effort: a delivery failure is logged, never
-// propagated, so a webhook outage does not abort a run that is only waiting.
+// notifyOperatorPause alerts the operator that Eject paused on a full I/O
+// station (SPEC §11). Best-effort: a webhook outage must not abort a waiting
+// run.
 func notifyOperatorPause(ctx workflow.Context, readyForRemoval []tape.Barcode, awaiting int) {
 	input := OperatorPauseInput{
 		RunID:           workflow.GetInfo(ctx).WorkflowExecution.ID,
@@ -1053,8 +872,6 @@ func notifyOperatorPause(ctx workflow.Context, readyForRemoval []tape.Barcode, a
 	}
 }
 
-// barcodeStrings converts a slice of tape barcodes to plain strings for an
-// activity payload and operator-facing message.
 func barcodeStrings(barcodes []tape.Barcode) []string {
 	out := make([]string, len(barcodes))
 	for i, barcode := range barcodes {

@@ -63,9 +63,8 @@ func TestBuildManifest(t *testing.T) {
 	assert.Empty(t, arch2.PAR2Files)
 }
 
-// TestBuildManifestSharedLabel proves that when two sources carry the same
-// descriptive label, the NNN source-index prefix keeps their on-tape directories
-// distinct so neither archive's manifest paths collide with the other's.
+// TestBuildManifestSharedLabel proves the NNN prefix keeps same-label archives'
+// manifest paths distinct.
 func TestBuildManifestSharedLabel(t *testing.T) {
 	t.Parallel()
 
@@ -146,7 +145,6 @@ func TestCopyTape(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 
-	// Create staged slice and PAR2 files.
 	slice0 := filepath.Join(src, "archive.000")
 	require.NoError(t, os.WriteFile(slice0, []byte("slice0-content"), 0o644))
 
@@ -172,7 +170,6 @@ func TestCopyTape(t *testing.T) {
 
 	require.NoError(t, copyTape(t.Context(), dst, archives))
 
-	// Verify the on-tape directory layout: archives/000-<label>/<files>
 	archDir := filepath.Join(dst, "archives", "000-photos")
 	entries, err := os.ReadDir(archDir)
 	require.NoError(t, err)
@@ -210,7 +207,6 @@ func TestCopyTapeMultipleArchives(t *testing.T) {
 
 	require.NoError(t, copyTape(t.Context(), dst, archives))
 
-	// Source index 0 → archives/000-photos, source index 2 → archives/002-videos
 	got0, err := os.ReadFile(filepath.Join(dst, "archives", "000-photos", "a0.000"))
 	require.NoError(t, err)
 	assert.Equal(t, "archive0", string(got0))
@@ -220,18 +216,14 @@ func TestCopyTapeMultipleArchives(t *testing.T) {
 	assert.Equal(t, "archive2", string(got2))
 }
 
-// TestCopyTapeSharedLabel proves that two sources whose labels are identical (by
-// override, by derivation, or by sanitizing to the same string) still land in
-// distinct on-tape directories — the NNN prefix disambiguates — so neither
-// overwrites the other on the mounted volume, even when their slice basenames match.
+// TestCopyTapeSharedLabel proves same-label archives with identical slice
+// basenames land in distinct directories rather than clobbering each other.
 func TestCopyTapeSharedLabel(t *testing.T) {
 	t.Parallel()
 
 	src := t.TempDir()
 	dst := t.TempDir()
 
-	// Both archives use the identical slice basename (archive.000) and label, so a
-	// missing NNN prefix would make the second copy clobber the first.
 	file0 := filepath.Join(src, "s0", "archive.000")
 	require.NoError(t, os.MkdirAll(filepath.Dir(file0), 0o755))
 	require.NoError(t, os.WriteFile(file0, []byte("first-source"), 0o644))
@@ -269,8 +261,7 @@ func TestCopyTapeCancelledContext(t *testing.T) {
 		{SourceIndex: 0, Slices: []StagedSlice{{Path: file}}},
 	}
 
-	// A pre-cancelled context causes copyTape to abort on the context check
-	// between files. With a single file the check fires before copying it.
+	// A pre-cancelled context aborts on the check before the first file.
 	cancelledCtx, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -391,9 +382,8 @@ func TestArchivesForTapeMissingStaged(t *testing.T) {
 		},
 	}
 
-	// A planned archive with no staged slices must fail loudly rather than be
-	// omitted: writing manifest.json (the completeness signal) for a tape that
-	// is missing a planned archive would be undetectable data loss.
+	// Must fail loudly: a complete-looking manifest for a tape missing a planned
+	// archive would be undetectable data loss.
 	got, err := archivesForTape(state, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "source index 1")

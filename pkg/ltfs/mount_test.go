@@ -11,9 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestUnescapeMountinfo covers the octal unescaping applied to the mount-point
-// field of /proc/self/mountinfo (space, tab, newline, backslash), which
-// mountpointInUse relies on to match paths verbatim.
+// TestUnescapeMountinfo covers mountinfo's octal unescaping.
 func TestUnescapeMountinfo(t *testing.T) {
 	t.Parallel()
 
@@ -41,33 +39,26 @@ func TestUnescapeMountinfo(t *testing.T) {
 	}
 }
 
-// TestMountpointInUse verifies the /proc/self/mountinfo scan reports well-known
-// mount points as in use and ordinary paths as not, without stat'ing the path
-// (the property that lets it detect an orphaned ENOTCONN mount). This is the
-// attribution guard's core logic, exercised without a tape drive.
+// TestMountpointInUse checks the mountinfo scan, which never stats the path so it
+// can detect an orphaned ENOTCONN mount.
 func TestMountpointInUse(t *testing.T) {
 	t.Parallel()
 
-	// "/" is always a mount point and always present in mountinfo.
 	inUse, err := mountpointInUse("/")
 	require.NoError(t, err)
 	assert.True(t, inUse, "/ must be reported as a mount point")
 
-	// A path that exists but is an ordinary directory, not a mount boundary.
 	inUse, err = mountpointInUse(t.TempDir())
 	require.NoError(t, err)
 	assert.False(t, inUse, "a fresh temp dir is not a mount point")
 
-	// A path whose final component does not exist must not error (no stat of the
-	// component): the parent is resolved, the missing path simply is not found in
-	// mountinfo. This mirrors the pre-MkdirAll call in Volume.Mount.
+	// A missing final component must not error (the parent is resolved instead).
 	inUse, err = mountpointInUse(t.TempDir() + "/does-not-exist")
 	require.NoError(t, err)
 	assert.False(t, inUse, "a non-existent path is not a mount point")
 }
 
-// closedDone returns an already-closed channel, standing in for a supervised
-// ltfs process that has already exited.
+// closedDone stands in for an ltfs process that has already exited.
 func closedDone() chan struct{} {
 	done := make(chan struct{})
 	close(done)
@@ -75,11 +66,8 @@ func closedDone() chan struct{} {
 	return done
 }
 
-// TestUnmountIdempotentAfterDetach proves AC1's retry path deterministically,
-// without a tape drive: once a mount is detached, a second Unmount must NOT
-// re-run fusermount -u (which would exit non-zero on the already-released
-// mountpoint and spuriously fail the retry). The mountpoint here is not mounted,
-// so any fusermount call would fail — a nil return proves it was skipped.
+// TestUnmountIdempotentAfterDetach: once detached, a retry must not re-run
+// fusermount -u, which would fail on the unmounted path.
 func TestUnmountIdempotentAfterDetach(t *testing.T) {
 	t.Parallel()
 
@@ -111,22 +99,15 @@ func TestUnmountIdempotentAfterDetach(t *testing.T) {
 	}
 }
 
-// TestWaitForMountExitError proves waitForMount reports a legible error when the
-// ltfs process exits before the FUSE mount comes live, without a tape drive: the
-// mountpoint is a plain temp dir (never a mount boundary) and done is already
-// closed, so the poll sees "not mounted" then the closed done and returns the
-// exit error. It pins the two regressions from the write-path failure on run
-// 019f7dda: a nil waitErr (ltfs exited 0 without mounting) must never render as
-// the "%!w(<nil>)" verb error, and the captured ltfs stderr must survive with
-// its newlines intact so the multi-line diagnostics stay readable downstream.
+// TestWaitForMountExitError pins two regressions from run 019f7dda: a nil
+// waitErr must not render as "%!w(<nil>)", and ltfs stderr must keep its
+// newlines.
 func TestWaitForMountExitError(t *testing.T) {
 	t.Parallel()
 
 	const ltfsStderr = "LTFS9015W Setting the locale to 'en_US.UTF-8'.\n" +
 		"7427 LTFS14000I LTFS starting, LTFS version 2.4.8.4 (Prelim), log level 2."
 
-	// The output block indents each ltfs line by two spaces and keeps the
-	// newline between them, so downstream surfaces render it multi-line.
 	const indentedOutput = "  LTFS9015W Setting the locale to 'en_US.UTF-8'.\n" +
 		"  7427 LTFS14000I LTFS starting, LTFS version 2.4.8.4 (Prelim), log level 2."
 
@@ -139,8 +120,7 @@ func TestWaitForMountExitError(t *testing.T) {
 		wantSubstr []string
 	}{
 		{
-			// The run-019f7dda regression: ltfs exited 0 (waitErr nil) after only
-			// printing startup notices, never mounting.
+			// The run-019f7dda regression: ltfs exited 0 without mounting.
 			name:       "clean exit without mounting",
 			waitErr:    nil,
 			stderr:     ltfsStderr,
@@ -191,13 +171,8 @@ func TestWaitForMountExitError(t *testing.T) {
 	}
 }
 
-// TestUnmountReturnsWhenContextCancelled proves the seam issue #223's teardown fix
-// relies on: Unmount's terminal wait for the LTFS index write honours the context,
-// so bounding that context (TeardownSession wraps its uncancellable WithoutCancel
-// context in a WithTimeout) makes Unmount return — letting MountRegistry.Teardown
-// fall through to Kill — instead of blocking forever. Here the supervised process
-// never exits (done is never closed) and the context is already cancelled, so
-// Unmount must return the context error promptly rather than hang.
+// TestUnmountReturnsWhenContextCancelled: the index-write wait honours ctx, so
+// Teardown can fall through to Kill instead of hanging (#223).
 func TestUnmountReturnsWhenContextCancelled(t *testing.T) {
 	t.Parallel()
 
@@ -216,12 +191,8 @@ func TestUnmountReturnsWhenContextCancelled(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
-// TestUnmountFusermountFailureBenignAfterProcessExit proves the second half of
-// AC1: when fusermount -u fails but the supervised ltfs process has already
-// exited (the mount is already gone), Unmount treats the detach failure as
-// benign and reports the recorded index-write result instead of a spurious
-// "not in mtab" error. Uses a real fusermount against an unmounted path, so it
-// skips cleanly where fusermount is unavailable.
+// TestUnmountFusermountFailureBenignAfterProcessExit: a fusermount failure after
+// ltfs has exited is benign and the index-write result is reported.
 func TestUnmountFusermountFailureBenignAfterProcessExit(t *testing.T) {
 	t.Parallel()
 
@@ -229,9 +200,7 @@ func TestUnmountFusermountFailureBenignAfterProcessExit(t *testing.T) {
 		t.Skipf("fusermount not on PATH: %v", err)
 	}
 
-	// detached=false forces the fusermount -u attempt; the mountpoint is not
-	// mounted, so fusermount fails. Because done is closed, that failure must be
-	// swallowed and the (nil) index-write result reported.
+	// fusermount fails on the unmounted path; done is closed, so it is swallowed.
 	m := &Mount{
 		mountpoint: t.TempDir(),
 		detached:   false,

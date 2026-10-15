@@ -7,10 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPlanBurnSets covers the burn-set partitioning: copies are chunked into
-// successive sets of at most len(drives) discs, disc j in a set assigned to
-// drives[j], exactly mirroring the tape planDriveSets (SPEC §10). It is a pure
-// function, so it is exhaustively table-tested without any temporal machinery.
+// TestPlanBurnSets: copies are chunked into sets of at most len(drives) discs,
+// disc j assigned to drives[j].
 func TestPlanBurnSets(t *testing.T) {
 	t.Parallel()
 
@@ -80,10 +78,7 @@ func TestPlanBurnSets(t *testing.T) {
 	}
 }
 
-// TestPlanBurnSetsErrors covers the defensive guards: a negative copy count and
-// a positive copy count with no burners configured — states
-// Delivery.OpticalBurn.Enabled() already excludes, checked so a misconfiguration
-// never burns.
+// TestPlanBurnSetsErrors covers the defensive guards against a misconfiguration.
 func TestPlanBurnSetsErrors(t *testing.T) {
 	t.Parallel()
 

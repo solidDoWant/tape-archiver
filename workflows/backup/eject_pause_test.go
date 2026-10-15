@@ -22,11 +22,8 @@ type ejectPauseParams struct {
 	Written []WrittenTape
 }
 
-// ejectPauseTestWorkflow drives only the Eject phase so its operator-in-the-loop
-// pause/resume loop can be tested with mocked Eject/IOStationStatus activities,
-// signals, and the test env's time-skipping — without the full tape path. It
-// registers CurrentPauseQuery against its own local state, mirroring the real
-// Backup entry point (workflow.go), so tests can query pause state mid-pause.
+// ejectPauseTestWorkflow drives only the Eject phase, registering
+// CurrentPauseQuery like the real entry point so tests can query mid-pause.
 func ejectPauseTestWorkflow(ctx workflow.Context, params ejectPauseParams) error {
 	state := &runState{}
 
@@ -67,8 +64,7 @@ func newEjectPauseEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(ejectPauseTestWorkflow)
-	// The Eject pause auto-resume poll loop runs in this child workflow
-	// (issue #168); it must be registered for the parent to start it.
+	// The auto-resume poll loop runs in this child workflow (#168).
 	env.RegisterWorkflow(ioStationWaitWorkflow)
 	env.RegisterActivity(newEjectActivities())
 	env.RegisterActivity(&FailureActivities{})
@@ -76,10 +72,8 @@ func newEjectPauseEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	return env
 }
 
-// TestEjectPhaseSignalResume covers AC1 + AC3: when the I/O station fills, the
-// phase pauses and alerts the operator instead of failing, and an explicit
-// OperatorResumeSignal (the fallback for libraries that do not report the
-// access bit) resumes the export of the remaining tapes.
+// TestEjectPhaseSignalResume covers AC1 + AC3: a full station pauses instead of
+// failing, and OperatorResumeSignal resumes the remaining exports.
 func TestEjectPhaseSignalResume(t *testing.T) {
 	env := newEjectPauseEnv(t)
 
@@ -89,8 +83,6 @@ func TestEjectPhaseSignalResume(t *testing.T) {
 		pauseAlerts int
 	)
 
-	// First Eject fills the station and reports one tape still remaining; the
-	// second (after resume) exports it.
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, input EjectInput) (EjectResult, error) {
 			mu.Lock()
@@ -108,8 +100,7 @@ func TestEjectPhaseSignalResume(t *testing.T) {
 			return EjectResult{InIOStation: []tape.Barcode{"TA0001L6", "TA0002L6"}}, nil
 		})
 
-	// The library never reports access state, so the poll can never auto-resume —
-	// only the signal ends the wait.
+	// No access-state reporting, so only the signal can end the wait.
 	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
 		IOStatus{FreeSlots: 0, AccessReported: false}, nil)
 
@@ -126,7 +117,6 @@ func TestEjectPhaseSignalResume(t *testing.T) {
 			return nil
 		})
 
-	// The operator clears the station and signals resume before the wait elapses.
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(OperatorResumeSignal, nil)
 	}, 45*time.Second)
@@ -143,10 +133,8 @@ func TestEjectPhaseSignalResume(t *testing.T) {
 	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
 }
 
-// TestEjectPhaseCurrentPauseQuery covers the CurrentPauseQuery contract for the
-// Eject pause: while paused it reports PauseEject with the tapes ready for
-// removal and how many still await export, and once resumed to completion it
-// reports no pause.
+// TestEjectPhaseCurrentPauseQuery covers CurrentPauseQuery for the Eject pause
+// while paused and after completion.
 func TestEjectPhaseCurrentPauseQuery(t *testing.T) {
 	env := newEjectPauseEnv(t)
 
@@ -201,13 +189,8 @@ func TestEjectPhaseCurrentPauseQuery(t *testing.T) {
 	assert.Equal(t, PauseNone, pause.Kind, "pause state clears once the run completes")
 }
 
-// TestEjectResumeInAlertToWaitGapResumes covers issue #216 AC2 for the Eject I/O
-// pause: a resume the operator sends after the pause's alert has fired but before
-// the workflow task that begins the wait executes must resume the export, not be
-// drained as stale. The first Eject fills the station with one tape remaining; the
-// resume is delivered from the pause alert firing (buffered ahead of the wait
-// task), and the second Eject exports the remainder. A drain at wait entry would
-// discard the resume and the run would time out.
+// TestEjectResumeInAlertToWaitGapResumes covers #216 AC2: a resume sent after
+// the alert but before the wait begins must not be drained as stale.
 func TestEjectResumeInAlertToWaitGapResumes(t *testing.T) {
 	env := newEjectPauseEnv(t)
 
@@ -234,7 +217,6 @@ func TestEjectResumeInAlertToWaitGapResumes(t *testing.T) {
 			return EjectResult{InIOStation: []tape.Barcode{"TA0001L6", "TA0002L6"}}, nil
 		})
 
-	// The library never reports access state, so only the signal ends the wait.
 	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
 		IOStatus{FreeSlots: 0, AccessReported: false}, nil)
 
@@ -248,7 +230,6 @@ func TestEjectResumeInAlertToWaitGapResumes(t *testing.T) {
 			return nil
 		})
 
-	// The operator resumes in the alert-to-wait-entry gap.
 	resumeWhilePauseAlertFires(env, "NotifyOperatorPause")
 
 	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{
@@ -266,8 +247,8 @@ func TestEjectResumeInAlertToWaitGapResumes(t *testing.T) {
 	assert.Equal(t, 1, pauseAlerts, "the operator is alerted exactly once")
 }
 
-// TestEjectPhaseAutoResume covers AC2: a library that reports the access bit
-// resumes automatically once the station is closed with a free slot — no signal.
+// TestEjectPhaseAutoResume covers AC2: a library reporting the access bit
+// resumes with no signal once the station is closed with a free slot.
 func TestEjectPhaseAutoResume(t *testing.T) {
 	env := newEjectPauseEnv(t)
 
@@ -294,8 +275,6 @@ func TestEjectPhaseAutoResume(t *testing.T) {
 			return EjectResult{}, nil
 		})
 
-	// First poll: door still open (not closed). Second poll: cleared and closed
-	// with a free slot → auto-resume.
 	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, _ IOStatusInput) (IOStatus, error) {
 			mu.Lock()
@@ -312,7 +291,6 @@ func TestEjectPhaseAutoResume(t *testing.T) {
 
 	env.OnActivity((&FailureActivities{}).NotifyOperatorPause, mock.Anything, mock.Anything).Return(nil)
 
-	// No signal is ever sent — resume must come from the poll alone.
 	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{
 		Cfg:     ejectPauseConfig(3600),
 		Written: twoWrittenTapes(),
@@ -325,13 +303,11 @@ func TestEjectPhaseAutoResume(t *testing.T) {
 	assert.GreaterOrEqual(t, polls, 2, "at least two polls: door-open then closed")
 }
 
-// TestEjectPhaseTimeout covers AC4: when the operator never responds, the wait
-// elapses and the run ends in a defined, reported state (the failure names the
-// tapes left in storage slots and that none is in a drive).
+// TestEjectPhaseTimeout covers AC4: an unanswered pause ends in a defined,
+// reported state.
 func TestEjectPhaseTimeout(t *testing.T) {
 	env := newEjectPauseEnv(t)
 
-	// Eject always leaves a tape remaining (station never cleared).
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, input EjectInput) (EjectResult, error) {
 			return EjectResult{
@@ -345,7 +321,7 @@ func TestEjectPhaseTimeout(t *testing.T) {
 
 	env.OnActivity((&FailureActivities{}).NotifyOperatorPause, mock.Anything, mock.Anything).Return(nil)
 
-	// No signal, no auto-resume: the 100s wait elapses (polls at 30/60/90s).
+	// The 100s wait elapses (polls at 30/60/90s).
 	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{
 		Cfg:     ejectPauseConfig(100),
 		Written: twoWrittenTapes(),
@@ -358,18 +334,12 @@ func TestEjectPhaseTimeout(t *testing.T) {
 	assert.Contains(t, err.Error(), "did not clear the import/export station")
 }
 
-// TestEjectPhaseBoundedHistory covers AC1: a pause that outlasts a single child
-// execution's poll budget must still resume correctly, which is only possible if
-// the poll loop's child workflow ContinueAsNew's to reset its history. It drives
-// the pause past maxPollsBeforeContinue polls (so at least one continuation is
-// forced) via the test env's time-skipping, then auto-resumes; observing more
-// than maxPollsBeforeContinue polls with a clean completion proves the child
-// continued rather than growing one unbounded execution.
+// TestEjectPhaseBoundedHistory covers AC1: a pause outlasting
+// maxPollsBeforeContinue polls still resumes, proving the child continued as
+// new rather than growing one unbounded execution.
 func TestEjectPhaseBoundedHistory(t *testing.T) {
 	env := newEjectPauseEnv(t)
 
-	// Resume a handful of polls past the continuation bound so at least one
-	// ContinueAsNew must have happened before the station clears.
 	resumeAtPoll := maxPollsBeforeContinue + 5
 
 	var (
@@ -395,8 +365,6 @@ func TestEjectPhaseBoundedHistory(t *testing.T) {
 			return EjectResult{}, nil
 		})
 
-	// The station stays open (cannot auto-resume) until well past the poll bound,
-	// forcing the child to ContinueAsNew, then reports closed with a free slot.
 	env.OnActivity((&EjectActivities{}).IOStationStatus, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, _ IOStatusInput) (IOStatus, error) {
 			mu.Lock()
@@ -413,8 +381,7 @@ func TestEjectPhaseBoundedHistory(t *testing.T) {
 
 	env.OnActivity((&FailureActivities{}).NotifyOperatorPause, mock.Anything, mock.Anything).Return(nil)
 
-	// A long wait budget (well beyond resumeAtPoll poll intervals) so the pause is
-	// bounded by the child's ContinueAsNew, not the timeout.
+	// Wait budget well beyond resumeAtPoll intervals.
 	env.ExecuteWorkflow(ejectPauseTestWorkflow, ejectPauseParams{
 		Cfg:     ejectPauseConfig(4 * 60 * 60),
 		Written: twoWrittenTapes(),
@@ -431,18 +398,15 @@ func TestEjectPhaseBoundedHistory(t *testing.T) {
 		"the pause polled past the continuation bound, so the child workflow must have ContinueAsNew'd at least once")
 }
 
-// TestBoundedHistoryEventBudget covers AC1 deterministically: the per-execution
-// history a single child accrues (its poll budget × the worst-case events per
-// poll) stays far below Temporal's 51,200-event hard limit, so no pause length
-// can exhaust one execution's history.
+// TestBoundedHistoryEventBudget covers AC1: one child execution's worst-case
+// history stays far below Temporal's 51,200-event limit.
 func TestBoundedHistoryEventBudget(t *testing.T) {
 	t.Parallel()
 
 	const (
 		historyHardLimit = 51_200
-		// Worst case per poll: a timer (start + fire) plus an IOStationStatus
-		// activity retried the full ioStatusMaxAttempts times (schedule + start +
-		// fail each). This upper bound is intentionally generous.
+		// Worst case: timer start+fire plus ioStatusMaxAttempts activity
+		// attempts (schedule + start + fail each).
 		worstCaseEventsPerPoll = 3 + 3*ioStatusMaxAttempts
 	)
 

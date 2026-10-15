@@ -11,9 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRunWithHeartbeatReturnsWorkResult verifies the helper is transparent to
-// work's outcome: it returns work's error unchanged (nil or not) and only after
-// work has returned.
 func TestRunWithHeartbeatReturnsWorkResult(t *testing.T) {
 	t.Parallel()
 
@@ -45,9 +42,8 @@ func TestRunWithHeartbeatReturnsWorkResult(t *testing.T) {
 	}
 }
 
-// TestRunWithHeartbeatTicks verifies a record is emitted while work is in flight,
-// and that no further record lands after work returns. Work blocks until it has
-// observed at least one heartbeat, so the assertion needs no fixed sleep.
+// TestRunWithHeartbeatTicks: records land while work runs and stop after it
+// returns. Work blocks until it sees a heartbeat, so no fixed sleep is needed.
 func TestRunWithHeartbeatTicks(t *testing.T) {
 	t.Parallel()
 
@@ -70,8 +66,6 @@ func TestRunWithHeartbeatTicks(t *testing.T) {
 	assert.Equal(t, got, records.Load(), "heartbeat must stop once work returns")
 }
 
-// TestRunWithHeartbeatDisabledInterval verifies a non-positive interval runs work
-// with no heartbeats — the seam that keeps the helper usable without a clock.
 func TestRunWithHeartbeatDisabledInterval(t *testing.T) {
 	t.Parallel()
 
@@ -82,9 +76,6 @@ func TestRunWithHeartbeatDisabledInterval(t *testing.T) {
 	assert.Zero(t, records.Load(), "a non-positive interval must not heartbeat")
 }
 
-// TestRunWithHeartbeatContextCancel verifies that when the context is cancelled
-// the helper stops ticking and still waits for work to unwind before returning,
-// so the work goroutine never outlives the call.
 func TestRunWithHeartbeatContextCancel(t *testing.T) {
 	t.Parallel()
 
@@ -96,7 +87,6 @@ func TestRunWithHeartbeatContextCancel(t *testing.T) {
 	go cancel()
 
 	err := runWithHeartbeat(ctx, time.Millisecond, func() {}, func() error {
-		// Wait for the cancellation the caller observes, then unwind.
 		<-ctx.Done()
 		close(unwound)
 

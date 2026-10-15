@@ -17,15 +17,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// errUnexpectedSense is returned when the blank-check READ(6) completes with a
-// SCSI result that is neither "data present", "blank", nor "filemark" — i.e. a
-// genuine drive/media error. IsBlank never reports such a tape as blank.
+// errUnexpectedSense marks a blank-check READ(6) result that is neither data,
+// blank, nor filemark; such a tape is never reported blank.
 var errUnexpectedSense = errors.New("unexpected SCSI sense on blank-check read")
 
-// SGDevice returns the SCSI generic device node (e.g. /dev/sg1) paired with
-// this drive's tape node. When the node was not set explicitly with
-// WithSGDevice it is resolved from the tape device's SCSI address. This is the
-// node that LTFS and FormatTape use (the reference LTFS sg backend).
+// SGDevice returns the SCSI generic node paired with this drive's tape node,
+// which LTFS and FormatTape use.
 func (d *Drive) SGDevice() (string, error) {
 	if d.sgDevice != "" {
 		return d.sgDevice, nil
@@ -34,33 +31,13 @@ func (d *Drive) SGDevice() (string, error) {
 	return sgDeviceForTapeNode(d.stDevice)
 }
 
-// IsBlank reports whether the loaded tape is blank (never written or fully
-// erased). SPEC.md §4.3 step 6 uses this as the guard that a run never
-// silently overwrites existing data ("Never write to a non-blank tape").
+// IsBlank reports whether the loaded tape is blank; it is the guard that a run
+// never overwrites existing data (SPEC.md §4.3). It returns true only when the
+// drive positively reports BLANK CHECK at the first block.
 //
-// Why this issues a raw SCSI READ(6) via SG_IO instead of read(2) on the st
-// node:
-//
-//   - A blank tape answers a read at beginning-of-partition with a CHECK
-//     CONDITION whose sense key is BLANK CHECK (0x08) / END-OF-DATA — exactly
-//     how a real LTO drive reports blank media. The Linux st driver collapses
-//     that into a bare EIO, indistinguishable from a genuine I/O error. For a
-//     guard whose whole purpose is to refuse to overwrite a non-blank tape,
-//     conflating "blank" with "read failure" is unacceptable: it could either
-//     reject a perfectly blank tape or, worse, misclassify a faulty read.
-//     Reading through SG_IO preserves the full sense data, so we can tell the
-//     three outcomes apart precisely.
-//
-//   - It also minimises tape wear (SPEC.md §2, principle 2). We read a single
-//     block at beginning-of-partition for any tape. The position-based
-//     alternative (space-to-EOD, then check the block number) would wind a
-//     *non-blank* tape all the way to its end-of-data — a full-cartridge
-//     locate across exactly the recorded tape we are trying to protect.
-//
-// The decision is conservative: IsBlank returns (true, nil) only when the
-// drive positively reports BLANK CHECK at the first block. Data, a filemark,
-// or any unexpected sense all mean "not blank" or an error — never a false
-// "blank".
+// It uses a raw SG_IO READ(6) because the st driver collapses BLANK CHECK into
+// a bare EIO, indistinguishable from a real I/O error. Reading one block at BOP
+// also avoids space-to-EOD, which would wind a non-blank tape end to end.
 func (d *Drive) IsBlank(ctx context.Context) (blank bool, err error) {
 	sgDevice := d.sgDevice
 	if sgDevice == "" {
@@ -81,9 +58,6 @@ func (d *Drive) IsBlank(ctx context.Context) (blank bool, err error) {
 		}
 	}()
 
-	// Rewind to beginning-of-partition so the first block we read is the start
-	// of the medium. On a real drive this can take a while, hence the generous
-	// timeout; on a blank/near-BOP tape it returns immediately.
 	if err = scsiRewind(ctx, f); err != nil {
 		return false, err
 	}
@@ -96,32 +70,21 @@ func (d *Drive) IsBlank(ctx context.Context) (blank bool, err error) {
 	return interpretBlankProbe(res, f.Name())
 }
 
-// interpretBlankProbe turns a decoded blank-probe READ(6) into IsBlank's verdict.
-// It is the pure decision half of IsBlank, split out so the decode logic is
-// unit-testable without a real drive (status-only completions cannot be produced
-// by mhvtl). It returns an error — never a false verdict — for any completion
-// that does not positively resolve to blank, data, or filemark, so the caller's
-// ready-retry loop retries a transient condition instead of recording a wrong
-// answer.
+// interpretBlankProbe turns a decoded blank-probe READ(6) into IsBlank's
+// verdict. Anything not positively blank, data, or filemark is an error so the
+// caller retries rather than recording a wrong answer.
 func interpretBlankProbe(probe blankProbe, name string) (bool, error) {
 	switch {
 	case probe.status != statusGood && probe.status != statusCheckCondition:
-		// A status-only completion (BUSY, RESERVATION CONFLICT, TASK SET FULL, ...)
-		// carries no data phase and no sense: its residual and empty sense buffer
-		// would otherwise be misread as transferred data (a false "not blank").
-		// Report it as an error so blankCheckWhenReady retries rather than commit
-		// to a definitive verdict from a completion that never read the medium.
+		// A status-only completion (BUSY, RESERVATION CONFLICT, ...) never read
+		// the medium; its residual would otherwise look like transferred data.
 		return false, fmt.Errorf(
 			"read first block of %s (status=0x%02x): %w", name, probe.status, errUnexpectedSense)
 	case probe.transferred > 0:
-		// The first block returned data — the tape has recorded content.
 		return false, nil
 	case probe.senseKey == senseKeyBlankCheck:
-		// BLANK CHECK at beginning-of-partition: end-of-data is the very first
-		// block, so nothing has ever been written. This is the only blank case.
 		return true, nil
 	case probe.filemark:
-		// A filemark is recorded structure, not blank media.
 		return false, nil
 	default:
 		return false, fmt.Errorf(
@@ -137,10 +100,7 @@ const (
 	scsiGenericClassDir = "/sys/class/scsi_generic"
 )
 
-// sgDeviceForTapeNode resolves the SCSI generic node (/dev/sgN) that shares the
-// same physical drive as the given non-rewinding tape node (/dev/nstN). Both
-// classes expose a "device" symlink whose final component is the SCSI address
-// (H:C:T:L); the sg node with the matching address is the same unit.
+// sgDeviceForTapeNode resolves the /dev/sgN sharing a /dev/nstN's SCSI address.
 func sgDeviceForTapeNode(device string) (string, error) {
 	tapeAddr, err := scsiAddressOfDevNode(scsiTapeClassDir, device)
 	if err != nil {
@@ -155,9 +115,7 @@ func sgDeviceForTapeNode(device string) (string, error) {
 		"set it explicitly with WithSGDevice", device, tapeAddr)
 }
 
-// sgDeviceForSCSIAddress returns the /dev/sgN node whose backing SCSI device is
-// at the given address (H:C:T:L). The boolean reports whether a match was found.
-// It is shared by the tape-drive and changer sg-node resolvers.
+// sgDeviceForSCSIAddress returns the /dev/sgN at SCSI address H:C:T:L.
 func sgDeviceForSCSIAddress(scsiAddr string) (string, bool) {
 	entries, err := os.ReadDir(scsiGenericClassDir)
 	if err != nil {
@@ -178,8 +136,7 @@ func sgDeviceForSCSIAddress(scsiAddr string) (string, bool) {
 	return "", false
 }
 
-// scsiAddressOf returns the SCSI address (H:C:T:L) of a sysfs device node by
-// reading its "device" symlink.
+// scsiAddressOf reads a sysfs class entry's H:C:T:L from its "device" symlink.
 func scsiAddressOf(classDir, node string) (string, error) {
 	link, err := os.Readlink(filepath.Join(classDir, node, "device"))
 	if err != nil {
@@ -189,15 +146,9 @@ func scsiAddressOf(classDir, node string) (string, error) {
 	return filepath.Base(link), nil
 }
 
-// scsiAddressOfDevNode returns the SCSI address (H:C:T:L) of the device node at
-// path, resolving it to its sysfs class entry by the node's device number (rdev)
-// rather than assuming the path basename equals the kernel device name.
-//
-// The basename assumption holds for the raw library nodes (/dev/sch0 -> sch0,
-// /dev/nst0 -> nst0) but not for the stable udev symlinks a dry run targets
-// (/dev/mhvtl/changer -> sch2, /dev/mhvtl/drive0 -> nst0), whose basename is not
-// a sysfs entry at all (issue #326). Matching on the device number is robust for
-// the raw node, any symlink, and any kernel renaming, so it needs no special case.
+// scsiAddressOfDevNode returns the H:C:T:L of the device node at path, matching
+// its sysfs entry by device number: udev symlinks such as /dev/mhvtl/changer
+// have basenames that are not sysfs entries (#326).
 func scsiAddressOfDevNode(classDir, path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -219,11 +170,8 @@ func scsiAddressOfDevNode(classDir, path string) (string, error) {
 	return scsiAddressOf(classDir, name)
 }
 
-// classEntryForDevNumber returns the name of the sysfs class entry under classDir
-// whose "dev" file reports the given character-device number (major:minor). Each
-// entry's "dev" file holds "major:minor\n"; the entry that matches names the same
-// physical unit as the device node with that number, regardless of how that node
-// is named or symlinked in /dev.
+// classEntryForDevNumber returns the classDir entry whose "dev" file is
+// major:minor.
 func classEntryForDevNumber(classDir string, major, minor uint32) (string, error) {
 	want := fmt.Sprintf("%d:%d", major, minor)
 
@@ -246,10 +194,7 @@ func classEntryForDevNumber(classDir string, major, minor uint32) (string, error
 	return "", fmt.Errorf("no %s entry has device number %s", classDir, want)
 }
 
-// --- SG_IO plumbing -------------------------------------------------------
-//
-// The structures and constants below mirror <scsi/sg.h> and the SCSI command
-// set. They are deliberately self-contained (no cgo, no third-party deps).
+// --- SG_IO plumbing (mirrors <scsi/sg.h>; no cgo) ---------------------------
 
 const (
 	sgIO = 0x2285 // SG_IO ioctl request
@@ -269,14 +214,12 @@ const (
 	senseKeyBlankCheck = 0x08 // SCSI sense key BLANK CHECK
 	senseFilemarkBit   = 0x80 // FILEMARK bit in fixed-format sense byte 2
 
-	// firstBlockBufSize bounds the data transfer for the probe read. Any value
-	// large enough to receive at least one byte of a recorded block suffices;
-	// we only care whether *any* data comes back, not its full contents.
+	// firstBlockBufSize: the probe only needs to see whether any data comes back.
 	firstBlockBufSize = 64 * 1024
 )
 
-// sgIOHdr mirrors struct sg_io_hdr (Linux, 64-bit). Field order and natural Go
-// alignment reproduce the C layout the kernel expects (88 bytes).
+// sgIOHdr mirrors struct sg_io_hdr (Linux, 64-bit, 88 bytes); field order is
+// load-bearing.
 type sgIOHdr struct {
 	interfaceID    int32   // 'S'
 	dxferDirection int32   // SG_DXFER_*
@@ -302,7 +245,6 @@ type sgIOHdr struct {
 	info           uint32  //
 }
 
-// blankProbe holds the decoded result of the first-block READ(6).
 type blankProbe struct {
 	status      uint8
 	transferred int
@@ -312,10 +254,8 @@ type blankProbe struct {
 	filemark    bool
 }
 
-// scsiRewind issues a SCSI REWIND and waits for completion.
 func scsiRewind(ctx context.Context, f *os.File) error {
-	// Heap-allocate the buffers so the addresses embedded in the SG_IO header
-	// as uintptrs remain valid for the duration of the (blocking) ioctl.
+	// Heap buffers, kept alive below, since the header holds them as uintptrs.
 	cdb := []byte{opcodeRewind, 0, 0, 0, 0, 0}
 	sense := make([]byte, senseBufferLen)
 
@@ -349,15 +289,12 @@ func scsiRewind(ctx context.Context, f *os.File) error {
 	return nil
 }
 
-// scsiReadFirstBlock issues a variable-length READ(6) (with SILI set) for the
-// block at the current position and decodes the outcome.
+// scsiReadFirstBlock issues a variable-length READ(6) at the current position.
 func scsiReadFirstBlock(ctx context.Context, f *os.File) (blankProbe, error) {
 	buf := make([]byte, firstBlockBufSize)
 	sense := make([]byte, senseBufferLen)
 
-	// READ(6): variable block (FIXED=0), SILI set so a short/over-length block
-	// does not raise an incorrect-length CHECK CONDITION; the transfer length
-	// is the buffer size encoded big-endian in bytes 2..4.
+	// SILI suppresses the incorrect-length CHECK CONDITION for a short block.
 	n := uint32(len(buf))
 	cdb := []byte{
 		opcodeRead6,
@@ -390,10 +327,8 @@ func scsiReadFirstBlock(ctx context.Context, f *os.File) (blankProbe, error) {
 		return blankProbe{}, fmt.Errorf("SG_IO READ(6) on %s: %w", f.Name(), err)
 	}
 
-	// A non-zero host status, or a driver status beyond DRIVER_SENSE, is a
-	// transport-level failure rather than a SCSI sense condition; surface it as
-	// an error rather than guessing blankness. A plain CHECK CONDITION sets
-	// DRIVER_SENSE and is expected here (blank check / incorrect length).
+	// Anything beyond DRIVER_SENSE (which a CHECK CONDITION sets) is a transport
+	// failure; never guess blankness from it.
 	if hdr.hostStatus != 0 || hdr.driverStatus&^driverSense != 0 {
 		return blankProbe{}, fmt.Errorf("READ(6) on %s transport error "+
 			"(host=0x%x driver=0x%x)", f.Name(), hdr.hostStatus, hdr.driverStatus)
@@ -411,8 +346,7 @@ func scsiReadFirstBlock(ctx context.Context, f *os.File) (blankProbe, error) {
 	}, nil
 }
 
-// parseSense decodes the sense key, ASC, ASCQ, and filemark flag from a SCSI
-// sense buffer in either fixed (0x70/0x71) or descriptor (0x72/0x73) format.
+// parseSense decodes fixed- or descriptor-format sense data.
 func parseSense(sb []byte) (key, asc, ascq byte, filemark bool) {
 	if len(sb) == 0 {
 		return 0, 0, 0, false
@@ -430,9 +364,8 @@ func parseSense(sb []byte) (key, asc, ascq byte, filemark bool) {
 			ascq = sb[13]
 		}
 	case 0x72, 0x73: // descriptor-format sense
-		// The filemark bit lives in a stream-commands sense data descriptor,
-		// not in the fixed header; we do not need it for the blank decision
-		// (which keys on the sense key), so leave filemark false here.
+		// The filemark bit lives in a separate descriptor; the blank decision
+		// does not need it.
 		if len(sb) > 3 {
 			key = sb[1] & 0x0f
 			asc = sb[2]
@@ -443,7 +376,6 @@ func parseSense(sb []byte) (key, asc, ascq byte, filemark bool) {
 	return key, asc, ascq, filemark
 }
 
-// sgIoctl invokes the SG_IO ioctl with the given header.
 func sgIoctl(fd uintptr, hdr *sgIOHdr) error {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, uintptr(sgIO), uintptr(unsafe.Pointer(hdr)))
 	if errno != 0 {
@@ -453,19 +385,14 @@ func sgIoctl(fd uintptr, hdr *sgIOHdr) error {
 	return nil
 }
 
-// Default command timeouts. Rewind on a full cartridge can take several minutes
-// on real hardware; a blank-check read is near-instant.
+// Rewinding a full cartridge can take minutes.
 const (
 	rewindTimeout = 5 * time.Minute
 	readTimeout   = 60 * time.Second
 )
 
-// timeoutMs returns the SG_IO timeout in milliseconds: the context's remaining
-// time if it has a deadline sooner than def, otherwise def. SG_IO is a blocking
-// ioctl, so this timeout — not context cancellation — bounds how long a command
-// may hang. The returned value is the kernel's required unit (sg_io_hdr.timeout
-// is a uint32 of milliseconds); def is always small enough that the conversion
-// cannot overflow.
+// timeoutMs returns min(def, ctx's remaining time) in ms. SG_IO is blocking, so
+// this timeout, not ctx cancellation, bounds a hung command.
 func timeoutMs(ctx context.Context, def time.Duration) uint32 {
 	timeout := def
 
@@ -483,7 +410,6 @@ func timeoutMs(ctx context.Context, def time.Duration) uint32 {
 	return uint32(ms)
 }
 
-// testUnitReady reports whether the drive at sgDevice has a medium ready.
 func testUnitReady(ctx context.Context, sgDevice string) error {
 	return withSGFile(sgDevice, func(f *os.File) error {
 		cdb := []byte{0x00, 0, 0, 0, 0, 0}

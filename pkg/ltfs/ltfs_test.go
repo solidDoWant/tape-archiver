@@ -29,8 +29,7 @@ func TestLtfsArgs(t *testing.T) {
 
 	args := ltfsArgs("/dev/sg0", "/mnt/ltfs", "/var/tmp/ltfs-work")
 
-	// Foreground supervision and the wear-minimising options are non-negotiable
-	// (SPEC.md §14); assert each is present and exact.
+	// These options are non-negotiable (SPEC.md §14).
 	assert.Equal(t, []string{
 		"-f",
 		"/mnt/ltfs",
@@ -46,13 +45,10 @@ func TestPickIndexFile(t *testing.T) {
 
 	base := time.Unix(1_700_000_000, 0)
 
-	// Canonical LTFS captures are named after the volume UUID (RFC-4122
-	// 8-4-4-4-12 hex); generation copies append "-<n>".
 	const (
 		uuidA = "5659e353-d2fc-44d4-863c-c814a3d3d10a"
 		uuidB = "7a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
-		// uuidDigitTail's final group is all digits — a valid canonical UUID that
-		// the old negative "-<n>.schema" test misclassified as generation-suffixed.
+		// An all-digit final group is still a canonical UUID.
 		uuidDigitTail = "12345678-1234-1234-1234-000000000000"
 	)
 
@@ -103,9 +99,7 @@ func TestPickIndexFile(t *testing.T) {
 			expected: uuidA + "-2.schema",
 		},
 		{
-			// AC2: an all-digit final UUID group is canonical, so a fresh capture so
-			// named is chosen over an older hex-lettered leftover — not misclassified
-			// as generation-suffixed and excluded from the canonical tier.
+			// An all-digit final UUID group is canonical, so the fresh capture wins.
 			name: "all-digit-tail UUID chosen over older leftover",
 			candidates: []indexCandidate{
 				{name: uuidA + ".schema", modTime: base},
@@ -114,8 +108,6 @@ func TestPickIndexFile(t *testing.T) {
 			expected: uuidDigitTail + ".schema",
 		},
 		{
-			// A leftover from a prior format predates the mount; it must be rejected
-			// rather than returned as this tape's index.
 			name: "stale leftover rejected as errStaleIndex",
 			candidates: []indexCandidate{
 				{name: uuidA + ".schema", modTime: base.Add(-time.Hour)},
@@ -125,9 +117,7 @@ func TestPickIndexFile(t *testing.T) {
 			errAssertion: requireErrorIs(errStaleIndex),
 		},
 		{
-			// AC2 worst case: a stale hex-lettered leftover plus a newer all-digit-tail
-			// fresh capture — the stale file is filtered by mtime and the fresh file is
-			// recognised as canonical, so the fresh one wins.
+			// Stale leftover filtered by mtime; the all-digit-tail fresh capture wins.
 			name: "fresh all-digit capture chosen over stale hex leftover",
 			candidates: []indexCandidate{
 				{name: uuidA + ".schema", modTime: base.Add(-time.Hour)},
@@ -183,17 +173,13 @@ func TestReadIndex(t *testing.T) {
 	t.Run("rejects a stale leftover index from a prior format", func(t *testing.T) {
 		t.Parallel()
 
-		// AC1: the work directory (keyed per-barcode, stable across runs) holds only
-		// a valid captured index left over from a previous format, and this cycle's
-		// capture never appeared. ReadIndex must fail rather than ship the stale map.
+		// Only a stale prior-format capture exists; ReadIndex must not ship it.
 		workDir := t.TempDir()
 		leftover := filepath.Join(workDir, leftoverName)
 		require.NoError(t, os.WriteFile(leftover, []byte(validIndex), 0o644))
 
 		mountStart := time.Now()
 
-		// Back-date the leftover to before the mount started, as a real prior-format
-		// capture would be.
 		staleTime := mountStart.Add(-time.Hour)
 		require.NoError(t, os.Chtimes(leftover, staleTime, staleTime))
 
@@ -210,7 +196,6 @@ func TestReadIndex(t *testing.T) {
 		workDir := t.TempDir()
 		mountStart := time.Now()
 
-		// A capture written at unmount postdates the mount start.
 		fresh := filepath.Join(workDir, leftoverName)
 		require.NoError(t, os.WriteFile(fresh, []byte(validIndex), 0o644))
 

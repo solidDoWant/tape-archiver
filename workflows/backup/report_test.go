@@ -25,9 +25,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// reportTestInput builds a small but complete ReportInput: one raw-ZFS archive
-// with two slices and one PAR2 file, packed onto a single logical tape, written
-// as two copies (two physical tapes / barcodes).
+// reportTestInput builds one raw-ZFS archive (two slices, one PAR2 file) on one
+// logical tape written as two copies.
 func reportTestInput(t *testing.T) ReportInput {
 	t.Helper()
 
@@ -71,9 +70,7 @@ func reportTestInput(t *testing.T) ReportInput {
 	}
 }
 
-// stageTestIndex writes a captured LTFS index for barcode to a temp file and
-// returns its path, mirroring how FinalizeTape stages the index to disk for the
-// Report phase to read back (issue #221).
+// stageTestIndex stages a captured LTFS index to disk, as FinalizeTape does (#221).
 func stageTestIndex(t *testing.T, barcode string) string {
 	t.Helper()
 
@@ -85,9 +82,7 @@ func stageTestIndex(t *testing.T, barcode string) string {
 
 func ptrFloat(f float64) *float64 { return &f }
 
-// TestBuildReportManifest checks the pure manifest assembly maps the run state
-// into every SPEC §9 field: contents, tapes-by-barcode, build metadata, and the
-// escrowed identity.
+// TestBuildReportManifest checks the run state maps into every SPEC §9 field.
 func TestBuildReportManifest(t *testing.T) {
 	t.Parallel()
 
@@ -112,13 +107,11 @@ func TestBuildReportManifest(t *testing.T) {
 	assert.Equal(t, "archives/000-archive", archive.Directory,
 		"the report must show each archive's descriptive on-tape directory")
 	assert.Equal(t, []string{"bulk-pool-01/archive@snap"}, archive.SourceSnapshots)
-	// slices then PAR2 file, by base name.
 	require.Len(t, archive.Files, 3)
 	assert.Equal(t, "archive.000", archive.Files[0].Name)
 	assert.Equal(t, "archive.par2", archive.Files[2].Name)
 	assert.Equal(t, "cc", archive.Files[2].SHA256)
 
-	// Both physical tapes are listed by barcode, each holding the one archive.
 	require.Len(t, manifest.Tapes, 2)
 	assert.Equal(t, "TAPE01L6", manifest.Tapes[0].Barcode)
 	assert.Equal(t, []string{"bulk-pool-01/archive@snap"}, manifest.Tapes[0].Contents)
@@ -133,9 +126,8 @@ func TestBuildReportManifest(t *testing.T) {
 	assert.NotEmpty(t, manifest.Build.AgeVersion)
 }
 
-// TestReportTapesPropagatesOverwroteNonBlank checks that a WrittenTape marked as
-// having overwritten a non-blank tape (Library.AllowNonBlankTapes) surfaces the
-// flag on its report.Tape, while a normally-written tape does not (SPEC §9).
+// TestReportTapesPropagatesOverwroteNonBlank: only an overwriting tape carries the
+// flag in the report.
 func TestReportTapesPropagatesOverwroteNonBlank(t *testing.T) {
 	t.Parallel()
 
@@ -151,9 +143,8 @@ func TestReportTapesPropagatesOverwroteNonBlank(t *testing.T) {
 		"a tape written to a blank tape must not be flagged as an overwrite")
 }
 
-// TestReportDiscsPropagatesOverwrite checks the burned discs map into the report
-// manifest, carrying each burner device and any deliberate overwrite (SPEC §10),
-// and that a run without burning yields no Discs section.
+// TestReportDiscsPropagatesOverwrite: burned discs map into the report; a run
+// without burning has no Discs section.
 func TestReportDiscsPropagatesOverwrite(t *testing.T) {
 	t.Parallel()
 
@@ -175,11 +166,8 @@ func TestReportDiscsPropagatesOverwrite(t *testing.T) {
 		"a run without optical burning renders no Discs section")
 }
 
-// TestBuildReportStagesDiscManifest checks that with optical burning enabled the
-// Report phase stages the disc-content manifest beside the uncompressed ISO and
-// records its path (SPEC §10). The manifest lists the ISO's own files with SHA-256
-// digests, so the Burn phase's VerifyDisc can read each burned disc back against
-// it — distinct from the on-tape SHA-256 manifest embedded inside the ISO.
+// TestBuildReportStagesDiscManifest: with burning enabled the disc-content manifest
+// of the ISO's own files is staged and its path recorded.
 func TestBuildReportStagesDiscManifest(t *testing.T) {
 	t.Parallel()
 
@@ -204,8 +192,6 @@ func TestBuildReportStagesDiscManifest(t *testing.T) {
 	manifest, err := optical.ParseManifest(bytes.NewReader(data))
 	require.NoError(t, err)
 
-	// The disc-content manifest names the recovery ISO's own files, not the on-tape
-	// files listed inside it.
 	for _, discPath := range []string{"report.pdf", "manifest.sha256", "recovery-procedure.md"} {
 		assert.Contains(t, manifest, discPath, "disc manifest must list the ISO's own %s", discPath)
 	}
@@ -218,9 +204,8 @@ func TestBuildReportStagesDiscManifest(t *testing.T) {
 	}
 }
 
-// TestRebuildDeliveredReport checks the post-burn re-render (SPEC §10): it
-// overwrites the delivered report.pdf at the same path with a fresh render that
-// records the burned discs, leaving any other staged artifact untouched.
+// TestRebuildDeliveredReport: the post-burn re-render overwrites report.pdf in
+// place, recording the burned discs.
 func TestRebuildDeliveredReport(t *testing.T) {
 	t.Parallel()
 
@@ -232,7 +217,6 @@ func TestRebuildDeliveredReport(t *testing.T) {
 	acts := newReportActivities(t.TempDir(), testutil.RecoveryBinariesDir(t), testutil.RecoverySourcesDir(t))
 	outDir := t.TempDir()
 
-	// Pre-burn build: the delivered report predates the burn, so it records no discs.
 	preBurn, err := acts.rebuildReport(t.Context(), outDir, input)
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(outDir, reportFileName), preBurn)
@@ -241,7 +225,6 @@ func TestRebuildDeliveredReport(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, strings.HasPrefix(string(before), "%PDF-"), "delivered report must be a PDF")
 
-	// Post-burn re-render with the burned discs (one deliberately reclaimed).
 	input.Discs = []BurnResult{{Device: "/dev/sr0", OverwroteNonBlank: true}}
 
 	rebuilt, err := acts.rebuildReport(t.Context(), outDir, input)
@@ -253,9 +236,8 @@ func TestRebuildDeliveredReport(t *testing.T) {
 	assert.NotEqual(t, before, after, "the re-rendered report must differ once it records the burned discs")
 }
 
-// TestQueryDeviceIdentityDegrades covers the graceful-degradation contract: when
-// the library exposes no drives or changer to query (e.g. a dry run with no
-// device), every hardware identifier degrades to "unknown" rather than failing.
+// TestQueryDeviceIdentityDegrades: with nothing to query, identifiers degrade to
+// "unknown" rather than failing.
 func TestQueryDeviceIdentityDegrades(t *testing.T) {
 	t.Parallel()
 
@@ -292,8 +274,8 @@ func TestRedundancyPolicy(t *testing.T) {
 	assert.Equal(t, "none", redundancyPolicy(config.Redundancy{}))
 }
 
-// TestLTOGeneration covers the capacity→generation mapping that classifies the
-// write-health speed-matching floor, including the below-range fallback.
+// TestLTOGeneration covers the capacity→generation mapping, including the
+// below-range fallback.
 func TestLTOGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -316,8 +298,8 @@ func TestLTOGeneration(t *testing.T) {
 	}
 }
 
-// TestBuildSHA256Manifest checks the manifest lists every on-tape file for every
-// physical tape in sorted, sha256sum-format lines prefixed by the barcode.
+// TestBuildSHA256Manifest checks sorted, barcode-prefixed sha256sum lines for every
+// on-tape file of every tape.
 func TestBuildSHA256Manifest(t *testing.T) {
 	t.Parallel()
 
@@ -325,19 +307,15 @@ func TestBuildSHA256Manifest(t *testing.T) {
 	require.NoError(t, err)
 
 	text := string(manifest)
-	// 3 files × 2 tapes = 6 lines.
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	assert.Len(t, lines, 6)
 	assert.Contains(t, text, "aa  TAPE01L6/archives/000-archive/archive.000")
 	assert.Contains(t, text, "cc  TAPE02L6/archives/000-archive/archive.par2")
-	// Sorted output.
 	assert.True(t, sortedStrings(lines), "manifest lines must be sorted")
 }
 
-// TestTapeGeneration pins issue #340: the report names the generation of the
-// media, because that is what decides which drive can read them. It is read from
-// each tape while loaded, never inferred from the drive that wrote them — an
-// LTO-6 drive writes LTO-5 media, and an LTO-8 drive can read neither.
+// TestTapeGeneration (issue #340): the report names the media generation, read
+// from each tape, never inferred from the writing drive.
 func TestTapeGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -358,8 +336,7 @@ func TestTapeGeneration(t *testing.T) {
 			written: []WrittenTape{writtenTape("LTO-5"), writtenTape("LTO-6")},
 			want:    "mixed",
 		},
-		// A tape whose medium could not be read makes the run's answer unknown
-		// rather than letting the readable tapes speak for it.
+		// One unreadable medium makes the whole answer unknown.
 		"one tape unreadable": {
 			written: []WrittenTape{writtenTape("LTO-5"), writtenTape("unknown")},
 			want:    "unknown",
@@ -379,10 +356,8 @@ func TestTapeGeneration(t *testing.T) {
 	}
 }
 
-// TestManifestCarriesPerArchiveCompression pins issue #340: compression is a
-// per-source setting (config.Source.Compression), and the report is what tells a
-// recoverer whether a zstd step stands between the decrypted stream and the tar.
-// Each archive therefore carries its own source's answer, not a run-wide guess.
+// TestManifestCarriesPerArchiveCompression (issue #340): each archive carries its
+// own source's compression setting.
 func TestManifestCarriesPerArchiveCompression(t *testing.T) {
 	t.Parallel()
 
@@ -404,12 +379,9 @@ func TestManifestCarriesPerArchiveCompression(t *testing.T) {
 	}
 }
 
-// TestRecoveryProcedureMountStepNamesADevice pins issue #340: the printed LTFS
-// mount step must name the drive to mount. "ltfs -o ro <mountpoint>" on its own
-// opens no device — it fails with "Cannot open device" — which strands a recoverer
-// at the very first tape read, so the step carries -o devname= and says which node
-// to use. LTFS's sg backend needs the SCSI generic node; the /dev/nstN tape node
-// fails the read with an SG_IO error.
+// TestRecoveryProcedureMountStepNamesADevice (issue #340): "ltfs -o ro" alone opens
+// no device, and LTFS's sg backend needs /dev/sgN, not /dev/nstN, so the printed
+// step must carry -o devname=.
 func TestRecoveryProcedureMountStepNamesADevice(t *testing.T) {
 	t.Parallel()
 
@@ -419,11 +391,8 @@ func TestRecoveryProcedureMountStepNamesADevice(t *testing.T) {
 		"the mount step must say how to find the drive's sg node")
 }
 
-// TestRecoveryProcedureUnpackStepMatchesTheTar pins issue #340: step 8 tells a
-// recoverer what an unpacked archive looks like, so the printed text and the tar
-// the run actually writes (tarMembers) must agree. A multi-volume archive unpacks
-// to one subdirectory per member volume; a single-volume archive unpacks its
-// contents with no wrapping directory.
+// TestRecoveryProcedureUnpackStepMatchesTheTar (issue #340): the printed unpack
+// step must agree with the tar layout tarMembers actually writes.
 func TestRecoveryProcedureUnpackStepMatchesTheTar(t *testing.T) {
 	t.Parallel()
 
@@ -457,8 +426,7 @@ func TestRecoveryProcedureUnpackStepMatchesTheTar(t *testing.T) {
 		return names
 	}
 
-	// A single member: its contents sit at the archive root, with no volume
-	// directory wrapping them.
+	// A single member unpacks with no wrapping volume directory.
 	single := entries(member("volume-a", "only.txt"))
 	assert.Contains(t, single, "only.txt")
 
@@ -467,18 +435,14 @@ func TestRecoveryProcedureUnpackStepMatchesTheTar(t *testing.T) {
 			"a single-volume archive must unpack with no wrapping volume directory")
 	}
 
-	// Two members: every entry sits under its own member subdirectory.
 	group := entries(member("volume-a", "a.txt"), member("volume-b", "b.txt"))
 	assert.Contains(t, group, "volume-a/a.txt")
 	assert.Contains(t, group, "volume-b/b.txt")
 }
 
-// TestRecoveryProcedureSHA256Layout proves the recovery instructions' verification
-// step actually works: it builds a real manifest.sha256, lays the copied files out
-// exactly as the concise procedure (report.go recoveryProcedure) and the operator
-// doc describe — <barcode>/archives/NNN-<label>/<file>, relative to a copy root —
-// and runs the system sha256sum against it. It covers the full-copy case and the
-// documented single-tape (grep-by-barcode) partial-copy case.
+// TestRecoveryProcedureSHA256Layout runs the system sha256sum against a real
+// manifest laid out exactly as the recovery procedure describes, for both a full
+// copy and the documented single-tape partial copy.
 func TestRecoveryProcedureSHA256Layout(t *testing.T) {
 	t.Parallel()
 
@@ -486,8 +450,7 @@ func TestRecoveryProcedureSHA256Layout(t *testing.T) {
 		t.Skip("sha256sum not available")
 	}
 
-	// Content keyed by on-tape file basename. Both physical tapes carry the same
-	// files (copies), so one content map covers every manifest line.
+	// Both tapes carry the same files, so one content map covers every line.
 	contents := map[string][]byte{
 		"archive.000":  []byte("slice zero contents"),
 		"archive.001":  []byte("slice one contents"),
@@ -513,10 +476,7 @@ func TestRecoveryProcedureSHA256Layout(t *testing.T) {
 
 	lines := strings.Split(strings.TrimRight(string(manifest), "\n"), "\n")
 
-	// writeLayout materializes the manifest's paths under root (a copy root), so
-	// each file sits at <root>/<barcode>/archives/NNN-<label>/<file> — the layout
-	// the instructions tell a recoverer to create. keep selects which tapes' files
-	// to write, modelling a full vs. partial copy.
+	// writeLayout writes the manifest's files under root; keep selects which tapes.
 	writeLayout := func(root string, keep func(relPath string) bool) {
 		for _, line := range lines {
 			parts := strings.SplitN(line, "  ", 2)
@@ -544,16 +504,13 @@ func TestRecoveryProcedureSHA256Layout(t *testing.T) {
 		return cmd.Run()
 	}
 
-	// Full copy: every tape's files are present, so the whole manifest verifies.
 	allRoot := t.TempDir()
 	writeLayout(allRoot, func(string) bool { return true })
 	assert.NoError(t, runCheck(allRoot, manifest),
 		"files laid out per the recovery instructions must verify against the full manifest")
 
-	// Partial copy: only TAPE01L6's files present. Checking the full manifest
-	// fails on the not-yet-copied tape's lines — the exact confusion the fixed
-	// instructions warn about — but the documented per-tape barcode filter verifies
-	// the copied tape.
+	// Partial copy: the full manifest fails on the missing tape, but the documented
+	// per-tape barcode filter verifies the copied one.
 	partialRoot := t.TempDir()
 	writeLayout(partialRoot, func(relPath string) bool {
 		return strings.HasPrefix(relPath, "TAPE01L6/")
@@ -601,9 +558,6 @@ func TestVerifyEscrowIdentity(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	// AC1: an empty escrow identity is a deterministic misconfiguration; the error
-	// must be non-retryable so the Report phase fails promptly (and the SPEC §11
-	// alert fires) instead of retrying the activity forever.
 	t.Run("empty identity fails non-retryably", func(t *testing.T) {
 		t.Parallel()
 		err := verifyEscrowIdentity(t.Context(), config.Encryption{Recipients: []string{recipient}})
@@ -612,8 +566,6 @@ func TestVerifyEscrowIdentity(t *testing.T) {
 		assertNonRetryable(t, err)
 	})
 
-	// AC1: a rotated or wrong identity that derives to a non-configured recipient
-	// is likewise deterministic; the mismatch must fail non-retryably.
 	t.Run("unmatched recipient fails non-retryably", func(t *testing.T) {
 		t.Parallel()
 		err := verifyEscrowIdentity(t.Context(), config.Encryption{
@@ -626,8 +578,7 @@ func TestVerifyEscrowIdentity(t *testing.T) {
 	})
 }
 
-// assertNonRetryable asserts err is a Temporal ApplicationError marked
-// non-retryable, so the server-default unlimited retry policy does not loop on it.
+// assertNonRetryable asserts err is a non-retryable Temporal ApplicationError.
 func assertNonRetryable(t *testing.T, err error) {
 	t.Helper()
 
@@ -636,9 +587,7 @@ func assertNonRetryable(t *testing.T, err error) {
 	assert.True(t, appErr.NonRetryable(), "error must be marked non-retryable")
 }
 
-// TestBuildReport covers AC4: with optical burning disabled the activity produces
-// only the PDF report — no recovery ISO, compressed or uncompressed, and no disc
-// manifest — in the staging directory.
+// TestBuildReport: with burning disabled only the PDF report is produced.
 func TestBuildReport(t *testing.T) {
 	t.Parallel()
 
@@ -647,8 +596,6 @@ func TestBuildReport(t *testing.T) {
 	input := reportTestInput(t)
 	input.Config.Encryption = config.Encryption{Recipients: []string{recipient}, Identity: identity}
 
-	// Stage real slice/PAR2 files so the report references existing base names
-	// (buildReport itself does not read them, but this mirrors a real run).
 	stageDir := t.TempDir()
 	input.Staged[0].Slices = []StagedSlice{
 		{Path: filepath.Join(stageDir, "archive.000"), SHA256: "aa", SizeBytes: 3},
@@ -665,15 +612,12 @@ func TestBuildReport(t *testing.T) {
 
 	assert.Equal(t, filepath.Join(outDir, reportFileName), output.ReportPath)
 
-	// Optical burning is disabled (no delivery.opticalBurn section), so no recovery
-	// ISO — compressed or uncompressed — and no disc manifest are produced.
 	assert.Empty(t, output.UncompressedISOPath, "no uncompressed ISO must be staged when burning is disabled")
 	assert.NoFileExists(t, filepath.Join(outDir, isoFileName), "the uncompressed ISO file must not exist when burning is disabled")
 	assert.NoFileExists(t, filepath.Join(outDir, "recovery.iso.zst"), "no compressed ISO must ever be produced")
 	assert.Empty(t, output.DiscManifestPath, "no disc-content manifest must be staged when burning is disabled")
 	assert.NoFileExists(t, filepath.Join(outDir, discManifestFileName), "the disc-content manifest must not exist when burning is disabled")
 
-	// Only the report is staged in the output directory.
 	entries, err := os.ReadDir(outDir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "only the PDF report must be produced when burning is disabled")
@@ -684,10 +628,8 @@ func TestBuildReport(t *testing.T) {
 	assert.True(t, strings.HasPrefix(string(pdf), "%PDF-"), "report must be a PDF")
 }
 
-// TestBuildReportStagesUncompressedISOWhenBurning covers AC5: with optical burning
-// enabled the Report phase stages the uncompressed recovery ISO beside the run
-// artifacts and records its path, the staged image is a valid ISO 9660, and no
-// compressed .zst ISO is produced.
+// TestBuildReportStagesUncompressedISOWhenBurning: with burning enabled a valid
+// uncompressed ISO 9660 is staged and no .zst is produced.
 func TestBuildReportStagesUncompressedISOWhenBurning(t *testing.T) {
 	t.Parallel()
 
@@ -704,21 +646,17 @@ func TestBuildReportStagesUncompressedISOWhenBurning(t *testing.T) {
 	output, err := acts.buildReport(t.Context(), outDir, input)
 	require.NoError(t, err)
 
-	// The uncompressed ISO is staged and its path recorded for the Burn phase.
 	assert.Equal(t, filepath.Join(outDir, isoFileName), output.UncompressedISOPath)
 
 	staged, err := os.ReadFile(output.UncompressedISOPath)
 	require.NoError(t, err)
 	assertValidISO9660(t, staged)
 
-	// No compressed ISO is produced.
 	assert.NoFileExists(t, filepath.Join(outDir, "recovery.iso.zst"), "no compressed ISO must be produced")
 }
 
-// assertValidISO9660 checks that data is an ISO 9660 image: its Primary Volume
-// Descriptor carries the "CD001" standard identifier at the start of logical
-// sector 16 (byte offset 32769, after the 32768-byte system area and the 1-byte
-// volume-descriptor type).
+// assertValidISO9660 checks for the "CD001" identifier of the Primary Volume
+// Descriptor at byte 32769 (sector 16).
 func assertValidISO9660(t *testing.T, data []byte) {
 	t.Helper()
 
@@ -777,10 +715,8 @@ func generateTestKeypair(t *testing.T) (identity, recipient string) {
 	return string(contents), recipient
 }
 
-// TestTapeIndexesReadFromStagedFiles pins the disk-staging fix for issue #221:
-// the recovery-ISO tape indexes are read from the paths FinalizeTape staged them
-// to, not carried in the ReportInput payload. This is what keeps the post-write
-// Report payload bounded regardless of run size (no multi-MB index per copy).
+// TestTapeIndexesReadFromStagedFiles (issue #221): tape indexes are read from the
+// staged files, keeping the Report payload bounded.
 func TestTapeIndexesReadFromStagedFiles(t *testing.T) {
 	t.Parallel()
 
@@ -806,8 +742,8 @@ func TestTapeIndexesReadFromStagedFiles(t *testing.T) {
 	assert.Equal(t, []byte("<ltfsindex>B</ltfsindex>"), indexes[1].Index)
 }
 
-// TestTapeIndexesMissingFileErrors ensures a missing staged index is a named,
-// actionable error rather than a silent empty index in the recovery ISO.
+// TestTapeIndexesMissingFileErrors: a missing staged index is a named error, not a
+// silent empty index.
 func TestTapeIndexesMissingFileErrors(t *testing.T) {
 	t.Parallel()
 

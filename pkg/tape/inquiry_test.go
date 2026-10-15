@@ -6,9 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// standardInquiry builds a standard INQUIRY (0x12) response with the given ASCII
-// identity strings at their SPC-defined offsets, space-padded to their field
-// widths, so the decoder is exercised against a byte layout matching a real drive.
+// standardInquiry builds a space-padded standard INQUIRY response.
 func standardInquiry(vendor, product, revision string) []byte {
 	data := make([]byte, 36)
 	data[0] = 0x01 // peripheral device type: sequential-access (tape)
@@ -31,16 +29,12 @@ func standardInquiry(vendor, product, revision string) []byte {
 	return data
 }
 
-// unitSerialPage builds a Unit Serial Number VPD page (0x80) response carrying
-// the given serial.
 func unitSerialPage(serial string) []byte {
 	data := []byte{0x01, vpdUnitSerial, 0x00, byte(len(serial))}
 
 	return append(data, []byte(serial)...)
 }
 
-// TestDecodeStandardInquiry checks vendor/product/revision extraction from a
-// well-formed response and from a truncated one.
 func TestDecodeStandardInquiry(t *testing.T) {
 	t.Parallel()
 
@@ -49,39 +43,31 @@ func TestDecodeStandardInquiry(t *testing.T) {
 	assert.Equal(t, "ULT3580-TD6", product)
 	assert.Equal(t, "1760", revision)
 
-	// A response truncated before the revision field yields an empty revision but
-	// still returns the fields it reaches.
 	shortVendor, shortProduct, shortRevision := decodeStandardInquiry(standardInquiry("STK", "L700", "")[:20])
 	assert.Equal(t, "STK", shortVendor)
 	assert.Equal(t, "L700", shortProduct)
 	assert.Empty(t, shortRevision)
 
-	// A response too short to reach any identity field yields all empty.
 	emptyVendor, emptyProduct, emptyRevision := decodeStandardInquiry([]byte{0x01, 0, 0, 0})
 	assert.Empty(t, emptyVendor)
 	assert.Empty(t, emptyProduct)
 	assert.Empty(t, emptyRevision)
 }
 
-// TestDecodeUnitSerial checks serial extraction, including a page whose declared
-// length exceeds the buffer and a header-only page.
 func TestDecodeUnitSerial(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, "1068000073", decodeUnitSerial(unitSerialPage("1068000073")))
 
-	// Trailing pad is trimmed.
 	assert.Equal(t, "XYZZY_A1", decodeUnitSerial(unitSerialPage("XYZZY_A1  ")))
 
 	// A declared page length past the buffer is clamped to what is present.
 	overlong := []byte{0x01, vpdUnitSerial, 0x00, 0x20, 'A', 'B', 'C'}
 	assert.Equal(t, "ABC", decodeUnitSerial(overlong))
 
-	// A header-only page (no serial bytes) yields empty.
 	assert.Empty(t, decodeUnitSerial([]byte{0x01, vpdUnitSerial, 0x00, 0x00}))
 }
 
-// TestDeviceInfoModel checks the vendor+product join, including the empty cases.
 func TestDeviceInfoModel(t *testing.T) {
 	t.Parallel()
 
@@ -91,8 +77,6 @@ func TestDeviceInfoModel(t *testing.T) {
 	assert.Empty(t, DeviceInfo{}.Model())
 }
 
-// TestLTOGenerationFromProduct covers the product id → generation mapping across
-// IBM full/half-height, HPE, and unmapped forms.
 func TestLTOGenerationFromProduct(t *testing.T) {
 	t.Parallel()
 

@@ -11,11 +11,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
 )
 
-// TestZFSLocatorUnmountedDataset exercises the production zfsLocator against a
-// real ZFS pool for a raw dataset source (no "@"). A mounted dataset resolves to
-// its live mountpoint (AC2); an unmounted dataset — whose mountpoint can survive
-// as a shadow directory — fails with an error naming the dataset (AC1, issue
-// #135), so the run aborts in Prepare before any tape is written.
+// TestZFSLocatorUnmountedDataset: a mounted raw dataset resolves to its
+// mountpoint (AC2); an unmounted one fails naming the dataset (AC1, #135).
 func TestZFSLocatorUnmountedDataset(t *testing.T) {
 	testutil.SkipIfPoolUnavailable(t)
 	testutil.SkipIfZFSUnavailable(t)

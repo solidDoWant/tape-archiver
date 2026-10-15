@@ -20,60 +20,33 @@ import (
 
 // Session execution timeouts for the Write phase.
 const (
-	// sessionCreationTimeout is how long workflow.CreateSession waits for a
-	// data worker to accept the session before failing.
 	sessionCreationTimeout = 10 * time.Minute
-	// teardownTimeout bounds each TeardownSession attempt: it only needs to
-	// unmount/kill any live mounts, which should complete in well under a
-	// minute. teardownCtx also caps the attempts (RetryPolicy) so a wedged
-	// unmount cannot retry forever.
+	// teardownTimeout bounds each TeardownSession attempt; teardownCtx also caps
+	// the attempts so a wedged unmount cannot retry forever.
 	teardownTimeout = 5 * time.Minute
-	// teardownUnmountTimeout bounds the per-mount Unmount wait inside
-	// TeardownSession, independent of the (uncancellable) WithoutCancel context
-	// the activity detaches onto. It is deliberately shorter than teardownTimeout
-	// so a permanently wedged ltfs index-write returns from Unmount in time for
-	// the Kill fallback (MountRegistry.Teardown) to run and release the
-	// process-global registry mutex within the same activity attempt, instead of
-	// blocking on ctx.Done() forever (pkg/ltfs Mount.Unmount) and wedging every
-	// future teardown on the worker.
+	// teardownUnmountTimeout bounds the per-mount Unmount wait under the
+	// WithoutCancel teardown context. It is shorter than teardownTimeout so a
+	// wedged ltfs index-write still reaches the Kill fallback and releases the
+	// registry mutex within the same attempt.
 	teardownUnmountTimeout = 3 * time.Minute
-	// writeTimeoutSafetyFactor scales the theoretical floor-speed write duration
-	// (capacity ÷ speed-matching floor) into the per-tape activity ceiling. A
-	// factor of 2 absorbs mount/format/finalize overhead and rate variance while
-	// keeping the ceiling bounded — a legitimate streaming write finishes well
-	// under it, but a genuinely wedged drive is still killed.
+	// writeTimeoutSafetyFactor scales the floor-speed write duration into the
+	// per-tape ceiling: room for overhead, but a wedged drive is still killed.
 	writeTimeoutSafetyFactor = 2
-	// defaultWriteTapeTimeout bounds a single tape's Format → WriteTree →
-	// FinalizeTape chain when the configured capacity maps to no known LTO
-	// generation (so no floor is available to derive the ceiling from). It is a
-	// generous fixed fallback that still bounds a hang rather than leaving the
-	// activity unbounded.
+	// defaultWriteTapeTimeout is the per-tape ceiling when the capacity maps to no
+	// known LTO generation (no floor to derive it from).
 	defaultWriteTapeTimeout = 48 * time.Hour
-	// writeSessionHeadroom is the slack added on top of the per-tape ceiling to
-	// bound the whole Write-phase session. Within one drive's chain the session
-	// wall time is the per-tape WriteTree ceiling plus the serial non-streaming
-	// activities that bracket it — FormatTape before, FinalizeTape (unmount +
-	// single index sync) and MeasureWriteHealth after, plus the deferred
-	// TeardownSession. Budgeting a fixed 2 h for those guarantees the session is
-	// strictly larger than the per-tape ceiling, so a full-length write always
-	// leaves room to finalize (tapes in a set write in parallel, so the session
-	// bounds the max per-drive chain, not the sum across copies).
+	// writeSessionHeadroom covers the serial non-streaming activities around
+	// WriteTree (format, finalize, measure, teardown), keeping the session strictly
+	// longer than the per-tape ceiling.
 	writeSessionHeadroom = 2 * time.Hour
-	// writeHealthTimeout bounds the post-write MeasureWriteHealth activity. It only
-	// scrapes two SCSI log pages via sg_logs, which completes in seconds; a few
-	// minutes is a generous ceiling that still bounds a hang.
+	// writeHealthTimeout bounds MeasureWriteHealth (two sg_logs scrapes).
 	writeHealthTimeout = 5 * time.Minute
 )
 
-// perTapeWriteTimeout returns the StartToClose ceiling for a single tape's
-// Format → WriteTree → FinalizeTape chain, derived from the configured native
-// capacity and the tape generation's speed-matching floor. capacity ÷ floor is
-// the longest a legitimate streaming write can take — the drive cannot legally
-// stream slower than its floor — so scaling that by writeTimeoutSafetyFactor
-// yields a ceiling a healthy write finishes well under while still bounding a
-// wedged drive. When the capacity maps to no known generation (no floor) or is
-// non-positive, it falls back to the fixed defaultWriteTapeTimeout rather than
-// leaving the activity unbounded. Derived from stable config, so it is
+// perTapeWriteTimeout returns the StartToClose ceiling for one tape's Format →
+// WriteTree → FinalizeTape chain: capacity ÷ speed-matching floor (the longest
+// a legitimate streaming write can take) × writeTimeoutSafetyFactor, or
+// defaultWriteTapeTimeout without a known floor. Derived from stable config, so
 // replay-deterministic.
 func perTapeWriteTimeout(capacityBytes int64) time.Duration {
 	floorMBps, known := writeHealthFloor(capacityBytes)
@@ -87,41 +60,28 @@ func perTapeWriteTimeout(capacityBytes int64) time.Duration {
 	return time.Duration(floorSeconds * writeTimeoutSafetyFactor * float64(time.Second))
 }
 
-// writeSessionTimeout returns the ExecutionTimeout for the whole Write-phase
-// session: the per-tape ceiling plus writeSessionHeadroom for the serial
-// non-streaming activities (format, finalize, measure, teardown) that bracket
-// WriteTree within one drive's chain. It is strictly greater than
-// perTapeWriteTimeout by construction, so a full-length WriteTree never starves
-// FinalizeTape's index write. Tapes in a set write in parallel, so this bounds
-// the max per-drive chain, not the sum across copies.
+// writeSessionTimeout returns the Write-phase session ExecutionTimeout. Tapes
+// in a set write in parallel, so it bounds the per-drive chain, not the sum.
 func writeSessionTimeout(capacityBytes int64) time.Duration {
 	return perTapeWriteTimeout(capacityBytes) + writeSessionHeadroom
 }
 
-// MountRegistry is a concurrency-safe, process-global registry of live LTFS
-// mounts. WriteTree parks a mount here after the volume is mounted so
-// FinalizeTape can retrieve it in a later activity execution, even though the
-// two activity calls run in separate goroutines. Sessions pin both activities
-// to the same data-worker process, making the in-process map safe to use as
-// the bridge.
-//
-// Keys are device paths (e.g. /dev/sg0); one entry per tape drive in flight.
+// MountRegistry is a process-global registry of live LTFS mounts keyed by
+// device path. It bridges WriteTree and FinalizeTape, which the session pins to
+// the same data-worker process.
 type MountRegistry struct {
 	mu     sync.Mutex
 	mounts map[string]*mountEntry
 }
 
-// mountEntry is a registry slot for one live LTFS mount. unmounted records that
-// a FinalizeTape attempt already unmounted the volume (writing the deferred LTFS
-// index to tape); a later retry of the same tape uses it to skip re-Unmounting a
-// detached mount and go straight to re-reading the idempotent captured index. The
-// entry outlives the unmount so the retry is not misdiagnosed as a lost mount.
+// mountEntry is one live mount. unmounted records that a FinalizeTape attempt
+// already unmounted it, so a retry skips straight to re-reading the captured
+// index instead of being misdiagnosed as a lost mount.
 type mountEntry struct {
 	mount     *ltfs.Mount
 	unmounted bool
 }
 
-// newMountRegistry returns an empty MountRegistry.
 func newMountRegistry() *MountRegistry {
 	return &MountRegistry{mounts: make(map[string]*mountEntry)}
 }
@@ -134,8 +94,7 @@ func (r *MountRegistry) Put(device string, mount *ltfs.Mount) {
 	r.mounts[device] = &mountEntry{mount: mount}
 }
 
-// Get retrieves the mount for the given device key. The boolean is false if no
-// mount is registered for that device.
+// Get retrieves the mount for device.
 func (r *MountRegistry) Get(device string) (*ltfs.Mount, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -148,9 +107,6 @@ func (r *MountRegistry) Get(device string) (*ltfs.Mount, bool) {
 	return entry.mount, true
 }
 
-// getEntry retrieves the mount and its unmounted state for the given device key.
-// ok is false if no mount is registered for that device. FinalizeTape uses the
-// unmounted flag to make its retry idempotent across the unmount boundary.
 func (r *MountRegistry) getEntry(device string) (mount *ltfs.Mount, unmounted bool, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -163,9 +119,8 @@ func (r *MountRegistry) getEntry(device string) (mount *ltfs.Mount, unmounted bo
 	return entry.mount, entry.unmounted, true
 }
 
-// MarkUnmounted records that the mount for device has been unmounted, so a later
-// FinalizeTape retry skips the Unmount and re-reads the captured index instead of
-// re-driving a correctly finalized tape. It is a no-op if the key is not present.
+// MarkUnmounted records that device's mount has been unmounted, so a
+// FinalizeTape retry re-reads the captured index instead of re-driving the tape.
 func (r *MountRegistry) MarkUnmounted(device string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -175,8 +130,7 @@ func (r *MountRegistry) MarkUnmounted(device string) {
 	}
 }
 
-// Delete removes the mount for the given device key. It is a no-op if the key
-// is not present.
+// Delete removes the mount for device.
 func (r *MountRegistry) Delete(device string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -184,14 +138,9 @@ func (r *MountRegistry) Delete(device string) {
 	delete(r.mounts, device)
 }
 
-// Teardown unmounts every live mount in the registry and clears it. If
-// Unmount returns an error (e.g. the mount is already gone or ctx was
-// cancelled), it falls back to Kill so the ltfs process does not linger.
-// Teardown continues past individual failures so all mounts are attempted;
-// errors from all entries are joined and returned so the caller can surface
-// them (e.g. in the Temporal event history via TeardownSession). A data-worker
-// restart loses in-memory mounts entirely; that window is documented in
-// SPEC §14.
+// Teardown unmounts every live mount, falling back to Kill when Unmount fails,
+// and clears the registry; errors are joined. A data-worker restart loses
+// in-memory mounts entirely (SPEC §14).
 func (r *MountRegistry) Teardown(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -199,9 +148,7 @@ func (r *MountRegistry) Teardown(ctx context.Context) error {
 	var errs []error
 
 	for device, entry := range r.mounts {
-		// An entry already marked unmounted has had its LTFS index written and the
-		// FUSE process detached by a prior FinalizeTape attempt; there is nothing
-		// left to unmount or kill, so just drop it.
+		// Already unmounted by a prior FinalizeTape: nothing left to release.
 		if entry.unmounted {
 			delete(r.mounts, device)
 
@@ -209,11 +156,7 @@ func (r *MountRegistry) Teardown(ctx context.Context) error {
 		}
 
 		if err := entry.mount.Unmount(ctx); err != nil {
-			// Unmount failed; forcibly kill the ltfs process so it does not
-			// linger. os.ErrProcessDone means the process already exited on
-			// its own (harmless — the FUSE kernel driver auto-cleans the
-			// mount when its server process dies); any other Kill error is
-			// included in the returned error.
+			// os.ErrProcessDone is harmless: FUSE cleans up when its server dies.
 			if killErr := entry.mount.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
 				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w; kill: %v", device, err, killErr))
 			} else {
@@ -229,66 +172,49 @@ func (r *MountRegistry) Teardown(ctx context.Context) error {
 
 // FormatInput is the payload for the FormatTape activity.
 type FormatInput struct {
-	// Device is the SCSI generic node the LTFS sg backend operates on
-	// (e.g. /dev/sg0).
+	// Device is the SCSI generic node (e.g. /dev/sg0).
 	Device string
-	// Barcode is the tape's barcode, used as the LTFS volume name (SPEC §6).
+	// Barcode is used as the LTFS volume name (SPEC §6).
 	Barcode tape.Barcode
 }
 
 // WriteTreeInput is the payload for the WriteTree activity.
 type WriteTreeInput struct {
-	// Device is the SCSI generic node for the drive holding the formatted tape.
 	Device string
-	// Barcode is the tape's barcode; it names the LTFS volume and is used to
-	// derive the per-tape mount and work directories under the staging root.
+	// Barcode names the LTFS volume and keys the per-tape mount and work dirs.
 	Barcode tape.Barcode
-	// TapeIndex is the 0-based logical tape index within plan.Tapes; it selects
-	// which archives to copy to this tape.
+	// TapeIndex is the 0-based logical tape index within plan.Tapes.
 	TapeIndex int
-	// CopyIndex is the 0-based copy number among the copies of this logical tape.
 	CopyIndex int
-	// Archives holds the staged slice and PAR2 files for each archive on this
-	// tape, in plan order.
+	// Archives holds the staged slice and PAR2 files for each archive, in plan order.
 	Archives []TapeWriteArchive
 }
 
 // FinalizeInput is the payload for the FinalizeTape activity.
 type FinalizeInput struct {
-	// Device identifies the mount to retrieve from the registry.
 	Device string
-	// Barcode is the tape's canonical identity (SPEC §6); FinalizeTape stages the
-	// captured LTFS index to a barcode-keyed path under the run's staging
-	// directory and returns that path.
+	// Barcode keys the staged LTFS index path.
 	Barcode tape.Barcode
 }
 
 // TeardownInput is the payload for the TeardownSession activity.
 type TeardownInput struct{}
 
-// WriteActivities hosts the LTFS write activities: FormatTape, WriteTree, and
-// FinalizeTape. They share a MountRegistry so WriteTree can park a live mount
-// that FinalizeTape retrieves in a later activity execution. Sessions ensure
-// both activities run on the same data-worker process, keeping the in-process
-// registry bridge valid.
+// WriteActivities hosts FormatTape, WriteTree and FinalizeTape, sharing a
+// MountRegistry so a mount parked by WriteTree is found by FinalizeTape.
 type WriteActivities struct {
 	registry   *MountRegistry
 	stagingDir string
 }
 
-// newWriteActivities returns WriteActivities backed by the given registry.
-// stagingDir is the data worker's staging root (TAPE_STAGING_DIR); per-tape
-// mount and work directories are created under it.
+// newWriteActivities returns WriteActivities rooted at stagingDir
+// (TAPE_STAGING_DIR).
 func newWriteActivities(registry *MountRegistry, stagingDir string) *WriteActivities {
 	return &WriteActivities{registry: registry, stagingDir: stagingDir}
 }
 
-// FormatTape formats the loaded tape with mkltfs, setting its LTFS volume name
-// to the tape's barcode (SPEC §6). It is the first activity in the Write
-// phase's Format → WriteTree → FinalizeTape sequence.
-//
-// MaximumAttempts is 1: mkltfs is destructive and non-idempotent. A failure
-// here fails the Write phase without retry.
+// FormatTape formats the loaded tape with mkltfs, naming the volume after its
+// barcode (SPEC §6). Single attempt: mkltfs is destructive and non-idempotent.
 func (a *WriteActivities) FormatTape(ctx context.Context, input FormatInput) error {
 	if err := ltfs.NewVolume(input.Device).Format(ctx, input.Barcode); err != nil {
 		return err
@@ -300,32 +226,15 @@ func (a *WriteActivities) FormatTape(ctx context.Context, input FormatInput) err
 	return nil
 }
 
-// WriteTree mounts the LTFS volume on the formatted tape, copies the staged
-// archive tree to the mountpoint (archives/NNN-<label>/ per archive, SPEC §6), writes
-// the per-tape manifest last, and parks the live mount in the registry so
-// FinalizeTape can retrieve it.
+// WriteTree mounts the formatted tape, copies the staged archive tree to it
+// (SPEC §6), writes the manifest last, and parks the mount for FinalizeTape.
+// Single attempt: mounting is non-idempotent.
 //
-// Per-tape mount and work directories are derived from the staging root and the
-// tape's barcode; they persist across activity boundaries (the session pins all
-// activities to the same worker process).
-//
-// MaximumAttempts is 1: mounting a formatted tape is non-idempotent (a second
-// mount would fail or produce a stale registry entry). A failure here fails
-// the Write phase without retry.
-//
-// The copy is a pure disk→tape stream — no checksumming in the write window
-// (SPEC §14). The precomputed SHA-256s from Prepare/GeneratePAR2 populate the
-// manifest so a future recoverer can verify files without re-reading every byte.
-//
-// Independent readers per drive: each drive's WriteTree reads staged files
-// independently. The ZFS ARC and sequential read-ahead transparently coalesce
-// in-lockstep streams from multiple drives into near-1× physical disk reads, and
-// allow a lagging drive to re-read from its own page-cache window when it drifts
-// past the coalesced read. This adaptive kernel behaviour eliminates the need for
-// a hand-rolled shared cursor or fan-out buffer, which would couple drives and
-// risk thrash. If a hardware benchmark ever shows a per-drive shortfall below the
-// LTO speed-matching floor, revisit with a static fan-out or application-level
-// buffer (SPEC §14); until then the kernel ARC is the right tool.
+// The copy is a pure disk→tape stream with no checksumming in the write window
+// (SPEC §14); the manifest uses the SHA-256s precomputed during Prepare. Each
+// drive reads independently and the ZFS ARC coalesces parallel identical
+// streams, so there is no shared fan-out buffer; revisit only if a benchmark
+// shows a drive starving below the speed-matching floor.
 func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) error {
 	mountDir := filepath.Join(a.stagingDir, "mounts", string(input.Barcode))
 	workDir := filepath.Join(a.stagingDir, "work", string(input.Barcode))
@@ -357,34 +266,19 @@ func (a *WriteActivities) WriteTree(ctx context.Context, input WriteTreeInput) e
 	return nil
 }
 
-// FinalizeTape unmounts the live LTFS mount from the registry, triggering the
-// single deferred index write (SPEC §14), then reads the captured index back
-// from the work directory and stages it to a barcode-keyed file under the run's
-// staging directory. It returns the path to that staged index — not the index
-// bytes — so the multi-MB LTFS index never travels in an activity payload
-// (issue #221); the Report phase, which runs on the same data worker, reads the
-// file from disk to build the recovery ISO. It removes the mount from the
-// registry on success.
+// FinalizeTape unmounts the live mount (triggering the single deferred index
+// write, SPEC §14), then stages the captured index under the run's staging dir
+// and returns its path, so the multi-MB index never enters an activity payload
+// (#221).
 //
-// FinalizeTape is safely retriable because the registry tracks each mount's
-// unmount state (mountEntry.unmounted). A retry after a successful Unmount whose
-// ReadIndex failed finds the entry still present and already unmounted, so it
-// skips re-Unmounting the detached volume and re-reads the idempotent captured
-// index rather than re-driving a correctly finalized tape (SPEC §14). Only a
-// data-worker restart between WriteTree and FinalizeTape drops the entry entirely;
-// that genuinely lost mount is the sole mount-lost case, and that tape is
-// re-written on the next run (SPEC §14). writePhase bounds the retries so a
-// persistent Unmount failure surfaces to the operator promptly.
+// It is retriable: a retry after a successful Unmount re-reads the captured
+// index instead of re-driving the tape. Only a data-worker restart loses the
+// entry; that tape is re-written next run (SPEC §14).
 func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput) (string, error) {
 	mount, unmounted, ok := a.registry.getEntry(input.Device)
 	if !ok {
-		// A missing entry is terminal, not transient: the only way it is absent
-		// here (after WriteTree parked it in the same process, and since a failed
-		// FinalizeTape keeps the entry) is a data-worker restart that wiped the
-		// in-memory registry. No retry can recreate it — that tape is re-written
-		// on the next run (SPEC §14). Mark the error non-retryable so the Write
-		// phase fails fast instead of retrying the unrecoverable state until the
-		// session timeout.
+		// A missing entry can only mean a data-worker restart wiped the registry; no
+		// retry can recreate it, so fail fast.
 		return "", temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("finalize %s: no live mount in registry (data-worker restarted between write and finalize?)", input.Device),
 			"mount-lost",
@@ -392,16 +286,11 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 		)
 	}
 
-	// Unmount only once. On a retry after a prior attempt already unmounted
-	// (index written to tape) but failed to read the index back, the entry is
-	// still present and marked unmounted; skip straight to re-reading the
-	// idempotent captured index so the finalized tape is not re-driven and the
-	// detached FUSE mount is not unmounted a second time.
+	// On a retry after a successful Unmount, skip straight to re-reading the
+	// captured index.
 	if !unmounted {
 		if err := mount.Unmount(ctx); err != nil {
-			// Keep the entry (not yet unmounted) so a retry re-attempts the
-			// Unmount; writePhase's bounded retry policy surfaces a persistent
-			// failure promptly instead of looping until the session timeout.
+			// Keep the entry so a retry re-attempts the Unmount.
 			return "", fmt.Errorf("unmount LTFS volume on %s: %w", input.Device, err)
 		}
 
@@ -410,18 +299,13 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 
 	index, err := mount.ReadIndex(ctx)
 	if err != nil {
-		// Index write succeeded (Unmount returned nil) but reading it back
-		// failed. Keep the entry — marked unmounted — so the retry re-reads the
-		// captured index without re-Unmounting a detached mount or misdiagnosing
-		// a lost mount. Do not delete: deleting would send the retry down the
+		// Keep the entry (marked unmounted): deleting it would send the retry down the
 		// mount-lost branch and re-drive a correctly finalized tape (SPEC §14).
 		return "", fmt.Errorf("read captured LTFS index for %s: %w", input.Device, err)
 	}
 
-	// Stage the index to disk before deleting the registry entry. If staging
-	// fails, keep the entry (already marked unmounted) so a retry re-reads the
-	// idempotent captured index and re-stages, rather than dropping into the
-	// mount-lost branch and re-driving a correctly finalized tape (SPEC §14).
+	// Stage before deleting the entry, so a failed stage is retried rather than
+	// treated as a lost mount.
 	indexPath, err := a.stageIndex(input.Barcode, index)
 	if err != nil {
 		return "", fmt.Errorf("stage captured LTFS index for %s: %w", input.Device, err)
@@ -435,14 +319,9 @@ func (a *WriteActivities) FinalizeTape(ctx context.Context, input FinalizeInput)
 	return indexPath, nil
 }
 
-// stageIndex writes the captured LTFS index for barcode to a stable,
-// barcode-keyed path under the data worker's staging directory and returns that
-// path. It mirrors WriteTree's flat, barcode-keyed staging layout (a barcode is
-// physically in at most one run at a time, so the path is unambiguous), and the
-// path is deterministic so a FinalizeTape retry re-stages to the same file. The
-// bytes are staged rather than returned so the multi-MB index never enters an
-// activity payload; the Report phase, on the same data worker, reads the file
-// back to build the recovery ISO (issue #221).
+// stageIndex writes the captured LTFS index to a deterministic barcode-keyed
+// path under the staging dir (a barcode is in at most one run at a time), for
+// the Report phase to read back on the same data worker (#221).
 func (a *WriteActivities) stageIndex(barcode tape.Barcode, index []byte) (string, error) {
 	dir := filepath.Join(a.stagingDir, "indexes")
 
@@ -458,76 +337,32 @@ func (a *WriteActivities) stageIndex(barcode tape.Barcode, index []byte) (string
 	return path, nil
 }
 
-// TeardownActivities hosts the TeardownSession activity, which cleans up any
-// live LTFS mounts the session still owns when the Write phase ends — on
-// success, failure, or cancellation.
+// TeardownActivities hosts TeardownSession.
 type TeardownActivities struct {
 	registry *MountRegistry
 }
 
-// newTeardownActivities returns TeardownActivities backed by the given registry.
 func newTeardownActivities(registry *MountRegistry) *TeardownActivities {
 	return &TeardownActivities{registry: registry}
 }
 
-// TeardownSession unmounts and releases every live LTFS mount the session owns.
-// It is deferred from writePhase so it runs even when the Write phase fails or
-// the workflow is cancelled, preventing orphaned FUSE mounts. If a mount has
-// already been cleanly finalized by FinalizeTape, the registry is empty and
-// this is a no-op.
+// TeardownSession unmounts every live LTFS mount the session still owns. It is
+// deferred from writePhase so it runs on failure and cancellation too.
 func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInput) error {
-	// Detach from the cancellation of the incoming activity context: if the
-	// Write phase was cancelled (which is why we are being called), we still
-	// need to unmount. Use context.WithoutCancel so the teardown runs regardless
-	// of the parent cancellation. Then re-arm a fresh deadline: without one, a
-	// wedged ltfs index-write leaves Unmount's ctx.Done() case unable to ever
-	// fire (WithoutCancel severs the parent's cancellation), so Unmount would
-	// block forever holding the registry mutex and the Kill fallback would be
-	// unreachable. teardownUnmountTimeout bounds that wait so Teardown falls
-	// through to Kill and returns within the activity's teardownTimeout.
+	// Detach from cancellation (that is often why we are here), then re-arm a
+	// deadline: without one a wedged index write would block Unmount forever
+	// holding the registry mutex, and the Kill fallback would never run.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownUnmountTimeout)
 	defer cancel()
 
 	return a.registry.Teardown(ctx)
 }
 
-// writePhase orchestrates the Write phase (SPEC §4.3 phase 7) for one drive-set
-// inside a Temporal session. The session pins all data activities to a single
-// data-worker process, keeping the in-process MountRegistry valid across the
-// Format → WriteTree → FinalizeTape activity boundary.
-//
-// All tapes in the set write in parallel — one Temporal coroutine per drive, each
-// sequencing Format → WriteTree → Finalize independently, so the set holds at most
-// len(Drives) tapes in flight at once (concurrent disk reads bounded by the drive
-// count, SPEC §14). This keeps drives decoupled: a slow drive does not gate a fast
-// one, and the ZFS ARC provides adaptive read coalescing for byte-identical copies
-// without a hand-rolled buffer. runTapePath calls it once per set with that set's
-// loaded tapes and appends the returned WrittenTapes to the run's cumulative list.
-//
-// The deferred TeardownSession activity runs on the same worker (within the
-// session) so it can unmount any live mount the session still owns on exit.
-//
-// It returns the tapes that wrote successfully and, separately, the tapes whose
-// Format/WriteTree/FinalizeTape failed — so a partial failure keeps the good
-// tapes (the caller ejects and records them) while the caller pauses on and
-// re-drives only the failed ones (SPEC §4.3). The returned error is reserved for
-// an unrecoverable orchestration fault (e.g. session creation) that touched no
-// tape; per-tape write failures come back as failedTape values, not as error.
-// validateBarcodes enforces the pre-write invariant that every tape in a
-// drive-set carries a non-empty barcode and that no two tapes share one
-// (SPEC §4.3). The per-tape LTFS mountpoint and work directory are keyed solely
-// on the barcode (WriteTree: stagingDir/mounts/{barcode}, stagingDir/work/{barcode}),
-// so an empty barcode (an unlabeled blank: pkg/tape only sets a barcode when the
-// SCSI PVOLTAG bit is present) or a collision would make two parallel WriteTree
-// activities share one mountpoint and work dir — cross-writing trees and letting
-// ReadIndex return the wrong tape's index. isMountpoint is a pure st_dev compare
-// and cannot disambiguate collided mounts, so this must be caught before any mount.
-//
-// It is pure (no Temporal dependency) and reports every offender in a single
-// joined error: empty barcodes are named by drive index (there is no label to
-// name), duplicates by the shared barcode value and the drive indices that carry
-// it. A single walk builds barcode → drive indices so both diagnostics come from
-// one pass; drive indices are reported in encounter order.
+// validateBarcodes enforces that every tape in a drive-set has a non-empty,
+// unique barcode (SPEC §4.3). Mount and work dirs are keyed solely on barcode,
+// so an empty (unlabeled blank) or duplicate one would make parallel WriteTrees
+// cross-write trees and read back the wrong index. It reports every offender in
+// one joined error.
 func validateBarcodes(loaded []LoadedTape) error {
 	byBarcode := make(map[tape.Barcode][]int, len(loaded))
 	order := make([]tape.Barcode, 0, len(loaded))
@@ -557,29 +392,21 @@ func validateBarcodes(loaded []LoadedTape) error {
 	return errors.Join(errs...)
 }
 
+// writePhase runs the Write phase (SPEC §4.3) for one drive-set in a Temporal
+// session, writing all tapes in parallel (one coroutine per drive). It returns
+// the written and failed tapes separately so the caller keeps the good ones and
+// re-drives only the failures; the error is reserved for orchestration faults
+// that touched no tape.
 func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded []LoadedTape) ([]WrittenTape, []failedTape, error) {
-	// Validate the drive-set's barcodes before creating the session or dispatching
-	// any activity, so an empty or duplicate barcode fails the run before any LTFS
-	// volume is formatted or mounted (SPEC §4.3). runDriveSet treats a writePhase
-	// error as an unrecoverable orchestration fault and fails the run without the
-	// operator-pause/retry loop — correct here, since reloading the same unlabeled
-	// or collided tapes could never clear the condition.
+	// Fails before any format or mount. Reloading the same tapes can never clear
+	// this, so it is an orchestration fault rather than an operator pause.
 	if err := validateBarcodes(loaded); err != nil {
 		return nil, nil, fmt.Errorf("write phase: %w", err)
 	}
 
-	// CreateSession pins the session to the task queue in the context's activity
-	// options, falling back to the workflow's own queue (control) when none is
-	// set. The session must run on the data worker — that is where the tape
-	// hardware, the session worker, and the live MountRegistry live — so set the
-	// data task queue before creating it. Without this the session is created on
-	// the control queue, whose worker has no session support, and the internal
-	// session-creation activity is never picked up (the run stalls).
-	// Derive the Write-phase timeouts from the configured capacity and the tape
-	// generation's speed-matching floor once, up front (stable config ⇒
-	// replay-deterministic). The per-tape ceiling bounds each activity's
-	// StartToClose; the session ExecutionTimeout adds headroom so a full-length
-	// WriteTree still leaves room to finalize.
+	// The session must be created on the data queue (tape hardware, session
+	// worker, and MountRegistry live there); otherwise it defaults to the control
+	// queue, whose worker has no session support, and the run stalls.
 	perTapeTimeout := perTapeWriteTimeout(cfg.Library.TapeCapacityBytes)
 
 	sessionBaseCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
@@ -596,25 +423,14 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 	}
 
 	defer func() {
-		// Dispatch teardown on a disconnected context so the activity is still
-		// scheduled onto the data worker when the workflow is being cancelled —
-		// the very case this defer exists for. Dispatching on sessionCtx (which
-		// chains to the workflow context) would fail ExecuteActivity immediately
-		// with a CanceledError on cancellation, so the mounts would leak. This
-		// mirrors notifyFailure's cancellation-surviving pattern in failure.go.
-		// NewDisconnectedContext preserves the session binding, so the activity
-		// still lands on the same data worker that holds the in-process
-		// MountRegistry.
+		// A disconnected context still schedules teardown when the workflow is being
+		// cancelled (the case this defer exists for); it keeps the session binding, so
+		// it lands on the worker holding the MountRegistry.
 		disconnected, cancel := workflow.NewDisconnectedContext(sessionCtx)
 		defer cancel()
 
-		// Bound the retries: without a RetryPolicy the server default is unlimited
-		// (MaximumAttempts: 0), so a TeardownSession attempt that keeps timing out
-		// (e.g. a permanently wedged unmount) would retry forever and this
-		// disconnected .Get would never return — hanging writePhase, hence Backup,
-		// so the deferred notifyFailure never fires. Cap the attempts so teardown
-		// concludes and the run reaches a defined failed end state (mirrors
-		// FinalizeTape's retryOpts, #152).
+		// The server default is unlimited retries; a wedged unmount would hang this
+		// .Get forever and notifyFailure would never fire (#152).
 		teardownCtx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
 			TaskQueue:           DataTaskQueue,
 			StartToCloseTimeout: teardownTimeout,
@@ -622,8 +438,7 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		})
 
 		var teardown *TeardownActivities
-		// Best-effort: ignore teardown errors so the original phase error is
-		// not masked.
+		// Best-effort: do not mask the original phase error.
 		_ = workflow.ExecuteActivity(teardownCtx, teardown.TeardownSession, TeardownInput{}).Get(teardownCtx, nil)
 
 		workflow.CompleteSession(sessionCtx)
@@ -633,21 +448,15 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		return nil, nil, nil
 	}
 
-	// Activity options for Format and WriteTree: MaximumAttempts=1 because
-	// both are non-idempotent (mkltfs is destructive; mounting a second time
-	// produces a stale registry entry).
+	// Non-idempotent: mkltfs is destructive and a second mount leaves a stale
+	// registry entry.
 	noRetryOpts := workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: perTapeTimeout,
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	}
-	// FinalizeTape is safe to retry without re-running WriteTree: the registry
-	// tracks each mount's unmount state, so a retry after a successful Unmount
-	// re-reads the idempotent captured index instead of re-driving the tape.
-	// Bound the attempts so a persistent Unmount failure (e.g. an LTFS index
-	// write that fails permanently after fusermount already detached — a media
-	// error) surfaces to the operator promptly instead of looping until the
-	// session timeout.
+	// FinalizeTape retries safely (see FinalizeTape); bound the attempts so a
+	// persistent Unmount failure surfaces promptly.
 	retryOpts := workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: perTapeTimeout,
@@ -661,8 +470,6 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 		err         error
 	}
 
-	// The speed-matching floor is a property of the tape generation being written,
-	// derived once from the configured native capacity (see measureWriteHealth).
 	floorMBps, floorKnown := writeHealthFloor(cfg.Library.TapeCapacityBytes)
 
 	ch := workflow.NewBufferedChannel(sessionCtx, len(loaded))
@@ -696,10 +503,8 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 				return
 			}
 
-			// Start the write-window clock before the copy and stop it after the
-			// finalize/unmount so the measured span is exactly WriteTree →
-			// FinalizeTape (SPEC §14). workflow.Now is the replay-safe workflow
-			// clock, so the elapsed time is deterministic across retries.
+			// The write window spans exactly WriteTree → FinalizeTape (SPEC §14);
+			// workflow.Now keeps it replay-deterministic.
 			writeStart := workflow.Now(gctx)
 
 			if err := workflow.ExecuteActivity(noRetryCtx, acts.WriteTree, WriteTreeInput{
@@ -727,22 +532,16 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 			}
 
 			res.indexPath = indexPath
-			// Measure the tape after the window closed (unmount and the deferred
-			// index sync have settled) but while it is still loaded — the only
-			// point the medium's own generation can be read. This is
-			// observational only (SPEC §2 principle 2): a measurement failure is
-			// logged and the tape is still recorded as written — it never fails
-			// the run.
+			// Measure while still loaded (the only time the medium's generation can be
+			// read). Observational only (SPEC §2 principle 2): failures never fail the run.
 			res.measurement = measureWriteHealth(gctx, lt, archives, workflow.Now(gctx).Sub(writeStart), floorMBps, floorKnown)
 
 			ch.Send(gctx, res)
 		})
 	}
 
-	// Collect results from all drives, partitioning them into the tapes that wrote
-	// successfully and the tapes that failed. A partial failure is not fatal here:
-	// the caller ejects and records the successes and pauses on the failures, so
-	// the failed tapes come back as failedTape values rather than a joined error.
+	// Partial failure is not fatal: the caller ejects the successes and pauses on
+	// the failures.
 	var written []WrittenTape
 
 	var failed []failedTape
@@ -773,23 +572,12 @@ func writePhase(ctx workflow.Context, cfg config.Config, state *runState, loaded
 	return written, failed, nil
 }
 
-// measureWriteHealth runs the observational MeasureWriteHealth activity for one tape
-// after its write window closed, returning the verdict. The activity runs in the
-// session context so it lands on the same data worker (and host) that wrote the tape,
-// where its SCSI generic node lives. Because write-health never gates a run (SPEC §2
-// principle 2, §14), a measurement failure is logged and reported as unmeasured
-// rather than propagated.
+// measureWriteHealth runs MeasureWriteHealth in the session (the host that
+// wrote the tape). Write-health never gates a run (SPEC §2 principle 2, §14),
+// so a failure is logged and reported as unmeasured.
 func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWriteArchive, elapsed time.Duration, floorMBps float64, floorKnown bool) TapeMeasurement {
-	// Bound the retries to a single attempt: without a RetryPolicy the server
-	// default is unlimited, so a scrape that *hangs* (rather than fails fast —
-	// MeasureWriteHealth already absorbs a fast ReadLogPages error and returns
-	// nil, degrading to throughput-only health) would be killed at
-	// writeHealthTimeout and retried forever, stalling an already-finished write
-	// phase until the session ExecutionTimeout. Write-health is observational
-	// only (SPEC §2 principle 2, §14) and must never gate a run, so a single
-	// timed-out attempt is enough: the tape is recorded unmeasured and the run
-	// proceeds. One attempt (not FinalizeTape's 3) avoids burning more of the
-	// completed write window re-scraping a wedged sg node.
+	// One attempt: the server default retries forever, and a hanging scrape would
+	// otherwise stall a finished write phase until the session timeout.
 	healthCtx := workflow.WithActivityOptions(gctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: writeHealthTimeout,
@@ -816,12 +604,8 @@ func measureWriteHealth(gctx workflow.Context, lt LoadedTape, archives []TapeWri
 	return measurement
 }
 
-// tapeWrittenBytes sums every byte physically copied to the tape inside the
-// measured write window — the archive slices plus the PAR2 recovery files
-// (copyTape writes both, write.go). It is the numerator of the sustained write
-// throughput, matching the WriteTree → FinalizeTape denominator so the rate is
-// not understated by the PAR2 fraction. The tiny mount/manifest/index overhead
-// is negligible and unavoidable window cost.
+// tapeWrittenBytes sums the slices and PAR2 files copied inside the write
+// window, the numerator of the sustained write throughput.
 func tapeWrittenBytes(archives []TapeWriteArchive) int64 {
 	var total int64
 

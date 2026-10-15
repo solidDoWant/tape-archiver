@@ -24,56 +24,26 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// The Report phase (SPEC §4.3 phase 9) builds the run's durable recovery artifacts:
-// always the PDF report (§9), and — only when optical burning is enabled
-// (delivery.opticalBurn) — the recovery ISO (§10) as the mountable image the Burn
-// phase consumes. The burned disc is the ISO's durable home, so a run without
-// burning produces no ISO at all. It runs on the data worker (SPEC §4.1) — not the
-// control worker — because everything it consumes lives there: the staged
-// slice/PAR2 files, the pinned recovery binaries staged into the ISO, and the
-// external tools whose versions the report records. The LTFS indexes travel in run
-// state from the Write phase. Building here also keeps the tens-of-MB ISO off the
-// Temporal payload path and out of the control image (which would otherwise have to
-// duplicate the recovery binaries).
-//
-// Before building anything it enforces the key-escrow contract (SPEC §7): the run
-// config's private identity must be present and must be the identity for one of
-// the configured recipients, so the report and ISO escrow a key that can actually
-// decrypt the archives. A mismatch fails the phase.
-//
-// The Report phase does no tape or device I/O beyond a best-effort SCSI INQUIRY
-// for drive/library provenance; it is pure assembly over already-staged, already-
-// verified inputs.
+// The Report phase (SPEC §4.3 phase 9) builds the PDF report and, only when
+// optical burning is enabled, the recovery ISO. It runs on the data worker, where
+// the staged files and recovery binaries live, and first enforces the key-escrow
+// contract (SPEC §7).
 
 const (
-	// reportTimeout bounds the Report activity: rendering the PDF and assembling the
-	// ISO 9660 image, over tens of MB. An hour is far more than enough while still
-	// bounding a hang.
 	reportTimeout = 1 * time.Hour
 
-	// reportFileName and isoFileName are the staged artifact names under the run's
-	// staging directory. The PDF report is always produced and delivered (SPEC §11);
-	// the uncompressed ISO is staged only when optical burning is enabled, as the
-	// mountable image the Burn phase consumes.
 	reportFileName = "report.pdf"
 	isoFileName    = "recovery.iso"
-	// discManifestFileName is the staged sha256sum manifest of the recovery ISO's
-	// contents, written beside the uncompressed ISO only when optical burning is
-	// enabled. The Burn phase verifies each burned disc against it (SPEC §10).
+	// discManifestFileName lists the ISO's own files; the Burn phase verifies
+	// each disc against it.
 	discManifestFileName = "disc-manifest.sha256"
 
-	// unknownIdentity is the placeholder for a drive/library identifier that could
-	// not be read, so the report never renders a blank provenance field.
 	unknownIdentity = "unknown"
 )
 
-// recoveryProcedure is the concise, step-by-step recovery text rendered into the
-// PDF report (SPEC §9) so the laminated printout is self-contained even if the
-// disc is lost. The full procedure — including index-loss recovery and the
-// failure-scenario handling — ships on the recovery disc as recovery-procedure.md
-// (embedded by pkg/recoverykit from docs/recovery-procedure.md, SPEC §10); this
-// concise version points there for those cases. It refers only to the tools
-// staged on the disc under bin/ and the artifacts beside it.
+// recoveryProcedure is the concise recovery text printed in the report so the
+// printout is self-contained if the disc is lost; the full procedure ships on the
+// disc as recovery-procedure.md.
 const recoveryProcedure = `Tape Archiver — recovery procedure (concise)
 
 You need only this disc and the physical tapes. All tools referenced below ship
@@ -127,10 +97,7 @@ on this disc.
     wrapping directory — the report's contents manifest names its member volume.
 9.  Repeat for every archive on every tape listed in the report.`
 
-// ReportActivities hosts the data-side Report activity. stagingRoot is where the
-// run's artifacts are written (beside its staged tree); binariesDir holds the
-// static recovery binaries and sourcesDir the tools' source archives, both staged
-// into the ISO (SPEC §10).
+// ReportActivities hosts the data-side Report activities.
 type ReportActivities struct {
 	stagingRoot string
 	binariesDir string
@@ -142,50 +109,32 @@ func newReportActivities(stagingRoot, binariesDir, sourcesDir string) *ReportAct
 	return &ReportActivities{stagingRoot: stagingRoot, binariesDir: binariesDir, sourcesDir: sourcesDir}
 }
 
-// ReportInput is the payload for the Report activity: the run config and the full
-// run state the report and ISO are assembled from. RunID and Date come from the
-// workflow (deterministic) so the artifact is stamped identically on any retry.
+// ReportInput is the payload for the Report activity. RunID and Date come from the
+// workflow so retries stamp the artifact identically.
 type ReportInput struct {
-	Config config.Config
-	RunID  string
-	Date   time.Time
-	// SliceSizeBytes is the run's slice size the Resolve phase derived
-	// (DeriveSliceSize; issue #324), recorded in the report's build parameters.
+	Config         config.Config
+	RunID          string
+	Date           time.Time
 	SliceSizeBytes int64
 	Resolved       []ResolvedArchive
 	Staged         []StagedArchive
 	PAR2           []PAR2Set
 	Plan           TapePlan
 	Written        []WrittenTape
-	// Discs are the recovery discs burned for the run, populated only for the
-	// post-burn re-render of the delivered report (the Report phase itself runs
-	// before the Burn phase, so it leaves this empty). When set, the report records
-	// a Discs section noting each burner and any deliberate overwrite (SPEC §10).
+	// Discs is set only for the post-burn re-render of the delivered report.
 	Discs []BurnResult
 }
 
-// ReportOutput is the Report activity's result: the on-disk path of the PDF report
-// the Deliver phase uploads, plus the optional uncompressed ISO and disc manifest
-// staged for the Burn phase when optical burning is enabled.
+// ReportOutput is the Report activity's result. The ISO and disc-manifest paths
+// are empty when optical burning is disabled.
 type ReportOutput struct {
-	// ReportPath is the staged PDF report (SPEC §9), always produced and delivered.
-	ReportPath string
-	// UncompressedISOPath is the staged uncompressed recovery ISO 9660 image, set
-	// only when optical burning is enabled (delivery.opticalBurn) — the mountable
-	// image the Burn phase burns. Empty when burning is disabled.
+	ReportPath          string
 	UncompressedISOPath string
-	// DiscManifestPath is the staged sha256sum manifest of the recovery ISO's
-	// contents, set only when optical burning is enabled. The Burn phase passes it
-	// to VerifyDisc to read back and verify each burned disc. Empty when burning is
-	// disabled.
-	DiscManifestPath string
+	DiscManifestPath    string
 }
 
-// BuildReport builds the PDF report for the run (SPEC §4.3 phase 9), and — only
-// when optical burning is enabled — the recovery ISO (SPEC §10) as the mountable
-// image the Burn phase consumes. It stages the artifacts beside the run's prepared
-// tree and returns their paths. It fails if the escrow identity is missing or does
-// not match a configured recipient.
+// BuildReport builds the PDF report and, when burning is enabled, the recovery
+// ISO. It fails if the escrow identity is missing or matches no recipient.
 func (a *ReportActivities) BuildReport(ctx context.Context, input ReportInput) (ReportOutput, error) {
 	if a.stagingRoot == "" {
 		return ReportOutput{}, fmt.Errorf("staging directory is not configured (set TAPE_STAGING_DIR on the data worker)")
@@ -201,9 +150,6 @@ func (a *ReportActivities) BuildReport(ctx context.Context, input ReportInput) (
 
 	outDir := filepath.Join(a.stagingRoot, activity.GetInfo(ctx).WorkflowExecution.RunID)
 
-	// Emit a liveness heartbeat while rendering the report and assembling the ISO
-	// so a data-worker restart mid-phase is caught within activityHeartbeatTimeout
-	// rather than the 1h StartToClose.
 	var output ReportOutput
 
 	err := withActivityHeartbeat(ctx, func() error {
@@ -217,8 +163,7 @@ func (a *ReportActivities) BuildReport(ctx context.Context, input ReportInput) (
 	return output, err
 }
 
-// buildReport is the body of the Report activity, split out so it can be exercised
-// against a real directory without an activity context.
+// buildReport is the body of BuildReport, testable without an activity context.
 func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input ReportInput) (ReportOutput, error) {
 	if err := verifyEscrowIdentity(ctx, input.Config.Encryption); err != nil {
 		return ReportOutput{}, err
@@ -235,8 +180,6 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 	slog.InfoContext(ctx, "report: escrow identity verified; building recovery artifacts",
 		"tapes", len(input.Written), "opticalBurn", input.Config.Delivery.OpticalBurn.Enabled())
 
-	// Render the PDF to memory so the same bytes are both written to disk and (when
-	// burning) embedded in the ISO (SPEC §10) — no round-trip through the filesystem.
 	pdf, err := renderReportPDF(ctx, input)
 	if err != nil {
 		return ReportOutput{}, err
@@ -247,9 +190,7 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		return ReportOutput{}, fmt.Errorf("write PDF report to %q: %w", reportPath, err)
 	}
 
-	// The recovery ISO is built only when optical burning is enabled: the burned
-	// disc is the ISO's durable home (SPEC §10, §11), so a run without burning
-	// produces just the report.
+	// The burned disc is the ISO's only durable home, so no burn means no ISO.
 	if !input.Config.Delivery.OpticalBurn.Enabled() {
 		slog.InfoContext(ctx, "report: built recovery artifacts", "report", reportPath)
 
@@ -281,10 +222,6 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 		return ReportOutput{}, err
 	}
 
-	// Stage the disc-content manifest beside the uncompressed ISO so the Burn phase
-	// can verify each burned disc against it (SPEC §10). It lists the ISO's own files
-	// (report.pdf, manifest.sha256, …), distinct from the on-tape SHA-256 manifest
-	// embedded inside the ISO.
 	discManifestPath := filepath.Join(outDir, discManifestFileName)
 	if err := os.WriteFile(discManifestPath, discManifest.Bytes(), 0o644); err != nil {
 		return ReportOutput{}, fmt.Errorf("write disc-content manifest to %q: %w", discManifestPath, err)
@@ -299,11 +236,7 @@ func (a *ReportActivities) buildReport(ctx context.Context, outDir string, input
 	}, nil
 }
 
-// renderReportPDF renders the run's PDF report to bytes (SPEC §9). It is shared
-// by the Report phase (which also embeds the bytes in the recovery ISO) and the
-// post-burn re-render of the delivered report (which records the burned discs),
-// so both produce byte-identical PDFs from the same run state. The escrow-identity
-// contract is enforced by the caller before staging anything.
+// renderReportPDF renders the run's PDF report to bytes (SPEC §9).
 func renderReportPDF(ctx context.Context, input ReportInput) ([]byte, error) {
 	manifest := buildReportManifest(input, queryDeviceIdentity(ctx, input.Config.Library))
 
@@ -315,13 +248,8 @@ func renderReportPDF(ctx context.Context, input ReportInput) ([]byte, error) {
 	return pdf.Bytes(), nil
 }
 
-// RebuildDeliveredReport re-renders the delivered PDF report from the full run
-// state now that the Burn phase has run, overwriting the staged report.pdf so the
-// delivered report records the burned discs and any deliberate disc overwrite
-// (SPEC §10). Only the delivered PDF is re-rendered — the recovery ISO (and the
-// pre-burn PDF copy inside it, which necessarily predates the burn) is left as-is.
-// It returns the path of the re-rendered report. The phase orders Report → Burn →
-// this re-render → Deliver.
+// RebuildDeliveredReport re-renders the staged report.pdf after the Burn phase so
+// it records the burned discs; the ISO is left as-is.
 func (a *ReportActivities) RebuildDeliveredReport(ctx context.Context, input ReportInput) (string, error) {
 	if a.stagingRoot == "" {
 		return "", fmt.Errorf("staging directory is not configured (set TAPE_STAGING_DIR on the data worker)")
@@ -342,9 +270,7 @@ func (a *ReportActivities) RebuildDeliveredReport(ctx context.Context, input Rep
 	return reportPath, err
 }
 
-// rebuildReport is the body of the RebuildDeliveredReport activity, split out so
-// it can be exercised against a real directory without an activity context. It
-// re-renders the delivered PDF into outDir, overwriting the pre-burn report.pdf.
+// rebuildReport is the body of RebuildDeliveredReport.
 func (a *ReportActivities) rebuildReport(ctx context.Context, outDir string, input ReportInput) (string, error) {
 	if err := verifyEscrowIdentity(ctx, input.Config.Encryption); err != nil {
 		return "", err
@@ -370,17 +296,11 @@ func (a *ReportActivities) rebuildReport(ctx context.Context, outDir string, inp
 	return reportPath, nil
 }
 
-// verifyEscrowIdentity enforces the key-escrow contract (SPEC §7): the private
-// identity must be present and must derive to one of the configured recipients, so
-// the escrowed key can decrypt what the recipients encrypted. It shells out to
-// age-keygen (present on the data worker) to derive the recipient.
+// verifyEscrowIdentity enforces the key-escrow contract (SPEC §7): the identity
+// must be present and derive to one of the configured recipients.
 func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) error {
 	if strings.TrimSpace(encryption.Identity) == "" {
-		// An empty escrow identity is a deterministic misconfiguration: every retry
-		// re-reads the same empty config and fails identically. Mark it non-retryable
-		// so the Report phase fails fast and the SPEC §11 failure alert fires, instead
-		// of looping under the server-default unlimited retry policy until the run's
-		// timeout (matches prepare.go / session.go / burn.go convention).
+		// Deterministic misconfiguration: non-retryable so the run fails fast.
 		return temporal.NewNonRetryableApplicationError(
 			"encryption.identity is empty; the age private identity must be provided to escrow into the report and ISO (SPEC §7)",
 			"escrow-identity-invalid",
@@ -390,16 +310,11 @@ func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) err
 
 	derived, err := agewrap.RecipientFromIdentity(ctx, encryption.Identity)
 	if err != nil {
-		// Left retryable: RecipientFromIdentity shells out to age-keygen, so a
-		// transient exec failure should still retry.
+		// Retryable: a transient age-keygen exec failure.
 		return fmt.Errorf("derive recipient from the escrowed identity: %w", err)
 	}
 
 	if !slices.Contains(encryption.Recipients, derived) {
-		// The escrowed identity derives to a key that is not among the configured
-		// recipients — a deterministic config error (a rotated or wrong identity):
-		// every retry re-derives the same key and fails identically. Non-retryable so
-		// the run fails promptly with the mismatch and the failure alert fires.
 		return temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("the escrowed identity's public key (%s) is not among the configured encryption.recipients; it could not decrypt the archives", derived),
 			"escrow-identity-invalid",
@@ -410,10 +325,8 @@ func verifyEscrowIdentity(ctx context.Context, encryption config.Encryption) err
 	return nil
 }
 
-// buildRecoveryISO assembles the recovery ISO 9660 image once and stages it at
-// isoPath for the Burn phase (SPEC §10). It returns the disc-content manifest
-// recoverykit.Build produces as it stages each file, which the Burn phase verifies
-// each burned disc against.
+// buildRecoveryISO writes the recovery ISO to isoPath and returns its
+// disc-content manifest.
 func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, isoPath string) (recoverykit.Manifest, error) {
 	out, err := os.Create(isoPath)
 	if err != nil {
@@ -434,11 +347,8 @@ func buildRecoveryISO(ctx context.Context, isoInput recoverykit.Input, isoPath s
 	return discManifest, nil
 }
 
-// tapeIndexes maps each written physical tape to its LTFS index backup for the
-// recovery ISO (SPEC §10), keyed by barcode — the canonical physical ID (SPEC §6).
-// Each tape's index is read from the path FinalizeTape staged it to on this data
-// worker's staging volume, not carried in the activity payload, so the multi-MB
-// index never inflates the ReportInput blob (issue #221).
+// tapeIndexes reads each written tape's staged LTFS index for the ISO. Indexes are
+// read from disk rather than carried in the payload, which they would bloat (#221).
 func tapeIndexes(written []WrittenTape) ([]recoverykit.TapeIndex, error) {
 	indexes := make([]recoverykit.TapeIndex, 0, len(written))
 
@@ -458,8 +368,6 @@ func tapeIndexes(written []WrittenTape) ([]recoverykit.TapeIndex, error) {
 }
 
 // buildReportManifest assembles the report.Manifest from the run state (SPEC §9).
-// It is pure — device identifiers are passed in — so it is unit-testable without
-// any tooling or hardware.
 func buildReportManifest(input ReportInput, device deviceIdentity) report.Manifest {
 	resolvedByIndex := make(map[int]ResolvedArchive, len(input.Resolved))
 	for _, resolved := range input.Resolved {
@@ -486,9 +394,7 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 			Directory:       archiveDirName(staged.SourceIndex, resolved.Label),
 			MemberVolumes:   memberVolumes(resolved),
 			SourceSnapshots: sourceSnapshots(resolved),
-			// Compression is per source (config.Source.Compression), so the
-			// recoverer is told per archive whether a zstd step stands between the
-			// decrypted stream and the tar (issue #340).
+			// Compression is per source, so the recoverer needs it per archive (#340).
 			Compressed: resolved.Compression,
 			Files:      archiveFiles(staged, par2ByIndex[staged.SourceIndex]),
 		})
@@ -506,10 +412,7 @@ func buildReportManifest(input ReportInput, device deviceIdentity) report.Manife
 	}
 }
 
-// reportDiscs maps the recovery discs burned for the run to the report shape,
-// carrying each burner device and whether a non-blank disc was reclaimed (SPEC
-// §10). It returns nil for a run without burning so the report omits the Discs
-// section entirely (the on-disc, pre-burn report never has one).
+// reportDiscs maps the burned discs to the report shape; nil omits the section.
 func reportDiscs(discs []BurnResult) []report.Disc {
 	if len(discs) == 0 {
 		return nil
@@ -526,10 +429,7 @@ func reportDiscs(discs []BurnResult) []report.Disc {
 	return out
 }
 
-// archiveName is the display name of the archive for source index, taken from the
-// originating config Source: the ZFS path, the namespaced k8s resource name, or
-// the namespaced label selector. It falls back to a positional name if the index
-// is somehow out of range.
+// archiveName is the display name of the archive for a source index.
 func archiveName(cfg config.Config, sourceIndex int) string {
 	if sourceIndex < 0 || sourceIndex >= len(cfg.Sources) {
 		return fmt.Sprintf("sources[%d]", sourceIndex)
@@ -549,9 +449,7 @@ func archiveName(cfg config.Config, sourceIndex int) string {
 	}
 }
 
-// memberVolumes lists the volume identity of each snapshot in the archive, in
-// resolution order — the per-member subdirectory name for a group, the volume for
-// a single source.
+// memberVolumes lists the volume identity of each snapshot in the archive.
 func memberVolumes(resolved ResolvedArchive) []string {
 	volumes := make([]string, 0, len(resolved.Snapshots))
 	for _, snapshot := range resolved.Snapshots {
@@ -571,9 +469,7 @@ func sourceSnapshots(resolved ResolvedArchive) []string {
 	return snapshots
 }
 
-// archiveFiles lists the on-tape files for an archive — its slices then its PAR2
-// recovery files — each with its size and precomputed SHA-256, by base name (the
-// name the file has on tape).
+// archiveFiles lists an archive's slices then PAR2 files by on-tape base name.
 func archiveFiles(staged StagedArchive, par2 PAR2Set) []report.ArchiveFile {
 	files := make([]report.ArchiveFile, 0, len(staged.Slices)+len(par2.Files))
 
@@ -588,8 +484,7 @@ func archiveFiles(staged StagedArchive, par2 PAR2Set) []report.ArchiveFile {
 	return files
 }
 
-// reportTapes maps each written physical tape (by barcode) to the archive names
-// it holds (SPEC §9), derived from the logical tape's placement in the Pack plan.
+// reportTapes maps each written tape to the archive names it holds.
 func reportTapes(input ReportInput, nameByIndex map[int]string) []report.Tape {
 	tapes := make([]report.Tape, 0, len(input.Written))
 
@@ -621,9 +516,8 @@ func reportTapes(input ReportInput, nameByIndex map[int]string) []report.Tape {
 	return tapes
 }
 
-// reportWriteHealth maps a tape's observational write-health measurement to the
-// report shape, returning nil when the measurement was not taken so the report can
-// render "not measured" rather than a misleading zeroed row (SPEC §14).
+// reportWriteHealth maps write health to the report shape; nil renders as "not
+// measured" rather than a misleading zeroed row.
 func reportWriteHealth(health WriteHealth) *report.WriteHealth {
 	if !health.Measured {
 		return nil
@@ -641,10 +535,7 @@ func reportWriteHealth(health WriteHealth) *report.WriteHealth {
 	}
 }
 
-// buildParams records how the tapes were built (SPEC §9): tool and external tool
-// versions from the committed build info, the run's derived slice size
-// (DeriveSliceSize; issue #324) and PAR2 policy from the run config, and the
-// best-effort drive/library identifiers.
+// buildParams records how the tapes were built (SPEC §9).
 func buildParams(cfg config.Config, sliceSizeBytes int64, device deviceIdentity, written []WrittenTape) report.BuildParams {
 	return report.BuildParams{
 		ToolVersion:     buildinfo.ToolVersion(),
@@ -661,15 +552,9 @@ func buildParams(cfg config.Config, sliceSizeBytes int64, device deviceIdentity,
 	}
 }
 
-// tapeGeneration reduces the run's per-tape media generations, each read from the
-// medium during its write window, to the single value the report names as the
-// generation a recoverer needs a drive for.
-//
-// A run's tapes are normally all one generation, which is reported as is. Tapes of
-// different generations render as "mixed" rather than picking one, since naming a
-// single generation would be wrong for some of the tapes it covers. A generation
-// that could not be read renders as "unknown" — never guessed from the writing
-// drive, which may be a newer generation than the media it wrote (issue #340).
+// tapeGeneration reduces the per-tape media generations to one report value, or
+// "mixed"/"unknown". It is never guessed from the writing drive, which may be newer
+// than the media (issue #340).
 func tapeGeneration(written []WrittenTape) string {
 	generation := ""
 
@@ -691,8 +576,7 @@ func tapeGeneration(written []WrittenTape) string {
 	return generation
 }
 
-// redundancyPolicy renders the run's PAR2 policy for the report: the fixed target
-// percentage, or fill-to-capacity with its floor (SPEC §8).
+// redundancyPolicy renders the run's PAR2 policy for the report.
 func redundancyPolicy(redundancy config.Redundancy) string {
 	switch {
 	case redundancy.TargetPercentage != nil:
@@ -704,14 +588,10 @@ func redundancyPolicy(redundancy config.Redundancy) string {
 	}
 }
 
-// buildSHA256Manifest builds the full SHA-256 manifest for the recovery ISO
-// (SPEC §10): one sha256sum-format line per on-tape file across every physical
-// tape, prefixed by the tape's barcode so a recoverer can verify files copied off
-// any tape. Lines are sorted for a deterministic, diff-stable manifest. It reads
-// no files — every digest is the precomputed one from Prepare/GeneratePAR2.
+// buildSHA256Manifest builds the sorted, barcode-prefixed sha256sum manifest of
+// every on-tape file from the precomputed digests.
 func buildSHA256Manifest(input ReportInput) ([]byte, error) {
-	// resolved carries each archive's descriptive directory label, so it is needed
-	// here for archivesForTape to reproduce the on-tape paths (SPEC §6).
+	// resolved carries the directory labels archivesForTape needs for tape paths.
 	state := &runState{resolved: input.Resolved, staged: input.Staged, par2: input.PAR2, plan: input.Plan, written: input.Written}
 
 	var lines []string
@@ -736,10 +616,7 @@ func buildSHA256Manifest(input ReportInput) ([]byte, error) {
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 
-// deviceIdentity carries the drive and library provenance rendered in the report's
-// build parameters. Every field is read from the hardware by a best-effort SCSI
-// INQUIRY — the model and serial directly, the drive generation from the product
-// id — so nothing is hand-entered from config.
+// deviceIdentity is the drive/library provenance read by SCSI INQUIRY.
 type deviceIdentity struct {
 	driveModel      string
 	driveSerial     string
@@ -747,12 +624,8 @@ type deviceIdentity struct {
 	libraryModel    string
 }
 
-// queryDeviceIdentity assembles the drive/library provenance for the report from a
-// best-effort SCSI INQUIRY (0x12) on the first drive and the changer: the drive's
-// model, serial, and — from its product id — the LTO generation required to read
-// its tapes, plus the library model. INQUIRY is provenance only, so any failure
-// (e.g. dry-run/mhvtl without the device) degrades each field to "unknown" and is
-// logged rather than failing the run.
+// queryDeviceIdentity INQUIREs the first drive and the changer. It is provenance
+// only, so failures degrade fields to "unknown" rather than failing the run.
 func queryDeviceIdentity(ctx context.Context, library config.Library) deviceIdentity {
 	identity := deviceIdentity{
 		driveModel:      unknownIdentity,
@@ -788,13 +661,8 @@ func queryDeviceIdentity(ctx context.Context, library config.Library) deviceIden
 	return identity
 }
 
-// ltoGeneration maps a tape's native capacity (SPEC §5 library.tapeCapacityBytes)
-// to its LTO generation, used to look up the generation's write-health
-// speed-matching floor (writeHealthFloor). The report's "generation required to
-// read" field instead comes from the drive's INQUIRY product id (deviceIdentity),
-// not this capacity heuristic. Thresholds are the generations' native capacities;
-// a capacity below LTO-5's or non-positive yields an explicit "unknown" carrying
-// the raw value.
+// ltoGeneration maps a native tape capacity to its LTO generation, for the
+// write-health floor lookup only (not the report's generation field).
 func ltoGeneration(capacityBytes int64) string {
 	switch {
 	case capacityBytes >= 16_000_000_000_000:
@@ -812,12 +680,7 @@ func ltoGeneration(capacityBytes int64) string {
 	}
 }
 
-// reportPhase orchestrates the Report phase (SPEC §4.3 phase 9): it runs the
-// data-side BuildReport activity over the run state and records the artifact paths
-// in runState — the PDF report for the Deliver phase, and (when optical burning is
-// enabled) the uncompressed ISO and disc manifest for the Burn phase. RunID and
-// Date are taken from the workflow so the artifact is stamped deterministically
-// across retries.
+// reportPhase runs BuildReport and records the artifact paths in runState.
 func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
@@ -827,8 +690,7 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 
 	var activities *ReportActivities
 
-	// Capture the report date once so the post-burn re-render of the delivered
-	// report carries the same date as the on-disc copy that predates the burn.
+	// Captured once so the post-burn re-render carries the same date.
 	state.reportDate = workflow.Now(ctx)
 
 	var output ReportOutput
@@ -843,18 +705,8 @@ func reportPhase(ctx workflow.Context, cfg config.Config, state *runState) error
 	return nil
 }
 
-// reportInput assembles the Report activity payload from the run config and run
-// state (SPEC §4.3 phase 9). It is shared by the Report phase and the post-burn
-// report re-render so both render from identical run state; RunID and the report
-// date come from the workflow (deterministic) so the artifact is stamped
-// identically across retries and across the two renders. Discs is left empty; the
-// re-render sets it from the burned discs.
-//
-// RunID is the execution's run id, not its workflow id: the workflow id is the
-// constant WorkflowID ("backup") for every run, so stamping it would label every
-// report ever printed identically, and the report is the durable offline index for
-// one specific run. The run id is also what names the run's staging directory and
-// what tapectl and the web UI identify a run by.
+// reportInput assembles the Report activity payload. It uses the run id, not the
+// workflow id, which is the constant "backup" for every run.
 func reportInput(ctx workflow.Context, cfg config.Config, state *runState) ReportInput {
 	return ReportInput{
 		Config:         cfg,

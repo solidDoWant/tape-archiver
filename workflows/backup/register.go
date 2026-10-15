@@ -6,59 +6,41 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-// ControlConfig holds the control worker's settings that the backup workflow's
-// control-side registrations need. It is the seam through which cmd/worker
-// passes operational configuration (parsed from the environment) into the
-// workflow package.
+// ControlConfig is the control worker's operational configuration, parsed from
+// the environment by cmd/worker.
 type ControlConfig struct {
-	// FailureWebhookURL is the Discord failure webhook (DISCORD_FAILURE_WEBHOOK_URL).
-	// Empty disables failure alerting (SPEC §11).
+	// FailureWebhookURL is DISCORD_FAILURE_WEBHOOK_URL; empty disables failure
+	// alerting (SPEC §11).
 	FailureWebhookURL string
 	// K8sDatasetParent is democratic-csi's datasetParentName, used to rebuild
-	// absolute ZFS snapshot paths during k8s resolution (SPEC §3, §16). Empty
-	// treats CSI snapshotHandles as already absolute.
+	// absolute ZFS snapshot paths (SPEC §3, §16). Empty treats snapshotHandles as
+	// absolute.
 	K8sDatasetParent string
 }
 
-// DataConfig holds the data worker's settings that the backup workflow's
-// data-side registrations need. It is the seam through which cmd/worker passes
-// operational configuration (parsed from the environment) into the workflow
-// package, mirroring ControlConfig.
+// DataConfig is the data worker's operational configuration, parsed from the
+// environment by cmd/worker.
 type DataConfig struct {
-	// StagingDir is the directory the Prepare phase stages prepared archives
-	// into (TAPE_STAGING_DIR), a subdirectory of an existing dataset on the
-	// storage host (SPEC §4.1). Required; the Prepare activity fails when empty.
+	// StagingDir is TAPE_STAGING_DIR (SPEC §4.1). Required.
 	StagingDir string
-	// RecoveryBinariesDir is the directory holding the statically linked recovery
-	// binaries (age, par2, zstd, tar) the Report phase stages into the recovery
-	// ISO (TAPE_RECOVERY_BINARIES_DIR, SPEC §10). Required; the Report activity
-	// fails when empty or when a binary is not statically linked.
+	// RecoveryBinariesDir holds the statically linked recovery binaries for the ISO
+	// (TAPE_RECOVERY_BINARIES_DIR, SPEC §10). Required.
 	RecoveryBinariesDir string
-	// RecoverySourcesDir is the directory holding the recovery tools' upstream
-	// source archives the Report phase stages into the recovery ISO's src/
-	// (TAPE_RECOVERY_SOURCES_DIR, SPEC §2, §10). Required; the Report activity fails
-	// when empty or when it yields no source archives.
+	// RecoverySourcesDir holds the recovery tools' source archives for the ISO's
+	// src/ (TAPE_RECOVERY_SOURCES_DIR, SPEC §2, §10). Required.
 	RecoverySourcesDir string
-	// MetricsRegisterer is the Prometheus registry the data worker's write-health
-	// gauges register against (SPEC §14). It is the same registry that backs the
-	// worker's /metrics endpoint; nil when metrics are disabled, in which case
-	// write-health metrics are simply not exported (the report still records them).
+	// MetricsRegisterer receives the write-health gauges (SPEC §14); nil disables
+	// them (the report still records them).
 	MetricsRegisterer prometheus.Registerer
 }
 
-// RegisterControl registers everything the control worker hosts: the Backup
-// workflow under WorkflowType (so clients can start it by the contract name),
-// the operational failure-alert activity wired with the configured webhook URL,
-// and the control-side planning activities (snapshot resolution, bin-packing).
-// It is called from cmd/worker for the control role. The bulk-data phases —
-// including report/ISO building and delivery — run on the data worker.
+// RegisterControl registers the Backup workflow and the control-side
+// activities on w.
 func RegisterControl(w worker.Worker, cfg ControlConfig) {
 	w.RegisterWorkflowWithOptions(Backup, workflow.RegisterOptions{Name: WorkflowType})
 
-	// The Eject-pause auto-resume poll loop runs as a self-continuing child
-	// workflow so the run's own history stays bounded across long pauses
-	// (issue #168). It is a control-side workflow (its IOStationStatus polls
-	// dispatch to the data queue) and is started by waitForIOCleared.
+	// Self-continuing child workflow for the Eject-pause poll loop, keeping the
+	// run's history bounded (#168).
 	w.RegisterWorkflowWithOptions(ioStationWaitWorkflow, workflow.RegisterOptions{Name: IOStationWaitWorkflowType})
 
 	w.RegisterActivity(&FailureActivities{WebhookURL: cfg.FailureWebhookURL})
@@ -67,51 +49,34 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 	w.RegisterActivity(newPackActivities())
 }
 
-// RegisterData registers the data worker's bulk-data phase activities
-// (SPEC §4.1), wired with the data worker's operational configuration. It is
-// called from cmd/worker for the data role.
+// RegisterData registers the bulk-data activities (SPEC §4.1) on w.
 func RegisterData(w worker.Worker, cfg DataConfig) {
 	w.RegisterActivity(newResolveDataActivities())
 	w.RegisterActivity(newHoldActivities())
 	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
 	w.RegisterActivity(newGeneratePAR2Activities())
 	w.RegisterActivity(newVerifyActivities())
-	// Dry runs only: makes the virtual library mirror the real one before the
-	// tape path, so the rehearsal meets the real library's slot conditions. The
-	// workflow skips it entirely unless Library.MirrorSourceChanger is set.
+	// Dry runs only (Library.MirrorSourceChanger).
 	w.RegisterActivity(newMirrorActivities())
 	w.RegisterActivity(newLoadActivities())
 
-	// FormatTape, WriteTree, and FinalizeTape share a registry so a live
-	// mount parked by WriteTree survives into FinalizeTape across the activity
-	// boundary (sessions pin both to the same process).
+	// Shared so a mount parked by WriteTree survives into FinalizeTape (sessions
+	// pin both to the same process).
 	registry := newMountRegistry()
 	w.RegisterActivity(newWriteActivities(registry, cfg.StagingDir))
 	w.RegisterActivity(newTeardownActivities(registry))
 
-	// Write-health measurement (SPEC §14) runs after each tape's write window and
-	// exports its gauges against the worker's Prometheus registry.
 	w.RegisterActivity(newWriteHealthActivities(cfg.MetricsRegisterer))
 
 	w.RegisterActivity(newEjectActivities())
 
-	// Report and Deliver run on the data worker: the report/ISO build needs the
-	// staged files, recovery binaries, and pinned tools that live here, and
-	// delivering from here keeps the tens-of-MB ISO off the Temporal payload path
-	// (SPEC §4.3 phases 9–10, §9–§11).
+	// Report and Deliver run here: they need the staged files and recovery
+	// binaries, and it keeps the ISO off the Temporal payload path.
 	w.RegisterActivity(newReportActivities(cfg.StagingDir, cfg.RecoveryBinariesDir, cfg.RecoverySourcesDir))
 	w.RegisterActivity(newDeliverActivities())
 
-	// Staging cleanup reclaims the run's staged bulk data on exit. It runs here
-	// because the staged bytes live on this worker's staging volume, and it shares
-	// the same staging root Prepare, Write, and Report were constructed with
-	// (SPEC §4.3).
 	w.RegisterActivity(newCleanupActivities(cfg.StagingDir))
 
-	// The per-disc optical burn/verify activities run here too: the burners are
-	// attached to the storage host and the recovery ISO is staged beside the run's
-	// tree (SPEC §10). They are stateless — every per-disc parameter (device,
-	// ISO/manifest path, AllowNonBlankDiscs) flows through the activity input — so
-	// nothing is wired in from DataConfig.
+	// Burners are attached to the storage host; the activities are stateless.
 	w.RegisterActivity(newBurnActivities())
 }

@@ -22,9 +22,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/optical"
 )
 
-// discContents stands in for the recovery ISO the Report phase produces (SPEC §10):
-// the report, the SHA-256 manifest, the recovery text, an LTFS index, and a recovery
-// binary. Slash-separated disc-relative path -> file content.
+// discContents stands in for the recovery ISO (disc-relative path -> content).
 var discContents = map[string]string{
 	"report.pdf":           "pretend PDF report bytes\n",
 	"manifest.sha256":      "pretend tape manifest\n",
@@ -33,10 +31,8 @@ var discContents = map[string]string{
 	"ltfs-index/T1.schema": "<index>tape one</index>\n",
 }
 
-// TestBurnDiscVerifyRoundTrip drives the BurnDisc and VerifyDisc activities against a
-// loop-device-backed pseudo-disc through the real xorriso/mount path: a blank disc is
-// burned and reads back matching its disc-content manifest (AC1, AC2), and a tampered
-// manifest is caught as a burn failure (AC2).
+// TestBurnDiscVerifyRoundTrip burns a loop-device pseudo-disc through the real
+// xorriso/mount path, verifies it, and catches a tampered manifest.
 func TestBurnDiscVerifyRoundTrip(t *testing.T) {
 	testutil.SkipIfXorrisoUnavailable(t)
 	testutil.SkipIfLosetupUnavailable(t)
@@ -47,19 +43,16 @@ func TestBurnDiscVerifyRoundTrip(t *testing.T) {
 
 	acts := newBurnActivities()
 
-	// --- Burn a blank disc (AC1) ----------------------------------------------
 	result, err := acts.BurnDisc(t.Context(), BurnDiscInput{Device: device, ISOPath: isoPath})
 	require.NoError(t, err, "burn blank disc")
 	assert.Equal(t, device, result.Device)
 	assert.False(t, result.OverwroteNonBlank, "a blank disc is not an overwrite")
 
-	// --- Verify the burned disc matches its manifest (AC2) --------------------
 	require.NoError(t, acts.VerifyDisc(t.Context(), VerifyDiscInput{
 		Device:       device,
 		ManifestPath: manifestPath,
 	}), "verify burned disc")
 
-	// --- A tampered manifest is a burn failure (AC2) --------------------------
 	tampered := cloneContents(discContents)
 	tampered["report.pdf"] = "these bytes are NOT what was burned\n"
 	tamperedManifest := writeManifestFile(t, tampered)
@@ -69,9 +62,8 @@ func TestBurnDiscVerifyRoundTrip(t *testing.T) {
 	assert.ErrorContains(t, err, "report.pdf")
 }
 
-// TestBurnDiscRefusesNonBlankByDefault asserts that with AllowNonBlankDiscs unset a
-// non-blank disc is refused with the typed operator-pause error and left intact — no
-// partial or bad disc is produced (AC3).
+// TestBurnDiscRefusesNonBlankByDefault: without the opt-in a non-blank disc is
+// refused and left intact.
 func TestBurnDiscRefusesNonBlankByDefault(t *testing.T) {
 	testutil.SkipIfXorrisoUnavailable(t)
 	testutil.SkipIfLosetupUnavailable(t)
@@ -82,26 +74,21 @@ func TestBurnDiscRefusesNonBlankByDefault(t *testing.T) {
 
 	acts := newBurnActivities()
 
-	// First burn makes the (rewritable) disc non-blank.
 	_, err := acts.BurnDisc(t.Context(), BurnDiscInput{Device: device, ISOPath: isoPath})
 	require.NoError(t, err, "seed the disc with a first burn")
 
-	// A second burn without the opt-in must refuse it.
 	_, err = acts.BurnDisc(t.Context(), BurnDiscInput{Device: device, ISOPath: isoPath})
 	require.Error(t, err, "a non-blank disc must be refused by default")
 	assert.True(t, IsDiscNotWritable(err), "the refusal must be the typed operator-pause error: %v", err)
 
-	// The disc is untouched: it still matches the first burn's manifest.
 	require.NoError(t, acts.VerifyDisc(t.Context(), VerifyDiscInput{
 		Device:       device,
 		ManifestPath: manifestPath,
 	}), "the refused disc must be left intact")
 }
 
-// TestBurnDiscReclaimsNonBlankRewritable asserts that with AllowNonBlankDiscs set a
-// non-blank rewritable disc is reclaimed and rewritten, the result records the
-// overwrite, and the reburned disc verifies (AC4). A loop/stdio disc is always
-// rewritable, so it exercises the reclaim path directly.
+// TestBurnDiscReclaimsNonBlankRewritable: with the opt-in a non-blank rewritable
+// disc is reclaimed, recorded, and verifies.
 func TestBurnDiscReclaimsNonBlankRewritable(t *testing.T) {
 	testutil.SkipIfXorrisoUnavailable(t)
 	testutil.SkipIfLosetupUnavailable(t)
@@ -109,13 +96,11 @@ func TestBurnDiscReclaimsNonBlankRewritable(t *testing.T) {
 	device := loopDevice(t, 64<<20)
 	acts := newBurnActivities()
 
-	// Seed the disc with an unrelated first burn so it is non-blank with different
-	// contents than the second burn.
+	// Seed the disc with different contents so it is non-blank.
 	firstISO := makeISO(t, map[string]string{"stale.txt": "old contents to be reclaimed\n"})
 	_, err := acts.BurnDisc(t.Context(), BurnDiscInput{Device: device, ISOPath: firstISO})
 	require.NoError(t, err, "seed the disc with a first burn")
 
-	// Reburn the real recovery contents over the non-blank disc, with the opt-in.
 	isoPath := makeISO(t, discContents)
 	manifestPath := writeManifestFile(t, discContents)
 
@@ -133,16 +118,13 @@ func TestBurnDiscReclaimsNonBlankRewritable(t *testing.T) {
 	}), "the reburned disc must match the new manifest")
 }
 
-// TestBurnDiscRefusesWriteOnceMedium asserts the opt-in never forces a write-once
-// overwrite (AC5). A file-backed stdio/loop disc is always rewritable, so this needs
-// real write-once media; it is skipped unless OPTICAL_BURN_DEV points at one. The
-// decision itself is covered exhaustively by TestDecideBurn.
+// TestBurnDiscRefusesWriteOnceMedium: the opt-in never forces a write-once
+// overwrite. Loop discs are always rewritable, so this needs OPTICAL_BURN_DEV.
 func TestBurnDiscRefusesWriteOnceMedium(t *testing.T) {
 	testutil.SkipIfXorrisoUnavailable(t)
 
 	device := testutil.OpticalBurnDev(t)
 
-	// Guard: the assertion is only meaningful against a non-blank write-once disc.
 	state, err := optical.NewDisc(device).State(t.Context())
 	require.NoError(t, err, "read state of the configured burn device")
 	require.Contains(t, []optical.DiscState{optical.StateAppendableWriteOnce, optical.StateFinalized}, state,
@@ -150,7 +132,6 @@ func TestBurnDiscRefusesWriteOnceMedium(t *testing.T) {
 
 	isoPath := makeISO(t, discContents)
 
-	// Even with the opt-in set, a write-once disc must be refused.
 	_, err = newBurnActivities().BurnDisc(t.Context(), BurnDiscInput{
 		Device:             device,
 		ISOPath:            isoPath,
@@ -160,9 +141,7 @@ func TestBurnDiscRefusesWriteOnceMedium(t *testing.T) {
 	assert.True(t, IsDiscNotWritable(err), "the refusal must be the typed operator-pause error: %v", err)
 }
 
-// loopDevice creates a size-byte backing file and attaches it to a loop device,
-// returning the loop device path. Both are cleaned up when the test ends. Requires
-// root (losetup), which the integration target provides.
+// loopDevice attaches a size-byte backing file to a loop device (needs root).
 func loopDevice(t *testing.T, size int64) string {
 	t.Helper()
 
@@ -187,9 +166,7 @@ func loopDevice(t *testing.T, size int64) string {
 	return device
 }
 
-// makeISO builds an ISO 9660 image from the given slash-separated path -> content
-// map using xorriso's mkisofs emulation, standing in for the recovery ISO that
-// pkg/recoverykit produces, and returns the image path.
+// makeISO builds an ISO 9660 image from a path -> content map via xorriso.
 func makeISO(t *testing.T, files map[string]string) string {
 	t.Helper()
 
@@ -209,9 +186,8 @@ func makeISO(t *testing.T, files map[string]string) string {
 	return isoPath
 }
 
-// writeManifestFile writes a sha256sum-format disc-content manifest for files
-// (path -> content) to a temp file and returns its path — the on-disk manifest
-// VerifyDisc reads and parses.
+// writeManifestFile writes a sha256sum-format manifest for files and returns its
+// path.
 func writeManifestFile(t *testing.T, files map[string]string) string {
 	t.Helper()
 

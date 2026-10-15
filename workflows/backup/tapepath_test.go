@@ -18,8 +18,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// tapePathTestParams seeds a runState for the tapePathTestWorkflow: the plan to
-// write and the staged/PAR2 trees the Write phase assembles per tape.
+// tapePathTestParams seeds a runState for tapePathTestWorkflow.
 type tapePathTestParams struct {
 	Cfg    config.Config
 	Plan   TapePlan
@@ -27,9 +26,7 @@ type tapePathTestParams struct {
 	PAR2   []PAR2Set
 }
 
-// tapePathTestWorkflow drives only the tape path (runTapePath) over a seeded plan
-// so the drive-set orchestration can be tested with mocked Load/Write/Eject
-// activities, without the full backup pipeline building a plan first.
+// tapePathTestWorkflow drives only runTapePath over a seeded plan.
 func tapePathTestWorkflow(ctx workflow.Context, params tapePathTestParams) ([]WrittenTape, error) {
 	state := &runState{plan: params.Plan, staged: params.Staged, par2: params.PAR2}
 
@@ -41,9 +38,8 @@ func tapePathTestWorkflow(ctx workflow.Context, params tapePathTestParams) ([]Wr
 	return state.written, nil
 }
 
-// newTapePathEnv registers the tape-path test workflow and every tape-path
-// activity so a test attaches behavior with OnActivity. The Write phase creates a
-// Temporal session, so the session worker is enabled.
+// newTapePathEnv registers the tape-path test workflow and activities, with the
+// session worker Write needs.
 func newTapePathEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 
@@ -65,8 +61,8 @@ func newTapePathEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	return env
 }
 
-// tapePathConfig returns a config with the given library drives and enough blank
-// slots to cover copyCount copies of tapeCount logical tapes.
+// tapePathConfig returns a config with the given drives and enough blank slots
+// for copyCount copies of tapeCount tapes.
 func tapePathConfig(drives, tapeCount, copyCount int) config.Config {
 	driveNodes := make([]string, drives)
 	for i := range driveNodes {
@@ -89,9 +85,8 @@ func tapePathConfig(drives, tapeCount, copyCount int) config.Config {
 	}
 }
 
-// seededPlan builds a plan of tapeCount logical tapes, each carrying one archive
-// (source index = tape index), plus the matching staged and PAR2 trees so
-// archivesForTape resolves every placement.
+// seededPlan builds tapeCount one-archive tapes plus matching staged and PAR2
+// trees.
 func seededPlan(tapeCount, copyCount int) (TapePlan, []StagedArchive, []PAR2Set) {
 	tapes := make([]PlannedTape, tapeCount)
 	staged := make([]StagedArchive, tapeCount)
@@ -113,10 +108,8 @@ func seededPlan(tapeCount, copyCount int) (TapePlan, []StagedArchive, []PAR2Set)
 	return TapePlan{Copies: copyCount, Tapes: tapes}, staged, par2
 }
 
-// mockLoadReturnsAssignments mocks the Load activity to return one LoadedTape per
-// assignment in the drive-set, echoing the (tape, copy) assignment back with a
-// synthetic barcode/device. It appends each loaded drive-set's size to setSizes
-// (under mu) so a test can count sets and check the concurrency bound.
+// mockLoadReturnsAssignments mocks Load to echo each assignment with a synthetic
+// barcode/device, recording each set's size in setSizes (under mu).
 func mockLoadReturnsAssignments(env *testsuite.TestWorkflowEnvironment, mu *sync.Mutex, setSizes *[]int) {
 	env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
@@ -142,9 +135,8 @@ func mockLoadReturnsAssignments(env *testsuite.TestWorkflowEnvironment, mu *sync
 		})
 }
 
-// TestRunTapePathPassesAllowNonBlankTapes checks that the tape path forwards
-// Library.AllowNonBlankTapes from the run config into every Load activity call, so
-// the Load phase can honour the operator's opt-out (issue #91).
+// TestRunTapePathPassesAllowNonBlankTapes: Library.AllowNonBlankTapes reaches
+// every Load call (issue #91).
 func TestRunTapePathPassesAllowNonBlankTapes(t *testing.T) {
 	t.Parallel()
 
@@ -216,14 +208,9 @@ func TestRunTapePathPassesAllowNonBlankTapes(t *testing.T) {
 	}
 }
 
-// TestRunTapePathTeardownRunsOnCancellation verifies that when the workflow is
-// cancelled mid-Write — while a WriteTree activity is still holding a live LTFS
-// mount — the deferred TeardownSession activity is nonetheless dispatched to and
-// executed on the data worker, so the session's mounts are released (issue #133
-// AC1). Before the fix the teardown was dispatched on the cancelled session
-// context, which the SDK fails immediately without ever scheduling the activity,
-// leaking the mount. The workflow-cancel here reproduces that path, and the test
-// fails (teardown never runs) against the pre-fix dispatch.
+// TestRunTapePathTeardownRunsOnCancellation: cancelling mid-Write still runs
+// TeardownSession on the data worker (issue #133 AC1). Dispatching it on the
+// cancelled session context would never schedule it, leaking the mount.
 func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -237,10 +224,7 @@ func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
 
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
 
-	// WriteTree signals it is in flight, then blocks until its activity context
-	// is cancelled — modelling a live mount held open when the operator cancels
-	// the run mid-write. Its return arrives after cancellation, so writePhase
-	// unwinds into the deferred teardown while the workflow is being cancelled.
+	// WriteTree blocks until cancelled, modelling a live mount at cancel time.
 	writeInFlight := make(chan struct{})
 
 	var closeOnce sync.Once
@@ -258,9 +242,6 @@ func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
 		WriteHealth{}, nil)
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
 
-	// Spy on TeardownSession: recording the call proves the activity was
-	// dispatched and executed on the (session-pinned) data worker after
-	// cancellation — the exact behavior the pre-fix code skipped.
 	var teardownCalled bool
 
 	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(
@@ -272,9 +253,7 @@ func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
 			return nil
 		})
 
-	// Cancel once WriteTree is in flight (holding the mount). CancelWorkflow
-	// posts onto the test env's callback channel, so it is safe to invoke from
-	// this goroutine while ExecuteWorkflow drives the workflow.
+	// CancelWorkflow is safe to call from this goroutine.
 	go func() {
 		<-writeInFlight
 		env.CancelWorkflow()
@@ -295,10 +274,8 @@ func TestRunTapePathTeardownRunsOnCancellation(t *testing.T) {
 		"TeardownSession must run on the data worker after cancellation so the session's live mounts are released")
 }
 
-// TestRunTapePathMultipleDriveSets drives a plan that needs several drive-sets
-// from both extra logical tapes and extra copies, and asserts every (tape, copy)
-// pair is written and ejected with concurrency bounded by the drive count
-// (issue #66 AC1, AC2, AC3, AC4).
+// TestRunTapePathMultipleDriveSets: every (tape, copy) is written and ejected
+// with concurrency bounded by the drive count (issue #66 AC1-AC4).
 func TestRunTapePathMultipleDriveSets(t *testing.T) {
 	t.Parallel()
 
@@ -312,7 +289,6 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 
 	var mu sync.Mutex
 
-	// loadSetSizes records the size of each drive-set as it is loaded.
 	var loadSetSizes []int
 
 	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
@@ -348,7 +324,6 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 			}
 			mu.Unlock()
 
-			// All tapes exported (no Remaining) → no operator pause.
 			return EjectResult{}, nil
 		})
 
@@ -402,15 +377,11 @@ func TestRunTapePathMultipleDriveSets(t *testing.T) {
 		}
 	}
 
-	// Every written tape is ejected.
 	assert.Len(t, ejectedBarcodes, tapes*copies, "every written tape must be ejected")
 }
 
-// TestRunTapePathStopsAfterSetFailure verifies the bounded blast radius when a
-// tape in a drive-set fails its write: the run pauses for the operator and, if the
-// operator aborts, no later set is loaded (issue #66 AC5, as amended by issue #92:
-// a write failure now pauses for operator approval rather than failing the whole
-// run outright — but the "no later set is loaded" bound is preserved).
+// TestRunTapePathStopsAfterSetFailure: after a write failure and operator abort,
+// no later set is loaded (issue #66 AC5, amended by #92).
 func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	t.Parallel()
 
@@ -429,8 +400,6 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 
 	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
 
-	// The first (and only) tape in set 0 fails to format; the Write phase pauses,
-	// and the operator aborts, so runTapePath returns before any later set loads.
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
 		fmt.Errorf("simulated format failure"))
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
@@ -439,9 +408,7 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		WriteHealth{}, nil)
 
-	// AC2 (issue #133): teardown still runs on an ordinary write-phase failure
-	// (no cancellation). Record the call so the guarantee is locked, not merely
-	// mocked away.
+	// Teardown still runs on an ordinary write failure (issue #133 AC2).
 	teardownCalls := 0
 
 	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(
@@ -465,7 +432,6 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 			return EjectResult{}, nil
 		})
 
-	// The operator aborts the paused run rather than reloading fresh blanks.
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(OperatorAbortSignal, nil)
 	}, 30*time.Second)
@@ -493,13 +459,9 @@ func TestRunTapePathStopsAfterSetFailure(t *testing.T) {
 	assert.Positive(t, teardownCalls, "teardown must still run on an ordinary write-phase failure (issue #133 AC2)")
 }
 
-// TestRunTapePathFinalizeRetryBounded covers issue #152 AC4: when FinalizeTape
-// fails persistently (e.g. an LTFS index write that keeps failing after the volume
-// detached — a permanent media error), the bounded retry policy surfaces the
-// failure to the operator promptly instead of retrying the unmount until the
-// 24-hour session timeout. The failing FinalizeTape is attempted a bounded number
-// of times (MaximumAttempts=3), then the tape is treated as a write failure and
-// the run pauses for the operator.
+// TestRunTapePathFinalizeRetryBounded: a persistently failing FinalizeTape is
+// retried a bounded number of times, then pauses as a write failure instead of
+// retrying until the 24h session timeout (issue #152 AC4).
 func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
 	t.Parallel()
 
@@ -523,9 +485,6 @@ func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(nil)
 	env.OnActivity((&WriteActivities{}).WriteTree, mock.Anything, mock.Anything).Return(nil)
 
-	// FinalizeTape fails on every attempt, simulating a persistent unmount/index
-	// failure. Count the attempts to prove the retry policy is bounded rather than
-	// the Temporal-default unlimited.
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		func(_ context.Context, _ FinalizeInput) (string, error) {
 			mu.Lock()
@@ -542,7 +501,6 @@ func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
 		EjectResult{}, nil)
 
-	// The operator aborts the paused run.
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(OperatorAbortSignal, nil)
 	}, 30*time.Second)
@@ -566,14 +524,9 @@ func TestRunTapePathFinalizeRetryBounded(t *testing.T) {
 		"FinalizeTape must be bounded to MaximumAttempts=3 so a persistent unmount failure surfaces promptly instead of retrying until the session timeout")
 }
 
-// TestRunTapePathTeardownRetryBounded covers issue #223 AC1/AC2: when the deferred
-// TeardownSession activity keeps failing (a permanently wedged ltfs unmount that
-// times out every attempt), the bounded retry policy concludes teardown after a
-// fixed number of attempts instead of retrying under Temporal's default-unlimited
-// policy. So writePhase returns and the run reaches a defined end state within a
-// bounded time — the deferred failure alert then fires (TestWorkflowFailureSendsAlert)
-// — instead of the workflow hanging forever with no alert. The teardown error is
-// best-effort and never masks the phase result: the written tape is still recorded.
+// TestRunTapePathTeardownRetryBounded: a wedged TeardownSession retries a bounded
+// number of times so writePhase returns and the failure alert can fire, instead of
+// hanging forever (issue #223 AC1/AC2). The written tape is still recorded.
 func TestRunTapePathTeardownRetryBounded(t *testing.T) {
 	t.Parallel()
 
@@ -602,10 +555,7 @@ func TestRunTapePathTeardownRetryBounded(t *testing.T) {
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(
 		EjectResult{}, nil)
 
-	// TeardownSession fails on every attempt, modelling a wedged unmount that times
-	// out each time. Count the attempts to prove the retry policy is bounded rather
-	// than the Temporal-default unlimited (which would retry until the session
-	// timeout and hang writePhase, so Backup never returns and no alert fires).
+	// Unbounded retries would hang writePhase until the session timeout.
 	env.OnActivity((&TeardownActivities{}).TeardownSession, mock.Anything, mock.Anything).Return(
 		func(context.Context, TeardownInput) error {
 			mu.Lock()
@@ -624,8 +574,6 @@ func TestRunTapePathTeardownRetryBounded(t *testing.T) {
 		PAR2:   par2,
 	})
 
-	// The write phase reaches a defined end state (does not hang) even though teardown
-	// keeps failing.
 	require.True(t, env.IsWorkflowCompleted(),
 		"the write phase must return within a bounded time even when teardown keeps failing")
 	require.NoError(t, env.GetWorkflowError(),
@@ -642,12 +590,9 @@ func TestRunTapePathTeardownRetryBounded(t *testing.T) {
 		"TeardownSession must be bounded to MaximumAttempts=3 so a wedged unmount cannot retry until the session timeout and hang the workflow with no failure alert")
 }
 
-// TestRunTapePathWriteHealthRetryBounded covers issue #223 AC3: when the post-write
-// MeasureWriteHealth scrape hangs and is killed at its StartToClose timeout on every
-// attempt, the bounded retry policy concludes after a single attempt instead of
-// retrying under Temporal's default-unlimited policy — so an already-finished write
-// phase is not stalled until the session timeout. Write-health is observational only
-// (SPEC §2 principle 2, §14): the tape is still recorded, with health unmeasured.
+// TestRunTapePathWriteHealthRetryBounded: a hanging MeasureWriteHealth is tried
+// once, so a finished write is not stalled (issue #223 AC3). Health is
+// observational only (SPEC §14); the tape is still recorded.
 func TestRunTapePathWriteHealthRetryBounded(t *testing.T) {
 	t.Parallel()
 
@@ -672,10 +617,6 @@ func TestRunTapePathWriteHealthRetryBounded(t *testing.T) {
 	env.OnActivity((&WriteActivities{}).FinalizeTape, mock.Anything, mock.Anything).Return(
 		"/stage/indexes/tape.xml", nil)
 
-	// MeasureWriteHealth fails on every attempt, modelling a scrape that hangs and is
-	// killed at writeHealthTimeout. Count the attempts to prove the retry is bounded
-	// rather than the Temporal-default unlimited (which would stall the finished
-	// write phase until the session timeout).
 	env.OnActivity((&WriteHealthActivities{}).MeasureWriteHealth, mock.Anything, mock.Anything).Return(
 		func(context.Context, MeasureWriteHealthInput) (TapeMeasurement, error) {
 			mu.Lock()
@@ -716,11 +657,8 @@ func TestRunTapePathWriteHealthRetryBounded(t *testing.T) {
 		"MeasureWriteHealth must be bounded to MaximumAttempts=1 so a hung scrape cannot retry until the session timeout and stall a finished write")
 }
 
-// TestRunTapePathResumeNeverReformatsCompletedTapes covers issue #92 AC5 across
-// drive-sets: with two sets, the first completes and one tape in the second fails.
-// On resume only that failed tape is re-driven — the first set's tapes (a
-// completed drive-set) and the second set's tape that succeeded are never
-// re-formatted, so an already-written tape is never overwritten.
+// TestRunTapePathResumeNeverReformatsCompletedTapes: on resume only the failed
+// tape is re-driven, so a written tape is never re-formatted (issue #92 AC5).
 func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 	t.Parallel()
 
@@ -741,8 +679,7 @@ func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 
 	mockLoadReturnsAssignments(env, &mu, &loadSetSizes)
 
-	// Barcodes are BC-<tapeIndex>-<copyIndex>; tape index 3 (in the second set)
-	// fails to format on its first attempt, then succeeds on the resume retry.
+	// Tape 3 (second set) fails its first format, then succeeds on resume.
 	failed := tape.Barcode("BC-3-0")
 
 	env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
@@ -768,7 +705,6 @@ func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 	env.OnActivity((&EjectActivities{}).Eject, mock.Anything, mock.Anything).Return(EjectResult{}, nil)
 	env.OnActivity((&FailureActivities{}).NotifyWritePathPause, mock.Anything, mock.Anything).Return(nil)
 
-	// The operator loads a fresh blank and resumes.
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(OperatorResumeSignal, nil)
 	}, 30*time.Second)
@@ -791,8 +727,7 @@ func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	// Only the failed tape is ever re-formatted; every other tape — including the
-	// whole first (completed) drive-set — is formatted exactly once (AC5).
+
 	assert.Equal(t, 2, formatsByTape[failed], "the failed tape is re-formatted once on resume")
 
 	for _, barcode := range []tape.Barcode{"BC-0-0", "BC-1-0", "BC-2-0"} {
@@ -801,18 +736,12 @@ func TestRunTapePathResumeNeverReformatsCompletedTapes(t *testing.T) {
 	}
 }
 
-// TestRunTapePathRejectsBadBarcodesBeforeMount is the AC-level test for issue
-// #170: a drive-set whose loaded tapes have empty or duplicate barcodes fails the
-// run before any LTFS volume is formatted or mounted, and the error names the
-// offenders. It mocks Load to return the bad barcode set and asserts FormatTape
-// and WriteTree are never invoked — proving the barcode validation precedes any
-// mount. A drive-set of distinct non-empty barcodes is the happy path already
-// covered by the other tape-path tests.
+// TestRunTapePathRejectsBadBarcodesBeforeMount: empty or duplicate barcodes fail
+// the run, naming the offenders, before any format or mount (issue #170).
 func TestRunTapePathRejectsBadBarcodesBeforeMount(t *testing.T) {
 	t.Parallel()
 
-	// badLoad mocks Load to echo the assignments back but rewrites the barcodes
-	// to the caller-supplied bad set (indexed by drive position within the set).
+	// badLoad echoes the assignments with the bad barcodes, by drive position.
 	tests := []struct {
 		name           string
 		barcodes       []tape.Barcode
@@ -843,7 +772,6 @@ func TestRunTapePathRejectsBadBarcodesBeforeMount(t *testing.T) {
 				writeCalls  int
 			)
 
-			// A single drive-set with two drives so both bad barcodes land together.
 			env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
 				func(_ context.Context, input LoadInput) ([]LoadedTape, error) {
 					loaded := make([]LoadedTape, len(input.Tapes))
@@ -862,8 +790,6 @@ func TestRunTapePathRejectsBadBarcodesBeforeMount(t *testing.T) {
 					return loaded, nil
 				})
 
-			// If validation did not precede the mount path these would fire; the
-			// counters must stay zero.
 			env.OnActivity((&WriteActivities{}).FormatTape, mock.Anything, mock.Anything).Return(
 				func(_ context.Context, _ FormatInput) error {
 					mu.Lock()

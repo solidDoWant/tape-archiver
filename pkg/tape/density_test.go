@@ -6,10 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// modeSenseResponse builds a MODE SENSE(10) response carrying one block
-// descriptor with the given density code, shaped like the real drive response:
-// an 8-byte header whose bytes 6-7 hold the block descriptor length, followed by
-// an 8-byte descriptor opening with the density code.
+// modeSenseResponse builds a MODE SENSE(10) response with one block descriptor.
 func modeSenseResponse(density byte) []byte {
 	return []byte{
 		0x00, 0xea, // mode data length
@@ -39,9 +36,7 @@ func TestDensityCode(t *testing.T) {
 		},
 		"LTO-9 density":    {response: modeSenseResponse(0x60), want: 0x60, wantOK: true},
 		"truncated header": {response: []byte{0x00, 0xea, 0x58}, wantOK: false},
-		// No descriptor: an empty drive, or descriptors disabled. Reporting this
-		// as density 0x00 would invent a medium generation for a drive holding
-		// no medium at all.
+		// No descriptor must not be read as density 0x00.
 		"no block descriptor": {
 			response: []byte{0x00, 0x06, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00},
 			wantOK:   false,
@@ -66,9 +61,7 @@ func TestDensityCode(t *testing.T) {
 	}
 }
 
-// TestLTODensityCodes pins the density-to-generation table against the values
-// mhvtl's include/vtlcart.h assigns, so a mistyped code cannot quietly send a
-// recoverer after the wrong drive generation.
+// TestLTODensityCodes pins the table to mhvtl's include/vtlcart.h values.
 func TestLTODensityCodes(t *testing.T) {
 	t.Parallel()
 
@@ -87,8 +80,6 @@ func TestLTODensityCodes(t *testing.T) {
 
 	assert.Equal(t, tests, ltoDensityCodes)
 
-	// A code the table does not know must not resolve to a neighbouring
-	// generation.
 	_, known := ltoDensityCodes[0x59]
 	assert.False(t, known, "an unassigned density code must not map to a generation")
 }

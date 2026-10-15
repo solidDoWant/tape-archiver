@@ -18,25 +18,10 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// TestEjectAutoResumeOnAccess drives the operator-in-the-loop Eject phase through
-// a real Temporal server and real workers against mhvtl, exercising the
-// auto-resume path (issue #85 AC5): because the changer now reads element status
-// via SG_IO, the import/export ACCESS bit is reported, so a paused Eject resumes
-// automatically once the operator clears a slot — with no explicit
-// OperatorResumeSignal.
-//
-// It runs a run whose written tapes outnumber the library's I/O slots so the
-// Eject phase fills the station and pauses, then simulates the operator removing
-// one exported tape (which frees and re-closes a slot). With the ACCESS bit now
-// live on mhvtl, IOStatus.CanAutoResume becomes true and the run resumes on the
-// next poll and exports the remaining tape — the signal is never sent. The
-// signal- and timeout-driven resume paths remain covered by the mock-based unit
-// tests in eject_pause_test.go.
-//
-// It drives only the Eject phase (ejectPauseTestWorkflow) so it needs no real
-// tape writes: the "written" tapes are ordinary tapes parked in storage slots that
-// Eject transfers straight to the I/O station. Skips when mhvtl or dev Temporal is
-// absent. Driven by `make test-integration`.
+// TestEjectAutoResumeOnAccess drives the Eject phase through real Temporal and
+// workers against mhvtl to cover auto-resume (#85 AC5): the SG_IO changer reports
+// the import/export ACCESS bit, so clearing one slot resumes the paused export
+// with no OperatorResumeSignal. Only Eject runs, so no tape writes are needed.
 func TestEjectAutoResumeOnAccess(t *testing.T) {
 	requireTemporalAddress(t)
 	testutil.SkipIfMhvtlUnavailable(t)
@@ -49,8 +34,7 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 	require.GreaterOrEqual(t, len(inv.Drives), 1, "at least one drive required")
 	require.GreaterOrEqualf(t, len(inv.IOSlots), 2, "need at least two I/O slots to test overflow")
 
-	// The changer must now report the import/export ACCESS bit; otherwise
-	// auto-resume can never fire and this test could not pass.
+	// Without the ACCESS bit auto-resume can never fire.
 	require.True(t, inv.IOAccessReported, "SG_IO changer must report the import/export ACCESS bit")
 
 	ioSlots := len(inv.IOSlots)
@@ -58,12 +42,10 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 		require.Falsef(t, io.Full, "I/O slot %d must start empty", io.Address)
 	}
 
-	// Write one more physical tape than the library has I/O slots so the last one
-	// cannot be exported until the operator clears a slot.
+	// One more tape than I/O slots, so the last waits for the operator.
 	tapeCount := ioSlots + 1
 
-	// Use storage slots from a high index range the sibling integration tests
-	// (slots 0–7) do not touch, so the shared mhvtl library does not collide.
+	// High slots, clear of the sibling tests' slots 0-7 in the shared library.
 	const baseIndex = 20
 	require.Greaterf(t, len(inv.Slots), baseIndex+tapeCount, "need storage slots in the %d+ range", baseIndex)
 
@@ -78,17 +60,14 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 		require.NotEmptyf(t, slot.Barcode, "storage slot index %d tape must have a barcode", baseIndex+i)
 
 		written = append(written, WrittenTape{
-			Barcode: slot.Barcode,
-			// The drive is left empty in this test; Eject transfers each tape
-			// straight from its source storage slot to the I/O station.
+			Barcode:    slot.Barcode,
 			DriveIndex: 0,
 			SourceSlot: slot.Address,
 		})
 		barcodes = append(barcodes, slot.Barcode)
 	}
 
-	// Restore the library on exit: move every tape back to its home storage slot so
-	// the sibling tests find the expected state.
+	// Return every tape to its home slot for the sibling tests.
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 120*time.Second)
 		defer cancel()
@@ -111,8 +90,7 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 
 	controlWorker := worker.New(temporalClient, TaskQueue, worker.Options{})
 	controlWorker.RegisterWorkflow(ejectPauseTestWorkflow)
-	// The Eject pause auto-resume poll loop runs in this child workflow on the
-	// control queue (issue #168); register it so the parent can start it.
+	// The auto-resume poll loop child workflow (#168).
 	controlWorker.RegisterWorkflow(ioStationWaitWorkflow)
 	controlWorker.RegisterActivity(&FailureActivities{})
 	require.NoError(t, controlWorker.Start(), "start control worker")
@@ -170,18 +148,9 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 		return full == ioSlots
 	}, 90*time.Second, time.Second, "the Eject phase must fill all %d I/O slots and pause", ioSlots)
 
-	// While genuinely paused with real barcodes in the I/O station, confirm
-	// CurrentPauseQuery (added alongside pkg/runsapi's pause actions, #250)
-	// reports it correctly against real mhvtl hardware — the mock-based unit
-	// tests in eject_pause_test.go already cover the query mechanically, but
-	// never with real tape.Barcode values flowing through barcodeStrings.
-	//
-	// The physical I/O station filling (confirmed above) and the workflow's
-	// query-visible pause state are updated by different actors (the data
-	// worker's transfer activity vs. the control workflow observing its
-	// result), so there is a real gap between "hardware full" and "query
-	// reports paused" — poll the query itself rather than assume it is
-	// already consistent the instant the changer looks full.
+	// Check CurrentPauseQuery (#250) with real barcodes. The station filling and
+	// the query-visible pause are updated by different actors, so poll the query
+	// rather than assume it is consistent the instant the changer looks full.
 	var currentPause CurrentPause
 
 	require.Eventuallyf(t, func() bool {
@@ -213,9 +182,7 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 	assert.ElementsMatch(t, inIOAtPause, currentPause.AffectedTapes,
 		"CurrentPauseQuery's AffectedTapes must match the real barcodes physically in the I/O station")
 
-	// Simulate the operator removing one exported tape, freeing an I/O slot. With
-	// the ACCESS bit now reported by the SG_IO changer, this alone must resume the
-	// run automatically — no OperatorResumeSignal is ever sent.
+	// Simulate the operator removing one exported tape; that alone must resume.
 	cur, err := changer.Inventory(runCtx)
 	require.NoError(t, err, "inventory at pause")
 
@@ -250,8 +217,6 @@ func TestEjectAutoResumeOnAccess(t *testing.T) {
 	// The run resumes on its own (poll interval) and completes — no signal.
 	require.NoError(t, run.Get(runCtx, nil), "workflow must auto-resume and complete once a slot is freed")
 
-	// Every written tape was exported: the ones still in I/O slots plus the one the
-	// operator removed account for all of them.
 	finalInv, err := changer.Inventory(runCtx)
 	require.NoError(t, err, "final inventory")
 

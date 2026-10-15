@@ -10,143 +10,88 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/webhook"
 )
 
-// failureAlertTimeout bounds the failure-alert activity. The alert is a single
-// best-effort webhook POST, so a short timeout is appropriate: a slow or
-// unreachable webhook must not hold the run open.
+// failureAlertTimeout is short so an unreachable webhook cannot hold the run open.
 const failureAlertTimeout = 30 * time.Second
 
-// operatorPauseAlertTimeout bounds the operator-pause alert activity. Like the
-// failure alert it is a single best-effort webhook POST.
 const operatorPauseAlertTimeout = 30 * time.Second
 
-// FailureInput is the payload for the failure-alert activity. It carries exactly
-// what SPEC §11 requires in the alert: the run id, the failing phase, and the
-// error summary. Partial context (e.g. tapes already written and needing manual
-// handling) is added by the Write/Eject sub-issues once that state exists.
+// FailureInput is the failure-alert payload (SPEC §11).
 type FailureInput struct {
-	// RunID is the workflow (run) id, so an operator can correlate the alert
-	// with the run in Temporal and in logs.
 	RunID string
-	// Phase is the name of the phase that was in flight when the run failed.
 	Phase string
-	// ErrorSummary is the run failure rendered as text; the error itself does
-	// not cross the activity boundary, so it is carried as its message.
+	// ErrorSummary carries the error as text across the activity boundary.
 	ErrorSummary string
 }
 
-// FailureActivities hosts the operational failure-alert activity (SPEC §11). It
-// is constructed on the control worker with the DISCORD_FAILURE_WEBHOOK_URL from
-// the environment; an empty URL yields a disabled webhook client, so alerting is
-// a silent no-op when the variable is unset.
+// FailureActivities hosts the control-side operational alert activities (SPEC
+// §11). An empty WebhookURL makes every alert a silent no-op.
 type FailureActivities struct {
-	// WebhookURL is the Discord failure webhook (DISCORD_FAILURE_WEBHOOK_URL).
-	// Empty disables alerting.
+	// WebhookURL is DISCORD_FAILURE_WEBHOOK_URL.
 	WebhookURL string
 }
 
-// NotifyFailure posts the operational failure alert. Per SPEC §11 it must never
-// mask the run's original error: pkg/webhook.SendFailure logs a delivery failure
-// rather than returning it, so this activity always returns nil. When the
-// webhook URL is empty the client is a no-op and nothing is sent.
+// NotifyFailure posts the failure alert. It always returns nil so delivery can
+// never mask the run's original error.
 func (a *FailureActivities) NotifyFailure(ctx context.Context, input FailureInput) error {
 	webhook.New(a.WebhookURL).SendFailure(ctx, input.RunID, input.Phase, errors.New(input.ErrorSummary))
 
 	return nil
 }
 
-// OperatorPauseInput is the payload for the operator-pause alert activity. It
-// carries what an operator needs to act on the Eject-phase pause (SPEC §4.3
-// phase 8, §11): the run id, the tapes now sitting in the import/export station
-// ready for removal, and how many written tapes still await a free slot.
+// OperatorPauseInput is the Eject-pause alert payload (SPEC §4.3 phase 8).
 type OperatorPauseInput struct {
-	// RunID is the workflow (run) id, so an operator can correlate the alert with
-	// the run.
 	RunID string
-	// ReadyForRemoval lists the barcodes of the tapes currently in I/O-station
-	// slots — the tapes the operator should remove to free slots.
+	// ReadyForRemoval are the tapes now in the I/O station.
 	ReadyForRemoval []string
-	// Awaiting is the count of written tapes still to be exported once slots free.
+	// Awaiting counts written tapes still to export.
 	Awaiting int
 }
 
-// NotifyOperatorPause posts the operator-in-the-loop pause alert when the Eject
-// phase fills the import/export station (SPEC §4.3 phase 8, §11). It uses the
-// same operational webhook as NotifyFailure and is best-effort: a delivery
-// failure is logged by pkg/webhook, not returned, so a webhook outage never
-// aborts a run that is only waiting for the operator. When the webhook URL is
-// empty the client is a no-op and nothing is sent.
+// NotifyOperatorPause posts the I/O-station-full pause alert. It is best-effort
+// so a webhook outage never aborts a run that is only waiting.
 func (a *FailureActivities) NotifyOperatorPause(ctx context.Context, input OperatorPauseInput) error {
 	webhook.New(a.WebhookURL).SendOperatorPause(ctx, input.RunID, input.ReadyForRemoval, input.Awaiting)
 
 	return nil
 }
 
-// WritePathPauseInput is the payload for the write-path pause alert activity. It
-// carries what an operator needs to act on a Load/Write-failure pause (SPEC §4.3,
-// §11): the run id, the failing phase, the tapes affected by the failure, the
-// storage slots to restock with fresh blanks, and the error summary.
+// WritePathPauseInput is the Load/Write-failure pause alert payload.
 type WritePathPauseInput struct {
-	// RunID is the workflow (run) id, so an operator can correlate the alert with
-	// the run.
 	RunID string
-	// Phase is the failing phase — "Load" or "Write".
+	// Phase is "Load" or "Write".
 	Phase string
-	// AffectedTapes lists the barcodes of the tapes the operator should remove and
-	// replace with fresh blanks. It is empty for a Load failure, which has no
-	// loaded tapes to name.
+	// AffectedTapes are tapes to replace with blanks; empty for a Load failure.
 	AffectedTapes []string
-	// ReloadSlots lists the storage slots to restock with fresh blank tapes before
-	// resuming. On resume the run loads from these same slots (SPEC §4.3).
-	ReloadSlots []int
-	// ErrorSummary is the failure rendered as text.
+	// ReloadSlots are the slots to restock; resume loads from these same slots.
+	ReloadSlots  []int
 	ErrorSummary string
 }
 
-// NotifyWritePathPause posts the operator-in-the-loop pause alert when a Load or
-// Write fails for one drive-set and the tape path pauses for the operator (SPEC
-// §4.3, §11). It uses the same operational webhook as NotifyFailure and is
-// best-effort: a delivery failure is logged by pkg/webhook, not returned, so a
-// webhook outage never aborts a run that is only waiting. When the webhook URL is
-// empty the client is a no-op and nothing is sent.
+// NotifyWritePathPause posts the Load/Write-failure pause alert, best-effort.
 func (a *FailureActivities) NotifyWritePathPause(ctx context.Context, input WritePathPauseInput) error {
 	webhook.New(a.WebhookURL).SendWritePathPause(ctx, input.RunID, input.Phase, input.AffectedTapes, input.ReloadSlots, input.ErrorSummary)
 
 	return nil
 }
 
-// BurnPauseInput is the payload for the optical-burn pause alert activity. It
-// carries what an operator needs to act on a Burn-phase pause (SPEC §10, §11):
-// the run id, the burner drive(s) involved, and the reason (a burn/verify
-// failure, or a between-set disc swap).
+// BurnPauseInput is the Burn-pause alert payload (SPEC §10).
 type BurnPauseInput struct {
-	// RunID is the workflow (run) id, so an operator can correlate the alert with
-	// the run.
 	RunID string
-	// Devices lists the optical burner device nodes the operator should load a
-	// fresh blank disc into before resuming (e.g. /dev/sr0).
+	// Devices are burners needing a fresh blank disc.
 	Devices []string
-	// ErrorSummary is the pause reason rendered as text — the burn/verify failure,
-	// or the between-set disc-swap prompt.
+	// ErrorSummary is the burn/verify failure or the disc-swap prompt.
 	ErrorSummary string
 }
 
-// NotifyBurnPause posts the operator-in-the-loop pause alert when the optical
-// Burn phase pauses — for a burn/verify failure or a between-set disc swap (SPEC
-// §10, §11). It uses the same operational webhook as NotifyFailure and is
-// best-effort: a delivery failure is logged by pkg/webhook, not returned, so a
-// webhook outage never aborts a run that is only waiting. When the webhook URL is
-// empty the client is a no-op and nothing is sent.
+// NotifyBurnPause posts the Burn pause alert, best-effort.
 func (a *FailureActivities) NotifyBurnPause(ctx context.Context, input BurnPauseInput) error {
 	webhook.New(a.WebhookURL).SendBurnPause(ctx, input.RunID, input.Devices, input.ErrorSummary)
 
 	return nil
 }
 
-// notifyFailure runs the failure-alert activity from the workflow when a run
-// fails (SPEC §11). It executes on a disconnected context so the alert still
-// fires when the workflow itself is cancelled, and it never propagates an error:
-// an activity-dispatch failure is logged, leaving the run's original error to
-// surface unmasked in the caller.
+// notifyFailure fires the failure alert on a disconnected context, so it also
+// fires on cancellation, and never propagates an error that could mask runErr.
 func notifyFailure(ctx workflow.Context, failingPhase string, runErr error) {
 	input := FailureInput{
 		RunID:        workflow.GetInfo(ctx).WorkflowExecution.ID,
@@ -154,14 +99,10 @@ func notifyFailure(ctx workflow.Context, failingPhase string, runErr error) {
 		ErrorSummary: runErr.Error(),
 	}
 
-	// A disconnected context is not cancelled when the workflow is, so the alert
-	// is delivered even on cancellation (SPEC §11).
 	disconnected, cancel := workflow.NewDisconnectedContext(ctx)
 	defer cancel()
 
-	// The operational failure alert is delivered by the control worker (it uses
-	// the env-configured failure webhook, distinct from the data-side success
-	// delivery), so it runs on the control task queue.
+	// The control worker owns the env-configured failure webhook.
 	actx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
 		TaskQueue:           TaskQueue,
 		StartToCloseTimeout: failureAlertTimeout,

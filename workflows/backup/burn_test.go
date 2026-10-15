@@ -13,10 +13,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/optical"
 )
 
-// TestDecideBurn exercises the overwrite policy for every disc state × opt-in
-// combination. This is the "never silently overwrite" decision ACs 3–5 turn on,
-// unit-tested without any optical hardware (the physical round-trips live in
-// burn_integration_test.go).
+// TestDecideBurn exercises the overwrite policy for every disc state and opt-in
+// combination.
 func TestDecideBurn(t *testing.T) {
 	t.Parallel()
 
@@ -40,8 +38,7 @@ func TestDecideBurn(t *testing.T) {
 			want:          burnWrite,
 		},
 		{
-			// A freshly-swapped blank in a drive that already burned a copy still
-			// writes: the issue #154 guard only ever refuses a NON-blank disc.
+			// The issue #154 guard only ever refuses a non-blank disc.
 			name:                 "blank disc in a reused drive writes directly (issue #154)",
 			state:                optical.StateBlank,
 			allowNonBlank:        true,
@@ -60,9 +57,6 @@ func TestDecideBurn(t *testing.T) {
 			want:          burnReclaimWrite,
 		},
 		{
-			// The core issue #154 fix: even with the opt-in, a non-blank rewritable
-			// disc in a drive that already verified a copy this run is that copy still
-			// loaded — never reclaim it, pause for a fresh blank instead.
 			name:                 "non-blank rewritable with opt-in but drive already verified a copy pauses (issue #154)",
 			state:                optical.StateNonBlankRewritable,
 			allowNonBlank:        true,
@@ -117,9 +111,8 @@ func TestDecideBurn(t *testing.T) {
 	}
 }
 
-// TestDiscNotWritableError asserts the operator-pause error BurnDisc builds is
-// distinguishable via IsDiscNotWritable, names the drive, and is non-retryable,
-// while unrelated errors are not misclassified.
+// TestDiscNotWritableError: the pause error is recognizable, names the drive, and
+// is non-retryable.
 func TestDiscNotWritableError(t *testing.T) {
 	t.Parallel()
 
@@ -151,9 +144,7 @@ func TestDiscNotWritableError(t *testing.T) {
 	t.Run("this run's own verified copy still loaded (issue #154)", func(t *testing.T) {
 		t.Parallel()
 
-		// A non-blank rewritable disc in a drive that already verified a copy, with
-		// the opt-in set: the reason must name it as this run's own copy, not a
-		// generic AllowNonBlankDiscs refusal, so the operator swaps rather than
+		// The reason must name this run's own copy so the operator swaps rather than
 		// enabling the opt-in.
 		err := discNotWritableError("/dev/sr0", optical.StateNonBlankRewritable, true, true)
 

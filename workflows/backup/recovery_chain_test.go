@@ -19,24 +19,17 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/par2"
 )
 
-// These tests exercise the recovery-time failure scenarios documented in
-// docs/recovery-procedure.md ("Failure scenarios and handling") against real
-// staged artifacts — no tape hardware. Each builds an archive slice through the
-// same pipeline the Prepare phase uses (tar -> zstd -> age -> split -> PAR2),
-// then recovers with the exact binaries the recovery disc ships (par2, age,
-// zstd, tar), asserting the documented handling holds. Principle 4: anything
-// documented must be tested.
-//
-// They skip when the recovery binaries are not on PATH.
+// These tests exercise the failure scenarios in docs/recovery-procedure.md
+// against real staged artifacts, recovering with the binaries the recovery disc
+// ships. They skip when those binaries are not on PATH.
 
 const (
 	recoveryRedundancyPercent = 30
 	recoverySliceSize         = 64 * 1024
 )
 
-// TestRecoveryChain_PAR2RepairsWithinCapacity is failure scenario (a): media
-// damage within the PAR2 redundancy is repaired to the exact original bytes,
-// and the archive then decrypts and unpacks cleanly.
+// TestRecoveryChain_PAR2RepairsWithinCapacity is scenario (a): damage within PAR2
+// redundancy is repaired to the exact original bytes.
 func TestRecoveryChain_PAR2RepairsWithinCapacity(t *testing.T) {
 	requireRecoveryTools(t)
 
@@ -51,9 +44,8 @@ func TestRecoveryChain_PAR2RepairsWithinCapacity(t *testing.T) {
 	assert.Equal(t, want, got, "PAR2 repair must reconstruct the exact bytes, so the archive recovers fully")
 }
 
-// TestRecoveryChain_PAR2FailsBeyondCapacity is failure scenario (b): when damage
-// exceeds PAR2's correction capacity, `par2 repair` cannot repair — the signal
-// that the operator must fall back to the redundant copy on another tape.
+// TestRecoveryChain_PAR2FailsBeyondCapacity is scenario (b): damage beyond PAR2
+// capacity cannot be repaired, signalling fallback to another copy.
 func TestRecoveryChain_PAR2FailsBeyondCapacity(t *testing.T) {
 	requireRecoveryTools(t)
 
@@ -79,9 +71,8 @@ func TestRecoveryChain_PAR2FailsBeyondCapacity(t *testing.T) {
 	require.Errorf(t, err, "par2 repair must fail when damage exceeds capacity; output:\n%s", out)
 }
 
-// TestRecoveryChain_AgeAbortsOnTruncation is failure scenario (c): a truncated
-// age stream fails to decrypt rather than yielding silently truncated data — age
-// authenticates each chunk, so recovery must fall back to the other copy.
+// TestRecoveryChain_AgeAbortsOnTruncation is scenario (c): age authenticates each
+// chunk, so a truncated stream fails rather than yielding truncated data.
 func TestRecoveryChain_AgeAbortsOnTruncation(t *testing.T) {
 	requireRecoveryTools(t)
 
@@ -102,9 +93,8 @@ func TestRecoveryChain_AgeAbortsOnTruncation(t *testing.T) {
 	require.Errorf(t, err, "age must reject a truncated stream; output:\n%s", out)
 }
 
-// TestRecoveryChain_ChecksumDetectsCorruption is failure scenario (d): a byte
-// flip is caught by the SHA-256 manifest, so the operator knows which file to
-// repair or replace rather than trusting corrupt data.
+// TestRecoveryChain_ChecksumDetectsCorruption is scenario (d): the SHA-256
+// manifest catches a byte flip.
 func TestRecoveryChain_ChecksumDetectsCorruption(t *testing.T) {
 	requireRecoveryTools(t)
 
@@ -122,13 +112,12 @@ func TestRecoveryChain_ChecksumDetectsCorruption(t *testing.T) {
 	require.Error(t, checksum.Verify(slice, digest), "a byte flip must fail SHA-256 verification")
 }
 
-// buildArchive stages one archive through the Prepare pipeline (tar -> zstd ->
-// age -> split), generates a PAR2 recovery set over the slices, and returns the
-// slice paths and the original payload bytes for comparison.
+// buildArchive stages one archive through the Prepare pipeline plus PAR2 and
+// returns the slice paths and original payload.
 func buildArchive(t *testing.T, dir, recipient string) (slices []string, payload []byte) {
 	t.Helper()
 
-	// An incompressible payload so zstd does not collapse it to a single slice.
+	// Incompressible, so zstd still yields several slices.
 	payload = pseudoRandom(512 * 1024)
 
 	src := t.TempDir()
@@ -152,16 +141,13 @@ func buildArchive(t *testing.T, dir, recipient string) (slices []string, payload
 	return slices, payload
 }
 
-// recoverArchive drives the documented recovery: optional PAR2 repair, then cat
-// the slices, age-decrypt, zstd-decompress, and untar, returning the recovered
-// payload.bin bytes.
+// recoverArchive runs the documented recovery and returns payload.bin's bytes.
 func recoverArchive(t *testing.T, dir, identityPath string, repair bool) []byte {
 	t.Helper()
 
 	if repair {
-		// -p matches the documented step 4: purge PAR2's artifacts (volume files
-		// and any archive.NNN.1 pre-repair backups) after a successful repair so
-		// the documented archive.[0-9]* reassembly glob matches only clean slices.
+		// -p (documented step 4) purges PAR2 artifacts so the archive.[0-9]*
+		// reassembly glob matches only clean slices.
 		runRecoveryCmd(t, dir, "par2", "repair", "-p", "archive.par2")
 	}
 
@@ -186,8 +172,6 @@ func recoverArchive(t *testing.T, dir, identityPath string, repair bool) []byte 
 	return got
 }
 
-// requireRecoveryTools skips the test unless every binary the recovery procedure
-// (and this test) relies on is on PATH.
 func requireRecoveryTools(t *testing.T) {
 	t.Helper()
 
@@ -198,8 +182,8 @@ func requireRecoveryTools(t *testing.T) {
 	}
 }
 
-// generateAgeKeypair generates a post-quantum age keypair with age-keygen,
-// writes the identity to a file, and returns its path and the recipient.
+// generateAgeKeypair writes a post-quantum age identity and returns its path and
+// recipient.
 func generateAgeKeypair(t *testing.T) (identityPath, recipient string) {
 	t.Helper()
 
@@ -225,8 +209,6 @@ func generateAgeKeypair(t *testing.T) (identityPath, recipient string) {
 	return identityPath, recipient
 }
 
-// runRecoveryCmd runs a recovery command in dir, failing the test with its
-// combined output on error.
 func runRecoveryCmd(t *testing.T, dir, name string, args ...string) {
 	t.Helper()
 
@@ -290,8 +272,7 @@ func fileSize(t *testing.T, name string) int {
 	return int(info.Size())
 }
 
-// pseudoRandom returns n incompressible bytes from a simple xorshift so slicing
-// yields several slices even after zstd.
+// pseudoRandom returns n incompressible xorshift bytes.
 func pseudoRandom(n int) []byte {
 	buf := make([]byte, n)
 	state := uint64(0x9e3779b97f4a7c15)

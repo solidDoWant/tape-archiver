@@ -22,25 +22,16 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// This file is the final layer of parent #98: it proves the optical Burn phase
-// (SPEC §10) is wired end-to-end into the workflow and data worker, the way the
-// tape path is proven against mhvtl. There is no faithful virtual optical writer,
-// so the burners are loop-device-backed pseudo-discs (setupOpticalDiscs) driven
-// through xorriso's stdio pseudo-drive — the same mechanism pkg/optical and the
-// burn integration tests use — plus an opt-in real-hardware burn gated on
-// OPTICAL_BURN_DEV.
+// Optical Burn phase e2e (#98, SPEC §10), using loop-device pseudo-discs plus an
+// opt-in real-hardware burn gated on OPTICAL_BURN_DEV.
 
-// TestBackupEndToEnd_OpticalBurn drives a full backup with optical burning enabled
-// against loop-device burners, proving the Burn phase is wired into the workflow and
-// data worker (issue #104 AC1). With two burners and two copies the discs burn in a
-// single set — no operator disc-swap pause — and each is read back and verified
-// against the recovery-disc manifest by the in-workflow VerifyDisc activity
-// (MaximumAttempts=1), so a completed run means every copy burned and verified.
+// TestBackupEndToEnd_OpticalBurn burns two copies on two loop burners (issue #104
+// AC1). VerifyDisc runs with MaximumAttempts=1, so completion means every copy
+// verified.
 func TestBackupEndToEnd_OpticalBurn(t *testing.T) {
 	h := requireHarness(t)
 	requireOpticalDiscs(t, h)
 
-	// Two burners, two copies: exactly one burn-set, so no manual disc-swap pause.
 	drives := h.opticalDevices[:2]
 	for _, drive := range drives {
 		blankOpticalDisc(t, drive)
@@ -77,26 +68,20 @@ func TestBackupEndToEnd_OpticalBurn(t *testing.T) {
 	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"workflow must complete successfully")
 
-	// Every phase ran to completion, in order — including Burn between Report and
-	// Deliver.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all phases must complete in order, including Burn")
 
-	// The run still delivers exactly the report (report-only delivery, SPEC §5);
-	// burning re-renders the report but adds no upload — the ISO's durable home is
-	// the burned disc, not a Discord upload.
+	// Burning adds no upload (report-only delivery, SPEC §5).
 	uploads := h.rec.uploadsFor(runID)
 	require.Len(t, uploads, 1, "the report is delivered (report-only delivery, SPEC §5)")
 
-	// The re-rendered report records every burned disc, naming its burner and that
-	// it was burned and verified (SPEC §10).
+	// SPEC §10.
 	report := extractPDFText(t, findUpload(t, uploads, "report.pdf"))
 	assert.Contains(t, report, "burned and verified", "report must record the burned discs")
 
 	for _, drive := range drives {
 		assert.Containsf(t, report, drive, "report must name burner %s", drive)
 
-		// Independent read-back: each disc really holds a mountable recovery ISO
-		// (the workflow's VerifyDisc already checked it against the manifest).
+		// Independent read-back of a mountable recovery ISO.
 		assert.Equalf(t, optical.StateNonBlankRewritable, discState(t, drive),
 			"disc on %s must be non-blank after burning", drive)
 
@@ -105,19 +90,14 @@ func TestBackupEndToEnd_OpticalBurn(t *testing.T) {
 	}
 }
 
-// TestBackupEndToEnd_OpticalBurnReclaimsNonBlank proves that with allowNonBlankDiscs
-// set the Burn phase reclaims and re-uses a non-blank rewritable disc instead of
-// requiring a fresh blank (issue #104 AC2) — the loop-device analogue of the
-// real-hardware disc-reuse ergonomics. A loop disc is pre-populated with a stale
-// image so it is genuinely non-blank; without the opt-in the run would pause and
-// refuse it, so a completed run that records the overwrite proves the reclaim.
+// TestBackupEndToEnd_OpticalBurnReclaimsNonBlank proves allowNonBlankDiscs lets
+// Burn reclaim a non-blank rewritable disc (issue #104 AC2).
 func TestBackupEndToEnd_OpticalBurnReclaimsNonBlank(t *testing.T) {
 	h := requireHarness(t)
 	requireOpticalDiscs(t, h)
 
 	drive := h.opticalDevices[0]
 
-	// Pre-populate the disc with an unrelated image so it is non-blank going in.
 	blankOpticalDisc(t, drive)
 	require.NoError(t, optical.NewDisc(drive).WriteImage(t.Context(), makeStaleISO(t)),
 		"seed the disc with a stale non-blank image")
@@ -156,19 +136,14 @@ func TestBackupEndToEnd_OpticalBurnReclaimsNonBlank(t *testing.T) {
 
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all phases must complete in order, including Burn")
 
-	// The re-rendered report records the deliberate overwrite of the non-blank disc
-	// (SPEC §10), and the completed run means the reclaimed disc verified against the
-	// recovery manifest — it now holds the recovery image, not the stale one.
+	// The report records the deliberate overwrite (SPEC §10).
 	report := extractPDFText(t, findUpload(t, h.rec.uploadsFor(runID), "report.pdf"))
 	assert.Contains(t, report, drive, "report must name the reclaimed burner")
 	assert.Contains(t, report, "Overwrote a non-blank disc", "report must record the deliberate reclaim")
 }
 
-// TestBackupEndToEnd_OpticalBurnRealHardware burns to a real optical drive named by
-// OPTICAL_BURN_DEV — the only way to exercise a physical MMC write (issue #104 AC3).
-// It is skipped when the env var is absent, so make test-e2e stays green in CI
-// without optical hardware; it is gated exactly like the real-tape and benchmark
-// tests. Load a rewritable disc and it re-uses it across runs (allowNonBlankDiscs).
+// TestBackupEndToEnd_OpticalBurnRealHardware burns to OPTICAL_BURN_DEV (issue #104
+// AC3); skipped when unset.
 func TestBackupEndToEnd_OpticalBurnRealHardware(t *testing.T) {
 	h := requireHarness(t)
 	testutil.SkipIfXorrisoUnavailable(t)
@@ -190,7 +165,6 @@ func TestBackupEndToEnd_OpticalBurnRealHardware(t *testing.T) {
 		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
 		Delivery: config.Delivery{
 			WebhookURL: h.deliveryURL(runID),
-			// One drive, one copy: a single burn-set, no operator disc-swap pause.
 			// allowNonBlankDiscs re-uses a loaded rewritable disc across runs.
 			OpticalBurn: &config.OpticalBurn{Drives: []string{drive}, Copies: 1, AllowNonBlankDiscs: true},
 		},
@@ -214,9 +188,7 @@ func TestBackupEndToEnd_OpticalBurnRealHardware(t *testing.T) {
 	assert.Contains(t, report, "burned and verified", "report must record the burned disc")
 }
 
-// requireOpticalDiscs skips the calling test unless the harness provisioned
-// loop-device burners (losetup available) and the host has xorriso, which the test
-// itself uses to read disc state and pre-burn stale images.
+// requireOpticalDiscs skips unless loop burners and xorriso are available.
 func requireOpticalDiscs(t *testing.T, h *e2eHarness) {
 	t.Helper()
 
@@ -227,16 +199,10 @@ func requireOpticalDiscs(t *testing.T, h *e2eHarness) {
 	}
 }
 
-// opticalBlankBytes is how much of a loop-device pseudo-disc blankOpticalDisc zeros
-// to reset it between tests. The burned recovery ISO (tens of MB) is written from
-// the start of the device, so zeroing a generous prefix wipes it entirely and the
-// device reads back blank; the untouched tail was already zero from setup.
+// opticalBlankBytes is a prefix comfortably larger than the burned ISO.
 const opticalBlankBytes = 128 << 20
 
-// blankOpticalDisc resets a loop-device pseudo-disc to blank by zeroing its leading
-// region, so a test starts from a known-blank disc regardless of what an earlier
-// test burned there. The e2e suite runs as root, so it can write the device node
-// directly.
+// blankOpticalDisc zeros the disc's leading region so it reads back blank.
 func blankOpticalDisc(t *testing.T, device string) {
 	t.Helper()
 
@@ -262,9 +228,7 @@ func blankOpticalDisc(t *testing.T, device string) {
 	require.NoErrorf(t, file.Sync(), "flush blanked %s", device)
 }
 
-// discState returns the medium state of the disc loaded in device, failing the test
-// on an operational error. It reads the same xorriso-backed state the Burn phase
-// uses.
+// discState returns the disc's medium state as the Burn phase reads it.
 func discState(t *testing.T, device string) optical.DiscState {
 	t.Helper()
 
@@ -274,10 +238,7 @@ func discState(t *testing.T, device string) optical.DiscState {
 	return state
 }
 
-// readOpticalDisc mounts a burned disc read-only and returns its regular files by
-// disc-relative path, an independent read-back of what the Burn phase wrote. It
-// mounts the block device directly (an ISO 9660 filesystem needs root, which the
-// suite has) and unmounts before returning.
+// readOpticalDisc mounts the disc read-only and returns its files by relative path.
 func readOpticalDisc(t *testing.T, device string) map[string][]byte {
 	t.Helper()
 
@@ -323,9 +284,7 @@ func readOpticalDisc(t *testing.T, device string) map[string][]byte {
 	return files
 }
 
-// makeStaleISO builds a small ISO 9660 image with a uniquely named marker file,
-// standing in for a used disc's prior contents so the reclaim test starts from a
-// genuinely non-blank disc. It returns the image path.
+// makeStaleISO builds a small marker ISO standing in for a used disc's contents.
 func makeStaleISO(t *testing.T) string {
 	t.Helper()
 

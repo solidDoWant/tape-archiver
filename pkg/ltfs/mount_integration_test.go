@@ -18,10 +18,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// loadFormattedVolume loads slot 0 into drive 0, formats the tape, and returns a
-// Volume bound to the drive. It registers an unload cleanup that survives the
-// test's own cancellation. It mirrors the setup in
-// TestFormatMountWriteUnmountReadIndex and is shared by the mount-lifecycle tests.
+// loadFormattedVolume loads slot 0 into drive 0, formats it, and registers an
+// unload cleanup that survives test cancellation.
 func loadFormattedVolume(t *testing.T) *ltfs.Volume {
 	t.Helper()
 
@@ -59,20 +57,14 @@ func loadFormattedVolume(t *testing.T) *ltfs.Volume {
 	return volume
 }
 
-// TestMountRejectsPreexistingMountNoDrive proves AC2's observable behavior
-// through the public Volume.Mount API without a tape drive: it bind-mounts a
-// directory onto itself so the path is a genuine mount point, then calls
-// Volume.Mount there. The pre-start guard must reject it with a descriptive
-// error before touching the (irrelevant) device — so this covers the AC even
-// when the mhvtl drive is wedged. It skips cleanly where privileged mounts are
-// unavailable.
+// TestMountRejectsPreexistingMountNoDrive bind-mounts a directory onto itself so
+// the pre-start guard can be tested without a drive.
 func TestMountRejectsPreexistingMountNoDrive(t *testing.T) {
 	testutil.SkipIfLTFSUnavailable(t)
 
 	mountpoint := filepath.Join(t.TempDir(), "mnt")
 	require.NoError(t, os.MkdirAll(mountpoint, 0o755))
 
-	// Bind-mount the directory onto itself: a real mount boundary with no tape.
 	if out, err := exec.CommandContext(t.Context(), "mount", "--bind", mountpoint, mountpoint).CombinedOutput(); err != nil {
 		t.Skipf("cannot create a bind mount (needs privilege): %v: %s", err, out)
 	}
@@ -81,8 +73,7 @@ func TestMountRejectsPreexistingMountNoDrive(t *testing.T) {
 		_ = exec.CommandContext(context.WithoutCancel(t.Context()), "umount", mountpoint).Run()
 	})
 
-	// The device is never touched because the guard fires first; a bogus path is
-	// therefore fine and keeps the test independent of any tape hardware.
+	// The guard fires before the device is touched.
 	volume := ltfs.NewVolume("/dev/null")
 
 	mount, err := volume.Mount(t.Context(), mountpoint, filepath.Join(t.TempDir(), "work"))
@@ -93,10 +84,7 @@ func TestMountRejectsPreexistingMountNoDrive(t *testing.T) {
 	assert.Contains(t, err.Error(), mountpoint, "error must name the mountpoint")
 }
 
-// TestUnmountIdempotent covers AC1 against mhvtl: a second Unmount after the ltfs
-// process has already exited cleanly must succeed rather than fail on a
-// re-issued fusermount -u. On the unfixed code the second call re-runs
-// fusermount -u against the already-detached mountpoint and exits non-zero.
+// TestUnmountIdempotent: a second Unmount after ltfs exited cleanly must succeed.
 func TestUnmountIdempotent(t *testing.T) {
 	volume := loadFormattedVolume(t)
 
@@ -105,18 +93,13 @@ func TestUnmountIdempotent(t *testing.T) {
 
 	writeFiles(t, mount.Mountpoint(), map[string]string{"manifest.txt": "idempotent-unmount\n"})
 
-	// First Unmount: detaches and waits for the index write to complete.
 	require.NoError(t, mount.Unmount(t.Context()), "first unmount")
 
-	// Second Unmount, after the ltfs process has exited cleanly: must be a no-op
-	// success, not a spurious fusermount failure. This is the AC1 scenario.
 	require.NoError(t, mount.Unmount(t.Context()), "retry unmount must succeed idempotently")
 }
 
-// TestMountRejectsLivePriorMount covers AC2 Case A against mhvtl: when a live
-// mount from a prior run already occupies the barcode's mountpoint, a new Mount
-// must NOT report success (the unfixed code returns immediately from the foreign
-// st_dev), and must fail with an error identifying the pre-existing mount.
+// TestMountRejectsLivePriorMount: a live prior mount at the mountpoint must be
+// refused, not mistaken for our own.
 func TestMountRejectsLivePriorMount(t *testing.T) {
 	volume := loadFormattedVolume(t)
 
@@ -129,8 +112,6 @@ func TestMountRejectsLivePriorMount(t *testing.T) {
 		_ = live.Unmount(context.WithoutCancel(t.Context()))
 	})
 
-	// A second Mount at the same (still-mounted) mountpoint must be refused before
-	// any ltfs is spawned, with an error naming the pre-existing mount.
 	second, err := volume.Mount(t.Context(), mountpoint, filepath.Join(t.TempDir(), "work2"))
 	require.Error(t, err, "mount over a live prior mount must fail, not report success")
 	assert.Nil(t, second, "no Mount handle for a rejected mount")
@@ -139,11 +120,8 @@ func TestMountRejectsLivePriorMount(t *testing.T) {
 	assert.Contains(t, err.Error(), mountpoint, "error must name the mountpoint")
 }
 
-// TestMountRejectsOrphanedMount covers AC2 Case B against mhvtl: a SIGKILL-
-// orphaned FUSE mount (stat returns ENOTCONN, but it is still listed in
-// /proc/self/mountinfo) at the barcode's mountpoint must cause a new Mount to
-// fail with a descriptive error, not the opaque ENOTCONN stat failure the
-// unfixed code surfaces.
+// TestMountRejectsOrphanedMount: a SIGKILL-orphaned FUSE mount (ENOTCONN) must
+// yield a descriptive error, not an opaque stat failure.
 func TestMountRejectsOrphanedMount(t *testing.T) {
 	volume := loadFormattedVolume(t)
 
@@ -152,11 +130,9 @@ func TestMountRejectsOrphanedMount(t *testing.T) {
 	orphan, err := volume.Mount(t.Context(), mountpoint, filepath.Join(t.TempDir(), "work"))
 	require.NoError(t, err, "initial mount")
 
-	// Orphan the FUSE mount by killing the ltfs daemon without unmounting.
 	require.NoError(t, orphan.Kill(), "kill ltfs to orphan the mount")
 
 	t.Cleanup(func() {
-		// Release the orphaned FUSE mount so the drive can be unloaded.
 		_ = exec.CommandContext(context.WithoutCancel(t.Context()), "fusermount", "-u", mountpoint).Run()
 	})
 

@@ -24,24 +24,15 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// TestBackupK8sVolumeSnapshotSource backs up a Kubernetes VolumeSnapshot source
-// (not a raw ZFS path), exercising the control worker's snapshot-discovery path
-// end to end: it reads a bound VolumeSnapshot + VolumeSnapshotContent from the
-// cluster, parses the democratic-csi snapshotHandle, maps it through
-// K8sDatasetParent to a ZFS snapshot, and verifies + backs it up to tape.
-//
-// The fixture stands in for democratic-csi without a CSI driver: a real ZFS
-// snapshot carrying the `democratic-csi:managed_resource=true` property the
-// data-side Verify requires, plus pre-created **bound** VolumeSnapshot /
-// VolumeSnapshotContent objects whose snapshotHandle resolves to it. A completed
-// run proves resolution, the chart's shipped VolumeSnapshot RBAC, the
-// handle→ZFS mapping, and the data-side verify all work.
+// TestBackupK8sVolumeSnapshotSource backs up a VolumeSnapshot source end to end:
+// discovery under the chart's RBAC, democratic-csi handle mapping via
+// K8sDatasetParent, and data-side verify. The fixture fakes democratic-csi with
+// a real ZFS snapshot carrying `democratic-csi:managed_resource=true` and
+// pre-bound snapshot objects.
 func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 	h := requireHarness(t)
 
-	// democratic-csi names the volume "pvc-<uuid>" and the snapshot
-	// "snapshot-<uuid>"; the handle is "<volume>@<snapshot>" relative to
-	// datasetParent, so the absolute snapshot is <parent>/pvc-<uuid>@snapshot-<uuid>.
+	// democratic-csi's handle is "pvc-<uuid>@snapshot-<uuid>" relative to datasetParent.
 	volume := "pvc-" + newUUID(t)
 	snapshotName := "snapshot-" + newUUID(t)
 	dataset := datasetParent + "/" + volume
@@ -84,14 +75,11 @@ func TestBackupK8sVolumeSnapshotSource(t *testing.T) {
 	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
 		"k8s VolumeSnapshot run must complete successfully")
 
-	// A completed run means the k8s source resolved (VolumeSnapshot + Content read
-	// under the chart's shipped RBAC, handle mapped) and the snapshot verified + backed up.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete for a k8s source")
 	assert.Len(t, h.rec.uploadsFor(runID), 1, "the report is delivered (report-only delivery, SPEC §5)")
 }
 
-// snapshotClient builds an external-snapshotter clientset against the kind
-// cluster, used to create the fixture VolumeSnapshot objects.
+// snapshotClient builds an external-snapshotter clientset for the kind cluster.
 func (h *e2eHarness) snapshotClient(t *testing.T) versioned.Interface {
 	t.Helper()
 
@@ -104,8 +92,7 @@ func (h *e2eHarness) snapshotClient(t *testing.T) versioned.Interface {
 	return c
 }
 
-// newUUID returns a fresh RFC-4122 UUID (8-4-4-4-12 hex), matching the
-// democratic-csi snapshot-name pattern the handle parser requires.
+// newUUID returns an RFC-4122 UUID, as the democratic-csi handle parser requires.
 func newUUID(t *testing.T) string {
 	t.Helper()
 
@@ -115,10 +102,8 @@ func newUUID(t *testing.T) string {
 	return strings.TrimSpace(string(raw))
 }
 
-// createZFSSnapshotFixture creates a ZFS dataset with content and the
-// democratic-csi managed-resource property, snapshots it, and triggers the
-// snapshot automount so it propagates into the data container. The test process
-// runs as root (via `make test-e2e`), so zfs needs no sudo. Registers teardown.
+// createZFSSnapshotFixture creates a democratic-csi-managed dataset snapshot and
+// triggers its automount. The test runs as root, so zfs needs no sudo.
 func createZFSSnapshotFixture(t *testing.T, dataset, snapshotName string) {
 	t.Helper()
 
@@ -139,8 +124,7 @@ func createZFSSnapshotFixture(t *testing.T, dataset, snapshotName string) {
 
 	runZFS(t, "snapshot", dataset+"@"+snapshotName)
 
-	// Reading the snapshot dir triggers the on-demand automount on the host; with
-	// the pool bind mount's rshared propagation it then appears in the container.
+	// Reading the dir triggers the automount, which propagates via rshared.
 	_, _ = os.ReadDir(filepath.Join(mountpoint, ".zfs", "snapshot", snapshotName))
 }
 
@@ -166,10 +150,8 @@ func zfsValue(t *testing.T, property, dataset string) string {
 	return string(out)
 }
 
-// createBoundVolumeSnapshot creates a VolumeSnapshotContent and a VolumeSnapshot
-// already bound and ready-to-use, with the content carrying the CSI snapshotHandle
-// — exactly the state the control worker resolves. The minimal test CRDs declare
-// no status subresource, so status is persisted on create. Registers teardown.
+// createBoundVolumeSnapshot creates pre-bound, ready snapshot objects. The test
+// CRDs have no status subresource, so status persists on create.
 func createBoundVolumeSnapshot(t *testing.T, c versioned.Interface, vsName, vscName, pvc, handle string) {
 	t.Helper()
 

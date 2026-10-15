@@ -23,18 +23,13 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/config"
 )
 
-// zstdMagic is the zstd frame magic number (RFC 8878), little-endian. The
-// compressed-vs-uncompressed cases assert on its presence in the decrypted
-// stream to prove whether the zstd stage ran.
+// zstdMagic (RFC 8878) proves whether the zstd stage ran.
 var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 
-// smallSlice forces several slices from a modest payload so the split, ordering,
-// per-slice checksum, and size-measurement paths are all exercised.
+// smallSlice forces several slices from a modest payload.
 const smallSlice = 256
 
-// fakeLocator is a snapshotLocator serving canned on-disk directories keyed by a
-// snapshot's ZFSPath, so the Prepare pipeline runs against temp directories
-// without a ZFS pool. A ZFSPath absent from the map errors.
+// fakeLocator serves canned directories keyed by ZFSPath; unknown paths error.
 type fakeLocator struct {
 	dirs map[string]string
 	err  error
@@ -70,8 +65,6 @@ func TestPrepareArchivePipeline(t *testing.T) {
 
 			identity, recipient := generateKeypair(t)
 
-			// A snapshot tree with nested files; large enough to span several
-			// slices once encrypted.
 			contents := map[string]string{
 				"file.txt":            strings.Repeat("alpha-", 200),
 				"nested/inner.bin":    strings.Repeat("beta!", 300),
@@ -112,8 +105,7 @@ func TestPrepareArchivePipeline(t *testing.T) {
 			var measured int64
 
 			for index, slice := range result.Slices {
-				// Slices are named and ordered, and live under the archive's
-				// staging directory — nothing is written to tape (AC4).
+				// Slices stay under the staging directory — nothing goes to tape (AC4).
 				assert.Equal(t, filepath.Join(archiveDir, fmt.Sprintf("%s.%03d", sliceBaseName, index)), slice.Path)
 				assert.True(t, strings.HasPrefix(slice.Path, archiveDir), "slice must be staged under the archive directory")
 
@@ -126,11 +118,10 @@ func TestPrepareArchivePipeline(t *testing.T) {
 				measured += info.Size()
 			}
 
-			// The recorded total is the measured on-disk size (AC3).
+			// AC3: the recorded total is the measured on-disk size.
 			assert.Equal(t, measured, result.SizeBytes)
 
-			// Reverse the pipeline with the same tools a recoverer uses and
-			// confirm the original tree round-trips exactly.
+			// Reverse the pipeline with the recoverer's tools.
 			encrypted := concatSlices(t, result.Slices)
 			decrypted := decryptWithAge(t, encrypted, identity)
 
@@ -147,8 +138,8 @@ func TestPrepareArchivePipeline(t *testing.T) {
 	}
 }
 
-// TestPrepareGroupArchive verifies a multi-snapshot archive (a k8s group) is
-// staged as one archive with one subdirectory per member (SPEC §5).
+// TestPrepareGroupArchive: a group is one archive, one subdirectory per member
+// (SPEC §5).
 func TestPrepareGroupArchive(t *testing.T) {
 	t.Parallel()
 
@@ -194,12 +185,8 @@ func TestPrepareGroupArchive(t *testing.T) {
 	}, readTarFiles(t, tarBytes))
 }
 
-// TestPrepareGroupArchiveDuplicateMember verifies a group whose members derive
-// the same in-archive subdirectory (two snapshots of one PVC — the collision
-// reachable under a valid label-selector config) fails during Prepare, before any
-// tape is written, with an error identifying the colliding members. Prepare runs
-// entirely to disk before the write window (SPEC §4.3), so this abort is on the
-// no-tape side (AC2).
+// TestPrepareGroupArchiveDuplicateMember: two snapshots of one PVC derive the same
+// subdirectory, and Prepare must fail naming them, before any tape write (AC2).
 func TestPrepareGroupArchiveDuplicateMember(t *testing.T) {
 	t.Parallel()
 
@@ -208,8 +195,6 @@ func TestPrepareGroupArchiveDuplicateMember(t *testing.T) {
 	dirA := writeTree(t, map[string]string{"data.txt": "from snapshot a"})
 	dirB := writeTree(t, map[string]string{"data.txt": "from snapshot b"})
 
-	// Two VolumeSnapshots of the same PVC in one namespace: memberName derives the
-	// identical PVC subdirectory for both, so their trees would collide on tar.
 	groupArchive := ResolvedArchive{
 		SourceIndex: 0,
 		Snapshots: []ResolvedSnapshot{
@@ -241,8 +226,6 @@ func TestPrepareGroupArchiveDuplicateMember(t *testing.T) {
 	assert.Empty(t, staged, "no archive may be staged when a member collision is detected")
 }
 
-// TestPrepareMultipleArchives verifies each resolved archive is staged into its
-// own directory and recorded in order.
 func TestPrepareMultipleArchives(t *testing.T) {
 	t.Parallel()
 
@@ -281,8 +264,6 @@ func TestPrepareMultipleArchives(t *testing.T) {
 	assert.True(t, strings.HasPrefix(staged[1].Slices[0].Path, filepath.Join(stagingDir, "001")))
 }
 
-// TestPrepareLocatorError verifies a snapshot that cannot be located fails the
-// archive, naming the source.
 func TestPrepareLocatorError(t *testing.T) {
 	t.Parallel()
 
@@ -308,10 +289,8 @@ func TestPrepareLocatorError(t *testing.T) {
 	assert.Contains(t, err.Error(), "sources[3]")
 }
 
-// TestPrepareInvalidConfig verifies the pipeline fails with a clear cause for
-// misconfiguration that would otherwise surface as an opaque broken-pipe error
-// (a non-positive slice size) or be unsafe (no recipients, which agewrap rejects
-// before any plaintext is fed to age).
+// TestPrepareInvalidConfig: a non-positive slice size would otherwise surface as a
+// broken pipe, and no recipients must be rejected before plaintext reaches age.
 func TestPrepareInvalidConfig(t *testing.T) {
 	t.Parallel()
 
@@ -361,8 +340,6 @@ func TestPrepareInvalidConfig(t *testing.T) {
 	}
 }
 
-// TestPrepareArchivesRequiresStagingDir verifies the activity rejects an
-// unconfigured staging root rather than staging into an unintended location.
 func TestPrepareArchivesRequiresStagingDir(t *testing.T) {
 	t.Parallel()
 
@@ -372,27 +349,21 @@ func TestPrepareArchivesRequiresStagingDir(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "staging directory")
 
-	// Misconfiguration recurs on every retry, so the activity must surface it as
-	// non-retryable — the run fails fast rather than retrying to the 24h timeout.
+	// Must be non-retryable so the run fails fast, not at the 24h timeout.
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
 	assert.True(t, appErr.NonRetryable(), "unconfigured staging root must be non-retryable")
 }
 
-// TestPrepareProgressTracker verifies the progress tracker's snapshot: the
-// archive counts, the in-flight archive and its stage, the byte-weighted overall
-// percentage, and the ETA projected from the byte rate — using an injected clock
-// so the ETA is deterministic.
+// TestPrepareProgressTracker uses an injected clock so the ETA is deterministic.
 func TestPrepareProgressTracker(t *testing.T) {
 	t.Parallel()
 
-	// A controllable clock so the byte-rate ETA is deterministic.
 	current := time.Unix(0, 0)
 	clock := func() time.Time { return current }
 	advance := func(elapsed time.Duration) { current = current.Add(elapsed) }
 
-	// Two archives of 100 and 300 source bytes (400 total), so overall progress is
-	// genuinely byte-weighted rather than a per-archive count.
+	// 100 + 300 source bytes, so progress is genuinely byte-weighted.
 	archives := []ResolvedArchive{
 		{SourceIndex: 3, Label: "first", LogicalBytes: 100},
 		{SourceIndex: 7, Label: "second", LogicalBytes: 300},
@@ -400,12 +371,9 @@ func TestPrepareProgressTracker(t *testing.T) {
 
 	tracker := newPrepareProgressTracker(archives, clock)
 
-	// Nothing started yet: only the totals are set, and there is no ETA to project.
 	assert.Equal(t, PrepareProgress{TotalArchives: 2, TotalSourceBytes: 400}, tracker.snapshot())
 
-	// First archive streaming, half its 100 source bytes read after 10s: overall is
-	// 50/400 = 12.5%, and the ETA projects the remaining 350 bytes at 50 bytes /
-	// 10s = 70s.
+	// 50/400 = 12.5% after 10s → remaining 350 bytes at 5 B/s = 70s.
 	tracker.startArchive(3, "first", 100)
 	tracker.addSourceBytes(30)
 	tracker.addSourceBytes(20)
@@ -423,8 +391,6 @@ func TestPrepareProgressTracker(t *testing.T) {
 		EstimatedTimeRemaining: 70 * time.Second,
 	}, tracker.snapshot())
 
-	// The checksum pass reads no source bytes, so its slice counter is what shows
-	// the archive is still progressing.
 	tracker.addSourceBytes(50)
 	tracker.startChecksums(4)
 	tracker.finishSlice()
@@ -435,8 +401,6 @@ func TestPrepareProgressTracker(t *testing.T) {
 	assert.Equal(t, 4, got.TotalSlices)
 	assert.Equal(t, 100.0, got.CurrentArchivePercent, "every source byte of the archive has been read")
 
-	// Finishing folds the archive's source bytes into the completed total and
-	// clears the in-flight slot, so no bytes are double-counted between archives.
 	tracker.finishArchive()
 
 	got = tracker.snapshot()
@@ -445,9 +409,7 @@ func TestPrepareProgressTracker(t *testing.T) {
 	assert.Empty(t, got.CurrentStage, "no stage is reported between archives")
 	assert.Equal(t, 25.0, got.OverallPercent, "100 of 400 source bytes are done")
 
-	// Second archive done: every source byte is accounted for, so overall is 100%
-	// and no time remains. Tar headers and padding push the read count past the
-	// archive's logical size, which must not push the phase past 100%.
+	// Tar headers/padding push readBytes past the logical size; must not exceed 100%.
 	tracker.startArchive(7, "second", 300)
 	tracker.addSourceBytes(320)
 
@@ -461,8 +423,6 @@ func TestPrepareProgressTracker(t *testing.T) {
 	assert.Equal(t, int64(400), got.SourceBytesRead)
 	assert.Zero(t, got.EstimatedTimeRemaining, "no time remains once every archive is staged")
 
-	// The mutating methods no-op on a nil tracker rather than panicking — the seam
-	// that lets prepare run without a heartbeat in tests.
 	var nilTracker *prepareProgressTracker
 
 	assert.NotPanics(t, func() {
@@ -477,9 +437,8 @@ func TestPrepareProgressTracker(t *testing.T) {
 	assert.Same(t, &sink, nilTracker.countingWriter(&sink), "a nil tracker must not wrap the tar stage")
 }
 
-// TestPrepareProgressMessage verifies the periodic progress line carries the
-// numbers inline. The web log panel projects only a log record's message text, so
-// a detail left solely in the structured attributes would be invisible there.
+// TestPrepareProgressMessage: the web log panel shows only message text, so the
+// numbers must be inline.
 func TestPrepareProgressMessage(t *testing.T) {
 	t.Parallel()
 
@@ -524,9 +483,6 @@ func TestPrepareProgressMessage(t *testing.T) {
 	}
 }
 
-// TestPrepareReportsProgress verifies the activity body advances the progress
-// tracker as it stages real archives through the full pipeline, ending with every
-// archive counted complete, all source bytes done, and no time remaining.
 func TestPrepareReportsProgress(t *testing.T) {
 	t.Parallel()
 
@@ -535,8 +491,6 @@ func TestPrepareReportsProgress(t *testing.T) {
 	dirZero := writeTree(t, map[string]string{"zero.txt": strings.Repeat("zero", 500)})
 	dirOne := writeTree(t, map[string]string{"one.txt": strings.Repeat("one!", 500)})
 
-	// LogicalBytes stands in for the summed logicalreferenced Resolve records; the
-	// tar stage reads at least the file contents, so the tracker must reach 100%.
 	archives := []ResolvedArchive{
 		{SourceIndex: 0, Label: "zero", LogicalBytes: 2000, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/zero@snap"}}},
 		{SourceIndex: 1, Label: "one", LogicalBytes: 2000, Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/one@snap"}}},
@@ -566,8 +520,6 @@ func TestPrepareReportsProgress(t *testing.T) {
 	assert.Zero(t, got.EstimatedTimeRemaining, "no time remains once the phase is done")
 }
 
-// writeTree creates a temp directory populated with the given relative-path →
-// contents map (creating parent directories as needed) and returns its path.
 func writeTree(t *testing.T, contents map[string]string) string {
 	t.Helper()
 
@@ -582,8 +534,7 @@ func writeTree(t *testing.T, contents map[string]string) string {
 	return root
 }
 
-// sha256OfFile returns the lowercase hex SHA-256 of the file at path, computed
-// independently of the production checksum helper.
+// sha256OfFile is independent of the production checksum helper.
 func sha256OfFile(t *testing.T, path string) string {
 	t.Helper()
 
@@ -595,8 +546,6 @@ func sha256OfFile(t *testing.T, path string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// generateKeypair generates a fresh age post-quantum keypair with the real
-// age-keygen binary and returns the identity file path and the recipient string.
 func generateKeypair(t *testing.T) (identityPath, recipient string) {
 	t.Helper()
 
@@ -627,8 +576,6 @@ func generateKeypair(t *testing.T) (identityPath, recipient string) {
 	return identityPath, recipient
 }
 
-// decryptWithAge decrypts data with the given identity file by invoking the
-// bundled age binary — the same tool a recoverer uses.
 func decryptWithAge(t *testing.T, data []byte, identityPath string) []byte {
 	t.Helper()
 
@@ -645,8 +592,6 @@ func decryptWithAge(t *testing.T, data []byte, identityPath string) []byte {
 	return out.Bytes()
 }
 
-// concatSlices reads the staged slices in order and concatenates them, the
-// authoritative reconstruction of the archive's stream.
 func concatSlices(t *testing.T, slices []StagedSlice) []byte {
 	t.Helper()
 
@@ -661,8 +606,6 @@ func concatSlices(t *testing.T, slices []StagedSlice) []byte {
 	return buf.Bytes()
 }
 
-// zstdDecompress decompresses a zstd stream with the bundled zstd binary — the
-// same tool a recoverer uses.
 func zstdDecompress(t *testing.T, data []byte) []byte {
 	t.Helper()
 
@@ -679,8 +622,6 @@ func zstdDecompress(t *testing.T, data []byte) []byte {
 	return out.Bytes()
 }
 
-// readTarFiles extracts a tar archive into a relative-path → contents map for
-// regular files, so a round-tripped tree can be compared against its source.
 func readTarFiles(t *testing.T, data []byte) map[string]string {
 	t.Helper()
 

@@ -23,53 +23,36 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 )
 
-// The Prepare phase (SPEC §4.3 phase 2) turns the resolved work list into staged,
-// tape-ready files on disk. For each resolved archive it streams the per-archive
-// pipeline — tar the snapshot tree → optional zstd → age-encrypt → split into
-// fixed-size slices — computes a SHA-256 per slice, and measures the exact on-disk
-// size. Nothing is written to tape: every byte lands under the data worker's
-// staging directory so the later write window is a pure disk→tape copy (SPEC §4.3,
-// §14). The measured size, not the Resolve estimate, is what the Pack phase plans
-// against.
-//
-// It runs entirely on the data worker, where the snapshot bytes live (SPEC §4.1).
+// The Prepare phase (SPEC §4.3 phase 2) stages each archive to disk as
+// tar → optional zstd → age → fixed-size slices, with a SHA-256 per slice.
+// Nothing touches tape, so the write window is a pure disk→tape copy (SPEC §4.3,
+// §14); Pack plans against the measured size, not the Resolve estimate.
 
 const (
-	// prepareTimeout bounds the whole Prepare activity. Unlike Resolve's cheap
-	// metadata reads, Prepare reads, compresses, encrypts, and slices the full
-	// snapshot contents — potentially terabytes — so the bound is deliberately
-	// generous. The streaming stages honor context cancellation per read buffer,
-	// so a cancelled or timed-out run stops promptly rather than at end-of-copy.
+	// prepareTimeout is generous because Prepare streams full snapshot contents
+	// (potentially terabytes); the stages honor cancellation per read buffer.
 	prepareTimeout = 24 * time.Hour
 
-	// stagingDirPerm is the permission staging directories are created with. The
-	// staging tree holds encrypted archive slices on the data worker only.
 	stagingDirPerm = 0o755
 
-	// sliceBaseName is the base file name for an archive's slice files within its
-	// staging directory; Split appends the ".NNN" slice index. Each archive has
-	// its own directory, so a fixed base name keeps slice names short and uniform.
+	// sliceBaseName is the base name Split appends ".NNN" to; each archive has its
+	// own directory.
 	sliceBaseName = "archive"
 
-	// prepareStageStreaming and prepareStageChecksumming are the two stages an
-	// archive passes through, reported in the phase's progress so a long archive is
-	// distinguishable from a stalled one. Streaming is the tar → zstd → age → split
-	// pipeline; checksumming is the SHA-256 pass over the slices it produced.
+	// The two per-archive stages reported in progress, so a long archive is
+	// distinguishable from a stalled one.
 	prepareStageStreaming    = "streaming"
 	prepareStageChecksumming = "checksumming"
 )
 
-// snapshotLocator resolves a resolved snapshot to the on-disk directory whose
-// contents the Prepare phase tars. It is the seam the zfs package functions are
-// wrapped behind, injected so the activity is unit-testable without a ZFS pool.
+// snapshotLocator resolves a snapshot to the directory Prepare tars; injected so
+// the activity is testable without a ZFS pool.
 type snapshotLocator interface {
 	SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (string, error)
 }
 
-// zfsLocator is the production snapshotLocator: it reads the dataset's mountpoint
-// from ZFS and resolves the snapshot's .zfs/snapshot/<snap>/ directory under it
-// (SPEC §6). A raw ZFS source naming a dataset rather than a snapshot (no "@")
-// resolves to the dataset's live mountpoint.
+// zfsLocator is the production snapshotLocator (SPEC §6). A raw dataset source
+// (no "@") resolves to the dataset's live mountpoint.
 type zfsLocator struct{}
 
 func (zfsLocator) SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (string, error) {
@@ -81,11 +64,9 @@ func (zfsLocator) SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (s
 	}
 
 	if snapName == "" {
-		// A raw dataset source archives the dataset's live mountpoint directly.
-		// An unmounted dataset's mountpoint can survive as an ordinary "shadow"
-		// directory, so archiving it would silently certify empty or stale
-		// contents (issue #135). Reading the mounted property in Prepare fails
-		// the run here, before any tape is written (SPEC §4.3).
+		// An unmounted dataset's mountpoint can survive as a "shadow" directory,
+		// so archiving it would silently certify empty or stale contents (#135).
+		// Fail here, before any tape is written.
 		mounted, err := zfs.Mounted(ctx, dataset)
 		if err != nil {
 			return "", fmt.Errorf("check mount state for %q: %w", dataset, err)
@@ -101,88 +82,56 @@ func (zfsLocator) SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (s
 	return zfs.SnapshotDir(mount, snapName)
 }
 
-// PrepareActivities hosts the data-side Prepare activity. stagingRoot is the
-// directory all runs stage under (operational worker config, SPEC §4.1); each run
-// isolates its output beneath it by run id.
+// PrepareActivities hosts the data-side Prepare activity; each run stages under
+// stagingRoot/<run id>.
 type PrepareActivities struct {
 	stagingRoot string
 	locator     snapshotLocator
 }
 
-// newPrepareActivities returns the production data-side Prepare activity, staging
-// into stagingRoot and locating snapshot contents through the zfs CLI.
 func newPrepareActivities(stagingRoot string) *PrepareActivities {
 	return &PrepareActivities{stagingRoot: stagingRoot, locator: zfsLocator{}}
 }
 
-// PrepareInput is the payload for the Prepare activity: the run config (for the
-// recipients), the resolved work list to stage, and the slice size the Resolve
-// phase derived for the run (DeriveSliceSize; issue #324).
+// PrepareInput is the Prepare activity payload; SliceSizeBytes comes from
+// Resolve (DeriveSliceSize; #324).
 type PrepareInput struct {
 	Config         config.Config
 	Archives       []ResolvedArchive
 	SliceSizeBytes int64
 }
 
-// PrepareProgress is the Prepare activity's progress snapshot: it is the
-// heartbeat payload Temporal surfaces while the phase runs (and hands a retried
-// attempt via activity.GetHeartbeatDetails), and it is what the periodic progress
-// log reports. Prepare streams archives one at a time and a single archive can
-// take hours over terabytes, so the snapshot combines the per-archive count with
-// the in-flight archive's own completion into a byte-weighted overall percentage
-// and a projected time to finish.
-//
-// Progress is measured on the source side — the bytes the tar stage has read out
-// of the snapshot trees, against the summed logicalreferenced Resolve recorded
-// (ResolvedArchive.LogicalBytes). The staged output size is not knowable in
-// advance (compression and encryption both change it), whereas the input is, so
-// the source side is the only honest denominator.
+// PrepareProgress is the Prepare heartbeat payload and progress-log snapshot.
+// Progress is measured on source bytes read by tar against Resolve's
+// LogicalBytes: the staged output size is unknowable in advance, so the source
+// side is the only honest denominator.
 type PrepareProgress struct {
-	// TotalArchives is how many archives the phase will stage; CompletedArchives
-	// is how many have been staged, checksummed, and measured.
 	TotalArchives     int `json:"totalArchives"`
 	CompletedArchives int `json:"completedArchives"`
 
-	// CurrentSourceIndex and CurrentLabel identify the archive being staged right
-	// now, CurrentStage is which of its two stages is running
-	// (prepareStageStreaming or prepareStageChecksumming), and
-	// CurrentArchivePercent is that archive's own source-byte completion (0–100).
-	// All are zero-valued when no archive is in flight.
+	// The in-flight archive; zero-valued between archives.
 	CurrentSourceIndex    int     `json:"currentSourceIndex"`
 	CurrentLabel          string  `json:"currentLabel"`
 	CurrentStage          string  `json:"currentStage"`
 	CurrentArchivePercent float64 `json:"currentArchivePercent"`
 
-	// ChecksummedSlices and TotalSlices track the in-flight archive's checksum
-	// pass, which reads back every slice the pipeline just wrote. Source bytes stop
-	// moving during that pass, so this counter is what shows it is progressing.
+	// Source bytes stop moving during the checksum pass, so these show it is
+	// progressing.
 	ChecksummedSlices int `json:"checksummedSlices"`
 	TotalSlices       int `json:"totalSlices"`
 
-	// SourceBytesRead and TotalSourceBytes are the raw counters OverallPercent is
-	// derived from, reported so a run's throughput can be read off the log. A
-	// completed archive counts its full source size; the in-flight one counts what
-	// tar has read so far.
 	SourceBytesRead  int64 `json:"sourceBytesRead"`
 	TotalSourceBytes int64 `json:"totalSourceBytes"`
 
-	// OverallPercent is byte-weighted progress across every archive (0–100), and
-	// EstimatedTimeRemaining projects the time left from the byte rate observed so
-	// far. EstimatedTimeRemaining is zero until there is enough progress to
-	// estimate (and near zero as the phase finishes).
+	// EstimatedTimeRemaining is zero until there is enough progress to estimate.
 	OverallPercent         float64       `json:"overallPercent"`
 	EstimatedTimeRemaining time.Duration `json:"estimatedTimeRemaining"`
 }
 
-// prepareProgressTracker holds the live progress the Prepare heartbeat and log
-// report. The staging goroutines advance it — per archive, per source byte the
-// tar stage emits, and per slice checksummed — while the heartbeat goroutine
-// snapshots it, so its methods take a lock. The mutating methods are nil-safe: a
-// nil tracker (the test path, which runs prepare without a heartbeat) records
-// nothing.
+// prepareProgressTracker is advanced by the staging goroutines and snapshotted by
+// the heartbeat goroutine. Mutating methods are nil-safe (the test path).
 type prepareProgressTracker struct {
-	// now and startedAt drive the ETA; totalArchives and totalBytes are the fixed
-	// denominators. All are set at construction and read without the lock.
+	// Set at construction and read without the lock.
 	now           func() time.Time
 	startedAt     time.Time
 	totalArchives int
@@ -194,9 +143,6 @@ type prepareProgressTracker struct {
 	current        prepareCurrentArchive
 }
 
-// prepareCurrentArchive is the tracker's view of the archive being staged: its
-// identity, its source size (for byte-weighting), how much of that source the tar
-// stage has read, and which stage it is in.
 type prepareCurrentArchive struct {
 	sourceIndex  int
 	label        string
@@ -207,9 +153,6 @@ type prepareCurrentArchive struct {
 	doneSlices   int
 }
 
-// newPrepareProgressTracker returns a tracker for a phase staging the given
-// archives, using now as its clock (injected so the ETA is testable). startedAt is
-// stamped now so the ETA measures from phase start.
 func newPrepareProgressTracker(archives []ResolvedArchive, now func() time.Time) *prepareProgressTracker {
 	var totalBytes int64
 	for _, resolvedArchive := range archives {
@@ -224,8 +167,6 @@ func newPrepareProgressTracker(archives []ResolvedArchive, now func() time.Time)
 	}
 }
 
-// startArchive records that staging of the given archive has begun, in the
-// streaming stage.
 func (p *prepareProgressTracker) startArchive(sourceIndex int, label string, logicalBytes int64) {
 	if p == nil {
 		return
@@ -242,9 +183,7 @@ func (p *prepareProgressTracker) startArchive(sourceIndex int, label string, log
 	}
 }
 
-// addSourceBytes records source bytes the tar stage has emitted for the archive
-// in flight. It is the counting writer's callback, so it is called per write and
-// must stay cheap.
+// addSourceBytes is called per write by the counting writer and must stay cheap.
 func (p *prepareProgressTracker) addSourceBytes(n int64) {
 	if p == nil {
 		return
@@ -256,8 +195,6 @@ func (p *prepareProgressTracker) addSourceBytes(n int64) {
 	p.current.readBytes += n
 }
 
-// startChecksums records that the archive in flight has finished streaming and is
-// now being checksummed, over the given number of slices.
 func (p *prepareProgressTracker) startChecksums(totalSlices int) {
 	if p == nil {
 		return
@@ -271,7 +208,6 @@ func (p *prepareProgressTracker) startChecksums(totalSlices int) {
 	p.current.doneSlices = 0
 }
 
-// finishSlice records one slice measured and checksummed.
 func (p *prepareProgressTracker) finishSlice() {
 	if p == nil {
 		return
@@ -283,11 +219,8 @@ func (p *prepareProgressTracker) finishSlice() {
 	p.current.doneSlices++
 }
 
-// finishArchive records that the archive in flight has been fully staged: its
-// source bytes fold into the completed total and the in-flight slot clears, so no
-// bytes are double-counted between archives. The archive's full logical size is
-// credited rather than the bytes actually read, so a tree that tars to slightly
-// less than logicalreferenced (sparse files) still leaves the phase at 100%.
+// finishArchive credits the archive's full logical size rather than the bytes
+// read, so a tree that tars smaller (sparse files) still ends at 100%.
 func (p *prepareProgressTracker) finishArchive() {
 	if p == nil {
 		return
@@ -301,9 +234,6 @@ func (p *prepareProgressTracker) finishArchive() {
 	p.current = prepareCurrentArchive{}
 }
 
-// countingWriter wraps w so every byte written through it is added to the
-// in-flight archive's source-byte count. A nil tracker returns w untouched, so
-// the test path streams without any counting overhead.
 func (p *prepareProgressTracker) countingWriter(w io.Writer) io.Writer {
 	if p == nil {
 		return w
@@ -312,16 +242,11 @@ func (p *prepareProgressTracker) countingWriter(w io.Writer) io.Writer {
 	return &countingWriter{writer: w, count: p.addSourceBytes}
 }
 
-// snapshot computes the current PrepareProgress: the archive counts, the
-// in-flight archive and its stage, the byte-weighted overall percentage, and an
-// ETA projected from the byte rate observed since the phase started.
 func (p *prepareProgressTracker) snapshot() PrepareProgress {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Bytes done so far: every completed archive in full, plus what the in-flight
-	// archive has read. Clamped to that archive's size so tar's per-entry headers
-	// and padding cannot push the phase past 100%.
+	// Clamped so tar's headers and padding cannot push the phase past 100%.
 	currentBytes := min(p.current.readBytes, p.current.logicalBytes)
 	doneBytes := p.completedBytes + currentBytes
 
@@ -344,9 +269,6 @@ func (p *prepareProgressTracker) snapshot() PrepareProgress {
 	if p.totalBytes > 0 {
 		progress.OverallPercent = roundPercent(float64(doneBytes) / float64(p.totalBytes) * 100)
 
-		// Project the remaining time from the average byte rate so far. Needs some
-		// progress and elapsed time to divide by; otherwise the ETA stays zero
-		// ("not yet estimable").
 		if elapsed := p.now().Sub(p.startedAt); elapsed > 0 && doneBytes > 0 {
 			remaining := p.totalBytes - doneBytes
 			eta := time.Duration(float64(remaining) / float64(doneBytes) * float64(elapsed))
@@ -357,9 +279,6 @@ func (p *prepareProgressTracker) snapshot() PrepareProgress {
 	return progress
 }
 
-// countingWriter is an io.Writer that reports the bytes it passes through to
-// count. It wraps the Prepare pipeline's tar stage, which is where the phase's
-// only knowable-in-advance quantity — source bytes — flows.
 type countingWriter struct {
 	writer io.Writer
 	count  func(int64)
@@ -368,24 +287,18 @@ type countingWriter struct {
 func (c *countingWriter) Write(p []byte) (int, error) {
 	written, err := c.writer.Write(p)
 
-	// Count what was written even on a short or failing write, so the count never
-	// runs ahead of the stream.
+	// Count even on a short write, so the count never runs ahead of the stream.
 	c.count(int64(written))
 
 	return written, err
 }
 
 // PrepareArchives stages every resolved archive to disk (SPEC §4.3 phase 2),
-// returning a StagedArchive per input archive in the same order, each with its
-// slice paths, per-slice SHA-256, and measured total size. Output is isolated
-// under a per-run subdirectory of the staging root so concurrent or repeated runs
-// never collide; the run id comes from the activity context.
+// returning one StagedArchive per input in order.
 func (a *PrepareActivities) PrepareArchives(ctx context.Context, input PrepareInput) ([]StagedArchive, error) {
 	if a.stagingRoot == "" {
-		// An unconfigured staging root is worker misconfiguration, not a transient
-		// fault: every retry hits the same missing env var. Mark it non-retryable
-		// so the run fails fast at the first attempt instead of retrying an
-		// unrecoverable state under the default policy until the 24h timeout.
+		// Misconfiguration, not a transient fault: fail fast instead of retrying
+		// until the 24h timeout.
 		return nil, temporal.NewNonRetryableApplicationError(
 			"staging directory is not configured (set TAPE_STAGING_DIR on the data worker)",
 			"prepare-misconfigured",
@@ -395,11 +308,8 @@ func (a *PrepareActivities) PrepareArchives(ctx context.Context, input PrepareIn
 
 	stagingDir := filepath.Join(a.stagingRoot, activity.GetInfo(ctx).WorkflowExecution.RunID)
 
-	// Emit a liveness heartbeat while staging so a data-worker restart mid-Prepare
-	// is caught within activityHeartbeatTimeout rather than the 24h StartToClose.
-	// Each tick also records the progress snapshot as the heartbeat payload and
-	// logs it, so a multi-hour archive is neither silent in the logs nor opaque in
-	// the Temporal UI — with a byte-weighted percentage and ETA.
+	// Heartbeat so a data-worker restart is caught within activityHeartbeatTimeout
+	// rather than the 24h StartToClose.
 	var staged []StagedArchive
 
 	progress := newPrepareProgressTracker(input.Archives, time.Now)
@@ -421,15 +331,9 @@ func (a *PrepareActivities) PrepareArchives(ctx context.Context, input PrepareIn
 	return staged, err
 }
 
-// logPrepareProgress emits one periodic progress line for the Prepare phase. The
-// ETA is included only once it is estimable, so the line does not imply a bogus
-// "0s remaining" before the first bytes are staged.
-//
-// The numbers are inlined into the message, not left solely in the structured
-// attributes: the web log panel projects only the message text (see
-// pkg/runsapi.LogLine), so a constant "prepare: progress" message would read as
-// blank progress there. The structured attributes are retained for VictoriaLogs
-// and the Temporal heartbeat payload.
+// logPrepareProgress inlines the numbers into the message because the web log
+// panel shows only message text (pkg/runsapi.LogLine); the attributes remain for
+// VictoriaLogs.
 func logPrepareProgress(ctx context.Context, progress PrepareProgress) {
 	attrs := []any{
 		"completedArchives", progress.CompletedArchives,
@@ -455,14 +359,10 @@ func logPrepareProgress(ctx context.Context, progress PrepareProgress) {
 	slog.InfoContext(ctx, prepareProgressMessage(progress), attrs...)
 }
 
-// prepareProgressMessage renders a progress snapshot as the log line's message
-// text — the whole of what the web log panel shows, so every number an operator
-// needs to see the phase moving lives here rather than in the attributes.
 func prepareProgressMessage(progress PrepareProgress) string {
 	msg := fmt.Sprintf("prepare: progress %.1f%% overall (%d/%d archives staged",
 		progress.OverallPercent, progress.CompletedArchives, progress.TotalArchives)
 
-	// The in-flight detail is omitted between archives, when there is none.
 	switch progress.CurrentStage {
 	case prepareStageStreaming:
 		msg += fmt.Sprintf(", streaming %q at %.1f%%", progress.CurrentLabel, progress.CurrentArchivePercent)
@@ -480,11 +380,8 @@ func prepareProgressMessage(progress PrepareProgress) string {
 	return msg
 }
 
-// prepare stages every archive under stagingDir. It is split from
-// PrepareArchives so it can be exercised against a real directory without an
-// activity context. progress may be nil (the test path); when set it is advanced
-// per archive, per source byte, and per slice checksummed so the caller's
-// heartbeat can report where the phase is.
+// prepare stages every archive under stagingDir without needing an activity
+// context. progress may be nil.
 func (a *PrepareActivities) prepare(ctx context.Context, stagingDir string, input PrepareInput, progress *prepareProgressTracker) ([]StagedArchive, error) {
 	recipients := input.Config.Encryption.Recipients
 	sliceSize := input.SliceSizeBytes
@@ -522,10 +419,8 @@ func (a *PrepareActivities) prepare(ctx context.Context, stagingDir string, inpu
 	return staged, nil
 }
 
-// stageArchive runs the per-archive prepare pipeline and measures its output. It
-// creates the archive's staging directory, streams tar → optional zstd → age →
-// split into it, then stats and checksums each slice to produce the StagedArchive.
-// progress may be nil; when set it is advanced through both stages.
+// stageArchive runs one archive's pipeline into its staging directory, then
+// measures and checksums each slice.
 func (a *PrepareActivities) stageArchive(ctx context.Context, stagingDir string, resolvedArchive ResolvedArchive, recipients []string, sliceSize int64, progress *prepareProgressTracker) (StagedArchive, error) {
 	archiveDir := filepath.Join(stagingDir, fmt.Sprintf("%03d", resolvedArchive.SourceIndex))
 	if err := os.MkdirAll(archiveDir, stagingDirPerm); err != nil {
@@ -546,8 +441,6 @@ func (a *PrepareActivities) stageArchive(ctx context.Context, stagingDir string,
 
 	var total int64
 
-	// The checksum pass reads every staged slice back, so it can run for a while
-	// with no source bytes moving; report it as its own stage.
 	progress.startChecksums(len(slicePaths))
 
 	for _, slicePath := range slicePaths {
@@ -570,8 +463,6 @@ func (a *PrepareActivities) stageArchive(ctx context.Context, stagingDir string,
 	return StagedArchive{SourceIndex: resolvedArchive.SourceIndex, Slices: slices, SizeBytes: total}, nil
 }
 
-// resolveMembers turns an archive's resolved snapshots into the tar members to
-// pack, each located on disk via the snapshotLocator.
 func (a *PrepareActivities) resolveMembers(ctx context.Context, resolvedArchive ResolvedArchive) ([]archive.Member, error) {
 	members := make([]archive.Member, 0, len(resolvedArchive.Snapshots))
 
@@ -587,19 +478,10 @@ func (a *PrepareActivities) resolveMembers(ctx context.Context, resolvedArchive 
 	return members, nil
 }
 
-// runPipeline streams the per-archive prepare stages into archiveDir and returns
-// the staged slice paths in order. The stages are wired together with io.Pipe —
-// tar (single tree, or one subdirectory per member for a group) → optional zstd →
-// age → split — and run concurrently in an errgroup so the whole archive flows
-// through without staging any intermediate result to disk. Only the final slices
-// are written, by Split.
-//
-// progress may be nil; when set, the tar stage's output is counted through it so
-// the phase can report how much of the source it has read.
+// runPipeline streams tar → optional zstd → age → split through io.Pipes, so
+// only the final slices touch disk. It returns the slice paths in order.
 func runPipeline(ctx context.Context, archiveDir string, members []archive.Member, compress bool, recipients []string, sliceSize int64, progress *prepareProgressTracker) ([]string, error) {
-	// Validate up front: a non-positive slice size makes Split fail before it
-	// reads, which would otherwise surface only as a broken-pipe error from the
-	// upstream stages rather than this clear cause.
+	// Otherwise this surfaces only as a broken-pipe error from upstream stages.
 	if sliceSize <= 0 {
 		return nil, fmt.Errorf("slice size must be positive, got %d", sliceSize)
 	}
@@ -624,8 +506,7 @@ func runPipeline(ctx context.Context, archiveDir string, members []archive.Membe
 
 	slicePaths, splitErr := archive.Split(groupCtx, encryptReader, sliceSize, archiveDir, sliceBaseName)
 
-	// Unblock the encrypt stage if Split stopped reading early (an error); on
-	// success Split has already drained the stream to EOF and this is a no-op.
+	// Unblock the encrypt stage if Split stopped reading early.
 	encryptReader.CloseWithError(splitErr)
 
 	if waitErr := group.Wait(); waitErr != nil {
@@ -639,11 +520,9 @@ func runPipeline(ctx context.Context, archiveDir string, members []archive.Membe
 	return slicePaths, nil
 }
 
-// pipeStage runs produce in the group, writing to a fresh pipe whose read end is
-// returned for the next stage to consume. On return it closes the write end with
-// produce's error (signalling EOF or failure downstream) and, when this stage has
-// an input reader, closes that reader with the same error so a failure unblocks
-// the upstream producer rather than deadlocking it on a full pipe.
+// pipeStage runs produce into a fresh pipe and returns its read end. It also
+// closes input with produce's error so a failure unblocks the upstream producer
+// instead of deadlocking it on a full pipe.
 func pipeStage(group *errgroup.Group, input *io.PipeReader, produce func(io.Writer) error) *io.PipeReader {
 	reader, writer := io.Pipe()
 
@@ -662,10 +541,8 @@ func pipeStage(group *errgroup.Group, input *io.PipeReader, produce func(io.Writ
 	return reader
 }
 
-// tarMembers tars an archive's members. A single member is tarred directly so the
-// snapshot's contents sit at the archive root (SPEC §4.3 phase 2); a group of
-// members is tarred with one subdirectory per member for cross-volume consistency
-// (SPEC §5).
+// tarMembers puts a single member at the archive root (SPEC §4.3 phase 2) and a
+// group one subdirectory per member (SPEC §5).
 func tarMembers(ctx context.Context, w io.Writer, members []archive.Member) error {
 	if len(members) == 1 {
 		return archive.Tar(ctx, w, members[0].Dir)
@@ -674,11 +551,8 @@ func tarMembers(ctx context.Context, w io.Writer, members []archive.Member) erro
 	return archive.TarMembers(ctx, w, members)
 }
 
-// datasetAndSnapshot splits a resolved snapshot into its dataset and short
-// snapshot name. A k8s-resolved snapshot carries them explicitly; a raw ZFS
-// source carries only ZFSPath, split on the "@" that separates a snapshot from
-// its dataset. A raw path with no "@" is a dataset, returned with an empty
-// snapshot name.
+// datasetAndSnapshot splits a snapshot into dataset and short snapshot name; a
+// raw path with no "@" is a dataset with an empty snapshot name.
 func datasetAndSnapshot(snapshot ResolvedSnapshot) (dataset, snapName string) {
 	if snapshot.Dataset != "" {
 		return snapshot.Dataset, snapshot.SnapshotName
@@ -691,10 +565,8 @@ func datasetAndSnapshot(snapshot ResolvedSnapshot) (dataset, snapName string) {
 	return snapshot.ZFSPath, ""
 }
 
-// memberName is the subdirectory a group member's contents are tarred under. The
-// PVC name is the natural volume identity for a k8s member; a raw ZFS source
-// falls back to the dataset's last path component. It is only meaningful for
-// multi-member groups — a single-member archive is tarred without a subdirectory.
+// memberName is a group member's subdirectory: the PVC name, else the dataset's
+// last path component.
 func memberName(snapshot ResolvedSnapshot) string {
 	if snapshot.PVC != "" {
 		return snapshot.PVC
@@ -705,10 +577,8 @@ func memberName(snapshot ResolvedSnapshot) string {
 	return filepath.Base(dataset)
 }
 
-// preparePhase orchestrates the Prepare phase (SPEC §4.3 phase 2): it runs the
-// data-side Prepare activity over the resolved work list and stores the staged
-// archives in runState for the Pack phase. A failure aborts the run here, before
-// any tape is touched.
+// preparePhase runs the data-side Prepare activity and stores the staged
+// archives for Pack. A failure aborts the run before any tape is touched.
 func preparePhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,

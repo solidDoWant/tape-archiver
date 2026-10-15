@@ -12,10 +12,8 @@ import (
 	"go.temporal.io/sdk/temporal"
 )
 
-// verifyFixture builds a real staged tree on disk — staged archives, a Pack plan,
-// and generated PAR2 sets — so the Verify tests run against the same artifacts the
-// pipeline produces. The slices and recovery files are real files with correct
-// recorded checksums and sizes.
+// verifyFixture builds a real staged tree (archives, Pack plan, PAR2 sets) on
+// disk with correct recorded checksums and sizes.
 func verifyFixture(t *testing.T) (TapePlan, []StagedArchive, []PAR2Set) {
 	t.Helper()
 
@@ -24,10 +22,8 @@ func verifyFixture(t *testing.T) (TapePlan, []StagedArchive, []PAR2Set) {
 		writeStagedArchive(t, 1, []int{120_000}),
 	}
 
-	// A generous tape capacity so both archives pack onto one tape and the real
-	// staged tree fits: par2cmdline's per-block overhead inflates the recovery set
-	// far past its nominal percentage at these tiny test-block sizes (negligible at
-	// LTO's TB scale), which would otherwise overflow a small capacity.
+	// Generous capacity: par2's per-block overhead inflates the recovery set far
+	// past its nominal percentage at these tiny block sizes.
 	cfg := packConfig(500_000_000, 1, 1, targetRedundancy(20))
 
 	plan, err := pack(cfg, staged)
@@ -39,8 +35,7 @@ func verifyFixture(t *testing.T) (TapePlan, []StagedArchive, []PAR2Set) {
 	return plan, staged, sets
 }
 
-// corruptFile flips a byte in the file at path, so its contents no longer match
-// the SHA-256 recorded when it was staged.
+// corruptFile flips a byte so the file no longer matches its recorded SHA-256.
 func corruptFile(t *testing.T, path string) {
 	t.Helper()
 
@@ -53,9 +48,8 @@ func corruptFile(t *testing.T, path string) {
 	require.NoError(t, os.WriteFile(path, data, 0o600))
 }
 
-// TestVerifyAcceptsIntactStagedTree covers AC1: when every staged file's checksum
-// matches and each tape's tree is present and within capacity, Verify succeeds so
-// the workflow can proceed to Load.
+// TestVerifyAcceptsIntactStagedTree covers AC1: an intact tree within capacity
+// passes Verify.
 func TestVerifyAcceptsIntactStagedTree(t *testing.T) {
 	t.Parallel()
 
@@ -65,15 +59,13 @@ func TestVerifyAcceptsIntactStagedTree(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestVerifyFailsOnChecksumMismatch covers AC2: a staged file whose contents have
-// changed since it was staged — whether an archive slice or a PAR2 recovery file —
-// fails verification, so the run cannot proceed to Load.
+// TestVerifyFailsOnChecksumMismatch covers AC2: a changed slice or PAR2 file
+// fails verification.
 func TestVerifyFailsOnChecksumMismatch(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		// corrupt picks the file to corrupt from the staged tree.
+		name    string
 		corrupt func(staged []StagedArchive, sets []PAR2Set) string
 	}{
 		{
@@ -104,14 +96,12 @@ func TestVerifyFailsOnChecksumMismatch(t *testing.T) {
 	}
 }
 
-// TestVerifyFailsOnMissingFile covers AC3: a missing file from a planned tape's
-// tree fails the run before Load.
+// TestVerifyFailsOnMissingFile covers AC3: a missing file fails before Load.
 func TestVerifyFailsOnMissingFile(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		// remove picks the file to delete from the staged tree.
+		name   string
 		remove func(staged []StagedArchive, sets []PAR2Set) string
 	}{
 		{
@@ -142,16 +132,14 @@ func TestVerifyFailsOnMissingFile(t *testing.T) {
 	}
 }
 
-// TestVerifyFailsWhenArchiveAbsentFromStagedTree covers AC3: a tape that plans an
-// archive which was never staged, or never given a PAR2 set, has an incomplete
-// tree and fails before Load.
+// TestVerifyFailsWhenArchiveAbsentFromStagedTree covers AC3: a planned archive
+// never staged or never given a PAR2 set fails before Load.
 func TestVerifyFailsWhenArchiveAbsentFromStagedTree(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name string
-		// drop returns the staged archives and PAR2 sets to pass, with one of the
-		// planned archives' artifacts removed from the input entirely.
+		// drop removes one planned archive's artifacts from the input.
 		drop func(staged []StagedArchive, sets []PAR2Set) ([]StagedArchive, []PAR2Set)
 	}{
 		{
@@ -182,17 +170,13 @@ func TestVerifyFailsWhenArchiveAbsentFromStagedTree(t *testing.T) {
 	}
 }
 
-// TestVerifyFailsWhenPlannedTreeExceedsCapacity covers AC3: even when every file
-// checksums correctly, a tape whose complete tree does not fit within its usable
-// capacity fails the run before Load.
+// TestVerifyFailsWhenPlannedTreeExceedsCapacity covers AC3: correct checksums
+// but an over-capacity tree still fails before Load.
 func TestVerifyFailsWhenPlannedTreeExceedsCapacity(t *testing.T) {
 	t.Parallel()
 
 	_, staged, sets := verifyFixture(t)
 
-	// A plan whose tape capacity is far below the staged tree's real size: every
-	// file still checksums correctly, but the tree cannot fit, so Verify rejects
-	// the plan.
 	tightPlan := TapePlan{
 		Copies: 1,
 		Tapes: []PlannedTape{{
@@ -208,36 +192,24 @@ func TestVerifyFailsWhenPlannedTreeExceedsCapacity(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestVerifyFailureBlocksLoad covers AC2/AC3's "no tape is loaded" guarantee at
-// the workflow level: when the Verify phase fails, the run aborts before the Load
-// phase ever runs.
-//
-// The test is constructed so that a regression which swallowed the Verify failure
-// *would* reach the Load phase: Pack is mocked to return a non-empty plan and the
-// run is given a real library (one drive, one blank slot, a changer), so the tape
-// path yields exactly one drive-set and Load becomes reachable. Load is then routed
-// through OnActivity to flip a captured flag if it is ever dispatched — so the test
-// observes directly whether Load ran, rather than asserting on an unmocked name.
+// TestVerifyFailureBlocksLoad covers AC2/AC3's "no tape is loaded" guarantee.
+// Pack returns a non-empty plan and the library is real, so Load is reachable if
+// a regression swallowed the Verify failure; Load flips a flag if dispatched.
 func TestVerifyFailureBlocksLoad(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
 
-	// A valid config is required by the entry-point validation gate, but resolve it
-	// to nothing so the run stages no sources without touching a real pool.
+	// Valid config, resolved to nothing so no real pool is touched.
 	expectResolveEmpty(env)
 
-	// A non-empty plan makes planDriveSets yield a drive-set, so Load is reachable
-	// once the run passes Verify. Generate PAR2 stays a no-op: the run stages no
-	// sources, so the staged tree is empty and generatePAR2 returns early.
+	// A non-empty plan makes Load reachable; PAR2 is a no-op on the empty tree.
 	plan, _, _ := seededPlan(1, 1)
 	env.OnActivity((&PackActivities{}).Pack, mock.Anything, mock.Anything).
 		Return(plan, nil)
 
-	// Fail the Verify phase.
 	failPhase(t, env, PhaseVerify)
 
-	// Observe Load directly: it flips loadCalled and errors if it is ever invoked.
 	loadCalled := false
 
 	env.OnActivity((&LoadActivities{}).Load, mock.Anything, mock.Anything).Return(
@@ -252,15 +224,12 @@ func TestVerifyFailureBlocksLoad(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 	require.Error(t, env.GetWorkflowError())
 
-	// The Load phase's activity is never invoked once Verify fails.
 	assert.False(t, loadCalled, "Load ran after Verify failed")
 }
 
-// TestVerifyRetriesTransientFailure covers AC1: a routine data-worker restart
-// mid-Verify — a retryable, non-application error — is retried and the run
-// proceeds to completion, rather than being capped at one attempt as the old
-// RetryPolicy{MaximumAttempts: 1} would have. The Verify activity fails once then
-// succeeds; with the heartbeat-based default policy the workflow must complete.
+// TestVerifyRetriesTransientFailure covers AC1: a retryable failure (worker
+// restart) is retried and the run completes, rather than being capped at one
+// attempt as the old MaximumAttempts: 1 policy did.
 func TestVerifyRetriesTransientFailure(t *testing.T) {
 	t.Parallel()
 
@@ -279,11 +248,8 @@ func TestVerifyRetriesTransientFailure(t *testing.T) {
 	require.NoError(t, env.GetWorkflowError())
 }
 
-// TestVerifyCancellationStaysRetryable covers AC1's graceful-shutdown case: when
-// the activity context is cancelled over an otherwise intact staged tree — as a
-// data-worker shutdown does — the Verify activity returns a retryable error
-// wrapping context.Canceled, never a non-retryable ApplicationError, so the
-// rescheduled attempt re-runs the idempotent re-read.
+// TestVerifyCancellationStaysRetryable covers AC1's graceful-shutdown case: a
+// cancelled context yields a retryable error wrapping context.Canceled.
 func TestVerifyCancellationStaysRetryable(t *testing.T) {
 	t.Parallel()
 
@@ -301,17 +267,13 @@ func TestVerifyCancellationStaysRetryable(t *testing.T) {
 	}
 }
 
-// TestVerifyClassifiesDeterministicFaultsNonRetryable covers AC2: a deterministic
-// verification fault — a corrupted slice, a missing file, or an over-capacity plan
-// — is surfaced by the Verify activity as a non-retryable ApplicationError, so the
-// default retry policy fails the run fast (before Load) instead of retrying a fault
-// that recurs on every attempt.
+// TestVerifyClassifiesDeterministicFaultsNonRetryable covers AC2: corruption,
+// a missing file, or over-capacity yields a non-retryable ApplicationError.
 func TestVerifyClassifiesDeterministicFaultsNonRetryable(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		// mutate breaks the fixture so verification fails deterministically.
+		name   string
 		mutate func(t *testing.T, plan *TapePlan, staged []StagedArchive, sets []PAR2Set)
 	}{
 		{

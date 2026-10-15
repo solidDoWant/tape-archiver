@@ -1,15 +1,10 @@
 //go:build e2e
 
-// Package e2e is the end-to-end test suite (issue #20). It drives the whole
-// backup workflow the way it ships in production: the control worker deployed
-// via its Helm chart + OCI image into a real kind cluster, the data worker run
-// as its OCI container on the host with the tape devices and ZFS pool, a real
-// dev Temporal joined to the kind network, and mhvtl standing in for the tape
-// library. It consumes only the exported workflows/backup API plus the public
-// pkg/* + internal/testutil helpers, so it is a genuine black-box, whole-system
-// test.
+// Package e2e is the black-box end-to-end suite (issue #20): the control worker
+// via Helm in kind, the data worker as its OCI container on the host, dev
+// Temporal on the kind network, and mhvtl as the library.
 //
-// Topology (confirmed with the maintainer):
+// Topology:
 //
 //	kind cluster (docker network "kind")
 //	 ├─ control-worker Deployment  ← Helm chart, control-worker image
@@ -21,9 +16,8 @@
 //	 └─ this test process: blank-tape prep, run submission, and one shared mock
 //	      webhook (reachable from the cluster via the kind bridge gateway IP)
 //
-// The whole harness is guarded so it skips cleanly (never fails) when any
-// prerequisite — docker/kind/helm/nix, Temporal, mhvtl, LTFS, or the ZFS pool —
-// is absent (issue #20 AC5). Driven by `make test-e2e`.
+// The suite skips cleanly when any prerequisite is absent (issue #20 AC5).
+// Driven by `make test-e2e`.
 package e2e
 
 import (
@@ -64,56 +58,35 @@ const (
 	controlRepo  = "ghcr.io/soliddowant/tape-archiver/control-worker"
 	dataRepo     = "ghcr.io/soliddowant/tape-archiver/data-worker"
 
-	// temporalAlias is the network alias the Temporal container gets on the kind
-	// network so the in-cluster control worker and the data container both resolve
-	// it at a stable "temporal:7233" regardless of the compose container name.
+	// temporalAlias gives Temporal a stable "temporal:7233" on the kind network.
 	temporalAlias = "temporal"
 	temporalPort  = "7233"
 
-	// poolMount is the on-host ZFS pool root the data container bind-mounts. Both
-	// the dataset mount (…/archive) and its on-demand .zfs/snapshot/ automounts
-	// live under it; rshared propagation carries them into the container.
+	// poolMount is bind-mounted rshared so .zfs/snapshot/ automounts propagate.
 	poolMount = "/mnt/tape-test-pool"
-	// containerStagingDir is where the host staging directory is bind-mounted in
-	// the data container (TAPE_STAGING_DIR). Staging must NOT live in the small
-	// ephemeral ZFS test pool (it holds only the source payload); it gets its own
-	// ample host directory, bind-mounted here and readable by the host test
-	// process for the AC4 slice corruption.
+	// containerStagingDir is TAPE_STAGING_DIR in the data container: a host dir,
+	// not the tiny test pool, which the test reads for AC4 slice corruption.
 	containerStagingDir = "/staging"
 
-	// datasetParent is democratic-csi's datasetParentName for the k8s-source test:
-	// the CSI snapshotHandle's volume component is joined under it to rebuild the
-	// absolute ZFS path. It is the test pool root, so `<parent>/pvc-<uuid>` is a
-	// child dataset of the pool. Wired into the control worker as K8sDatasetParent.
+	// datasetParent is democratic-csi's datasetParentName (K8sDatasetParent) for
+	// the k8s-source test.
 	datasetParent = "tape_test"
 
-	// scaledJobRelease is the separate Helm release used by the autoscaling tests to
-	// install the control worker in its KEDA ScaledJob shape, alongside (not on top
-	// of) the shared Deployment release. It is installed and uninstalled by the
-	// autoscaling test itself, not the shared harness.
+	// scaledJobRelease is the autoscaling tests' own ScaledJob-shaped release.
 	scaledJobRelease = "ta-control-sj"
 
-	// kedaNamespace / kedaRelease / kedaChartVersion pin the KEDA operator install.
-	// The built-in Temporal scaler the control-worker ScaledJob depends on ships with
-	// KEDA from 2.17 onward (it does not exist in 2.16). KEDA is a hard prerequisite of
-	// the suite: installKeda fails the whole harness if the install fails, so the
-	// autoscaling path is genuinely covered rather than silently skipped.
+	// The KEDA Temporal scaler needs KEDA >= 2.17. KEDA is a hard prerequisite so
+	// autoscaling is never silently skipped.
 	kedaNamespace    = "keda"
 	kedaRelease      = "keda"
 	kedaChartName    = "keda"
 	kedaChartVersion = "2.21.0"
-	// kedaChartRepo is the KEDA chart's GitHub Pages Helm repository, used via
-	// helm's --repo flag so no global repo entry is added to the host. (KEDA also
-	// publishes an OCI chart at ghcr.io, but the Pages repo is the more broadly
-	// reachable of the two; the operator images still come from ghcr regardless.)
+	// kedaChartRepo is used via --repo so no global helm repo entry is added.
 	kedaChartRepo = "https://kedacore.github.io/charts"
 )
 
-// orderedPhases is the full phase sequence the backup workflow completes, in order
-// (SPEC §4.3). Built from the exported constants so it tracks any rename. The Burn
-// phase always runs — it is a no-op that still completes (and is recorded) when
-// optical burning is disabled — so it appears here between Report and Deliver for
-// every run, burning or not.
+// orderedPhases is the full phase sequence (SPEC §4.3). Burn always runs, as a
+// recorded no-op when burning is disabled.
 var orderedPhases = []string{
 	backup.PhaseResolve,
 	backup.PhasePrepare,
@@ -129,16 +102,12 @@ var orderedPhases = []string{
 }
 
 var (
-	// harness is the shared, running system under test, populated by TestMain when
-	// every prerequisite is present.
 	harness *e2eHarness
-	// skipReason is set (and harness left nil) when a prerequisite is missing, so
-	// every test skips cleanly instead of failing (AC5).
+	// skipReason is set (harness nil) when a prerequisite is missing (AC5).
 	skipReason string
 )
 
-// e2eHarness owns the running cluster, containers, and mock webhook for the
-// suite, plus the LIFO cleanup stack that tears them all down.
+// e2eHarness owns the suite's cluster, containers, mock webhook and LIFO cleanups.
 type e2eHarness struct {
 	repoRoot       string
 	kubeconfig     string
@@ -150,11 +119,7 @@ type e2eHarness struct {
 	webhookURL     string // base URL, e.g. http://172.18.0.1:39000
 	rec            *recorder
 
-	// opticalDevices are loop-device-backed pseudo-burners for the optical burn
-	// tests, created host-side and passed through to the data-worker container.
-	// Empty when losetup is unavailable, so the optical tests skip and the rest of
-	// the suite is unaffected. opticalBackings holds their backing files (detached
-	// on teardown alongside the loop devices).
+	// opticalDevices are loop-device pseudo-burners; empty when losetup is absent.
 	opticalDevices  []string
 	opticalBackings []string
 
@@ -194,8 +159,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// requireHarness returns the running harness, or skips the calling test when a
-// prerequisite was missing (AC5).
+// requireHarness returns the harness, or skips when a prerequisite is missing.
 func requireHarness(t *testing.T) *e2eHarness {
 	t.Helper()
 
@@ -206,10 +170,8 @@ func requireHarness(t *testing.T) *e2eHarness {
 	return harness
 }
 
-// checkPrerequisites returns a human-readable reason to skip, or "" when the
-// environment can run the suite. It mirrors the device/tool checks the
-// testutil.SkipIf* helpers make, but returns a reason instead of needing a
-// *testing.T (unavailable in TestMain).
+// checkPrerequisites returns a reason to skip, or "". It mirrors testutil.SkipIf*
+// without the *testing.T that TestMain lacks.
 func checkPrerequisites() string {
 	for _, tool := range []string{
 		"docker", "kind", "helm", "kubectl", "nix", "make",
@@ -245,8 +207,8 @@ func checkPrerequisites() string {
 	return ""
 }
 
-// setupHarness brings the whole system up, registering a teardown step after
-// each resource is created so a mid-setup failure still unwinds cleanly.
+// setupHarness brings the system up, registering teardown per resource so a
+// mid-setup failure still unwinds.
 func setupHarness() (*e2eHarness, error) {
 	h := &e2eHarness{rec: newRecorder()}
 
@@ -288,16 +250,12 @@ func setupHarness() (*e2eHarness, error) {
 }
 
 func (h *e2eHarness) buildImages() error {
-	// nix caches aggressively, so this is near-instant once the images exist.
-	// VERSION=e2e gives the images stable tags the cluster load + chart override +
-	// data container all reference.
 	_, err := execOut(h.repoRoot, nil, "make", "build-images", "VERSION="+imageVersion)
 
 	return err
 }
 
-// buildTapectl builds the tapectl CLI once; the tests submit runs through it (the
-// real operator path) rather than calling the Temporal API directly.
+// buildTapectl builds tapectl; tests submit runs through it, the operator path.
 func (h *e2eHarness) buildTapectl() error {
 	h.tapectlPath = filepath.Join(os.TempDir(), "tape-archiver-e2e-tapectl")
 
@@ -314,7 +272,6 @@ func (h *e2eHarness) buildTapectl() error {
 func (h *e2eHarness) createCluster() error {
 	h.kubeconfig = filepath.Join(os.TempDir(), "tape-archiver-e2e.kubeconfig")
 
-	// Delete any leftover cluster from an interrupted run so create starts clean.
 	_, _ = execOut(h.repoRoot, nil, "kind", "delete", "cluster", "--name", clusterName)
 
 	if _, err := execOut(h.repoRoot, nil, "kind", "create", "cluster",
@@ -334,13 +291,8 @@ func (h *e2eHarness) createCluster() error {
 	return nil
 }
 
-// installKeda installs the KEDA operator (with its CRDs, including ScaledJob and
-// TriggerAuthentication) into the kind cluster via its published OCI Helm chart. The
-// control-worker ScaledJob path and its Temporal scaler are KEDA features, so KEDA is
-// a hard prerequisite of the suite: a failed install fails the whole harness rather
-// than skipping the autoscaling tests, so the scale-to-zero path is genuinely covered.
-// KEDA is torn down with the cluster (createCluster's delete), so no separate cleanup
-// is registered.
+// installKeda installs KEDA; failure fails the harness. It goes away with the
+// cluster, so no cleanup is registered.
 func (h *e2eHarness) installKeda() error {
 	_, err := execOut(h.repoRoot, h.kubeEnv(), "helm", "install", kedaRelease, kedaChartName,
 		"--repo", kedaChartRepo,
@@ -359,9 +311,7 @@ func (h *e2eHarness) loadControlImage() error {
 	return err
 }
 
-// installSnapshotCRDs registers the minimal VolumeSnapshot/VolumeSnapshotContent
-// CRDs so the k8s-source test can create those objects and the control worker can
-// read them.
+// installSnapshotCRDs registers minimal VolumeSnapshot CRDs for the k8s-source test.
 func (h *e2eHarness) installSnapshotCRDs() error {
 	crds := filepath.Join("e2e", "testdata", "snapshot-crds.yaml")
 
@@ -369,7 +319,6 @@ func (h *e2eHarness) installSnapshotCRDs() error {
 		return err
 	}
 
-	// Wait until the API server serves the new kinds before any CR is created.
 	_, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "wait", "--for", "condition=established",
 		"--timeout", "60s",
 		"crd/volumesnapshots.snapshot.storage.k8s.io",
@@ -379,8 +328,6 @@ func (h *e2eHarness) installSnapshotCRDs() error {
 }
 
 func (h *e2eHarness) joinTemporalToNetwork() error {
-	// Discover the compose-managed Temporal container regardless of its
-	// project-derived name.
 	out, err := execStdout(h.repoRoot, nil, "docker", "compose", "ps", "-q", temporalAlias)
 	if err != nil {
 		return err
@@ -391,7 +338,6 @@ func (h *e2eHarness) joinTemporalToNetwork() error {
 		return fmt.Errorf("no running Temporal container (run `make temporal-up`)")
 	}
 
-	// Idempotent: connecting an already-connected container errors; ignore that.
 	if _, err := execOut(h.repoRoot, nil, "docker", "network", "connect",
 		"--alias", temporalAlias, kindNetwork, h.temporalCID); err != nil &&
 		!strings.Contains(err.Error(), "already exists") {
@@ -405,13 +351,10 @@ func (h *e2eHarness) joinTemporalToNetwork() error {
 	return nil
 }
 
-// cleanLeftoverWorkflows terminates any still-Running Backup workflows before the
-// run. Temporal's dev volume persists across restarts, so a prior hard-killed run
-// can leave open workflows whose stale activities the fresh data worker would pick
-// up and retry — noise that wastes the worker and muddies diagnosis. Best-effort.
+// cleanLeftoverWorkflows terminates Running backups left by a hard-killed prior
+// run (the dev Temporal volume persists) so the fresh worker won't retry them.
 func (h *e2eHarness) cleanLeftoverWorkflows() error {
-	// Isolate the Temporal envconfig from any stray host profile, matching
-	// dialTemporal; the address comes from TEMPORAL_ADDRESS.
+	// Isolate envconfig from any host profile, matching dialTemporal.
 	emptyConfig := filepath.Join(os.TempDir(), "tape-archiver-e2e-empty.toml")
 	if err := os.WriteFile(emptyConfig, nil, 0o600); err != nil {
 		return err
@@ -447,9 +390,7 @@ func (h *e2eHarness) cleanLeftoverWorkflows() error {
 }
 
 func (h *e2eHarness) createStagingDir() error {
-	// A generous host directory (not the tiny ZFS test pool) for the Prepare
-	// phase's staged archives + PAR2 sets. World-writable so both the container
-	// (root) and the host test process can access it.
+	// World-writable so both the root container and the test process can use it.
 	dir, err := os.MkdirTemp("", "tape-archiver-e2e-staging-")
 	if err != nil {
 		return err
@@ -465,25 +406,15 @@ func (h *e2eHarness) createStagingDir() error {
 	return nil
 }
 
-// opticalDiscCount is how many loop-device pseudo-burners the harness provisions
-// for the optical burn tests. Two lets a single burn-set drive two copies in
-// parallel (TestBackupEndToEnd_OpticalBurn) with no operator disc-swap pause, and
-// the reclaim test reuses the first.
+// opticalDiscCount: two lets one burn set write both copies without a disc swap.
 const opticalDiscCount = 2
 
-// opticalDiscSize is the backing size of each loop-device pseudo-disc. The recovery
-// ISO is tens of MB (report, manifest, a handful of static recovery binaries); half
-// a gibibyte is ample while staying a sparse file that costs nothing until written.
+// opticalDiscSize is ample for the tens-of-MB ISO; the backing file is sparse.
 const opticalDiscSize = 512 << 20
 
-// setupOpticalDiscs provisions loop-device-backed pseudo-burners for the optical
-// burn tests and passes them into the data-worker container (startDataWorker). It
-// is the optical analogue of the mhvtl library: there is no faithful virtual
-// optical writer, so a loop device driven through xorriso's stdio pseudo-drive
-// stands in for a burner (the same mechanism pkg/optical and the burn integration
-// tests use). It is best-effort: when losetup is unavailable it logs and leaves the
-// device list empty, so the optical tests skip (requireOpticalDiscs) and the rest
-// of the suite is unaffected — make test-e2e stays green without optical support.
+// setupOpticalDiscs provisions loop devices as burners via xorriso's stdio
+// pseudo-drive (there is no virtual optical writer). Best-effort: without
+// losetup the optical tests skip.
 func (h *e2eHarness) setupOpticalDiscs() error {
 	if _, err := exec.LookPath("losetup"); err != nil {
 		log.Printf("[e2e] optical-discs: losetup not on PATH; optical burn tests will skip")
@@ -530,10 +461,8 @@ func (h *e2eHarness) setupOpticalDiscs() error {
 }
 
 func (h *e2eHarness) startWebhook() error {
-	// The gateway of the kind bridge is the host's address on that network, i.e.
-	// the address in-cluster pods and the data container reach the host webhook at.
-	// The kind network is dual-stack; list every gateway and take the IPv4 one (the
-	// webhook listens on 0.0.0.0, and an IPv6 literal would also need bracketing).
+	// The kind bridge gateway is the host's address on that network. The network
+	// is dual-stack; take the IPv4 gateway.
 	out, err := execStdout(h.repoRoot, nil, "docker", "network", "inspect", kindNetwork,
 		"-f", "{{range .IPAM.Config}}{{.Gateway}} {{end}}")
 	if err != nil {
@@ -552,8 +481,6 @@ func (h *e2eHarness) startWebhook() error {
 		return fmt.Errorf("could not determine an IPv4 kind network gateway (got %q)", strings.TrimSpace(out))
 	}
 
-	// Bind all interfaces so the docker bridge can reach it; advertise the gateway
-	// IP to the workers.
 	listener, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		return err
@@ -579,7 +506,6 @@ func (h *e2eHarness) startWebhook() error {
 func (h *e2eHarness) deployControlWorker() error {
 	chart := filepath.Join("deploy", "charts", "tape-archiver-control-worker")
 
-	// Vendor the bjw-s common dependency from the committed Chart.lock (offline).
 	if _, err := execOut(h.repoRoot, nil, "helm", "dependency", "build", chart); err != nil {
 		return err
 	}
@@ -606,42 +532,29 @@ func (h *e2eHarness) deployControlWorker() error {
 	return nil
 }
 
-// installScaledJobWorker installs the control worker in its KEDA ScaledJob shape as a
-// separate release (scaledJobRelease), alongside — not replacing — the shared
-// Deployment release. The overlay drives a fast scale-to-zero cycle observable in
-// seconds: a low KEDA pollingInterval and a short WORKER_IDLE_EXIT_AFTER so the Job
-// self-completes quickly once the control queue goes idle. No config.temporal.keda.apiKey
-// is set: the dev Temporal is plaintext and unauthenticated, and KEDA's Temporal scaler
-// forces TLS whenever an API key is present — so an anonymous (no-apiKey) connection is
-// the only way it reaches this frontend. It registers a t.Cleanup that uninstalls the
-// release (which cascades KEDA's spawned Jobs via their ownerReferences). Callers must
-// first remove the shared Deployment worker as a poller (scaleControlDeployment 0), so the
-// KEDA-spawned worker is the only one on the control queue and scale-from-zero is observable.
+// installScaledJobWorker installs the KEDA ScaledJob-shaped control worker with a
+// fast scale-to-zero cycle. No keda.apiKey is set: KEDA's Temporal scaler forces
+// TLS whenever one is present, and dev Temporal is plaintext. Callers must first
+// scale the shared Deployment to 0 so scale-from-zero is observable.
 func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 	t.Helper()
 
 	chart := filepath.Join("deploy", "charts", "tape-archiver-control-worker")
 
-	// Vendor the bjw-s common dependency from the committed Chart.lock (offline);
-	// idempotent with deployControlWorker's earlier build.
 	_, err := execOut(h.repoRoot, nil, "helm", "dependency", "build", chart)
 	require.NoError(t, err, "helm dependency build")
 
 	imagePath := "resources.controllers.main.containers.main.image"
 
-	// Register the uninstall before installing so a failed/partial install (e.g. a
-	// left-behind Secret or a ScaledJob KEDA has started acting on) is still cleaned
-	// up — otherwise a stray ScaledJob would keep spawning control-queue pollers that
-	// interfere with every later test in the shared suite.
+	// Registered before install so a partial install can't leave a stray
+	// ScaledJob spawning pollers into later tests.
 	t.Cleanup(func() {
 		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", scaledJobRelease,
 			"--namespace", namespace, "--wait", "--timeout", "2m", "--ignore-not-found")
 	})
 
-	// No --wait: the only workload this release yields is a KEDA-spawned Job that does
-	// not exist until a backlog appears, and helm's readiness wait trips on the
-	// ScaledJob's transient "InProgress" status. The scale assertions poll pods
-	// directly instead.
+	// No --wait: helm's readiness wait trips on the ScaledJob's transient
+	// "InProgress" status, and no Job exists until there is a backlog.
 	_, err = execOut(h.repoRoot, h.kubeEnv(), "helm", "install", scaledJobRelease, chart,
 		"--namespace", namespace,
 		"--set", "config.temporal.address="+temporalAlias+":"+temporalPort,
@@ -656,10 +569,7 @@ func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 	require.NoError(t, err, "helm install scaledjob worker")
 }
 
-// scaleControlDeployment scales the shared Deployment control worker (helmRelease) to
-// the given replica count and waits for the rollout to settle there. The autoscaling
-// tests scale it to 0 so the KEDA-spawned worker is the sole control-queue poller; the
-// multi-replica test scales it to 2 to run two concurrent pollers.
+// scaleControlDeployment scales the shared control Deployment and waits for it to settle.
 func (h *e2eHarness) scaleControlDeployment(t *testing.T, replicas int) {
 	t.Helper()
 
@@ -673,18 +583,14 @@ func (h *e2eHarness) scaleControlDeployment(t *testing.T, replicas int) {
 	}, 2*time.Minute, 2*time.Second, "control deployment must settle at %d running pod(s)", replicas)
 }
 
-// restoreControlReplicas scales the shared Deployment control worker back to its
-// harness default of one replica. Best-effort (no *testing.T), for use in a cleanup so
-// a later test still finds the baseline Deployment serving the control queue.
+// restoreControlReplicas best-effort restores the shared Deployment to one replica.
 func (h *e2eHarness) restoreControlReplicas() {
 	_, _ = execOut(h.repoRoot, h.kubeEnv(), "kubectl", "scale", "deployment",
 		"-n", namespace, "-l", "app.kubernetes.io/instance="+helmRelease, "--replicas=1")
 }
 
-// runningControlPods returns the number of Running-phase pods for the given control
-// worker release. It counts only Running pods, so a KEDA Job pod that has Completed
-// (Succeeded phase) after a self-exit reads as scaled-to-zero, which is exactly the
-// "no worker running" signal the autoscaling assertions turn on.
+// runningControlPods counts Running pods only, so a self-exited KEDA Job pod
+// reads as scaled to zero.
 func (h *e2eHarness) runningControlPods(t *testing.T, release string) int {
 	t.Helper()
 
@@ -697,8 +603,7 @@ func (h *e2eHarness) runningControlPods(t *testing.T, release string) int {
 }
 
 func (h *e2eHarness) startDataWorker() error {
-	// Ensure the snapshot is automounted on the host and the pool subtree is
-	// rshared so the .zfs/snapshot/ automounts propagate into the container.
+	// Trigger the snapshot automount and make it propagate into the container.
 	snapshot := os.Getenv("TAPE_TEST_SNAPSHOT")
 	_, _ = execOut(h.repoRoot, nil, "sh", "-c",
 		fmt.Sprintf("ls %s/archive/.zfs/snapshot/%s >/dev/null 2>&1", poolMount, snapshot))
@@ -712,9 +617,6 @@ func (h *e2eHarness) startDataWorker() error {
 		"/dev/sg0", "/dev/sg1", "/dev/sg2", "/dev/fuse", "/dev/zfs",
 	}
 
-	// The optical burn tests burn to these inside the data worker: the loop-device
-	// pseudo-burners provisioned by setupOpticalDiscs, plus a real burner named by
-	// OPTICAL_BURN_DEV for the opt-in real-hardware test (when present).
 	devices = append(devices, h.opticalDevices...)
 	if realBurner := os.Getenv(testutil.OpticalBurnDevEnv); realBurner != "" {
 		devices = append(devices, realBurner)
@@ -731,8 +633,7 @@ func (h *e2eHarness) startDataWorker() error {
 		"--cap-add", "SYS_RAWIO", // changer / sg_raw / LTFS issue raw SCSI via SG_IO
 		"-v", poolMount+":"+poolMount+":rshared", // ZFS source + .zfs/snapshot automounts
 		"-v", h.stagingHostDir+":"+containerStagingDir, // staged archives + PAR2 (ample host dir)
-		// The recovery set is baked into the image at /recovery/{bin,src} with the
-		// TAPE_RECOVERY_*_DIR env vars pre-set, so the container needs no mount here.
+		// The recovery set is baked into the image, so it needs no mount.
 		"-e", "ROLE=data",
 		"-e", "TEMPORAL_ADDRESS="+temporalAlias+":"+temporalPort,
 		"-e", "TEMPORAL_NAMESPACE="+namespace,
@@ -753,8 +654,6 @@ func (h *e2eHarness) startDataWorker() error {
 		_, _ = execOut(h.repoRoot, nil, "docker", "rm", "-f", h.dataCID)
 	})
 
-	// Wait until the worker has started polling the data queue (its startup slog
-	// line), so the run does not stall waiting for a poller.
 	return h.waitForDataWorker(90 * time.Second)
 }
 
@@ -790,15 +689,12 @@ func (h *e2eHarness) teardown() {
 
 func (h *e2eHarness) kubeEnv() []string { return []string{"KUBECONFIG=" + h.kubeconfig} }
 
-// deliveryURL is the per-run success-delivery webhook URL (report + ISO uploads),
-// keyed by run ID so concurrent-safe bucketing survives even though tests are
-// serialized.
+// deliveryURL is the per-run success-delivery webhook URL.
 func (h *e2eHarness) deliveryURL(runID string) string {
 	return h.webhookURL + "/delivery/" + runID
 }
 
-// failureURL is the fixed failure-alert webhook baked into the control worker
-// Deployment at install time.
+// failureURL is the failure-alert webhook baked into the control worker at install.
 func (h *e2eHarness) failureURL() string { return h.webhookURL + "/failure" }
 
 // upload is one delivered artifact captured by the mock webhook.
@@ -807,8 +703,7 @@ type upload struct {
 	data     []byte
 }
 
-// recorder captures the mock webhook traffic: per-run artifact uploads and
-// failure alerts.
+// recorder captures mock webhook uploads and failure alerts.
 type recorder struct {
 	mu         sync.Mutex
 	deliveries map[string][]upload
@@ -886,8 +781,7 @@ func (r *recorder) failureMessages() []string {
 
 // ---- shared test helpers ----------------------------------------------------
 
-// dialTemporal connects the test process to the host Temporal (TEMPORAL_ADDRESS),
-// isolating envconfig from any stray host config, and registers client shutdown.
+// dialTemporal connects to TEMPORAL_ADDRESS, isolated from host envconfig.
 func dialTemporal(t *testing.T) client.Client {
 	t.Helper()
 
@@ -903,8 +797,7 @@ func dialTemporal(t *testing.T) client.Client {
 	return temporalClient
 }
 
-// generateTestKeypair produces an age post-quantum keypair, returning the full
-// identity file contents (the AGE-SECRET-KEY escrow material) and its recipient.
+// generateTestKeypair returns a post-quantum age identity file and its recipient.
 func generateTestKeypair(t *testing.T) (identity, recipient string) {
 	t.Helper()
 
@@ -929,21 +822,12 @@ func generateTestKeypair(t *testing.T) (identity, recipient string) {
 	return string(contents), recipient
 }
 
-// backupWorkflowID is the fixed, singleton workflow ID every backup run submits
-// under (SPEC §4.2 — the model is serial: one data worker, one storage host, one
-// staging area). It mirrors the same constant in cmd/tapectl (package main, so not
-// importable). Runs are mutually exclusive, so the suite (which runs serially,
-// -p 1) submits under this one ID and awaits/terminates it by name; the per-test
-// runID lives on only as the webhook-delivery bucket token in the run config URL.
+// backupWorkflowID is the singleton run ID (SPEC §4.2), mirroring cmd/tapectl's
+// unexported constant. The per-test runID is only a webhook bucket token.
 const backupWorkflowID = "backup"
 
-// submitRun submits a backup run through the tapectl CLI — the operator path — by
-// writing the config as JSON and invoking `tapectl run --config <file>`. It
-// inherits the process env (TEMPORAL_ADDRESS + the dialTemporal isolation) and
-// asserts the CLI echoes back the singleton workflow ID. Because the workflow ID
-// is a singleton, a run left over from a prior test may still be closing; the
-// submit is retried until that run's ID frees (tapectl reports a conflict as "a
-// backup run is already in progress"), mirroring the tapectl integration test.
+// submitRun submits cfg via `tapectl run --config`, retrying while a prior
+// test's singleton run is still closing.
 func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config) {
 	t.Helper()
 
@@ -968,9 +852,7 @@ func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config) {
 			return
 		}
 
-		// Retry a run left over from a prior test whose singleton ID is still closing,
-		// and a transient failure to reach the shared dev Temporal (a brief dial
-		// timeout under load is not a real submit failure).
+		// Also retry transient dial failures to the shared dev Temporal.
 		retryable := strings.Contains(string(out), "already in progress") ||
 			strings.Contains(string(out), "connect to Temporal") ||
 			strings.Contains(string(out), "dial Temporal")
@@ -984,9 +866,7 @@ func (h *e2eHarness) submitRun(t *testing.T, cfg config.Config) {
 	}
 }
 
-// resumeRun resumes the paused backup run by invoking `tapectl resume`, exercising
-// the operator CLI path end to end (issue #67). Runs are a singleton, so resume
-// takes no arguments and acts on backupWorkflowID.
+// resumeRun resumes the paused run via `tapectl resume` (issue #67).
 func (h *e2eHarness) resumeRun(t *testing.T) {
 	t.Helper()
 
@@ -997,8 +877,7 @@ func (h *e2eHarness) resumeRun(t *testing.T) {
 	require.NoErrorf(t, err, "tapectl resume: %s", out)
 }
 
-// temporalRunID returns the Temporal RunID of the current backup run. The staging
-// directory is keyed by this, not the (singleton) workflow ID.
+// temporalRunID returns the current RunID, which keys the staging directory.
 func temporalRunID(t *testing.T, c client.Client) string {
 	t.Helper()
 
@@ -1013,10 +892,8 @@ func temporalRunID(t *testing.T, c client.Client) string {
 
 func ptrFloat(f float64) *float64 { return &f }
 
-// terminateOnCleanup best-effort terminates the backup run when the test ends, so a
-// panicked, timed-out, or otherwise-abandoned run does not linger on the shared
-// Temporal server — and, because the workflow ID is a singleton, so the next test
-// can submit its own run. Terminating an already-closed run is a harmless no-op.
+// terminateOnCleanup terminates the run at test end so the singleton ID is free
+// for the next test.
 func terminateOnCleanup(t *testing.T, c client.Client) {
 	t.Helper()
 
@@ -1036,8 +913,7 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// execOut runs a command, returning its combined output and a wrapped error that
-// includes that output for diagnosis.
+// execOut returns combined output; the error includes it.
 func execOut(dir string, extraEnv []string, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	if dir != "" {
@@ -1054,10 +930,8 @@ func execOut(dir string, extraEnv []string, name string, args ...string) (string
 	return string(out), nil
 }
 
-// execStdout runs a command and returns only its stdout, so callers can parse it
-// without stderr noise (nix/docker emit warnings to stderr that would otherwise
-// corrupt a parsed path or container id). On error the wrapped message carries
-// stderr for diagnosis.
+// execStdout returns stdout only, since nix/docker warnings on stderr would
+// corrupt parsed output; the error carries stderr.
 func execStdout(dir string, extraEnv []string, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	if dir != "" {
@@ -1078,12 +952,9 @@ func execStdout(dir string, extraEnv []string, name string, args ...string) (str
 	return string(out), nil
 }
 
-// probeDriveReadiness decides once, before any test, whether this kernel can run
-// mhvtl's tape drive at all: it loads a tape into drive 0, waits for it to become
-// ready, and unloads it. A drive that never readies is the one environment gap
-// the suite skips on (returned as a reason); every later per-test readiness
-// wait then fails rather than skips, so a drive that wedges mid-suite cannot hide
-// behind a passing "ok". A changer that cannot load or unload is an error.
+// probeDriveReadiness loads, readies and unloads drive 0 once. A drive that never
+// readies is a skip reason; later per-test waits fail instead, so a mid-suite
+// wedge can't hide behind "ok".
 func probeDriveReadiness() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

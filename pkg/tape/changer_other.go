@@ -7,9 +7,7 @@ import (
 	"errors"
 )
 
-// The changer issues its SCSI commands via the Linux SG_IO ioctl (see
-// changer_linux.go). The data worker runs exclusively on Linux; these stubs exist
-// so the package still builds on other platforms for tooling and editors.
+// Linux-only (SG_IO); these stubs keep the package building elsewhere.
 
 var errChangerUnsupported = errors.New("tape: Changer is only supported on Linux (SG_IO)")
 
