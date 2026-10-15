@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -93,8 +94,14 @@ func (o *OpticalBurn) validate() error {
 		return nil
 	}
 
-	if o.Copies < 0 {
-		return fmt.Errorf("delivery.opticalBurn.copies: must be >= 0, got %d", o.Copies)
+	// A present block that burns nothing would let a run succeed without the
+	// recovery disc the operator asked for; omitting the block disables burning.
+	if len(o.Drives) == 0 {
+		return errors.New("delivery.opticalBurn.drives: at least one burner drive is required (omit opticalBurn to disable burning)")
+	}
+
+	if o.Copies < 1 {
+		return fmt.Errorf("delivery.opticalBurn.copies: must be >= 1 (omit opticalBurn to disable burning), got %d", o.Copies)
 	}
 
 	seen := make(map[string]struct{}, len(o.Drives))

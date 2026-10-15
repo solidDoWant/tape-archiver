@@ -324,6 +324,10 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
   // escrowed). Manually-entered recipients are untouched.
   const lastGeneratedRecipient = useRef<string | null>(null)
 
+  // Without a deploy burner, optical burn can only be turned off (a loaded
+  // config may still have it on).
+  const hasBurner = deploy.opticalBurnDrives.some((drive) => drive.trim() !== '')
+
   const updateSource = (id: string, patch: Partial<SourceFormState>) => {
     setForm((previous) => ({
       ...previous,
@@ -693,17 +697,22 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
         <div className="flex items-center justify-between">
           <div>
             <div className="text-[12.5px] font-medium text-text">Optical recovery discs</div>
-            <div className="mt-0.5 font-mono text-[11px] text-text-faint">Burned on the configured burner drives</div>
+            <div className="mt-0.5 font-mono text-[11px] text-text-faint">
+              {hasBurner
+                ? 'Burned on the configured burner drives'
+                : 'No optical burner configured on this deployment (set OPTICAL_BURNER_DRIVES)'}
+            </div>
           </div>
           <label className="cursor-pointer">
             <input
               type="checkbox"
               checked={form.opticalBurnEnabled}
+              disabled={!hasBurner && !form.opticalBurnEnabled}
               aria-label="Enable optical recovery discs"
               onChange={(event) =>
                 setForm((previous) => ({
                   ...previous,
-                  opticalBurnEnabled: event.target.checked,
+                  opticalBurnEnabled: event.target.checked && hasBurner,
                   // Enabling burn guarantees at least one copy: a config loaded
                   // with copies=0 (burn off) would otherwise turn on with the
                   // hidden 0 still in state and build a no-op burn block.
@@ -723,12 +732,9 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               </label>
               <NumberField
                 id="config-optical-copies"
-                // min 1: this input is only shown when optical burn is enabled,
-                // and copies=0 means "disabled" server-side — so a 0 here builds
-                // an opticalBurn block that silently burns nothing yet reads
-                // back as OFF on a Form round-trip (opticalBurnEnabled is
-                // copies>0). Clearing the field commits nothing (the last value
-                // stands); the min attribute nudges toward a positive count.
+                // min is only a browser hint; the schema's minimum blocks a
+                // 0 or negative count at Review. Clearing the field commits
+                // nothing (the last value stands).
                 min={1}
                 value={form.opticalCopies}
                 onValue={(opticalCopies) => setForm((previous) => ({ ...previous, opticalCopies }))}

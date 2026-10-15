@@ -161,10 +161,10 @@ type Delivery struct {
 // Library fields.
 type OpticalBurn struct {
 	// Drives lists the optical burner device paths (e.g. /dev/sr0).
-	Drives []string `json:"drives"`
+	Drives []string `json:"drives" jsonschema:"minItems=1"`
 	// Copies is the number of discs to burn, in burn-sets of at most len(Drives).
-	// Zero disables burning; it must not be negative.
-	Copies int `json:"copies"`
+	// Omit the whole block to disable burning.
+	Copies int `json:"copies" jsonschema:"minimum=1"`
 	// AllowNonBlankDiscs permits reclaiming rewritable media; write-once media can
 	// never be overwritten regardless.
 	AllowNonBlankDiscs bool `json:"allowNonBlankDiscs,omitempty"`

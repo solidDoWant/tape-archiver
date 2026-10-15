@@ -255,6 +255,38 @@ describe('ConfigForm', () => {
     expect(screen.getByText(/copies per run/i)).toBeInTheDocument()
   })
 
+  it('does not offer optical burn when the deployment configures no burner drives', () => {
+    let latest: FormState = defaultFormState()
+    render(<Wrapper deploy={emptyDeploy} onForm={(form) => (latest = form)} />)
+
+    const toggle = screen.getByLabelText('Enable optical recovery discs')
+    expect(toggle).toBeDisabled()
+    expect(screen.getByText(/no optical burner configured/i)).toBeInTheDocument()
+
+    fireEvent.click(toggle)
+
+    expect(latest.opticalBurnEnabled).toBe(false)
+    expect(buildConfig(latest, emptyDeploy).delivery.opticalBurn).toBeUndefined()
+  })
+
+  it('still lets a loaded burn-enabled config turn optical burn off without a deploy burner', () => {
+    let latest: FormState = defaultFormState()
+    render(
+      <Wrapper
+        deploy={emptyDeploy}
+        initialForm={{ ...defaultFormState(), opticalBurnEnabled: true, opticalCopies: 2 }}
+        onForm={(form) => (latest = form)}
+      />,
+    )
+
+    const toggle = screen.getByLabelText('Enable optical recovery discs')
+    expect(toggle).toBeEnabled()
+
+    fireEvent.click(toggle)
+
+    expect(latest.opticalBurnEnabled).toBe(false)
+  })
+
   it('does not render the deploy-owned burner drives in the form at all, even when optical burn is enabled', () => {
     render(<Wrapper />)
 

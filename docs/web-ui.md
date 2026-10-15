@@ -218,8 +218,9 @@ burning, so the operator can see which devices a burn will target while still co
 only the on/off toggle and the copies per run. The server enforces them the same way as
 the other deploy-owned fields, but only when a submitted run actually enables optical
 burn (carries a `delivery.opticalBurn` block): a burn-off run never gains a spurious one.
-When the deployment configured no burner drives, the subsection shows a "not configured"
-notice naming the env var to set; JSON / paste mode remains the escape hatch.
+When the deployment configured no burner drives, the optical-burn toggle is disabled and
+the Delivery section says no burner is configured, naming the env var to set (a loaded
+config with burning on can still be turned off). A copies-per-run below 1 blocks Review.
 
 **Deploy-owned library topology (slot-grid picker).** The physical library's slot
 layout is likewise a deployment property, so the Library section's blank/write-target
