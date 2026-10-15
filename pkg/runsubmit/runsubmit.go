@@ -106,9 +106,8 @@ type TemporalClient interface {
 
 var _ TemporalClient = client.Client(nil)
 
-// MemoKeyDryRun is the memo field recording whether a run was a dry-run; it is
-// the only durable signal distinguishing one from a production run.
-const MemoKeyDryRun = "dryRun"
+// MemoKeyDryRun is the memo field recording whether a run was a dry run.
+const MemoKeyDryRun = backup.MemoKeyDryRun
 
 // StartOptions returns the options every backup submission must use: the
 // singleton workflow ID, failing if a run is already in progress (SPEC §4.2).

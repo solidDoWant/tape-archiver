@@ -5,6 +5,8 @@ Every run produces a single PDF report (SPEC §9): the durable, printable, lamin
 and is intended to be printed and stored alongside the physical tapes, and is also
 embedded in the recovery ISO.
 
+A dry-run report carries a red banner under the title and a "DRY RUN — no real tapes were written" footer on every page: its barcodes are the real library's, mirrored onto the virtual one, and no real tape holds its data.
+
 ## Contents
 
 The report contains, at minimum:

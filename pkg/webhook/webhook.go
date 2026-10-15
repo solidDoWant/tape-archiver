@@ -60,6 +60,21 @@ type Message struct {
 type Client struct {
 	url        string
 	httpClient *http.Client
+	prefix     string
+}
+
+// DryRunPrefix leads every alert about a dry run, so an operator never acts on
+// the real library because of a rehearsal.
+const DryRunPrefix = "🧪 **[DRY RUN — virtual library, no real tapes]** "
+
+// WithDryRun prefixes every message this client sends with DryRunPrefix when
+// dryRun is set.
+func (c *Client) WithDryRun(dryRun bool) *Client {
+	if dryRun {
+		c.prefix = DryRunPrefix
+	}
+
+	return c
 }
 
 // New returns a Client for url; an empty URL yields a disabled no-op client.
@@ -79,7 +94,7 @@ func (c *Client) Send(ctx context.Context, msg Message) error {
 	}
 
 	// Backstop: Discord rejects content over its limit with HTTP 400.
-	msg.Content = truncate(msg.Content, maxContentLength)
+	msg.Content = truncate(c.prefix+msg.Content, maxContentLength)
 
 	body, err := json.Marshal(msg)
 	if err != nil {

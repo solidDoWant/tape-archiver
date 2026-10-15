@@ -410,7 +410,7 @@ func TestDeliverySummary(t *testing.T) {
 		},
 	}
 
-	summary := deliverySummary("019fa67f-6e01-7752-b1b6-e1d2b7530cf5", state)
+	summary := deliverySummary("019fa67f-6e01-7752-b1b6-e1d2b7530cf5", state, false)
 
 	assert.Contains(t, summary, "019fa67f-6e01-7752-b1b6-e1d2b7530cf5",
 		"the message must name the run, so a reader can find it without opening the PDF")
@@ -430,7 +430,7 @@ func TestDeliverySummaryPluralizesOneArchive(t *testing.T) {
 	summary := deliverySummary("run-1", &runState{
 		staged:  []StagedArchive{{SourceIndex: 0, SizeBytes: 1_500_000}},
 		written: []WrittenTape{{Barcode: tape.Barcode("TAPE01L6")}},
-	})
+	}, false)
 
 	assert.Contains(t, summary, "1 archive (1.5 MB)")
 }
@@ -451,4 +451,24 @@ func TestHumanBytes(t *testing.T) {
 	for bytes, want := range tests {
 		assert.Equalf(t, want, humanBytes(bytes), "humanBytes(%d)", bytes)
 	}
+}
+
+func TestDeliverySummaryLabelsADryRun(t *testing.T) {
+	t.Parallel()
+
+	state := &runState{
+		staged:  []StagedArchive{{SourceIndex: 0, SizeBytes: 1_500_000}},
+		written: []WrittenTape{{Barcode: tape.Barcode("JCY632L5")}},
+	}
+
+	dry := deliverySummary("run-1", state, true)
+	assert.Contains(t, dry, "Dry run complete")
+	assert.Contains(t, dry, "no real tapes were written")
+	assert.Contains(t, dry, "**Virtual tapes:** JCY632L5")
+	assert.NotContains(t, dry, "Backup complete")
+	assert.NotContains(t, dry, "recovery index")
+
+	real := deliverySummary("run-1", state, false)
+	assert.Contains(t, real, "Backup complete")
+	assert.NotContains(t, real, "Dry run")
 }

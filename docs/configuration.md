@@ -283,6 +283,8 @@ attachment:
 The attached report is this run's recovery index — print it and store it with the tapes.
 ```
 
+A dry run says so instead: the message opens with "🧪 **Dry run complete** — a rehearsal against the virtual library; no real tapes were written", lists **Virtual tapes**, and says the report must not be filed with any tapes. Every failure and pause alert for a dry run is prefixed with "🧪 **[DRY RUN — virtual library, no real tapes]**", so an operator never acts on the real library because of a rehearsal.
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `webhookUrl` | `string` | yes | Discord incoming webhook URL for success delivery. On success the PDF report is uploaded here. |
