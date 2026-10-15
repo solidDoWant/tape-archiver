@@ -11,6 +11,7 @@ class FakeEventSource {
   static instances: FakeEventSource[] = []
 
   closeCalls = 0
+  readyState = 1
   private listeners: Record<string, ((event: MessageEvent<string>) => void)[]> = {}
   url: string
 
@@ -225,5 +226,83 @@ describe('useRunEvents run switching', () => {
 
     expect(result.current.state).toBe('connecting')
     expect(result.current.detail).toBeNull()
+  })
+})
+
+describe('useRunEvents reconnection (issue #384)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { subject: 'user-1' })))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('opens a fresh stream after the browser gives up on a non-200 reconnect, and goes live again', () => {
+    const { result } = renderHook(() => useRunEvents('run-1'))
+
+    const first = FakeEventSource.instances[0]
+    first.emit('update', JSON.stringify({ runId: 'run-1', status: 'Running' }))
+
+    // A 502 on reconnect fails the EventSource for good: readyState CLOSED.
+    first.readyState = 2
+    first.emitError()
+    expect(result.current.state).toBe('error')
+
+    act(() => {
+      vi.advanceTimersByTime(60_000)
+    })
+
+    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(FakeEventSource.instances[1].url).toBe('/api/events/runs/run-1')
+
+    FakeEventSource.instances[1].emit('update', JSON.stringify({ runId: 'run-1', status: 'Paused' }))
+
+    expect(result.current.state).toBe('live')
+    expect(result.current.detail?.status).toBe('Paused')
+  })
+
+  it('leaves a still-reconnecting stream to the browser', () => {
+    renderHook(() => useRunEvents('run-1'))
+
+    FakeEventSource.instances[0].readyState = 0
+    FakeEventSource.instances[0].emitError()
+
+    act(() => {
+      vi.advanceTimersByTime(60_000)
+    })
+
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('does not reconnect after the terminal done event', () => {
+    renderHook(() => useRunEvents('run-1'))
+
+    const source = FakeEventSource.instances[0]
+    source.emit('done', JSON.stringify({ runId: 'run-1', status: 'Completed' }))
+    source.readyState = 2
+    source.emitError()
+
+    act(() => {
+      vi.advanceTimersByTime(60_000)
+    })
+
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it('does not reconnect after unmount', () => {
+    const { unmount } = renderHook(() => useRunEvents('run-1'))
+
+    const source = FakeEventSource.instances[0]
+    source.readyState = 2
+    source.emitError()
+    unmount()
+
+    act(() => {
+      vi.advanceTimersByTime(60_000)
+    })
+
+    expect(FakeEventSource.instances).toHaveLength(1)
   })
 })

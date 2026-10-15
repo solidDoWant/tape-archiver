@@ -33,7 +33,12 @@ export interface RunEventDetail {
   currentPause: CurrentPauseInfo
 }
 
-export type RunConnectionState = 'connecting' | 'live' | 'terminal' | 'error'
+// EventSource.CLOSED, as a literal so test fakes need not define the static.
+const eventSourceClosed = 2
+const reconnectInitialDelayMs = 1_000
+const reconnectMaxDelayMs = 30_000
+
+export type RunConnectionState ='connecting' | 'live' | 'terminal' | 'error'
 
 export interface RunEventsState {
   state: RunConnectionState
@@ -53,10 +58,10 @@ export interface RunEventsState {
 // current status/phase and updating in place as further "update" events
 // arrive, "terminal" once the server sends its final "done" event (the run
 // reached a status other than RUNNING), and "error" if the underlying
-// connection drops before that — EventSource retries automatically on its
-// own, so an "error" state can recover back to "live" if the retry
-// succeeds; it does not recover once "terminal" has been reached, since the
-// stream is explicitly closed at that point and not reopened.
+// connection drops before that. "error" always means a retry is pending:
+// EventSource retries network drops itself, but fails for good (readyState
+// CLOSED) on a non-200 reconnect, so the hook then opens a fresh EventSource
+// with backoff (issue #384). Nothing reconnects once "terminal" is reached.
 //
 // runId may be null/empty to mean "no run to watch yet" (e.g. Dashboard
 // before it knows whether any run is currently active): the hook then opens
@@ -94,7 +99,9 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
     }
 
     let cancelled = false
-    const source = new EventSource(`/api/events/runs/${encodeURIComponent(runId)}`)
+    let source: EventSource
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+    let reconnectDelay = reconnectInitialDelayMs
 
     const parseDetail = (event: MessageEvent<string>): RunEventDetail | null => {
       try {
@@ -115,6 +122,7 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
         // 'live' with a null detail. The next well-formed frame moves us on.
         return
       }
+      reconnectDelay = reconnectInitialDelayMs
       setDetail(parsed)
       setState('live')
     }
@@ -155,16 +163,26 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
       // treats a 401 as authoritative session loss and notifies
       // identity.ts's subscription (api.ts's onSessionExpired), which
       // routes the app back to the login page — this probe only needs to
-      // fire that path, not act on its own result. Any other outcome
-      // (success, or a non-401 failure such as the server being briefly
-      // unreachable) is left alone: EventSource's own automatic
-      // reconnection handles recovering from those without this hook doing
-      // anything further.
+      // fire that path, not act on its own result.
       //
-      // Skip the probe entirely once terminal: the server closes the stream on
-      // purpose after "done", so that drop is expected and carries no session
-      // signal — probing on it would be a wasted authenticated request.
-      if (cancelled || terminalReached || sessionProbeInFlight) {
+      // Skip everything once terminal: the server closes the stream on
+      // purpose after "done", so that drop is expected.
+      if (cancelled || terminalReached) {
+        return
+      }
+
+      // A network drop leaves the source CONNECTING and the browser retries
+      // it; a non-200/non-event-stream reconnect (e.g. a 502 during a
+      // rollout) closes it for good, so open a new one.
+      if (source.readyState === eventSourceClosed && reconnectTimer === undefined) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined
+          connect()
+        }, reconnectDelay)
+        reconnectDelay = Math.min(reconnectDelay * 2, reconnectMaxDelayMs)
+      }
+
+      if (sessionProbeInFlight) {
         return
       }
 
@@ -180,12 +198,18 @@ export function useRunEvents(runId: string | null | undefined): RunEventsState {
         })
     }
 
-    source.addEventListener('update', handleUpdate)
-    source.addEventListener('done', handleDone)
-    source.addEventListener('error', handleError)
+    const connect = () => {
+      source = new EventSource(`/api/events/runs/${encodeURIComponent(runId)}`)
+      source.addEventListener('update', handleUpdate)
+      source.addEventListener('done', handleDone)
+      source.addEventListener('error', handleError)
+    }
+
+    connect()
 
     return () => {
       cancelled = true
+      clearTimeout(reconnectTimer)
       source.close()
     }
   }, [runId])
