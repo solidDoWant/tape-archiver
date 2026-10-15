@@ -20,18 +20,12 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// writeVerifySlot is the storage slot both on-tape-contents tests use. It is
-// distinct from the slots the sibling integration tests claim (0: session,
-// 1: single-tape TestTapePath, 2: whole-run/AllowNonBlank, 4–7: multi-drive-set)
-// so this fixture never collides with them. Integration tests run sequentially
-// and each test blanks the tape on cleanup, so the two tests here can share it.
+// writeVerifySlot is distinct from the sibling integration tests' slots; the
+// two tests here share it since tests run sequentially and blank on cleanup.
 const writeVerifySlot = 3
 
-// stageFile writes content to name under dir and returns a StagedSlice carrying
-// the file's real SHA-256 and size. The precomputed digest is what WriteTree
-// records in the manifest without re-reading the file in the write window
-// (SPEC §14), so the tests verify against the exact digest the production path
-// would have carried from Prepare/GeneratePAR2.
+// stageFile writes a staged file and returns its StagedSlice with the real
+// SHA-256 and size.
 func stageFile(t *testing.T, dir, name string, content []byte) StagedSlice {
 	t.Helper()
 
@@ -47,17 +41,9 @@ func stageFile(t *testing.T, dir, name string, content []byte) StagedSlice {
 	}
 }
 
-// TestWriteTreeOnTapeContents writes a tape through the production Write path
-// (FormatTape → WriteTree → FinalizeTape) with a real, non-empty archive tree,
-// then re-mounts the finalized LTFS volume and byte-verifies the on-tape
-// contents: every archive slice, every PAR2 recovery file, and manifest.json.
-//
-// This closes the coverage gap in issue #149 (AC1): the leaf copy/manifest
-// functions are unit-tested against temp dirs, but nothing exercised the
-// WriteTree glue (mount → copyTape → buildManifest → writeManifest) against a
-// real LTFS volume with a non-empty archive list. A WriteTree that skips or
-// miswires the archive copy fails the file/bytes assertions here; one that skips
-// the manifest fails the manifest assertions. Skips when mhvtl or LTFS is absent.
+// TestWriteTreeOnTapeContents writes a real non-empty tree through Format,
+// WriteTree and Finalize, then re-mounts and byte-verifies every slice, PAR2
+// file and manifest.json (#149 AC1).
 func TestWriteTreeOnTapeContents(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 	testutil.SkipIfLTFSUnavailable(t)
@@ -78,9 +64,7 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 	expectedBarcode := inv.Slots[writeVerifySlot].Barcode
 	require.NotEmptyf(t, expectedBarcode, "slot %d tape must have a barcode", writeVerifySlot)
 
-	// Restore the library on exit: the tape blanked and parked back in its home
-	// slot, drive 0 empty, so a repeat run and the sibling tests find the state
-	// they expect.
+	// Restore the library on exit: tape blanked and home, drive 0 empty.
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
 		defer cancel()
@@ -88,8 +72,7 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 		returnAndBlank(cleanupCtx, changer, stDev, sgDev, driveAddr, slotAddr, expectedBarcode)
 	})
 
-	// Probe drive readiness up front, skipping cleanly if mhvtl left the drive
-	// stuck "not ready", then unload so the Load activity below loads from scratch.
+	// Skip if mhvtl left the drive stuck "not ready", then unload.
 	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load for readiness probe")
 	testutil.SkipIfDriveNotReady(t, stDev)
 	require.NoError(t, changer.Unload(t.Context(), slotAddr, driveAddr), "unload after readiness probe")
@@ -112,8 +95,6 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 	testutil.SkipIfDriveNotReady(t, stDev)
 
 	// --- Stage a real, non-empty archive tree ---------------------------------
-	// One archive (source index 0, label "photos") with two slice files and one
-	// PAR2 recovery file, each with distinct bytes and a real SHA-256.
 	stagingDir := t.TempDir()
 	sliceZero := stageFile(t, stagingDir, "archive.000", []byte("on-tape slice zero: the quick brown fox"))
 	sliceOne := stageFile(t, stagingDir, "archive.001", []byte("on-tape slice one: jumps over the lazy dog"))
@@ -147,14 +128,12 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 		Archives:  archives,
 	}), "WriteTree")
 
-	// FinalizeTape unmounts, flushing the LTFS index to tape so the re-mount below
-	// reads a durably written volume.
+	// FinalizeTape unmounts, flushing the LTFS index to tape.
 	_, err = writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
 	require.NoError(t, err, "FinalizeTape")
 
 	// --- Re-mount the finalized volume and verify on-tape contents ------------
-	// Mount fresh (a different mount/work dir than WriteTree used) so the read
-	// comes off the tape, not a lingering process or cache.
+	// A fresh mount so the read comes off tape, not a lingering cache.
 	mountDir := filepath.Join(t.TempDir(), "verify-mount")
 	workDir := filepath.Join(t.TempDir(), "verify-work")
 
@@ -171,7 +150,6 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 	root := mount.Mountpoint()
 	dir := archiveDirName(0, label) // archives/000-photos
 
-	// Every staged slice and PAR2 file must be on tape with byte-identical content.
 	for _, staged := range []StagedSlice{sliceZero, sliceOne, par2File} {
 		tapePath := filepath.Join(root, dir, filepath.Base(staged.Path))
 
@@ -184,8 +162,6 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 		assert.Equalf(t, want, got, "on-tape bytes of %s must match the source", filepath.Base(staged.Path))
 	}
 
-	// manifest.json must be present at the LTFS root and describe the tape and
-	// every file with the precomputed digests.
 	manifestBytes, err := os.ReadFile(filepath.Join(root, manifestName))
 	require.NoError(t, err, "manifest.json must be present at the LTFS root")
 
@@ -213,15 +189,8 @@ func TestWriteTreeOnTapeContents(t *testing.T) {
 }
 
 // TestWriteTreeCopyFailureLeavesNoManifest proves the SPEC §6 completeness
-// signal end-to-end: when the archive-tree copy fails before completing,
-// manifest.json must be absent from the finalized volume, so a future recoverer
-// can discard an incompletely-written tape by the missing manifest alone.
-//
-// It induces a copyTape failure by pointing a slice at a nonexistent staged
-// file: copyFile's os.Open fails, so WriteTree returns an error before
-// writeManifest runs. The mount is parked in the registry before the copy, so
-// FinalizeTape still unmounts/flushes the partial tape; re-mounting it must show
-// no manifest.json. This closes issue #149 AC2. Skips when mhvtl or LTFS is absent.
+// signal: a copy that fails (slice points at a nonexistent file) leaves no
+// manifest.json on the finalized volume (#149 AC2).
 func TestWriteTreeCopyFailureLeavesNoManifest(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 	testutil.SkipIfLTFSUnavailable(t)
@@ -249,8 +218,6 @@ func TestWriteTreeCopyFailureLeavesNoManifest(t *testing.T) {
 		returnAndBlank(cleanupCtx, changer, stDev, sgDev, driveAddr, slotAddr, barcode)
 	})
 
-	// Load and wait for readiness; keep the tape in the drive so FormatTape can
-	// format it in place.
 	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "load tape")
 	testutil.SkipIfDriveNotReady(t, stDev)
 
@@ -263,9 +230,7 @@ func TestWriteTreeCopyFailureLeavesNoManifest(t *testing.T) {
 		Barcode: barcode,
 	}), "FormatTape")
 
-	// WriteTree with a slice pointing at a file that does not exist: copyTape's
-	// copyFile can't open it, so WriteTree fails during the copy — before
-	// writeManifest is reached.
+	// A missing slice makes copyTape fail before writeManifest runs.
 	missingSlice := StagedSlice{
 		Path:      filepath.Join(stagingDir, "does-not-exist.000"),
 		SHA256:    "deadbeef",
@@ -283,14 +248,10 @@ func TestWriteTreeCopyFailureLeavesNoManifest(t *testing.T) {
 	})
 	require.Error(t, err, "WriteTree must fail when a staged slice is missing")
 
-	// WriteTree parked the mount before the copy; finalize it to unmount/flush the
-	// partially written tape, exactly as the production Teardown/Finalize path
-	// would leave it.
+	// WriteTree parked the mount before the copy; finalize the partial tape.
 	_, err = writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: sgDev, Barcode: barcode})
 	require.NoError(t, err, "FinalizeTape must unmount the partially written tape")
 
-	// Re-mount and assert manifest.json is absent — the completeness signal must
-	// not be present on an incompletely written tape.
 	mountDir := filepath.Join(t.TempDir(), "verify-mount")
 	workDir := filepath.Join(t.TempDir(), "verify-work")
 

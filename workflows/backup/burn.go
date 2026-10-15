@@ -12,88 +12,46 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/optical"
 )
 
-// The optical-burn phase (SPEC §10) burns the recovery disc — the PDF report, the
-// SHA-256 manifest, the per-tape LTFS indexes, and the static recovery binaries —
-// onto optical media (M-DISC DVD) as an extra, offline redundancy layer. These are
-// the per-disc activities that physically burn and verify ONE disc; they run on the
-// data task queue (the storage host, where the staged ISO lives and the burners are
-// attached), keeping the tens-of-MB image off the Temporal payload path exactly like
-// the tape Write/Eject activities.
-//
-// The deterministic burn-set / disc-swap / pause-resume orchestration is a separate
-// sub-issue of parent #98: BurnDisc signals "cannot write, pause the operator" via a
-// distinguishable error (IsDiscNotWritable) rather than blocking, and never silently
-// overwrites a disc.
-//
-// Both activities carry MaximumAttempts: 1 in their workflow dispatch — a burn is
-// physical and its failure (a bad disc, a refused non-blank medium) needs an operator
-// decision, not a blind retry that would waste another write-once disc.
+// Per-disc optical burn/verify activities (SPEC §10). They run on the data queue so
+// the ISO stays off the Temporal payload path, and are dispatched with
+// MaximumAttempts: 1: a failed burn needs an operator decision, not a retry that
+// wastes another write-once disc.
 
-// DiscNotWritableErrorType is the temporal application-error type BurnDisc returns
-// when the loaded disc cannot be written — a non-blank disc without the allow-non-blank
-// opt-in, or any non-blank write-once disc (which the opt-in never forces). The
-// orchestration sub-issue matches on it (IsDiscNotWritable) to pause for the operator
-// instead of failing the run. It is non-retryable: the disc is physically unwritable
-// until the operator swaps it, so retrying the same attempt cannot succeed.
-//
-// The BurnDisc/VerifyDisc activity timeouts (StartToClose, HeartbeatTimeout) are set by
-// the workflow dispatch in the burn-set orchestration sub-issue of parent #98.
+// DiscNotWritableErrorType is the non-retryable application-error type BurnDisc
+// returns when the loaded disc cannot be written; the workflow pauses for the
+// operator on it.
 const DiscNotWritableErrorType = "disc-not-writable"
 
-// BurnDiscInput is the payload for the BurnDisc activity: the burner device, the
-// staged uncompressed ISO to burn, and whether the run opted in to reclaiming a
-// non-blank rewritable disc (Delivery.OpticalBurn.AllowNonBlankDiscs).
+// BurnDiscInput is the payload for the BurnDisc activity.
 type BurnDiscInput struct {
-	// Device is the optical burner device node (e.g. /dev/sr0).
 	Device string
-	// ISOPath is the staged, uncompressed recovery ISO 9660 image to burn. It is the
-	// image assembled by the Report phase (SPEC §10) — burned verbatim, no computation
-	// in the burn window.
+	// ISOPath is the staged recovery ISO, burned verbatim (no computation in the
+	// burn window).
 	ISOPath string
-	// AllowNonBlankDiscs mirrors Delivery.OpticalBurn.AllowNonBlankDiscs: when true a
-	// non-blank *rewritable* disc is reclaimed and overwritten (with a warning)
-	// instead of pausing the run. It never forces a write-once overwrite. The state
-	// detection itself always runs; this only changes the non-blank outcome.
+	// AllowNonBlankDiscs reclaims a non-blank rewritable disc instead of pausing. It
+	// never forces a write-once overwrite.
 	AllowNonBlankDiscs bool
 	// DriveHasVerifiedCopy is true when this run already burned and verified a copy
-	// in this burner (state.burnedDiscs records it). When set, AllowNonBlankDiscs no
-	// longer reclaims a non-blank rewritable disc found in the drive: it is this
-	// run's own just-verified copy still loaded (a skipped/duplicated pause or a
-	// forgotten disc swap), not a prior-run leftover, so reclaiming it would blank a
-	// copy the report already counts — a silent loss of the configured redundancy
-	// (SPEC §2 principle 3, issue #154). The disc pauses for an operator swap
-	// instead. AllowNonBlankDiscs still reclaims a non-blank disc in a drive that has
-	// NOT yet produced a copy this run — the opt-in's actual purpose (a genuine
-	// prior-run disc).
+	// in this burner. A non-blank disc there is then this run's own copy, so it is
+	// never reclaimed even with AllowNonBlankDiscs (issue #154).
 	DriveHasVerifiedCopy bool
 }
 
-// BurnResult is the BurnDisc activity's result, carrying the provenance the report
-// records (SPEC §9): which drive burned the disc and whether a non-blank disc was
-// deliberately reclaimed.
+// BurnResult is the BurnDisc activity's result, recorded in the report (SPEC §9).
 type BurnResult struct {
-	// Device is the burner the disc was written on, echoed for the run record.
 	Device string
-	// OverwroteNonBlank is true when the disc was found non-blank (rewritable) and
-	// reclaimed because the run set AllowNonBlankDiscs. It is false for the normal
-	// (blank) path. The report records the deliberate overwrite.
+	// OverwroteNonBlank is true when a non-blank rewritable disc was reclaimed.
 	OverwroteNonBlank bool
 }
 
 // VerifyDiscInput is the payload for the VerifyDisc activity.
 type VerifyDiscInput struct {
-	// Device is the optical burner/reader device node the burned disc is loaded in.
 	Device string
-	// ManifestPath is the on-disk path to the sha256sum-format manifest of the disc's
-	// contents (disc-relative path -> SHA-256). VerifyDisc reads the disc back and
-	// checks every file against it. The disc-content manifest is produced by the
-	// Report/orchestration sub-issue; VerifyDisc is agnostic to how it was built.
+	// ManifestPath is a sha256sum-format manifest of the disc's contents.
 	ManifestPath string
 }
 
-// BurnActivities hosts the per-disc BurnDisc and VerifyDisc activities. It is
-// stateless (like EjectActivities): every per-disc parameter flows through the
-// activity input, so nothing is wired in from DataConfig.
+// BurnActivities hosts the stateless BurnDisc and VerifyDisc activities.
 type BurnActivities struct{}
 
 // newBurnActivities returns the optical burn/verify activities.
@@ -103,64 +61,37 @@ func newBurnActivities() *BurnActivities { return &BurnActivities{} }
 type burnAction int
 
 const (
-	// burnWrite: the disc is blank and ready to burn directly.
 	burnWrite burnAction = iota
-	// burnReclaimWrite: the disc is a non-blank rewritable medium and the run opted
-	// in — reclaim it with Blank, then burn.
+	// burnReclaimWrite blanks a non-blank rewritable disc, then burns.
 	burnReclaimWrite
-	// burnPause: the disc cannot be written (non-blank without the opt-in, or any
-	// non-blank write-once medium) — return the operator-pause error, touch nothing.
+	// burnPause returns the operator-pause error without touching the disc.
 	burnPause
 )
 
-// decideBurn applies the overwrite policy to a loaded disc's state. It is pure —
-// no device I/O — so the "never silently overwrite" decision that ACs 3–5 turn on
-// is unit-tested exhaustively without optical hardware (mirroring optical.verifyTree).
-//
-//   - StateBlank                                              → burnWrite
-//   - StateNonBlankRewritable + allowNonBlank + !driveHasCopy → burnReclaimWrite
-//   - StateNonBlankRewritable + driveHasVerifiedCopy          → burnPause (this run's
-//     own just-verified copy is still loaded; never reclaim it — issue #154)
-//   - StateNonBlankRewritable + !allowNonBlank                → burnPause
-//   - StateAppendableWriteOnce / StateFinalized               → burnPause (write-once:
-//     the flag never forces an overwrite, so a used write-once disc always pauses)
-//   - StateUnknown                                            → error (no/unreadable medium)
+// decideBurn applies the overwrite policy to a loaded disc's state. It is pure so
+// the "never silently overwrite" decision is unit-testable without hardware.
 func decideBurn(state optical.DiscState, allowNonBlank, driveHasVerifiedCopy bool) (burnAction, error) {
 	switch state {
 	case optical.StateBlank:
 		return burnWrite, nil
 	case optical.StateNonBlankRewritable:
-		// Never blank a disc in a drive that already produced a verified copy this
-		// run: that non-blank disc is this run's own copy, not a prior-run leftover,
-		// so reclaiming it would destroy a copy the report already counts (issue
-		// #154). It pauses for an operator swap even with the opt-in set. A blank
-		// disc in the same drive is unaffected (handled by StateBlank above), so a
-		// correctly-swapped fresh blank in a reused drive still burns normally.
+		// A non-blank disc in a drive that already produced a verified copy is this
+		// run's own copy; reclaiming it would destroy a counted copy (issue #154).
 		if allowNonBlank && !driveHasVerifiedCopy {
 			return burnReclaimWrite, nil
 		}
 
 		return burnPause, nil
 	case optical.StateAppendableWriteOnce, optical.StateFinalized:
-		// Write-once media (M-DISC DVD-R, DVD+R, CD-R, BD-R) cannot be reclaimed;
-		// AllowNonBlankDiscs deliberately does not apply here (SPEC §10, AC5).
+		// Write-once media can never be reclaimed, opt-in or not (SPEC §10).
 		return burnPause, nil
 	default: // StateUnknown
 		return burnWrite, fmt.Errorf("optical disc state could not be determined (no medium loaded, or an unreadable disc)")
 	}
 }
 
-// BurnDisc burns the staged recovery ISO onto the disc loaded in input.Device,
-// applying the overwrite policy first: a blank disc is written directly; a non-blank
-// rewritable disc is reclaimed and written only when the run set AllowNonBlankDiscs
-// (with a prominent warning naming the drive); any other non-blank disc — a rewritable
-// one without the opt-in, or a write-once one regardless of the opt-in — is refused
-// with a typed operator-pause error (IsDiscNotWritable) and nothing is written, so no
-// partial or bad disc is produced.
-//
-// The long burn (and any reclaim) runs under a liveness heartbeat so a data-worker
-// restart mid-burn is caught within activityHeartbeatTimeout rather than the activity's
-// (much longer) StartToClose timeout.
+// BurnDisc burns the staged recovery ISO onto the loaded disc after applying the
+// overwrite policy; an unwritable disc yields IsDiscNotWritable and nothing is written.
 func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (BurnResult, error) {
 	if input.Device == "" {
 		return BurnResult{}, fmt.Errorf("no optical burner device configured")
@@ -193,9 +124,7 @@ func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (Bur
 
 	err = withActivityHeartbeat(ctx, func() error {
 		if action == burnReclaimWrite {
-			// Reclaiming a non-blank disc is deliberate (AllowNonBlankDiscs) but
-			// irreversible: warn loudly, naming the drive whose disc is being wiped,
-			// so the destroyed data is observable in the run's durable log (SPEC §10).
+			// Irreversible: warn so the destroyed data is visible in the run log.
 			slog.WarnContext(ctx, "optical: reclaiming a NON-BLANK rewritable disc before burning "+
 				"(Delivery.OpticalBurn.AllowNonBlankDiscs is set); existing disc contents will be destroyed",
 				"device", input.Device)
@@ -223,10 +152,7 @@ func (a *BurnActivities) BurnDisc(ctx context.Context, input BurnDiscInput) (Bur
 	return result, nil
 }
 
-// discNotWritableError builds the typed, non-retryable operator-pause error for a
-// disc that cannot be written, naming the drive and the reason: a copy this run
-// already burned and verified is still loaded (issue #154), a rewritable disc that
-// needs the opt-in, or a write-once disc the opt-in can never overwrite.
+// discNotWritableError builds the operator-pause error naming the drive and reason.
 func discNotWritableError(device string, state optical.DiscState, allowNonBlank, driveHasVerifiedCopy bool) error {
 	var reason string
 
@@ -253,9 +179,7 @@ func discNotWritableError(device string, state optical.DiscState, allowNonBlank,
 	)
 }
 
-// IsDiscNotWritable reports whether err is the typed operator-pause error BurnDisc
-// returns when a disc cannot be written. The orchestration sub-issue uses it to pause
-// for the operator (swap in a blank disc) rather than failing the run.
+// IsDiscNotWritable reports whether err is BurnDisc's operator-pause error.
 func IsDiscNotWritable(err error) bool {
 	var appErr *temporal.ApplicationError
 	if !errors.As(err, &appErr) {
@@ -265,12 +189,8 @@ func IsDiscNotWritable(err error) bool {
 	return appErr.Type() == DiscNotWritableErrorType
 }
 
-// VerifyDisc mounts the burned disc in input.Device read-only and confirms every file
-// matches the disc-content manifest at input.ManifestPath (disc-relative path ->
-// SHA-256), returning an error on any mismatch, missing, or extra file — a burn
-// failure. The read-back runs under a liveness heartbeat. A returned error is either
-// operational (mount/read/parse) or a content mismatch (VerifyResult.Err); both fail
-// the disc, which the orchestration sub-issue treats as a bad burn.
+// VerifyDisc reads the burned disc back and checks every file against the manifest;
+// any mismatch, missing, or extra file fails the disc.
 func (a *BurnActivities) VerifyDisc(ctx context.Context, input VerifyDiscInput) error {
 	if input.Device == "" {
 		return fmt.Errorf("no optical device configured to verify")
@@ -304,8 +224,7 @@ func (a *BurnActivities) VerifyDisc(ctx context.Context, input VerifyDiscInput) 
 	return nil
 }
 
-// readManifestFile reads and parses the sha256sum-format disc-content manifest at
-// path into an optical.Manifest.
+// readManifestFile parses the sha256sum-format disc manifest at path.
 func readManifestFile(path string) (optical.Manifest, error) {
 	file, err := os.Open(path)
 	if err != nil {

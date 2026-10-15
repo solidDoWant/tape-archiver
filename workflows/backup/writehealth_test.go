@@ -28,8 +28,7 @@ func TestEvaluateWriteHealth(t *testing.T) {
 
 	const floor = 50.0
 
-	// measuredZero is a log-page result whose reposition counter was read and is
-	// zero (drive supports page 0x30) — the common clean-drive case.
+	// measuredZero: page 0x30 read, counter zero (the clean-drive case).
 	measuredZero := func() tape.LogPageResult {
 		return tape.LogPageResult{RepositionsMeasured: true}
 	}
@@ -73,8 +72,7 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			wantRepositionsMeasured: true,
 		},
 		{
-			// A non-zero reposition count (drive back-hitched) is never healthy,
-			// even with good throughput and no TapeAlert flags (AC1).
+			// Any back-hitch is unhealthy even at good throughput (AC1).
 			name:                    "repositions flagged",
 			stagedBytes:             6_000_000_000,
 			elapsed:                 60 * time.Second,
@@ -98,9 +96,8 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			wantAlertCount:          1,
 		},
 		{
-			// A drive that does not support page 0x30: the reposition counter is
-			// not measured. An unread counter can never certify a clean streaming
-			// write, so the tape is not healthy even with good throughput (AC3).
+			// Page 0x30 unsupported: an unread counter never certifies a clean
+			// write (AC3).
 			name:                    "unmeasured reposition counter is not healthy",
 			stagedBytes:             6_000_000_000,
 			elapsed:                 60 * time.Second,
@@ -112,8 +109,7 @@ func TestEvaluateWriteHealth(t *testing.T) {
 			wantHealthy:             false,
 		},
 		{
-			// A generation with no known floor: throughput is reported but no
-			// below-floor verdict is made and the tape is not "healthy".
+			// No known floor: no below-floor verdict and not "healthy".
 			name:                    "unknown floor is not judged",
 			stagedBytes:             2_400_000_000,
 			elapsed:                 60 * time.Second,
@@ -146,9 +142,8 @@ func TestEvaluateWriteHealth(t *testing.T) {
 	}
 }
 
-// TestWriteHealthFloor asserts the floor is derived per LTO generation from the
-// configured native capacity, and that generations without a sourced floor report
-// unknown rather than a guessed value.
+// TestWriteHealthFloor asserts per-generation floors and "unknown" (not a
+// guess) for generations without a sourced floor.
 func TestWriteHealthFloor(t *testing.T) {
 	t.Parallel()
 
@@ -180,8 +175,7 @@ func TestWriteHealthFloor(t *testing.T) {
 	}
 }
 
-// TestEvaluateWriteHealthLabelsTapeAlertFlags asserts an active flag is rendered
-// with its number and description for the report.
+// TestEvaluateWriteHealthLabelsTapeAlertFlags asserts flag label rendering.
 func TestEvaluateWriteHealthLabelsTapeAlertFlags(t *testing.T) {
 	t.Parallel()
 
@@ -196,11 +190,8 @@ func TestEvaluateWriteHealthLabelsTapeAlertFlags(t *testing.T) {
 	assert.Equal(t, "8: Cleaning required", health.TapeAlertFlags[0])
 }
 
-// TestMeasureWriteHealthReportsThroughputWhenScrapeFails proves the observational
-// contract (SPEC §2 principle 2): a log-page scrape failure is tolerated — the
-// activity still reports throughput and returns no error, so the run never fails on
-// a measurement problem. The cancelled context forces the scrape to fail fast
-// without needing tape hardware.
+// TestMeasureWriteHealthReportsThroughputWhenScrapeFails proves a scrape failure
+// (forced by a cancelled context) still reports throughput with no error.
 func TestMeasureWriteHealthReportsThroughputWhenScrapeFails(t *testing.T) {
 	t.Parallel()
 
@@ -227,15 +218,12 @@ func TestMeasureWriteHealthReportsThroughputWhenScrapeFails(t *testing.T) {
 	assert.Equal(t, int64(0), health.Repositions, "a failed scrape reports zero repositions")
 	assert.Empty(t, health.TapeAlertFlags)
 
-	// The medium's generation is read from the same drive, so it fails here too.
-	// It degrades to "unknown" rather than guessing, and without failing the run
-	// (issue #340).
+	// The generation read fails too and degrades to "unknown" (#340).
 	assert.Equal(t, "unknown", measurement.MediaGeneration,
 		"an unreadable medium generation must be reported as unknown, not guessed")
 }
 
-// TestMeasureWriteHealthRecordsMetrics asserts the throughput, below-floor,
-// reposition, and TapeAlert gauges are set for the tape's barcode.
+// TestMeasureWriteHealthRecordsMetrics asserts the gauges are set per barcode.
 func TestMeasureWriteHealthRecordsMetrics(t *testing.T) {
 	t.Parallel()
 
@@ -263,15 +251,13 @@ func TestMeasureWriteHealthRecordsMetrics(t *testing.T) {
 	assert.InDelta(t, 0.0, testutil.ToFloat64(activities.metrics.tapeAlerts.WithLabelValues("TAPE0002L6")), 0.001)
 }
 
-// TestNewWriteHealthActivitiesNilRegisterer asserts a nil registry (metrics
-// disabled) yields nil gauges and that recording is a safe no-op.
+// TestNewWriteHealthActivitiesNilRegisterer asserts a nil registry is a safe no-op.
 func TestNewWriteHealthActivitiesNilRegisterer(t *testing.T) {
 	t.Parallel()
 
 	activities := newWriteHealthActivities(nil)
 	assert.Nil(t, activities.metrics, "a nil registry disables the gauges")
 
-	// record on the nil metrics holder must not panic.
 	assert.NotPanics(t, func() {
 		activities.metrics.record("TAPE0001L6", WriteHealth{Measured: true, ThroughputMBps: 100})
 	})
@@ -304,10 +290,8 @@ func TestReportWriteHealthMapping(t *testing.T) {
 	assert.False(t, mapped.Healthy, "repositions make the tape unhealthy")
 }
 
-// TestTapeWrittenBytes asserts the throughput numerator sums every byte physically
-// written to the tape in the measured window — the archive slices AND the PAR2
-// recovery files — so it matches the WriteTree → FinalizeTape denominator (copyTape
-// writes both). Slice-only counting understated the rate by the PAR2 fraction (#146).
+// TestTapeWrittenBytes asserts the throughput numerator counts slices AND PAR2,
+// matching the write-window denominator (#146).
 func TestTapeWrittenBytes(t *testing.T) {
 	t.Parallel()
 
@@ -327,17 +311,13 @@ func TestTapeWrittenBytes(t *testing.T) {
 		"PAR2 bytes are included — they are copied inside the measured write window")
 }
 
-// TestWriteHealthNotFalseFlaggedByPAR2Window is the AC3 regression: a fill-to-capacity
-// tape whose write window includes copying PAR2 at maximum parity, streamed at or above
-// the generation floor for ALL bytes written, must NOT read below-floor, and the
-// reported throughput must reflect the true sustained rate. The old slice-only numerator
-// divided by the PAR2-inclusive window understated the rate (up to ~2x in fill mode) and
+// TestWriteHealthNotFalseFlaggedByPAR2Window is the AC3 regression: a slice-only
+// numerator over the PAR2-inclusive window halved the rate in fill mode and
 // false-flagged a healthy drive.
 func TestWriteHealthNotFalseFlaggedByPAR2Window(t *testing.T) {
 	t.Parallel()
 
-	// LTO-9 floor is 180 MB/s. Fill-to-capacity at maximum parity: PAR2 ≈ the slice
-	// bytes, so counting slices only would halve the measured rate.
+	// LTO-9 floor 180 MB/s; at maximum parity PAR2 ≈ slice bytes.
 	const floor = 180.0
 
 	sliceBytes := int64(18_000_000_000_000) // ~full LTO-9 native capacity of slices
@@ -351,8 +331,7 @@ func TestWriteHealthNotFalseFlaggedByPAR2Window(t *testing.T) {
 	written := tapeWrittenBytes(archives)
 	require.Equal(t, sliceBytes+par2Bytes, written)
 
-	// The drive streamed all 36 TB in 150_000 s = 240 MB/s — comfortably above the
-	// 180 MB/s floor. Elapsed is the true write-window span (slices + PAR2 copied).
+	// 36 TB in 150_000 s = 240 MB/s, above the floor.
 	elapsed := 150_000 * time.Second
 
 	health := evaluateWriteHealth(written, elapsed, tape.LogPageResult{}, floor, true)
@@ -360,8 +339,7 @@ func TestWriteHealthNotFalseFlaggedByPAR2Window(t *testing.T) {
 	assert.InDelta(t, 240.0, health.ThroughputMBps, 0.001, "throughput reflects all bytes written to tape")
 	assert.False(t, health.BelowFloor, "a drive above its floor for all written bytes must not be flagged below-floor")
 
-	// Prove the old slice-only numerator would have false-flagged this healthy drive:
-	// 18 TB ÷ 150_000 s = 120 MB/s, spuriously below the 180 MB/s floor.
+	// The old numerator: 18 TB / 150_000 s = 120 MB/s, spuriously below.
 	slicesOnly := evaluateWriteHealth(sliceBytes, elapsed, tape.LogPageResult{}, floor, true)
 	assert.InDelta(t, 120.0, slicesOnly.ThroughputMBps, 0.001)
 	assert.True(t, slicesOnly.BelowFloor,

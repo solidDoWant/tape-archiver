@@ -8,10 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testAddressing mirrors the mhvtl L700 / production-style element address
-// assignment page (0x1D): firstStorage=1000/47, firstIE=10/3, firstDTE=500/2,
-// firstMTE=1/1. Friendly numbers derived from it match what mtx reported, so
-// blankSlots configs stay byte-compatible.
+// testAddressing mirrors the mhvtl L700 element address assignment page.
 func testAddressing() *elementAddressing {
 	return &elementAddressing{
 		firstMTE: 1, numMTE: 1,
@@ -26,8 +23,7 @@ func testAddressing() *elementAddressing {
 func TestParseElementAddressing(t *testing.T) {
 	t.Parallel()
 
-	// Captured verbatim from `MODE SENSE(6) page 0x1D` on the mhvtl L700: a
-	// 4-byte header (block descriptor length 0) then the page.
+	// Captured verbatim from the mhvtl L700.
 	live := []byte{
 		0x17, 0x00, 0x10, 0x00, // mode parameter header
 		0x1d, 0x12, // page code 0x1D, page length 18
@@ -102,7 +98,6 @@ func TestParseElementAddressing(t *testing.T) {
 
 const testDescLen = 52
 
-// descriptor builds a single element descriptor of the standard 52-byte length.
 func descriptor(addr int, flags byte, opts ...func([]byte)) []byte {
 	d := make([]byte, testDescLen)
 	d[descAddressOffset], d[descAddressOffset+1] = byte(addr>>8), byte(addr)
@@ -115,7 +110,6 @@ func descriptor(addr int, flags byte, opts ...func([]byte)) []byte {
 	return d
 }
 
-// withVolumeTag writes a space-padded primary volume tag at descriptor byte 12.
 func withVolumeTag(tag string) func([]byte) {
 	return func(d []byte) {
 		for i := 0; i < primaryVolumeTagLen; i++ {
@@ -128,7 +122,6 @@ func withVolumeTag(tag string) func([]byte) {
 	}
 }
 
-// withSource sets SVALID and the raw source storage element address.
 func withSource(raw int) func([]byte) {
 	return func(d []byte) {
 		d[descSVALIDOffset] = svalidBit
@@ -136,7 +129,6 @@ func withSource(raw int) func([]byte) {
 	}
 }
 
-// statusPage builds an element status page for one element type.
 func statusPage(elementType byte, pvoltag bool, descs ...[]byte) []byte {
 	page := make([]byte, elementStatusPageHeaderLen)
 	page[0] = elementType
@@ -158,10 +150,8 @@ func statusPage(elementType byte, pvoltag bool, descs ...[]byte) []byte {
 	return page
 }
 
-// elementStatus wraps pages in the status data header, setting the header's
-// 24-bit "byte count of report available" to the actual body length so the
-// response looks like a complete (non-truncated) report, which is what
-// decodeElementStatus now checks.
+// elementStatus wraps pages in a header claiming a complete (untruncated)
+// report.
 func elementStatus(pages ...[]byte) []byte {
 	header := make([]byte, elementStatusHeaderLen)
 
@@ -185,10 +175,7 @@ const (
 func TestDecodeElementStatus(t *testing.T) {
 	t.Parallel()
 
-	// A full topology: 1 robot, 2 storage slots (one loaded), 2 drives (drive 1
-	// loaded from raw storage 1004), and 3 I/O slots exercising the ACCESS bit in
-	// both states. Element types intentionally out of order to prove the decoder
-	// keys on the page type, not position.
+	// Element types are out of order to prove the decoder keys on page type.
 	data := elementStatus(
 		statusPage(elementTypeMediumTransport, false, descriptor(1, 0x00)),
 		statusPage(elementTypeStorage, true,
@@ -250,14 +237,11 @@ func TestDecodeElementStatusShort(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestDecodeElementStatusTruncatedReport reproduces a report larger than the
-// transfer buffer: the data header claims 196608 report bytes while the storage
-// page advertises 3 descriptors but only 1 fits in what was transferred. The
-// decoder must reject this as truncated rather than surface a 1-of-3 inventory.
+// TestDecodeElementStatusTruncatedReport: a report larger than the transfer
+// buffer must be rejected, not decoded into a partial inventory.
 func TestDecodeElementStatusTruncatedReport(t *testing.T) {
 	t.Parallel()
 
-	// A storage page header that advertises 3 descriptors but carries only 1.
 	page := make([]byte, elementStatusPageHeaderLen)
 	page[0] = elementTypeStorage
 	page[pageDescLenOffset], page[pageDescLenOffset+1] = byte(testDescLen>>8), byte(testDescLen)
@@ -267,7 +251,6 @@ func TestDecodeElementStatusTruncatedReport(t *testing.T) {
 		byte(advertised>>16), byte(advertised>>8), byte(advertised)
 	page = append(page, descriptor(1000, flagFullAccess, withVolumeTag("TA0001L6"))...)
 
-	// Data header claiming 196608 report bytes — far more than was transferred.
 	data := make([]byte, elementStatusHeaderLen)
 
 	claimed := 196608 // 0x030000
@@ -285,12 +268,8 @@ func TestDecodeElementStatusTruncatedReport(t *testing.T) {
 
 // --- DVCID drive serial decoding (issue #137) ----------------------------
 
-// TestDecodeElementStatusDVCIDGolden decodes verbatim READ ELEMENT STATUS
-// responses captured from the mhvtl L700 with DVCID set and cleared. With DVCID
-// each data-transfer element carries its unit serial (the identity the Load phase
-// pairs a drive device node to its changer element by); without it, the serial is
-// empty. The two drives report XYZZY_A1 (DTE 0) and XYZZY_A2 (DTE 1) — the same
-// serials their INQUIRY VPD page 0x80 returns.
+// TestDecodeElementStatusDVCIDGolden decodes mhvtl L700 responses captured with
+// and without DVCID; the serials match the drives' INQUIRY VPD 0x80.
 func TestDecodeElementStatusDVCIDGolden(t *testing.T) {
 	t.Parallel()
 
@@ -310,8 +289,7 @@ func TestDecodeElementStatusDVCIDGolden(t *testing.T) {
 	assert.Len(t, inv.Slots, 47, "storage slots")
 	assert.Len(t, inv.IOSlots, 3, "I/O slots")
 
-	// The same library queried without DVCID reports no per-drive serials — the
-	// decode tolerates the absent identifier rather than failing.
+	// Without DVCID the serial is empty, not an error.
 	noDVCID, err := os.ReadFile("testdata/read_element_status_nodvcid.bin")
 	require.NoError(t, err)
 
@@ -322,18 +300,13 @@ func TestDecodeElementStatusDVCIDGolden(t *testing.T) {
 	assert.Empty(t, invNo.Drives[1].Serial, "no DVCID → no serial")
 }
 
-// dvcidDesignator builds an SPC designation descriptor (code set, designator type,
-// reserved, length, identifier) as appended to a data-transfer descriptor when
-// DVCID is set.
 func dvcidDesignator(codeSet, idType byte, identifier string) []byte {
 	d := []byte{codeSet, idType, 0x00, byte(len(identifier))}
 
 	return append(d, []byte(identifier)...)
 }
 
-// dvcidDriveDescriptor builds a data-transfer element descriptor carrying a DVCID
-// designator after the 12-byte prefix and the 36-byte primary volume tag (which is
-// present because the DTE page sets PVOLTAG).
+// dvcidDriveDescriptor places the designator after the 36-byte volume tag.
 func dvcidDriveDescriptor(addr int, flags byte, designator []byte) []byte {
 	d := make([]byte, primaryVolumeTagOffset+primaryVolumeTagFieldLen)
 	d[descAddressOffset], d[descAddressOffset+1] = byte(addr>>8), byte(addr)

@@ -15,8 +15,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/config"
 )
 
-// orderedPhases is the backup pipeline in the order SPEC §4.3 prescribes. The
-// tests assert the workflow drives exactly this sequence.
+// orderedPhases is the pipeline order SPEC §4.3 prescribes.
 var orderedPhases = []string{
 	PhaseResolve,
 	PhasePrepare,
@@ -31,9 +30,8 @@ var orderedPhases = []string{
 	PhaseDeliver,
 }
 
-// newBackupEnv returns a test workflow environment with the Backup workflow and
-// every phase activity plus the failure-alert activity registered, so a test only
-// overrides the behavior it cares about with OnActivity.
+// newBackupEnv returns a test environment with Backup and every phase activity
+// registered.
 func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 
@@ -42,60 +40,34 @@ func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(Backup)
 
-	// Every phase is run-orchestrated, so nothing is registered from the phase
-	// table's activity field (all nil); each phase's activities are registered
-	// explicitly below.
-
 	env.RegisterActivity(&ResolveControlActivities{})
 	env.RegisterActivity(&ResolveDataActivities{})
-	// The source-snapshot hold runs after Resolve; register its activities so the
-	// test env can dispatch them. With no sources the work list is empty and the
-	// workflow dispatches neither hold nor release.
 	env.RegisterActivity(newHoldActivities())
-	// The Prepare phase is run-orchestrated like Resolve; register its activity
-	// with a real staging root so a run with no sources stages nothing and the
-	// activity does not reject an empty staging directory.
+	// A real staging root, since Prepare rejects an empty one.
 	env.RegisterActivity(newPrepareActivities(t.TempDir()))
-	// The Pack and Generate PAR2 phases are run-orchestrated too; with no sources
-	// their activities produce an empty plan and no recovery sets.
 	env.RegisterActivity(newPackActivities())
 	env.RegisterActivity(newGeneratePAR2Activities())
-	// The Verify phase is run-orchestrated as well; with an empty plan it verifies
-	// nothing and produces a VerifiedPlan.
 	env.RegisterActivity(newVerifyActivities())
-	// The Load and Eject phases are now run-orchestrated; register their
-	// activities so the test env can dispatch them.
 	env.RegisterActivity(newLoadActivities())
 	env.RegisterActivity(newEjectActivities())
-	// The Write phase creates a Temporal session. Enable the session worker so
-	// the testsuite registers the internal session creation/completion
-	// activities and the session scaffold in writePhase succeeds.
+	// Write creates a Temporal session, which needs the session worker.
 	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
-	// Register both Write and Teardown activities so the test env can dispatch
-	// them; TeardownSession is deferred from writePhase even in the scaffold.
+
 	registry := newMountRegistry()
 	env.RegisterActivity(newWriteActivities(registry, t.TempDir()))
 	env.RegisterActivity(newTeardownActivities(registry))
-	// The Report and Deliver phases are run-orchestrated. Unlike the earlier
-	// phases they cannot no-op on an empty config (Report requires an escrow
-	// identity and at least one written tape), so a test that runs them to
-	// completion mocks them via expectReportDeliverSuccess; failure tests either
-	// target an earlier phase or fail Report explicitly.
+	// Report and Deliver cannot no-op on an empty config; tests mock them via
+	// expectReportDeliverSuccess.
 	env.RegisterActivity(newReportActivities(t.TempDir(), t.TempDir(), t.TempDir()))
 	env.RegisterActivity(newDeliverActivities())
 	env.RegisterActivity(&FailureActivities{})
-	// Staging cleanup is deferred from Backup on every exit path; register it with
-	// a real staging root so it runs to completion rather than logging a dispatch
-	// error on every workflow-orchestration test.
 	env.RegisterActivity(newCleanupActivities(t.TempDir()))
 
 	return env
 }
 
-// expectReportDeliverSuccess mocks the Report and Deliver activities to succeed,
-// for tests that drive the pipeline to completion. Their real bodies need staged
-// files, recovery binaries, and a live webhook, which the workflow-orchestration
-// tests deliberately do not set up — they assert sequencing, not artifact content.
+// expectReportDeliverSuccess mocks Report and Deliver to succeed; these tests
+// assert sequencing, not artifact content.
 func expectReportDeliverSuccess(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
 		Return(ReportOutput{}, nil)
@@ -103,10 +75,8 @@ func expectReportDeliverSuccess(env *testsuite.TestWorkflowEnvironment) {
 		Return(&DeliverResult{}, nil)
 }
 
-// validBackupConfig returns a run config that passes config.Validate, mirroring
-// internal/config's validConfig. The entry-point validation gate rejects an
-// invalid payload, so the workflow-orchestration tests — which assert phase
-// sequencing, not archive content — must submit a valid config.
+// validBackupConfig returns a config that passes config.Validate, mirroring
+// internal/config's validConfig.
 func validBackupConfig() config.Config {
 	targetPercentage := 10.0
 
@@ -134,12 +104,8 @@ func validBackupConfig() config.Config {
 	}
 }
 
-// expectResolveEmpty mocks the Resolve phase to yield an empty work list. With a
-// valid config the real Resolve data activity would shell out to zfs per source;
-// resolving to nothing instead lets the downstream data phases (Prepare, Pack,
-// Generate PAR2, Verify) and the tape path run as no-ops on empty input — exactly
-// the behavior the pipeline had on the pre-validation empty-config path — without
-// touching zfs, tar, or the tape library.
+// expectResolveEmpty mocks Resolve to an empty work list, so the data phases and
+// tape path no-op without touching zfs, tar, or the library.
 func expectResolveEmpty(env *testsuite.TestWorkflowEnvironment) {
 	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
 		Return([]ResolvedArchive(nil), nil)
@@ -147,10 +113,8 @@ func expectResolveEmpty(env *testsuite.TestWorkflowEnvironment) {
 		Return([]ResolvedArchive(nil), nil)
 }
 
-// expectAllPhasesSucceed mocks every phase that cannot no-op on an empty work
-// list, so a valid config drives all phases to completion without real zfs/tar/
-// tape work: Resolve yields an empty plan (expectResolveEmpty) and Report/Deliver
-// succeed. The intervening data phases and the tape path no-op on the empty plan.
+// expectAllPhasesSucceed mocks Resolve empty and Report/Deliver successful, so a
+// valid config runs every phase to completion.
 func expectAllPhasesSucceed(env *testsuite.TestWorkflowEnvironment) {
 	expectResolveEmpty(env)
 	expectReportDeliverSuccess(env)
@@ -172,17 +136,14 @@ func TestBackupRunsAllPhasesInOrder(t *testing.T) {
 	require.Equal(t, orderedPhases, result.CompletedPhases)
 }
 
-// TestReportIsStampedWithTheRunID pins issue #340: the report is the durable
-// offline index for one specific run, so it carries the execution's run id. Every
-// run submits under the same workflow id (WorkflowID, the singleton "backup", SPEC
-// §4.2), so stamping that instead would label every report ever printed
-// identically and leave a shelf of printouts indistinguishable.
+// TestReportIsStampedWithTheRunID pins issue #340: every run shares the
+// singleton workflow id (SPEC §4.2), so the report must carry the run id or every
+// printout would be indistinguishable.
 func TestReportIsStampedWithTheRunID(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
-	// Submit under the real singleton workflow id so the assertion below is the
-	// production case, not an artifact of the test environment's default id.
+	// The real singleton id, not the test environment's default.
 	env.SetStartWorkflowOptions(client.StartWorkflowOptions{ID: WorkflowID, TaskQueue: TaskQueue})
 	expectResolveEmpty(env)
 
@@ -212,11 +173,9 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 
 	tests := []struct {
 		name string
-		// failAt is the phase whose activity errors; empty runs every phase to
-		// completion.
+		// failAt is the failing phase; empty runs to completion.
 		failAt string
-		// want is the value lastCompletedPhase reports once the run ends.
-		want string
+		want   string
 	}{
 		{name: "before any phase completes", failAt: PhaseResolve, want: ""},
 		{name: "mid-run after several phases", failAt: PhaseGeneratePAR2, want: PhasePack},
@@ -233,13 +192,9 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 			case "":
 				expectAllPhasesSucceed(env)
 			case PhaseResolve:
-				// failPhase mocks the Resolve activity itself to fail, so no
-				// empty-resolve baseline is needed (nor allowed — it would double-
-				// mock the same activity).
+				// Resolve's own failure; an empty-resolve baseline would double-mock it.
 				failPhase(t, env, test.failAt)
 			default:
-				// Resolve to an empty plan so the phases before the failing one
-				// no-op, then fail the target phase.
 				expectResolveEmpty(env)
 				failPhase(t, env, test.failAt)
 			}
@@ -258,14 +213,8 @@ func TestLastCompletedPhaseQuery(t *testing.T) {
 	}
 }
 
-// TestCurrentPauseQueryDefaultsToNone covers the CurrentPauseQuery contract at
-// the real Backup entry point: a run that completes without ever pausing
-// reports PauseNone throughout (queried here after completion), proving the
-// handler is registered and its zero value is "not paused" — the pause-active
-// contract itself (each Kind, its context fields, and clearing on resume) is
-// covered per pause site in eject_pause_test.go, write_pause_test.go, and
-// burn_pause_test.go, which drive the narrower pause-only test workflows where
-// mid-pause queries are practical to arrange.
+// TestCurrentPauseQueryDefaultsToNone asserts a run that never pauses reports
+// PauseNone. Active pauses are covered in the per-site pause tests.
 func TestCurrentPauseQueryDefaultsToNone(t *testing.T) {
 	t.Parallel()
 
@@ -286,10 +235,8 @@ func TestCurrentPauseQueryDefaultsToNone(t *testing.T) {
 	assert.Equal(t, CurrentPause{}, pause, "no pause ever fired, so every field stays the zero value")
 }
 
-// failIfPrepareRuns registers the Prepare activity to fail the test if it is ever
-// invoked, proving no staging work happens. It is the observable proxy for "before
-// any staging (Prepare) work is performed": Prepare is the first phase that reads
-// or writes bulk data.
+// failIfPrepareRuns fails the test if Prepare, the first phase touching bulk
+// data, ever runs.
 func failIfPrepareRuns(t *testing.T, env *testsuite.TestWorkflowEnvironment) {
 	t.Helper()
 
@@ -301,9 +248,8 @@ func failIfPrepareRuns(t *testing.T, env *testsuite.TestWorkflowEnvironment) {
 		})
 }
 
-// TestBackupRejectsInvalidConfig covers AC1: a Backup started directly through
-// Temporal with a config that client-side validation would reject (here copies =
-// 0) fails with a config validation error before any staging (Prepare) work runs.
+// TestBackupRejectsInvalidConfig: an invalid config submitted directly to
+// Temporal fails validation before any staging.
 func TestBackupRejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 
@@ -323,8 +269,8 @@ func TestBackupRejectsInvalidConfig(t *testing.T) {
 	assert.ErrorContains(t, err, "copies")
 }
 
-// TestBackupRejectsZeroSources covers AC2: a Backup started with zero sources
-// fails validation rather than completing as a success that wrote nothing.
+// TestBackupRejectsZeroSources: zero sources fails validation rather than
+// succeeding vacuously.
 func TestBackupRejectsZeroSources(t *testing.T) {
 	t.Parallel()
 
@@ -338,25 +284,19 @@ func TestBackupRejectsZeroSources(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 
-	// The run errors instead of completing as a no-op "success".
 	err := env.GetWorkflowError()
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "invalid config")
 	assert.ErrorContains(t, err, "sources")
 }
 
-// TestBackupReleasesHoldsWhenHoldFails covers AC1 at the real Backup workflow: a
-// run whose HoldSnapshots activity fails (after pinning a subset of the resolved
-// snapshots — opaque to the workflow, which sees only the error) ends in failure,
-// yet still dispatches ReleaseSnapshots over the resolved snapshots so none retains
-// the run's hold tag. This guards the workflow's defer ordering directly — the
-// release is armed before the hold — rather than only the hold helper.
+// TestBackupReleasesHoldsWhenHoldFails asserts Backup's defer ordering: a failed
+// HoldSnapshots still dispatches ReleaseSnapshots over every resolved snapshot.
 func TestBackupReleasesHoldsWhenHoldFails(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
 
-	// Resolve to a single real snapshot so the run has something to hold.
 	archives := []ResolvedArchive{{Snapshots: []ResolvedSnapshot{{ZFSPath: "pool/a@snap1"}}}}
 
 	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
@@ -364,8 +304,6 @@ func TestBackupReleasesHoldsWhenHoldFails(t *testing.T) {
 	env.OnActivity((&ResolveDataActivities{}).ResolveAndCheck, mock.Anything, mock.Anything).
 		Return(archives, nil)
 
-	// The hold fails (e.g. a snapshot pruned in the resolve→hold window) after
-	// potentially pinning earlier snapshots.
 	env.OnActivity((&HoldActivities{}).HoldSnapshots, mock.Anything, mock.Anything).
 		Return(errors.New("hold boom"))
 
@@ -382,19 +320,14 @@ func TestBackupReleasesHoldsWhenHoldFails(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 
-	// The run fails at the Hold phase, before any staging.
 	require.ErrorContains(t, env.GetWorkflowError(), "phase Hold")
 
-	// The release fired despite the hold failure, over every resolved snapshot, so
-	// no snapshot retains the run's hold tag.
 	assert.Contains(t, releaseInput.Tag, holdTagPrefix)
 	assert.ElementsMatch(t, []string{"pool/a@snap1"}, releaseInput.Snapshots)
 }
 
-// failPhase mocks the named phase to fail through its activity. Every phase is
-// run-orchestrated, so each fails via the activity it dispatches. The failure
-// tests target phases up to Eject; Report and Deliver are mocked to succeed in
-// newBackupEnv, so they are not handled here.
+// failPhase mocks the named phase's activity to fail. Report and Deliver are not
+// handled; tests target phases up to Eject.
 func failPhase(t *testing.T, env *testsuite.TestWorkflowEnvironment, name string) {
 	t.Helper()
 

@@ -10,63 +10,35 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/config"
 )
 
-// The Burn phase (SPEC §10) is the optical analogue of the tape Load/Write/Eject
-// drive-set loop (runTapePath/runDriveSet). It partitions the configured disc
-// copies into burn-sets of at most len(Drives) discs, burns and independently
-// verifies each set in parallel, and runs the operator disc-swap / failure
-// pause-resume-abort loop between and within sets. Unlike the tape changer there
-// is no optical autoloader, so every set after the first requires a manual disc
-// swap plus `tapectl resume`. It is deterministic control-worker orchestration
-// over the already-landed per-disc BurnDisc/VerifyDisc activities (burn.go);
-// burning is a no-op when Delivery.OpticalBurn is disabled.
+// The Burn phase (SPEC §10) is the optical analogue of the tape drive-set loop.
+// There is no optical autoloader, so every burn-set after the first needs a
+// manual disc swap plus `tapectl resume`.
 
 const (
-	// burnDiscTimeout bounds a single BurnDisc activity: reading disc state, an
-	// optional reclaim (blanking a rewritable disc), and streaming the tens-of-MB
-	// ISO to optical media. M-DISC writes run slow (often 4×–8×), so an hour is a
-	// generous ceiling while still bounding a hang. It carries the liveness
-	// HeartbeatTimeout so a data-worker restart mid-burn is caught quickly.
-	burnDiscTimeout = 1 * time.Hour
-	// verifyDiscTimeout bounds a single VerifyDisc activity: mounting the burned
-	// disc read-only and hashing every file back against the disc-content manifest.
-	// Tens of MB of reads complete in minutes; 30 minutes is a generous ceiling.
+	// burnDiscTimeout: M-DISC writes are slow (often 4×–8×).
+	burnDiscTimeout   = 1 * time.Hour
 	verifyDiscTimeout = 30 * time.Minute
 )
 
 // burnAssignment assigns one recovery-disc copy to a burner drive within a set.
-// It is the optical analogue of TapeAssignment, minus the changer/blank-slot
-// bookkeeping (a disc is loaded by hand, not moved from a storage slot).
 type burnAssignment struct {
-	// Device is the optical burner device node the disc is burned on (e.g.
-	// /dev/sr0), drawn from Delivery.OpticalBurn.Drives.
-	Device string
-	// CopyIndex is the 0-based copy number among Delivery.OpticalBurn.Copies.
+	Device    string
 	CopyIndex int
 }
 
-// burnSet is one set of discs burned in parallel — at most len(Drives) discs,
-// one per burner (the optical analogue of driveSet).
+// burnSet is one set of discs burned in parallel, one per burner.
 type burnSet []burnAssignment
 
-// failedDisc pairs a disc whose burn or verify failed with the error that
-// stopped it, so the operator alert can name the drive and the run can re-drive
-// only the failed discs on resume.
+// failedDisc is a disc whose burn or verify failed, kept so a resume re-drives
+// only the failures.
 type failedDisc struct {
-	// Device is the burner the disc failed on.
-	Device string
-	// CopyIndex is the disc's 0-based copy number.
+	Device    string
 	CopyIndex int
-	// Err is the burn or verify failure.
-	Err error
+	Err       error
 }
 
-// planBurnSets partitions copies recovery discs into successive burn-sets of at
-// most len(drives) discs, disc j in a set assigned to drives[j] (the optical
-// analogue of planDriveSets). Copies is not bounded by the drive count: two
-// burners and three copies burn as {disc0,disc1} then {disc2}. It returns
-// (nil,nil) for zero copies (burning disabled). It returns an error when copies
-// is negative or no drives are configured — states Delivery.OpticalBurn.Enabled()
-// already excludes, checked defensively so a misconfiguration never burns.
+// planBurnSets partitions copies into successive burn-sets of at most len(drives)
+// discs, disc j assigned to drives[j]. Zero copies returns (nil, nil).
 func planBurnSets(copies int, drives []string) ([]burnSet, error) {
 	if copies == 0 {
 		return nil, nil
@@ -101,14 +73,9 @@ func planBurnSets(copies int, drives []string) ([]burnSet, error) {
 	return sets, nil
 }
 
-// burnPhase orchestrates the Burn phase (SPEC §10). It is a no-op — the run
-// completes exactly as before — when optical burning is not configured. Otherwise
-// it burns every configured copy through the burn-set loop and then re-renders
-// the delivered report so it records the burned discs and any deliberate
-// overwrite (Report → Burn → re-render → Deliver): the on-disc report predates the
-// burn and cannot record it, so the delivered copy is rebuilt from the full run
-// state (SPEC §10). A burn failure the operator aborts (or lets time out) fails
-// the run in its defined paused state, reported by the workflow's failure alert.
+// burnPhase burns every configured copy, then re-renders the delivered report so
+// it records the discs (the on-disc copy predates the burn). No-op when optical
+// burning is disabled.
 func burnPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	if !cfg.Delivery.OpticalBurn.Enabled() {
 		return nil
@@ -121,12 +88,8 @@ func burnPhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	return rebuildDeliveredReport(ctx, cfg, state)
 }
 
-// runBurnPath drives the burn-set loop: it partitions the copies into burn-sets
-// and burns each in turn. Every set after the first pauses first for the operator
-// to load fresh blank discs and resume — there is no optical autoloader, so the
-// swap is manual (SPEC §10). A between-set abort (or an elapsed operator wait)
-// ends the run with no further discs burned; the successfully burned sets are
-// already recorded in state.burnedDiscs.
+// runBurnPath burns each burn-set in turn, pausing before every set after the
+// first for a manual disc swap.
 func runBurnPath(ctx workflow.Context, cfg config.Config, state *runState) error {
 	burn := cfg.Delivery.OpticalBurn
 
@@ -137,8 +100,6 @@ func runBurnPath(ctx workflow.Context, cfg config.Config, state *runState) error
 
 	for setIndex, set := range sets {
 		if setIndex > 0 {
-			// Every set after the first needs a manual disc swap. Pause for the
-			// operator to load fresh blanks into the set's drives, then resume.
 			switch waitForBurnOperator(ctx, cfg, state, devicesOf(set), nil) {
 			case pauseResumed:
 			case pauseAborted:
@@ -157,13 +118,8 @@ func runBurnPath(ctx workflow.Context, cfg config.Config, state *runState) error
 	return nil
 }
 
-// runBurnSet burns and verifies one set, pausing for the operator on any
-// burn/verify failure rather than failing the whole run (SPEC §10) — the optical
-// analogue of runDriveSet. It loops until every disc in the set is burned and
-// verified or the operator aborts (or the wait elapses): each round burns the
-// pending discs in parallel, records the successes, and on any failure pauses;
-// on resume it re-drives only the failed discs (the operator has loaded fresh
-// blanks in their drives), never re-burning a disc that already verified.
+// runBurnSet burns and verifies one set, pausing for the operator on failure and
+// re-driving only the failed discs on resume, never a disc that already verified.
 func runBurnSet(ctx workflow.Context, cfg config.Config, state *runState, set burnSet) error {
 	pending := set
 
@@ -192,23 +148,13 @@ func runBurnSet(ctx workflow.Context, cfg config.Config, state *runState, set bu
 	}
 }
 
-// burnDiscSet burns and verifies every disc in set in parallel — one Temporal
-// coroutine per burner, so the set holds at most len(Drives) discs in flight at
-// once — and partitions the outcome into the discs that burned+verified (with
-// their BurnResult provenance for the report) and those that failed. A failure is
-// any of: a non-writable disc (IsDiscNotWritable — a non-blank disc without the
-// opt-in, or a write-once disc), a burn error, or a verify mismatch. Both
-// activities carry MaximumAttempts=1: a burn is physical and its failure needs an
-// operator decision, not a blind retry that would waste another disc. Like
-// writePhase, a partial failure is not fatal here — the failures come back as
-// failedDisc values for the caller to pause on, not as an error.
+// burnDiscSet burns and verifies every disc in set in parallel and partitions the
+// outcome into successes and failures; failures are returned, not raised.
 func burnDiscSet(ctx workflow.Context, cfg config.Config, state *runState, set burnSet) ([]BurnResult, []failedDisc) {
 	allowNonBlank := cfg.Delivery.OpticalBurn.AllowNonBlankDiscs
 
-	// MaximumAttempts=1 on both: a physical burn/verify failure needs an operator
-	// decision (swap the disc), so retrying the same attempt cannot succeed and
-	// would only waste a write-once disc. IsDiscNotWritable is already
-	// non-retryable at the source.
+	// MaximumAttempts=1: a physical failure needs an operator disc swap; a retry
+	// would only waste a write-once disc.
 	burnOpts := workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
 		StartToCloseTimeout: burnDiscTimeout,
@@ -231,12 +177,8 @@ func burnDiscSet(ctx workflow.Context, cfg config.Config, state *runState, set b
 	ch := workflow.NewBufferedChannel(ctx, len(set))
 
 	for i, assignment := range set {
-		// A drive that already produced a verified copy this run must never have its
-		// disc reclaimed: that non-blank disc is this run's own copy, not a prior-run
-		// leftover (issue #154). Computed from the copies recorded before this set —
-		// within a set each drive burns at most one disc, and a re-burn on resume
-		// keeps the same drive whose earlier attempt did NOT verify, so this is only
-		// ever true for a drive reused across sets (the forgotten-swap case).
+		// Never reclaim a disc in a drive that already verified a copy this run
+		// (issue #154); only true for a drive reused across sets.
 		driveHasVerifiedCopy := deviceHasVerifiedCopy(state.burnedDiscs, assignment.Device)
 
 		workflow.Go(ctx, func(gctx workflow.Context) {
@@ -296,10 +238,8 @@ func burnDiscSet(ctx workflow.Context, cfg config.Config, state *runState, set b
 	return results, failed
 }
 
-// rebuildDeliveredReport re-renders the delivered PDF report now that the discs
-// are burned, so it records them and any deliberate overwrite, and points the
-// Deliver phase at the re-rendered file (SPEC §10). Only the delivered report.pdf
-// changes; the recovery ISO (with its pre-burn report copy) is untouched.
+// rebuildDeliveredReport re-renders the delivered report.pdf to record the burned
+// discs; the ISO's pre-burn copy is untouched.
 func rebuildDeliveredReport(ctx workflow.Context, cfg config.Config, state *runState) error {
 	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           DataTaskQueue,
@@ -322,10 +262,8 @@ func rebuildDeliveredReport(ctx workflow.Context, cfg config.Config, state *runS
 	return nil
 }
 
-// deviceHasVerifiedCopy reports whether burned already holds a copy this run
-// burned and verified on the given burner device. It backs the issue #154
-// drive-guard: a non-blank rewritable disc in such a drive is this run's own copy,
-// so it is never reclaimed even with AllowNonBlankDiscs set.
+// deviceHasVerifiedCopy reports whether burned holds a verified copy from device
+// (the issue #154 drive guard).
 func deviceHasVerifiedCopy(burned []BurnResult, device string) bool {
 	for _, disc := range burned {
 		if disc.Device == device {
@@ -336,9 +274,7 @@ func deviceHasVerifiedCopy(burned []BurnResult, device string) bool {
 	return false
 }
 
-// retryBurnSet builds the narrowed burn-set that re-drives only the failed discs
-// on resume, keeping each failed disc's burner and copy identity (the operator
-// has loaded a fresh blank in that drive) — the optical analogue of retrySet.
+// retryBurnSet re-drives only the failed discs, keeping their drive and copy.
 func retryBurnSet(failed []failedDisc) burnSet {
 	set := make(burnSet, 0, len(failed))
 	for _, disc := range failed {
@@ -348,8 +284,7 @@ func retryBurnSet(failed []failedDisc) burnSet {
 	return set
 }
 
-// devicesOf lists the burner devices a burn-set uses — named in the between-set
-// disc-swap alert so the operator knows which drives to load fresh blanks into.
+// devicesOf lists the burner devices a burn-set uses, for the disc-swap alert.
 func devicesOf(set burnSet) []string {
 	out := make([]string, 0, len(set))
 	for _, assignment := range set {
@@ -359,8 +294,7 @@ func devicesOf(set burnSet) []string {
 	return out
 }
 
-// devicesOfFailed lists the burner devices of the failed discs, for the failure
-// pause alert.
+// devicesOfFailed lists the burner devices of the failed discs.
 func devicesOfFailed(failed []failedDisc) []string {
 	out := make([]string, 0, len(failed))
 	for _, disc := range failed {

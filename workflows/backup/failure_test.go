@@ -13,10 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestNotifyFailureActivity covers the failure-alert activity in isolation: it
-// posts to the configured webhook, never returns an error (a delivery failure is
-// swallowed so it cannot mask the run's original error, SPEC §11), and is a
-// silent no-op when no webhook URL is configured.
+// TestNotifyFailureActivity asserts the failure alert posts to the webhook, never
+// returns an error (SPEC §11), and no-ops without a URL.
 func TestNotifyFailureActivity(t *testing.T) {
 	t.Parallel()
 
@@ -55,8 +53,6 @@ func TestNotifyFailureActivity(t *testing.T) {
 				Phase:        PhaseWrite,
 				ErrorSummary: "phase Write: boom",
 			})
-			// SendFailure never returns a delivery error, so the activity always
-			// succeeds regardless of the webhook's response.
 			require.NoError(t, err)
 
 			if test.expectHit {
@@ -68,10 +64,8 @@ func TestNotifyFailureActivity(t *testing.T) {
 	}
 }
 
-// TestNotifyBurnPauseActivity asserts the burn-pause alert activity is best-effort
-// like the other operator alerts: it delivers on a healthy webhook, swallows a
-// delivery error, and is a no-op when the webhook URL is unset — always returning
-// nil so a webhook outage never aborts a paused burn (SPEC §10, §11).
+// TestNotifyBurnPauseActivity asserts the burn-pause alert is best-effort and
+// always returns nil (SPEC §10, §11).
 func TestNotifyBurnPauseActivity(t *testing.T) {
 	t.Parallel()
 
@@ -110,8 +104,6 @@ func TestNotifyBurnPauseActivity(t *testing.T) {
 				Devices:      []string{"/dev/sr0"},
 				ErrorSummary: "a burn or verify failed: drive reported a write error",
 			})
-			// SendBurnPause never returns a delivery error, so the activity always
-			// succeeds regardless of the webhook's response.
 			require.NoError(t, err)
 
 			if test.expectHit {
@@ -123,17 +115,13 @@ func TestNotifyBurnPauseActivity(t *testing.T) {
 	}
 }
 
-// TestWorkflowFailureSendsAlert asserts that when a phase fails the deferred
-// handler fires the failure-alert activity with the run id, failing phase, and
-// error summary, while the run's original error surfaces unmasked (SPEC §11).
+// TestWorkflowFailureSendsAlert asserts a phase failure fires the alert with run
+// id, phase, and error, and surfaces the original error unmasked (SPEC §11).
 func TestWorkflowFailureSendsAlert(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
-	// Resolve to an empty plan so every phase before Report no-ops on a valid
-	// config, then fail at the Report phase: it always dispatches its activity
-	// regardless of the plan content, making it reliable for exercising the
-	// deferred failure-alert handler.
+	// Empty plan, then fail at Report, which always dispatches its activity.
 	expectResolveEmpty(env)
 
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
@@ -152,26 +140,22 @@ func TestWorkflowFailureSendsAlert(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 
-	// The original failure surfaces unmasked: the workflow error names the
-	// failing phase and carries the underlying error.
 	require.ErrorContains(t, env.GetWorkflowError(), "phase Report")
 	require.ErrorContains(t, env.GetWorkflowError(), "boom")
 
-	// The alert carries the run id, the failing phase, and the error summary.
 	assert.NotEmpty(t, captured.RunID)
 	assert.Equal(t, PhaseReport, captured.Phase)
 	assert.Contains(t, captured.ErrorSummary, "boom")
 }
 
-// TestFailureAlertErrorDoesNotMask asserts that a failure of the alert delivery
-// itself never replaces the run's original error (SPEC §11): the workflow error
-// remains the phase failure, not the alert error.
+// TestFailureAlertErrorDoesNotMask asserts an alert delivery failure never
+// replaces the run's original error (SPEC §11).
 func TestFailureAlertErrorDoesNotMask(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
 
-	// Fail at the Report phase — same rationale as TestWorkflowFailureSendsAlert.
+	// Fail at Report, as in TestWorkflowFailureSendsAlert.
 	expectResolveEmpty(env)
 
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).

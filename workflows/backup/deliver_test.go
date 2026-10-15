@@ -57,10 +57,8 @@ func (r *uploadRecorder) names() []string {
 	return append([]string(nil), r.uploads...)
 }
 
-// deliverAPIRecorder emulates the two Discord calls a successful Deliver makes
-// against a webhook URL: the ?wait=true multipart POST that returns the created
-// message ({id, channel_id}), and the follow-up GET on the webhook object that
-// returns its guild ({guild_id}). It lets a test assert the full DeliverResult.
+// deliverAPIRecorder emulates Discord's ?wait=true post and the follow-up webhook
+// GET that returns the guild.
 type deliverAPIRecorder struct {
 	guildID   string
 	channelID string
@@ -89,8 +87,7 @@ func writeReportArtifact(t *testing.T) (reportPath string) {
 	return reportPath
 }
 
-// TestDeliverUploadsReportOnly covers AC1/AC2: exactly one file — the report — is
-// uploaded to the configured webhook, and no recovery ISO is.
+// TestDeliverUploadsReportOnly: only the report is uploaded, never the ISO.
 func TestDeliverUploadsReportOnly(t *testing.T) {
 	t.Parallel()
 
@@ -111,10 +108,8 @@ func TestDeliverUploadsReportOnly(t *testing.T) {
 		"exactly one file — the report — must be uploaded, and no ISO")
 }
 
-// TestDeliverCapturesPostedMessage covers issue #306: on a successful delivery the
-// activity records the posted message's guild/channel/message identity (from the
-// ?wait=true post response plus the webhook-object guild lookup) as its result, so
-// the run overview can deep-link to the Discord message.
+// TestDeliverCapturesPostedMessage (issue #306): the result records the posted
+// message's guild/channel/message identity.
 func TestDeliverCapturesPostedMessage(t *testing.T) {
 	t.Parallel()
 
@@ -131,11 +126,8 @@ func TestDeliverCapturesPostedMessage(t *testing.T) {
 	assert.Equal(t, &DeliverResult{GuildID: "g1", ChannelID: "c1", MessageID: "m1"}, result)
 }
 
-// TestDeliverGuildLookupFailureStillSucceeds covers issue #306's best-effort
-// guarantee: when the report is delivered but the follow-up guild lookup fails, the
-// activity still succeeds with the channel+message captured and an empty guild — a
-// missing guild only omits the deep-link, it never turns a delivered report into a
-// failed run.
+// TestDeliverGuildLookupFailureStillSucceeds (issue #306): a failed guild lookup
+// only omits the deep-link, never failing a delivered run.
 func TestDeliverGuildLookupFailureStillSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -161,8 +153,7 @@ func TestDeliverGuildLookupFailureStillSucceeds(t *testing.T) {
 	assert.Equal(t, &DeliverResult{ChannelID: "c1", MessageID: "m1"}, result)
 }
 
-// TestDeliverEmptyWebhookNoOp covers AC3: a run with delivery disabled (empty
-// webhook) succeeds without any upload.
+// TestDeliverEmptyWebhookNoOp: an empty webhook succeeds without uploading.
 func TestDeliverEmptyWebhookNoOp(t *testing.T) {
 	t.Parallel()
 
@@ -176,8 +167,7 @@ func TestDeliverEmptyWebhookNoOp(t *testing.T) {
 	assert.Equal(t, &DeliverResult{}, result, "a disabled webhook yields an empty result — no link")
 }
 
-// TestDeliverReportFailureFails covers AC6: a failed report upload fails the
-// activity and reports the report-upload error.
+// TestDeliverReportFailureFails: a failed upload fails the activity.
 func TestDeliverReportFailureFails(t *testing.T) {
 	t.Parallel()
 
@@ -195,18 +185,14 @@ func TestDeliverReportFailureFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "deliver report")
 }
 
-// deliverPhaseTestWorkflow drives deliverPhase so its activity scheduling options
-// can be inspected in the test env.
+// deliverPhaseTestWorkflow drives deliverPhase.
 func deliverPhaseTestWorkflow(ctx workflow.Context, cfg config.Config) error {
 	return deliverPhase(ctx, cfg, &runState{reportPath: "/stage/report.pdf"})
 }
 
-// TestDeliverPhaseSetsHeartbeatTimeout covers AC2: the Deliver activity is
-// scheduled with the shared data-activity HeartbeatTimeout, so a data worker that
-// dies hard mid-Deliver is detected within that window (2 min) rather than only
-// after the 30-minute deliverTimeout. Temporal enforces the detection window from
-// the activity's HeartbeatTimeout, so asserting it is set is the observable that
-// guarantees the fast detection.
+// TestDeliverPhaseSetsHeartbeatTimeout: Deliver carries the shared
+// HeartbeatTimeout so a dead worker is detected in minutes, not after
+// deliverTimeout.
 func TestDeliverPhaseSetsHeartbeatTimeout(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 
@@ -231,9 +217,7 @@ func TestDeliverPhaseSetsHeartbeatTimeout(t *testing.T) {
 		"Deliver must carry the data-activity HeartbeatTimeout so a dead worker is detected within minutes, not after the 30-minute deliverTimeout")
 }
 
-// flakyUpload is an httptest handler that fails the first failFirst uploads with
-// failStatus, then succeeds, recording every upload's filename and total hits. A
-// large failFirst models a webhook that never recovers.
+// flakyUpload fails the first failFirst uploads with status, then succeeds.
 type flakyUpload struct {
 	mu        sync.Mutex
 	hits      int
@@ -270,11 +254,8 @@ func (f *flakyUpload) count() int {
 	return f.hits
 }
 
-// TestDeliverDeterministicRejectionIsNonRetryable covers AC1: a deterministic
-// webhook rejection (a permanent 4xx — deleted/rotated webhook, or an oversize
-// report) fails the Deliver activity with a non-retryable ApplicationError, so the
-// run fails fast rather than retrying the identical upload forever. A transient
-// status (5xx/429) stays retryable so a brief outage can recover.
+// TestDeliverDeterministicRejectionIsNonRetryable: a permanent 4xx is
+// non-retryable; a transient 5xx/429 stays retryable.
 func TestDeliverDeterministicRejectionIsNonRetryable(t *testing.T) {
 	t.Parallel()
 
@@ -322,14 +303,12 @@ func TestDeliverDeterministicRejectionIsNonRetryable(t *testing.T) {
 	}
 }
 
-// deliverPhaseUploadWorkflow drives the real deliverPhase (RetryPolicy and all)
-// against a live webhook so the bounded-retry and recovery behavior is observable.
+// deliverPhaseUploadWorkflow drives the real deliverPhase against a live webhook.
 func deliverPhaseUploadWorkflow(ctx workflow.Context, cfg config.Config, reportPath string) error {
 	return deliverPhase(ctx, cfg, &runState{reportPath: reportPath})
 }
 
-// newDeliverUploadEnv builds a test workflow env with the real Deliver activity
-// registered (unmocked), so deliverPhase's RetryPolicy governs a real upload.
+// newDeliverUploadEnv registers the real, unmocked Deliver activity.
 func newDeliverUploadEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 
@@ -342,10 +321,8 @@ func newDeliverUploadEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	return env
 }
 
-// TestDeliverBoundedRetryTerminates covers AC1: a webhook that never recovers
-// (persistent transient failure) fails the run after a bounded number of attempts
-// (deliverMaxAttempts) rather than retrying indefinitely — Deliver is the final
-// phase, so an unbounded retry would wedge the run silently.
+// TestDeliverBoundedRetryTerminates: a webhook that never recovers fails the run
+// after deliverMaxAttempts instead of wedging it.
 func TestDeliverBoundedRetryTerminates(t *testing.T) {
 	t.Parallel()
 
@@ -364,13 +341,11 @@ func TestDeliverBoundedRetryTerminates(t *testing.T) {
 		"the upload must be attempted a bounded number of times, not indefinitely")
 }
 
-// TestDeliverTransientFailureRecovers covers AC3: a webhook that fails transiently
-// and then recovers (a brief outage) is retried and the run completes successfully.
+// TestDeliverTransientFailureRecovers: a brief outage is retried and the run
+// completes.
 func TestDeliverTransientFailureRecovers(t *testing.T) {
 	t.Parallel()
 
-	// Fail the first two attempts with a 503, then succeed — within the
-	// deliverMaxAttempts budget.
 	handler := &flakyUpload{failFirst: 2, status: http.StatusServiceUnavailable}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
@@ -385,18 +360,13 @@ func TestDeliverTransientFailureRecovers(t *testing.T) {
 	assert.Equal(t, 3, handler.count(), "the upload must be retried until it succeeds on the third attempt")
 }
 
-// TestDeliverFailureAlertNamesDeliver covers AC2: when the Deliver phase fails with
-// a bounded (non-retryable) error, the workflow ends and the operational failure
-// alert fires naming the Deliver phase (SPEC §11) — the run no longer wedges
-// silently after all tapes are written.
+// TestDeliverFailureAlertNamesDeliver: a failed Deliver ends the run and the
+// failure alert names the phase.
 func TestDeliverFailureAlertNamesDeliver(t *testing.T) {
 	t.Parallel()
 
 	env := newBackupEnv(t)
 
-	// Resolve to an empty plan so every phase before Report no-ops, then let Report
-	// succeed and fail Deliver with the deterministic-rejection error the real
-	// activity produces for a permanent 4xx.
 	expectResolveEmpty(env)
 	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
 		Return(ReportOutput{}, nil)
@@ -418,18 +388,14 @@ func TestDeliverFailureAlertNamesDeliver(t *testing.T) {
 
 	require.True(t, env.IsWorkflowCompleted())
 
-	// The run ends with an error naming the Deliver phase, unmasked.
 	require.ErrorContains(t, env.GetWorkflowError(), "phase "+PhaseDeliver)
 
-	// The failure alert names the Deliver phase.
 	assert.Equal(t, PhaseDeliver, captured.Phase)
 	assert.NotEmpty(t, captured.RunID)
 }
 
-// TestDeliverySummary asserts the message posted with the report names the run and
-// what it covers. Without it the report lands in Discord as an unlabelled PDF, so
-// the channel says nothing about which run produced it or what is on the tapes
-// until someone opens the attachment.
+// TestDeliverySummary: the message posted with the report names the run and what
+// it covers.
 func TestDeliverySummary(t *testing.T) {
 	t.Parallel()
 
@@ -453,13 +419,11 @@ func TestDeliverySummary(t *testing.T) {
 	assert.Contains(t, summary, "JCY631L5")
 	assert.Contains(t, summary, "JCY632L5", "the message must name every tape written")
 
-	// Discord's content limit; the message is short by construction but must
-	// never be at risk of rejection for length.
+	// Discord's content limit.
 	assert.Less(t, len(summary), 2000)
 }
 
-// TestDeliverySummaryPluralizesOneArchive covers the single-archive run, which is
-// the common case for this project and must not read "1 archives".
+// TestDeliverySummaryPluralizesOneArchive: one archive must not read "1 archives".
 func TestDeliverySummaryPluralizesOneArchive(t *testing.T) {
 	t.Parallel()
 
@@ -471,8 +435,7 @@ func TestDeliverySummaryPluralizesOneArchive(t *testing.T) {
 	assert.Contains(t, summary, "1 archive (1.5 MB)")
 }
 
-// TestHumanBytes pins the sizes the delivery message renders, in the decimal units
-// tape and drive capacities are quoted in.
+// TestHumanBytes pins the decimal-unit sizes the delivery message renders.
 func TestHumanBytes(t *testing.T) {
 	t.Parallel()
 

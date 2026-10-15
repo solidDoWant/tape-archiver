@@ -12,8 +12,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// inventoryWith returns a minimal Inventory with the given drives and slots for
-// use in table-driven tests of the pure library helpers.
 func inventoryWith(drives []tape.DriveElement, slots []tape.StorageElement, ioSlots []tape.IOElement) tape.Inventory {
 	return tape.Inventory{Drives: drives, Slots: slots, IOSlots: ioSlots}
 }
@@ -58,11 +56,8 @@ func TestOccupiedStorageSlots(t *testing.T) {
 	assert.Equal(t, []int{1, 3}, got)
 }
 
-// TestReconcileLoadEmptyTargetSlotErrorNamesWhereTapesAre is the diagnostic
-// contract for the failure an operator actually hits when the configured blank
-// slots no longer hold tapes (a prior run left them in the drives or the I/O
-// station): the error must say where the tapes *are*, so the run's own message is
-// enough to pick valid slots without a separate inventory.
+// TestReconcileLoadEmptyTargetSlotErrorNamesWhereTapesAre: when a configured
+// blank slot is empty, the error must say where the tapes are.
 func TestReconcileLoadEmptyTargetSlotErrorNamesWhereTapesAre(t *testing.T) {
 	t.Parallel()
 
@@ -77,7 +72,6 @@ func TestReconcileLoadEmptyTargetSlotErrorNamesWhereTapesAre(t *testing.T) {
 		[]tape.IOElement{{Address: 48, Full: true}, {Address: 49, Full: false}},
 	)
 
-	// An empty drive, so reconcileLoad goes straight to the target-slot lookup.
 	_, err := reconcileLoad(t.Context(), nil, inv, tape.DriveElement{Address: 1}, 20, make(map[int]tape.Barcode))
 
 	require.Error(t, err)
@@ -187,16 +181,13 @@ func TestFindFreeStorageSlot(t *testing.T) {
 	}
 }
 
-// TestFindFreeStorageSlotDistinctPerClaim proves the AC2 behavior at the
-// slot-selection layer: choosing a slot, recording it as claimed, then choosing
-// again from the same inventory snapshot yields a distinct slot — the previously
-// chosen slot is not offered a second time within one Load.
+// TestFindFreeStorageSlotDistinctPerClaim: a claimed slot is not offered again
+// from the same snapshot within one Load.
 func TestFindFreeStorageSlotDistinctPerClaim(t *testing.T) {
 	t.Parallel()
 
-	// Both drives report SourceSlot 0 (SVALID unreported), so both prefer the same
-	// (absent) slot 0 and fall back to the free-slot scan — the exact production
-	// collision this issue fixes.
+	// Both drives report SourceSlot 0 (SVALID unreported), the production
+	// collision case.
 	inv := inventoryWith(nil, []tape.StorageElement{
 		{Address: 1, Full: false},
 		{Address: 2, Full: false},
@@ -293,7 +284,6 @@ func TestSlotBarcode(t *testing.T) {
 func TestReconcileLoad(t *testing.T) {
 	t.Parallel()
 
-	// Base inventory: drive 0 empty, slot 1 has "AAA001L8", slot 2 has "BBB002L8".
 	baseSlots := []tape.StorageElement{
 		{Address: 1, Barcode: "AAA001L8", Full: true},
 		{Address: 2, Barcode: "BBB002L8", Full: true},
@@ -301,13 +291,10 @@ func TestReconcileLoad(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		// drive is the data-transfer element already paired to the caller's device
-		// node by drive identity (issue #137); reconcileLoad reconciles it directly.
+		name       string
 		drive      tape.DriveElement
 		targetSlot int
-		// wantBarcode is the barcode that should end up in the drive; empty means
-		// the call is expected to fail.
+		// wantBarcode is empty when the call is expected to fail.
 		wantBarcode tape.Barcode
 		wantErr     require.ErrorAssertionFunc
 	}{
@@ -338,9 +325,8 @@ func TestReconcileLoad(t *testing.T) {
 			t.Parallel()
 
 			inv := inventoryWith([]tape.DriveElement{test.drive}, baseSlots, nil)
-			// Use a nil changer device — the idempotent path returns before any
-			// changer command; the other paths hit a command error which is the
-			// expected test outcome for non-idempotent cases.
+			// The idempotent path issues no changer command; the others fail on the
+			// command, which is the expected outcome.
 			changer := tape.NewChanger("")
 			bc, err := reconcileLoad(t.Context(), changer, inv, test.drive, test.targetSlot, make(map[int]tape.Barcode))
 			test.wantErr(t, err)
@@ -352,16 +338,12 @@ func TestReconcileLoad(t *testing.T) {
 	}
 }
 
-// errNotReady stands in for the SCSI NOT READY / BECOMING READY error a real
-// drive returns while it is still threading and calibrating a freshly loaded
-// tape — the transient failure blankCheckWhenReady must poll through.
+// errNotReady stands in for the NOT READY a real drive returns while threading
+// a freshly loaded tape.
 var errNotReady = errors.New("SCSI NOT READY - becoming ready")
 
-// fakeBlankChecker is a deterministic blankChecker for exercising
-// blankCheckWhenReady's NOT-READY retry loop without a real drive or mhvtl. Its
-// first notReadyN calls report a not-ready error, then it returns the blank
-// verdict; with alwaysErr set it never becomes ready. It records calls so a test
-// can prove the loop actually retried rather than returning the first error.
+// fakeBlankChecker fails its first notReadyN calls (all of them with
+// alwaysErr), then returns blank, recording calls.
 type fakeBlankChecker struct {
 	notReadyN int   // number of leading calls that return the not-ready error
 	blank     bool  // verdict returned once the drive is "ready"
@@ -407,17 +389,14 @@ func TestBlankCheckWhenReady(t *testing.T) {
 			wantCalls: 1,
 		},
 		{
-			// AC1: transient NOT READY, then the correct blank verdict once ready.
-			// wantCalls proves the loop retried through every not-ready error rather
-			// than returning the first one (the "first error returned immediately"
-			// regression would return after a single call with an error).
+			// AC1: wantCalls proves the loop retried rather than returning the first
+			// error.
 			name:      "blank after transient NOT READY",
 			fake:      &fakeBlankChecker{notReadyN: 3, blank: true},
 			wantBlank: true,
 			wantCalls: 4,
 		},
 		{
-			// AC1: same retry loop must also surface a correct non-blank verdict.
 			name:      "non-blank after transient NOT READY",
 			fake:      &fakeBlankChecker{notReadyN: 3, blank: false},
 			wantBlank: false,
@@ -429,8 +408,6 @@ func TestBlankCheckWhenReady(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Tiny poll keeps the retry loop fast; a generous timeout ensures the
-			// drive becomes ready well before the deadline.
 			blank, err := blankCheckWhenReady(t.Context(), test.fake, time.Minute, time.Millisecond)
 			require.NoError(t, err)
 			assert.Equal(t, test.wantBlank, blank)
@@ -440,11 +417,8 @@ func TestBlankCheckWhenReady(t *testing.T) {
 	}
 }
 
-// TestBlankCheckWhenReadyDeadlineExpires covers the deadline bound: a drive that
-// never becomes ready must surface its last error once the timeout elapses,
-// having retried at least once first. A regression that inverts the deadline
-// check would either return on the first error (calls == 1) or loop forever
-// (tripping the go test timeout).
+// TestBlankCheckWhenReadyDeadlineExpires: a never-ready drive surfaces its last
+// error after retrying at least once.
 func TestBlankCheckWhenReadyDeadlineExpires(t *testing.T) {
 	t.Parallel()
 
@@ -459,12 +433,9 @@ func TestBlankCheckWhenReadyDeadlineExpires(t *testing.T) {
 		"must retry at least once before the deadline, not return the first error")
 }
 
-// TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll covers the poll
-// select's ctx.Done() arm: while parked between retries, a cancelled context
-// must end the wait promptly and surface the drive's last error. The poll is
-// large so its timer cannot fire within the test — only the ctx.Done() arm can
-// unblock the select. A regression that drops that arm would wait out the full
-// poll (caught by the elapsed-time bound below).
+// TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll: cancellation ends
+// the poll wait promptly. The poll is too long to fire, so only ctx.Done() can
+// unblock it.
 func TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll(t *testing.T) {
 	t.Parallel()
 
@@ -474,8 +445,6 @@ func TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll(t *testing.T) {
 	driveErr := errors.New("NOT READY during pause")
 	fake := &fakeBlankChecker{alwaysErr: true, err: driveErr}
 
-	// Cancel once the loop is parked in the poll select (well after the first,
-	// microsecond-scale IsBlank call and the pre-poll guard).
 	time.AfterFunc(20*time.Millisecond, cancel)
 
 	start := time.Now()
@@ -488,19 +457,12 @@ func TestBlankCheckWhenReadyReturnsOnContextCancelDuringPoll(t *testing.T) {
 		"must return promptly via the ctx.Done() select arm, not wait out the poll interval")
 }
 
-// TestReconcileLoadClaimsDistinctSlots proves the fix for this issue at the
-// reconcile layer (AC2): two drives that both hold an unexpected tape and both
-// report SourceSlot 0 (SVALID unreported) must be offered distinct free storage
-// slots when reconciled against one shared inventory snapshot. reconcileLoad
-// records each chosen relocation slot (mapped to the relocated barcode) in the
-// shared relocated map before issuing the (here failing, no real changer) unload,
-// so the second drive cannot be handed the slot the first already claimed. With
-// the pre-fix code both drives would claim the same first free slot.
+// TestReconcileLoadClaimsDistinctSlots (AC2): two drives with unexpected tapes
+// reporting SourceSlot 0 must claim distinct relocation slots from one shared
+// snapshot.
 func TestReconcileLoadClaimsDistinctSlots(t *testing.T) {
 	t.Parallel()
 
-	// Two free storage slots (1, 2) and a target blank slot (5). Both drives hold
-	// an unexpected tape with SourceSlot 0 — the deterministic collision case.
 	slots := []tape.StorageElement{
 		{Address: 1, Full: false},
 		{Address: 2, Full: false},
@@ -515,43 +477,30 @@ func TestReconcileLoadClaimsDistinctSlots(t *testing.T) {
 	changer := tape.NewChanger("") // relocate's unload fails, but only after the slot is claimed
 	relocated := make(map[int]tape.Barcode)
 
-	// Both calls fail at the unload (no real changer), but each must have claimed
-	// its relocation slot first.
+	// Both fail at the unload (no real changer), after claiming a slot.
 	_, err := reconcileLoad(t.Context(), changer, inv, drives[0], 5, relocated)
 	require.Error(t, err)
 
 	_, err = reconcileLoad(t.Context(), changer, inv, drives[1], 5, relocated)
 	require.Error(t, err)
 
-	// Exactly two distinct free slots claimed — no collision — each recording the
-	// barcode of the unexpected tape relocated into it.
 	assert.Len(t, relocated, 2, "each relocation must claim its own storage slot")
 	assert.Equal(t, tape.Barcode("UNEXP0L8"), relocated[1], "first relocation should claim slot 1")
 	assert.Equal(t, tape.Barcode("UNEXP1L8"), relocated[2], "second relocation should claim the distinct slot 2")
 }
 
-// TestReconcileLoadResolvesRelocatedTargetSlot proves the issue #224 stale-inventory
-// fix (AC3): when an earlier drive holds an unexpected tape whose home slot is a
-// later assignment's blank slot — the blank the set needs was left in that drive by
-// a prior run — Load relocates it back into that slot, and the later assignment's
-// reconcileLoad must see the relocated blank there rather than reading the once-read
-// snapshot (which still shows the slot empty) and failing "target slot is empty".
-//
-// Both reconcileLoad calls share one inventory snapshot and one relocated map, as in
-// production. The nil changer makes the physical moves fail, but the relocation is
-// recorded before the move, so the assertion is on the target-slot resolution: the
-// later call reaches the load command for the correct blank barcode instead of the
-// pre-fix "target slot N is empty" error.
+// TestReconcileLoadResolvesRelocatedTargetSlot (#224 AC3): a blank relocated
+// back into a later assignment's slot must be found there, not reported empty
+// off the stale snapshot. The nil changer fails the moves, but the relocation is
+// recorded first, so the later call reaches the load for the right barcode.
 func TestReconcileLoadResolvesRelocatedTargetSlot(t *testing.T) {
 	t.Parallel()
 
-	// Slot 1 holds drive 0's own blank; slot 5 is drive 1's blank slot but shows
-	// empty in the snapshot because its tape ("BLNK05L8") is sitting in drive 0.
+	// Slot 5 looks empty because its tape (BLNK05L8) is in drive 0.
 	slots := []tape.StorageElement{
 		{Address: 1, Barcode: "BLNK01L8", Full: true},
 		{Address: 5, Full: false},
 	}
-	// Drive 0 holds BLNK05L8, whose home slot 5 is drive 1's target; drive 1 is empty.
 	driveZero := tape.DriveElement{Address: 0, Loaded: true, Barcode: "BLNK05L8", SourceSlot: 5}
 	driveOne := tape.DriveElement{Address: 1, Loaded: false}
 
@@ -559,14 +508,11 @@ func TestReconcileLoadResolvesRelocatedTargetSlot(t *testing.T) {
 	changer := tape.NewChanger("") // physical moves fail, but only after the relocation is recorded
 	relocated := make(map[int]tape.Barcode)
 
-	// Drive 0 (target slot 1) relocates its unexpected tape back to its home slot 5.
 	_, err := reconcileLoad(t.Context(), changer, inv, driveZero, 1, relocated)
 	require.Error(t, err) // fails at the (nil-changer) unload, after recording the relocation
 	require.Equal(t, tape.Barcode("BLNK05L8"), relocated[5],
 		"relocating drive 0's unexpected tape must record its barcode against home slot 5")
 
-	// Drive 1 (target slot 5) must now resolve the relocated blank from slot 5 —
-	// not fail "target slot 5 is empty" off the stale snapshot.
 	_, err = reconcileLoad(t.Context(), changer, inv, driveOne, 5, relocated)
 	require.Error(t, err) // fails at the (nil-changer) load, i.e. it got past the empty-slot check
 	assert.NotContains(t, err.Error(), "is empty",
@@ -575,16 +521,13 @@ func TestReconcileLoadResolvesRelocatedTargetSlot(t *testing.T) {
 		"reconcile must reach the load command for the relocated blank in the target slot")
 }
 
-// TestMatchDriveElement covers the identity pairing that replaces positional
-// drive↔element association (issue #137): a device node's unit serial selects the
-// changer element with the same DVCID serial, regardless of the elements' order,
-// and unidentifiable or ambiguous drives fail rather than mispair.
+// TestMatchDriveElement covers identity pairing (#137): unit serial selects the
+// element with the same DVCID serial regardless of order; unidentifiable or
+// ambiguous drives fail.
 func TestMatchDriveElement(t *testing.T) {
 	t.Parallel()
 
-	// A probe-order-mismatched library: the changer reports DTE 0 with serial
-	// SN_B and DTE 1 with serial SN_A — the reverse of the config's drive order —
-	// exactly the dev-host case where /dev/nst0's unit is the changer's second DTE.
+	// Probe-order mismatch: DTE order is the reverse of the config's drive order.
 	swapped := []tape.DriveElement{
 		{Address: 0, Serial: "SN_B"},
 		{Address: 1, Serial: "SN_A"},
@@ -648,9 +591,6 @@ func TestMatchDriveElement(t *testing.T) {
 	}
 }
 
-// tapesFor builds a plan with tapeCount logical tapes and the given copy count.
-// The archives are irrelevant to planDriveSets — it partitions by (tape, copy)
-// pairs — so each tape carries a single placeholder archive.
 func tapesFor(tapeCount, copies int) TapePlan {
 	tapes := make([]PlannedTape, tapeCount)
 	for i := range tapes {
@@ -663,8 +603,6 @@ func tapesFor(tapeCount, copies int) TapePlan {
 func TestPlanDriveSets(t *testing.T) {
 	t.Parallel()
 
-	// blankSlots is a generous, distinct pool so every physical tape can claim its
-	// own blank slot; the tests assert each slot is used at most once.
 	blankSlots := []int{10, 11, 12, 13, 14, 15, 16, 17, 18}
 	drives2 := []string{"d0", "d1"}
 
@@ -673,14 +611,12 @@ func TestPlanDriveSets(t *testing.T) {
 		plan       TapePlan
 		drives     []string
 		blankSlots []int
-		// wantSets is the expected partition as (tapeIndex, copyIndex) pairs per
-		// set; nil when the call is expected to fail.
+		// wantSets is nil when the call is expected to fail.
 		wantSets [][][2]int
 		wantErr  require.ErrorAssertionFunc
 	}{
 		{
-			// AC1: more logical tapes than drives, copies ≤ drives — one set per
-			// logical tape, each holding that tape's two copies.
+			// AC1: more logical tapes than drives.
 			name:       "extra logical tapes: 3 tapes, 2 copies, 2 drives",
 			plan:       tapesFor(3, 2),
 			drives:     drives2,
@@ -692,8 +628,7 @@ func TestPlanDriveSets(t *testing.T) {
 			},
 		},
 		{
-			// AC2: copy count exceeds the drive count — the copies of the one
-			// logical tape spill into successive drive-sets, two at a time.
+			// AC2: more copies than drives spill into successive sets.
 			name:       "extra copies: 1 tape, 4 copies, 2 drives",
 			plan:       tapesFor(1, 4),
 			drives:     drives2,
@@ -704,8 +639,6 @@ func TestPlanDriveSets(t *testing.T) {
 			},
 		},
 		{
-			// Both extra logical tapes and extra copies at once: a single drive
-			// makes every physical tape its own set.
 			name:       "single drive: 2 tapes, 2 copies",
 			plan:       tapesFor(2, 2),
 			drives:     []string{"d0"},
@@ -715,9 +648,6 @@ func TestPlanDriveSets(t *testing.T) {
 			},
 		},
 		{
-			// A partial trailing set: pairs that do not fill a whole set still form
-			// one (2 tapes × 1 copy across 2 drives is exactly full; add a third to
-			// force a remainder).
 			name:       "partial trailing set: 3 tapes, 1 copy, 2 drives",
 			plan:       tapesFor(3, 1),
 			drives:     drives2,
@@ -775,8 +705,7 @@ func TestPlanDriveSets(t *testing.T) {
 				return
 			}
 
-			// The partition matches the expected (tape, copy) pairs per set. Leave
-			// got nil for an empty plan so it compares equal to a nil wantSets.
+			// Leave got nil for an empty plan so it equals a nil wantSets.
 			var got [][][2]int
 			if len(sets) > 0 {
 				got = make([][][2]int, len(sets))
@@ -791,20 +720,16 @@ func TestPlanDriveSets(t *testing.T) {
 
 			assert.Equal(t, test.wantSets, got)
 
-			// Invariants that every valid partition must hold.
 			usedSlots := make(map[int]bool)
 
 			for _, set := range sets {
-				// A set never exceeds the drive count (AC3: bounded concurrency).
+				// AC3: bounded concurrency.
 				assert.LessOrEqual(t, len(set), len(test.drives),
 					"a drive-set must not exceed the drive count")
 
 				for driveIdx, assignment := range set {
-					// Drives map one-to-one onto the library's drives, in order, and
-					// are reused across sets.
 					assert.Equal(t, test.drives[driveIdx], assignment.Drive,
 						"assignment must use the drive at its set position")
-					// Every physical tape claims a distinct blank slot.
 					assert.False(t, usedSlots[assignment.BlankSlot],
 						"blank slot %d assigned twice", assignment.BlankSlot)
 					usedSlots[assignment.BlankSlot] = true

@@ -25,17 +25,9 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/temporalclient"
 )
 
-// TestBackupEndToEnd runs the whole backup workflow through a real Temporal
-// server and real control + data workers, against mhvtl and the ephemeral ZFS
-// pool: it stages a real ZFS snapshot, packs it, generates PAR2, verifies,
-// writes it to a virtual tape, ejects it, builds the report, and delivers it to a
-// local webhook (the run has no optical burning, so no recovery ISO is built). It
-// asserts every one of the pipeline phases (SPEC §4.3) completes in order and the
-// run succeeds.
-//
-// Covers issue #55 AC3 (all 10 phases execute in order, success) and AC4 (the
-// integration test passes against mhvtl + dev Temporal and skips when either —
-// or ZFS/LTFS — is absent). Driven by `make test-integration`.
+// TestBackupEndToEnd runs the whole workflow through real Temporal and workers
+// against mhvtl and the ephemeral ZFS pool, asserting every phase completes in
+// order (issue #55 AC3, AC4).
 func TestBackupEndToEnd(t *testing.T) {
 	requireTemporalAddress(t)
 	testutil.SkipIfMhvtlUnavailable(t)
@@ -58,8 +50,7 @@ func TestBackupEndToEnd(t *testing.T) {
 	require.GreaterOrEqual(t, len(inv.Drives), 1, "at least one drive required")
 	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
 
-	// Use storage slot index 2 so this test does not collide with the session
-	// (slot 0) and tape-path (slot 1) integration tests sharing the mhvtl library.
+	// Slot 2 avoids the session (0) and tape-path (1) integration tests.
 	require.GreaterOrEqual(t, len(inv.Slots), 3, "at least three storage slots required")
 	slot := inv.Slots[2]
 	require.True(t, slot.Full, "slot 2 must hold a tape")
@@ -71,17 +62,12 @@ func TestBackupEndToEnd(t *testing.T) {
 	slotAddr := slot.Address
 	barcode := slot.Barcode
 
-	// Register drive cleanup BEFORE touching the drive so that even an early exit
-	// (a require failure or a SkipIfDriveNotReady skip after the pre-load) leaves
-	// the library as the sibling integration tests expect: drive 0 empty (they
-	// assert it starts empty) and the tape back in its storage slot. returnTapeToSlot
-	// handles both the run's normal end state (tape parked in an I/O slot by Eject)
-	// and an interrupted state (tape still in drive 0).
+	// Registered before touching the drive so even an early exit leaves drive 0
+	// empty and the tape in its slot, as sibling tests expect.
 	t.Cleanup(func() { returnTapeToSlot(changer, slotAddr, driveAddr, barcode) })
 
-	// The run must load a blank tape. Load the chosen tape, confirm the drive is
-	// ready (skip if mhvtl left it stuck "not ready"), erase it to blank, and
-	// unload — leaving a genuinely blank tape in slot 2 for the run to load.
+	// The run requires a blank tape: load, skip if mhvtl is stuck "not ready",
+	// erase, and unload.
 	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load for readiness/blanking")
 	testutil.SkipIfDriveNotReady(t, stDev)
 	eraseLoadedTape(t.Context(), stDev, sgDev)
@@ -93,10 +79,7 @@ func TestBackupEndToEnd(t *testing.T) {
 	binariesDir := testutil.RecoveryBinariesDir(t)
 	sourcesDir := testutil.RecoverySourcesDir(t)
 
-	// Mirror the production worker options (cmd/worker.workerOptions): session
-	// support on the data worker, defaults on the control worker. Eager activity
-	// execution is suppressed at the source via ActivityOptions.DisableEagerExecution
-	// on the control-side phases, not via a worker option.
+	// Mirror production worker options (cmd/worker.workerOptions).
 	controlWorker := worker.New(temporalClient, TaskQueue, worker.Options{})
 	RegisterControl(controlWorker, ControlConfig{})
 	require.NoError(t, controlWorker.Start(), "start control worker")
@@ -135,8 +118,7 @@ func TestBackupEndToEnd(t *testing.T) {
 	}
 	require.NoError(t, cfg.Validate(), "run config must be valid")
 
-	// Bound the run below `go test`'s default 10m timeout so a genuine stall fails
-	// this test with a clear deadline error rather than panicking the whole package.
+	// Below go test's 10m default, so a stall fails with a clear deadline error.
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 6*time.Minute)
 	defer cancel()
 
@@ -151,11 +133,9 @@ func TestBackupEndToEnd(t *testing.T) {
 	var result Result
 	require.NoError(t, run.Get(runCtx, &result), "workflow must complete successfully")
 
-	// AC3: all pipeline phases ran to completion, in order.
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all pipeline phases must complete in order")
 
-	// The Deliver phase uploaded exactly one artifact — the report. The run has no
-	// optical burning configured, so no recovery ISO is built or delivered.
+	// Only the report: no optical burning, so no ISO.
 	assert.Equal(t, int32(1), uploads.Load(), "only the report must be delivered")
 }
 
@@ -168,8 +148,7 @@ func requireTemporalAddress(t *testing.T) {
 	}
 }
 
-// dialTemporal connects to the Temporal server named by TEMPORAL_ADDRESS,
-// isolating envconfig from any stray host config, and registers client shutdown.
+// dialTemporal connects to TEMPORAL_ADDRESS, isolated from host envconfig.
 func dialTemporal(t *testing.T) client.Client {
 	t.Helper()
 
@@ -196,10 +175,8 @@ func requireBinaries(t *testing.T, names ...string) {
 	}
 }
 
-// eraseLoadedTape issues a short SCSI ERASE (CDB 0x19, LONG=0) to the tape
-// currently loaded in the drive, resetting mhvtl's in-memory state to blank
-// without a long physical erase. It rewinds first (bounded) so ERASE starts at
-// BOT. Best-effort: failures are ignored, mirroring the tape-path test.
+// eraseLoadedTape issues a short SCSI ERASE (CDB 0x19, LONG=0), resetting mhvtl's
+// in-memory tape to blank without a long erase. Best-effort.
 func eraseLoadedTape(ctx context.Context, stDev, sgDev string) {
 	rewindCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
@@ -210,12 +187,8 @@ func eraseLoadedTape(ctx context.Context, stDev, sgDev string) {
 		"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
 }
 
-// returnTapeToSlot restores the library to the state the sibling integration
-// tests expect after the run: drive 0 empty and the tape back in its storage
-// slot. It never loads the drive — the run's Eject already emptied drive 0, and
-// leaving a tape loaded would fail the next test's "drive 0 must start empty"
-// precondition. It is best-effort: failures are ignored so cleanup never fails a
-// passing test.
+// returnTapeToSlot leaves drive 0 empty and the tape in its storage slot, as
+// sibling tests expect. Best-effort, so cleanup never fails a passing test.
 func returnTapeToSlot(changer *tape.Changer, slotAddr, driveAddr int, barcode tape.Barcode) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -225,16 +198,14 @@ func returnTapeToSlot(changer *tape.Changer, slotAddr, driveAddr int, barcode ta
 		return
 	}
 
-	// If a tape is still in drive 0 (e.g. the run failed before Eject), unload it
-	// to the storage slot so the drive ends empty.
+	// The run failed before Eject.
 	if len(inv.Drives) > 0 && inv.Drives[0].Loaded {
 		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
 
 		return
 	}
 
-	// Otherwise the tape is parked in an I/O slot after Eject; move it back to its
-	// storage slot so a repeat run finds slot populated.
+	// Parked in an I/O slot by Eject.
 	for _, io := range inv.IOSlots {
 		if io.Full && io.Barcode == barcode {
 			_ = changer.Transfer(cleanupCtx, io.Address, slotAddr)

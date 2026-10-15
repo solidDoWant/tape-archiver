@@ -107,8 +107,7 @@ func TestRetryUnitAttention(t *testing.T) {
 	}
 }
 
-// A UNIT ATTENTION retry must not outlive its context: a cancelled run stops
-// re-issuing SCSI to the device rather than sleeping out the remaining attempts.
+// A UNIT ATTENTION retry must stop when its context is cancelled.
 func TestRetryUnitAttentionStopsWhenTheContextIsCancelled(t *testing.T) {
 	t.Parallel()
 
@@ -116,8 +115,7 @@ func TestRetryUnitAttentionStopsWhenTheContextIsCancelled(t *testing.T) {
 
 	attempts := 0
 
-	// The delay is long enough that the cancelled context is unambiguously the
-	// reason the retry stops, rather than racing an already-elapsed timer.
+	// Long enough that cancellation, not the timer, ends the retry.
 	err := retryUnitAttention(ctx, time.Minute, func() (bool, error) {
 		attempts++
 

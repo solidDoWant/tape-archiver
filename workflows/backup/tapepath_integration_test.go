@@ -17,12 +17,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// TestTapePath exercises the Load → Write (Format/WriteTree/Finalize) → Eject
-// activity sequence end-to-end against mhvtl. Each activity is called directly
-// (without a Temporal worker) to keep the test self-contained.
-//
-// Covers AC4 of issue #54 (full tape path against the virtual library, skips
-// when mhvtl or LTFS is absent).
+// TestTapePath calls the Load → Write → Eject activities directly against mhvtl
+// (issue #54 AC4).
 func TestTapePath(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 	testutil.SkipIfLTFSUnavailable(t)
@@ -36,9 +32,7 @@ func TestTapePath(t *testing.T) {
 	require.NotEmpty(t, inv.IOSlots, "at least 1 I/O slot required")
 
 	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
-	// Use slot index 1 (the second slot) so this test does not conflict with
-	// TestSessionSplitWriteWithFinalizeRetry, which uses slot index 0 and formats
-	// the tape there — leaving it non-blank for any subsequent test.
+	// Slot index 1: TestSessionSplitWriteWithFinalizeRetry formats slot 0's tape.
 	require.GreaterOrEqual(t, len(inv.Slots), 2, "at least 2 storage slots required")
 	require.True(t, inv.Slots[1].Full, "slot 1 must have a tape")
 
@@ -49,12 +43,9 @@ func TestTapePath(t *testing.T) {
 	expectedBarcode := inv.Slots[1].Barcode
 	require.NotEmpty(t, expectedBarcode, "slot 1 tape must have a barcode")
 
-	// Ensure the library is in a clean state when the test ends: the tape must be
-	// back in its storage slot AND blank so that consecutive test runs start from
-	// the same state. The vtltape daemon caches tape content in memory; after
-	// mkltfs formats a tape the daemon reports it as non-blank even if mktape
-	// recreates the disk files. A short SCSI ERASE (LONG=0, sent via sg_raw)
-	// resets the daemon's in-memory state to blank without a long physical erase.
+	// Leave the tape blank in its slot. vtltape caches tape content in memory, so
+	// after mkltfs it reports non-blank even if mktape recreates the files; a short
+	// SCSI ERASE (LONG=0, via sg_raw) resets that state.
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
 		defer cancel()
@@ -69,24 +60,20 @@ func TestTapePath(t *testing.T) {
 			cleanupInv.Drives[0].Barcode == expectedBarcode
 
 		if !tapeInDrive {
-			// If tape is in an I/O slot (normal after Eject), move it to storage first.
 			for _, io := range cleanupInv.IOSlots {
 				if io.Full && io.Barcode == expectedBarcode {
 					_ = changer.Transfer(cleanupCtx, io.Address, slotAddr)
 					break
 				}
 			}
-			// Load from storage slot into drive for the erase step.
+
 			if err := changer.Load(cleanupCtx, slotAddr, driveAddr); err != nil {
 				return
 			}
 		}
 
-		// Short SCSI ERASE (CDB 0x19, LONG=0) rewinds and truncates at BOT,
-		// resetting the vtltape daemon's in-memory state to blank. Bound the
-		// rewind: on a drive that is stuck "not ready" the st-node rewind blocks
-		// until the medium becomes ready, which would otherwise hang cleanup for
-		// the full 120s budget.
+		// Bound the rewind: on a drive stuck "not ready" it blocks until the medium is
+		// ready, hanging cleanup for the full budget.
 		rewindCtx, rewindCancel := context.WithTimeout(cleanupCtx, 10*time.Second)
 		_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
 
@@ -97,18 +84,13 @@ func TestTapePath(t *testing.T) {
 		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
 	})
 
-	// Probe drive readiness up front. On some kernels mhvtl leaves a freshly
-	// loaded drive stuck "not ready"; the Load activity's blank check would then
-	// fail rather than skip. Load the target tape and wait for the drive to become
-	// ready — skipping cleanly if it never does, like the other mhvtl tests — then
-	// unload so the Load activity below still exercises a load from scratch.
+	// mhvtl can leave a freshly loaded drive stuck "not ready", which would fail the
+	// blank check rather than skip; probe readiness first, then unload.
 	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load for readiness probe")
 	testutil.SkipIfDriveNotReady(t, stDev)
 	require.NoError(t, changer.Unload(t.Context(), slotAddr, driveAddr), "unload after readiness probe")
 
 	// --- Phase: Load ----------------------------------------------------------
-	// Call the Load activity directly to exercise the reconciliation, blank
-	// check, and SGDevice resolution without a running Temporal worker.
 	loadActs := newLoadActivities()
 	loadInput := LoadInput{
 		Changer: testutil.ChangerDev(t),
@@ -143,7 +125,6 @@ func TestTapePath(t *testing.T) {
 		Barcode: lt.Barcode,
 	}), "FormatTape")
 
-	// Stage a small file so WriteTree has real content to copy.
 	srcFile := filepath.Join(stagingDir, "archive.000")
 	require.NoError(t, os.WriteFile(srcFile, []byte("tape-path integration test data"), 0o644))
 
@@ -166,8 +147,7 @@ func TestTapePath(t *testing.T) {
 		Archives:  archives,
 	}), "WriteTree")
 
-	// FinalizeTape stages the LTFS index to disk and returns its path (AC3: LTFS
-	// index captured; staged rather than returned per issue #221).
+	// AC3: the index is staged to disk, not returned (issue #221).
 	indexPath, err := writeActs.FinalizeTape(t.Context(), FinalizeInput{Device: lt.SGDevice, Barcode: lt.Barcode})
 	require.NoError(t, err, "FinalizeTape")
 	require.NotEmpty(t, indexPath, "FinalizeTape must return the staged index path")
@@ -196,7 +176,7 @@ func TestTapePath(t *testing.T) {
 	require.NoError(t, err, "Eject")
 	require.Empty(t, ejectResult.Remaining, "the single tape must be exported, not left remaining")
 
-	// Verify the tape landed in an I/O slot (AC3: transferred for physical removal).
+	// AC3: transferred to an I/O slot for physical removal.
 	finalInv, err := changer.Inventory(t.Context())
 	require.NoError(t, err, "final inventory")
 
@@ -212,11 +192,8 @@ func TestTapePath(t *testing.T) {
 	assert.True(t, inIOSlot, "tape %s must be in an I/O slot after Eject", lt.Barcode)
 }
 
-// TestTapePathAllowNonBlankTapes exercises the Library.AllowNonBlankTapes override
-// (issue #91) against mhvtl: a pre-written (non-blank) tape makes the Load activity
-// refuse by default, and proceed with an "overwrote non-blank" flag when the
-// override is set. Blank detection is unchanged either way. Skips when mhvtl or LTFS
-// is absent.
+// TestTapePathAllowNonBlankTapes: a non-blank tape is refused by default and
+// written with an "overwrote non-blank" flag under the override (issue #91).
 func TestTapePathAllowNonBlankTapes(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 	testutil.SkipIfLTFSUnavailable(t)
@@ -232,10 +209,8 @@ func TestTapePathAllowNonBlankTapes(t *testing.T) {
 	sgDev := testutil.Drive0SgDev(t)
 	driveAddr := inv.Drives[0].Address
 
-	// Use a full storage slot distinct from those the other tape-path tests use
-	// (slot 0: session test, slot 1: TestTapePath) so a non-blank tape left here
-	// never interferes with them. Integration tests run sequentially, but this
-	// keeps the fixtures independent regardless of order.
+	// A slot unused by the other tape-path tests, so the non-blank tape never
+	// interferes with them.
 	slotIdx := -1
 
 	for i := 2; i < len(inv.Slots); i++ {
@@ -251,9 +226,7 @@ func TestTapePathAllowNonBlankTapes(t *testing.T) {
 	barcode := inv.Slots[slotIdx].Barcode
 	require.NotEmpty(t, barcode, "chosen slot tape must have a barcode")
 
-	// Leave the library clean: the tape back in its slot AND blank so consecutive
-	// runs start from the same state. A short SCSI ERASE resets the vtltape daemon's
-	// cached in-memory content to blank (see TestTapePath cleanup for the rationale).
+	// Leave the tape blank in its slot (see TestTapePath cleanup).
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
 		defer cancel()
@@ -283,16 +256,11 @@ func TestTapePathAllowNonBlankTapes(t *testing.T) {
 		_ = changer.Unload(cleanupCtx, slotAddr, driveAddr)
 	})
 
-	// Load the tape and wait for the drive to become ready, skipping cleanly if it
-	// never does (like the other mhvtl tests). The tape stays in the drive so the
-	// format below can make it non-blank in place; the reconciling Load calls then
-	// see it already loaded and re-run only the blank check.
+	// The tape stays loaded so the format below makes it non-blank in place; the
+	// reconciling Load calls then only re-run the blank check.
 	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load")
 	testutil.SkipIfDriveNotReady(t, stDev)
 
-	// Make the tape NON-BLANK by writing an LTFS volume to it. mkltfs leaves the
-	// vtltape daemon reporting the tape as non-blank, which is exactly the state the
-	// Load blank check must detect.
 	writeActs := newWriteActivities(newMountRegistry(), t.TempDir())
 	require.NoError(t, writeActs.FormatTape(t.Context(), FormatInput{
 		Device:  sgDev,
@@ -308,19 +276,16 @@ func TestTapePathAllowNonBlankTapes(t *testing.T) {
 		}
 	}
 
-	// Default: the Load activity refuses the non-blank tape before any write.
 	_, err = loadActs.Load(t.Context(), loadInput(false))
 	require.Error(t, err, "Load must refuse a non-blank tape by default")
 	assert.Contains(t, err.Error(), "not blank", "refusal must name the non-blank cause")
 
-	// The refused tape goes back to its slot rather than staying in the drive.
 	afterRefusal, err := changer.Inventory(t.Context())
 	require.NoError(t, err)
 	assert.False(t, afterRefusal.Drives[0].Loaded, "the refused tape must not be left in the drive")
 	assert.True(t, afterRefusal.Slots[slotIdx].Full, "the refused tape must be back in its slot")
 	assert.Equal(t, barcode, afterRefusal.Slots[slotIdx].Barcode)
 
-	// Override: the Load activity warns and proceeds, flagging the overwrite.
 	loaded, err := loadActs.Load(t.Context(), loadInput(true))
 	require.NoError(t, err, "Load must proceed on a non-blank tape when AllowNonBlankTapes is set")
 	require.Len(t, loaded, 1, "Load must return one LoadedTape")
@@ -329,14 +294,8 @@ func TestTapePathAllowNonBlankTapes(t *testing.T) {
 		"a non-blank tape written under the override must be flagged as overwritten")
 }
 
-// TestTapePathMultipleDriveSets exercises the drive-set loop against mhvtl: a plan
-// with more physical tapes than the library has drives is written as a sequence of
-// drive-sets, each loaded, written, and ejected before the next begins. With a
-// single configured drive, a 2-logical-tape × 2-copy plan needs four drive-sets —
-// covering both extra logical tapes and extra copies (issue #66 AC6). It mirrors
-// runTapePath by driving planDriveSets and the Load/Write/Eject activities
-// directly, so the whole path runs without a Temporal worker. Skips when mhvtl or
-// LTFS is absent.
+// TestTapePathMultipleDriveSets mirrors runTapePath against mhvtl: one drive and a
+// 2-tape × 2-copy plan give four sequential drive-sets (issue #66 AC6).
 func TestTapePathMultipleDriveSets(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 	testutil.SkipIfLTFSUnavailable(t)
@@ -353,9 +312,7 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 	sgDev := testutil.Drive0SgDev(t)
 	driveAddr := inv.Drives[0].Address
 
-	// Use storage slots 4–7 so this test does not collide with the session (slot 0),
-	// single-tape tape-path (slot 1), and whole-run (slot 2) integration tests
-	// sharing the mhvtl library.
+	// Slots 4-7 avoid the session (0), tape-path (1), and whole-run (2) tests.
 	slotIndexes := []int{4, 5, 6, 7}
 	require.Greater(t, len(inv.Slots), slotIndexes[len(slotIndexes)-1], "at least 8 storage slots required")
 
@@ -372,8 +329,6 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 		chosen = append(chosen, physicalTape{slotAddr: inv.Slots[index].Address, barcode: inv.Slots[index].Barcode})
 	}
 
-	// Restore the library on exit: every tape blanked and parked back in its slot,
-	// drive 0 empty — so a repeat run and the sibling tests find the expected state.
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 240*time.Second)
 		defer cancel()
@@ -383,14 +338,10 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 		}
 	})
 
-	// Probe drive readiness up front using the first tape, skipping cleanly if mhvtl
-	// left the drive stuck "not ready", then unload so the run starts from scratch.
 	require.NoError(t, changer.Load(t.Context(), chosen[0].slotAddr, driveAddr), "pre-load for readiness probe")
 	testutil.SkipIfDriveNotReady(t, stDev)
 	require.NoError(t, changer.Unload(t.Context(), chosen[0].slotAddr, driveAddr), "unload after readiness probe")
 
-	// A single configured drive with a 2-tape × 2-copy plan → four drive-sets of one
-	// tape each.
 	plan := TapePlan{
 		Copies: 2,
 		Tapes: []PlannedTape{
@@ -408,7 +359,6 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 	require.NoError(t, err, "planDriveSets")
 	require.Len(t, sets, 4, "2 tapes × 2 copies on 1 drive must need four drive-sets")
 
-	// Stage a small file so WriteTree has real content to copy.
 	stagingDir := t.TempDir()
 	srcFile := filepath.Join(stagingDir, "archive.000")
 	require.NoError(t, os.WriteFile(srcFile, []byte("multi-set drive-set integration data"), 0o644))
@@ -463,7 +413,7 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 		require.NoErrorf(t, err, "set %d: read staged LTFS index", setIndex)
 		assert.Containsf(t, string(indexXML), "<ltfsindex", "set %d: captured index must be LTFS XML", setIndex)
 
-		// --- Eject the set (frees the drive for the next set) --------------------
+		// --- Eject the set --------------------------------------------------------
 		// Eject needs only identity/slot fields, not the index (issue #221).
 		ejectResult, err := ejectActs.Eject(t.Context(), EjectInput{
 			Changer: testutil.ChangerDev(t),
@@ -480,12 +430,10 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 
 		writtenBarcodes = append(writtenBarcodes, lt.Barcode)
 
-		// The drive must be free again before the next set loads.
 		postInv, err := changer.Inventory(t.Context())
 		require.NoErrorf(t, err, "set %d: inventory after eject", setIndex)
 		assert.Falsef(t, postInv.Drives[0].Loaded, "drive must be free after ejecting set %d", setIndex)
 
-		// The tape must have reached an I/O slot for physical removal.
 		ioAddr := -1
 
 		for _, io := range postInv.IOSlots {
@@ -498,11 +446,8 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 
 		require.NotEqualf(t, -1, ioAddr, "set %d: tape %s must be in an I/O slot after Eject", setIndex, lt.Barcode)
 
-		// This run writes four physical tapes but the library has only three I/O
-		// slots, so the operator must remove exported tapes between sets to free
-		// slots — the operator-in-the-loop flow the Eject phase relies on (issue
-		// #67). Simulate that here by moving the exported tape from its I/O slot
-		// back to its home storage slot before the next set runs.
+		// Four tapes but three I/O slots: simulate the operator removing exported
+		// tapes between sets (issue #67) by moving each back to its home slot.
 		require.NoErrorf(t, changer.Transfer(t.Context(), ioAddr, lt.SourceSlot),
 			"set %d: clear the I/O slot for the next set", setIndex)
 	}
@@ -510,24 +455,10 @@ func TestTapePathMultipleDriveSets(t *testing.T) {
 	require.Len(t, writtenBarcodes, 4, "all four physical tapes must be written")
 }
 
-// TestLoadPairsDriveByIdentity drives the real Load activity against mhvtl with a
-// retry-shaped, non-prefix drive-set — a single assignment for a configured drive
-// whose changer data-transfer element is NOT element 0 — and proves the blank is
-// loaded into the same physical drive Load blank-checks and records (issue #137).
-//
-// It covers:
-//   - AC3: the configured drive device order disagrees with the changer's element
-//     order (this repo's dev host: /dev/nst0 is the changer's DTE 1), yet the tape
-//     is loaded and blank-checked on the drive it was assigned to.
-//   - AC4: the set is non-prefix (position 0 holds config drive index 1's node, or
-//     a node whose DTE address ≠ 0); the test fails if the loaded-into drive (the
-//     element the changer moved the blank into) and the written-to drive (the
-//     assignment's device node) diverge. Positional pairing would move the blank
-//     into DTE 0 while blank-checking a different drive.
-//   - AC2: the returned LoadedTape.DriveIndex is the assignment's config drive
-//     index, not its position in the set.
-//
-// Skips when mhvtl is absent or does not report per-drive DVCID serials.
+// TestLoadPairsDriveByIdentity runs Load with a non-prefix set whose drive is not
+// changer element 0, proving the blank goes into the same physical drive that is
+// blank-checked and recorded (issue #137 AC2-AC4). Positional pairing would load
+// DTE 0 while checking a different drive. Skips without per-drive DVCID serials.
 func TestLoadPairsDriveByIdentity(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 
@@ -543,9 +474,8 @@ func TestLoadPairsDriveByIdentity(t *testing.T) {
 		}
 	}
 
-	// Map each configured drive device node to the changer element that IS that
-	// physical unit, by unit serial. The two config nodes and the changer's element
-	// order may disagree (probe-order mismatch) — that is exactly what we exercise.
+	// Map config nodes to changer elements by unit serial; their orders may
+	// disagree, which is what this exercises.
 	configNodes := []string{testutil.Drive0Dev(t), testutil.Drive1Dev(t)}
 
 	type target struct {
@@ -568,10 +498,7 @@ func TestLoadPairsDriveByIdentity(t *testing.T) {
 		targets = append(targets, target{configIndex: configIndex, device: node, serial: info.Serial, dteAddress: de.Address})
 	}
 
-	// Pick the configured drive whose changer element is NOT element 0, so a
-	// single-assignment set (position 0) would positionally pair to DTE 0 — a
-	// different physical drive. Identity pairing must instead pick this drive's own
-	// element. On the dev host that is /dev/nst0 (DTE 1).
+	// Pick the drive that is not element 0 (on the dev host, /dev/nst0 is DTE 1).
 	chosen := targets[0]
 	for _, tg := range targets {
 		if tg.dteAddress > chosen.dteAddress {
@@ -582,8 +509,7 @@ func TestLoadPairsDriveByIdentity(t *testing.T) {
 	require.NotEqualf(t, 0, chosen.dteAddress,
 		"need a drive whose changer element ≠ 0 to exercise a position/identity mismatch; got %+v", targets)
 
-	// Use a storage slot distinct from the other tape-path tests (0 session, 1
-	// single-tape, 2 whole-run, 4–7 multi-set) so leftover state never collides.
+	// A slot unused by the other tape-path tests.
 	const slotIdx = 3
 	require.Greater(t, len(inv.Slots), slotIdx, "need at least 4 storage slots")
 	require.Truef(t, inv.Slots[slotIdx].Full, "slot %d must hold a tape", slotIdx)
@@ -592,7 +518,6 @@ func TestLoadPairsDriveByIdentity(t *testing.T) {
 	barcode := inv.Slots[slotIdx].Barcode
 	require.NotEmpty(t, barcode, "chosen slot tape must have a barcode")
 
-	// Restore the library: tape blanked and parked back in its slot, drive empty.
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 120*time.Second)
 		defer cancel()
@@ -600,14 +525,10 @@ func TestLoadPairsDriveByIdentity(t *testing.T) {
 		returnAndBlankFromElement(cleanupCtx, changer, chosen.device, chosen.serial, slotAddr, barcode)
 	})
 
-	// Start clean: the drive holding the chosen element must be empty, and the tape
-	// must be in its slot. If a prior run left the tape in the drive, unload it.
 	if de, ok := driveElementBySerial(inv, chosen.serial); ok && de.Loaded {
 		require.NoError(t, changer.Unload(t.Context(), slotAddr, de.Address), "clear the chosen drive before the test")
 	}
 
-	// Readiness probe on the chosen drive (skips cleanly on a wedged mhvtl drive),
-	// then unload so Load exercises a fresh load.
 	chosenDTE, ok := driveElementBySerial(inv, chosen.serial)
 	require.True(t, ok, "chosen element present in inventory")
 	require.NoError(t, changer.Load(t.Context(), slotAddr, chosenDTE.Address), "pre-load for readiness probe")
@@ -632,9 +553,7 @@ func TestLoadPairsDriveByIdentity(t *testing.T) {
 	assert.Equal(t, chosen.configIndex, lt.DriveIndex, "recorded DriveIndex is the config index (AC2)")
 	assert.Equal(t, chosen.device, lt.STDevice, "written-to device is the assignment's node")
 
-	// The loaded-into drive (the element now holding the tape) must be the SAME
-	// physical drive as the written-to device (AC4): its serial equals the chosen
-	// device's serial, and its address is the chosen element — never DTE 0.
+	// AC4: the drive now holding the tape is the chosen device's element, never DTE 0.
 	postInv, err := changer.Inventory(t.Context())
 	require.NoError(t, err, "post-load inventory")
 
@@ -668,8 +587,8 @@ func driveElementBySerial(inv tape.Inventory, serial string) (tape.DriveElement,
 	return tape.DriveElement{}, false
 }
 
-// returnAndBlankFromElement restores a tape to blank in its home slot, addressing
-// the drive by unit serial (identity) rather than by index. Best-effort cleanup.
+// returnAndBlankFromElement blanks a tape and returns it home, addressing the
+// drive by unit serial. Best-effort.
 func returnAndBlankFromElement(ctx context.Context, changer *tape.Changer, stDev, serial string, slotAddr int, barcode tape.Barcode) {
 	inv, err := changer.Inventory(ctx)
 	if err != nil {
@@ -710,18 +629,14 @@ func returnAndBlankFromElement(ctx context.Context, changer *tape.Changer, stDev
 	_ = changer.Unload(ctx, slotAddr, de.Address)
 }
 
-// returnAndBlank restores one written tape to blank in its home storage slot,
-// wherever it currently sits (an I/O slot after Eject, the drive after an
-// interrupted run, or already home). It is best-effort: failures are ignored so
-// cleanup never fails a passing test. A short SCSI ERASE resets mhvtl's in-memory
-// state to blank without a long physical erase.
+// returnAndBlank blanks a written tape (short SCSI ERASE) and returns it to its
+// home slot from wherever it sits. Best-effort.
 func returnAndBlank(ctx context.Context, changer *tape.Changer, stDev, sgDev string, driveAddr, slotAddr int, barcode tape.Barcode) {
 	inv, err := changer.Inventory(ctx)
 	if err != nil {
 		return
 	}
 
-	// Get the tape into its home storage slot first (unless it is in the drive).
 	loadedInDrive := len(inv.Drives) > 0 && inv.Drives[0].Loaded && inv.Drives[0].Barcode == barcode
 
 	if !loadedInDrive {
@@ -738,8 +653,6 @@ func returnAndBlank(ctx context.Context, changer *tape.Changer, stDev, sgDev str
 		}
 	}
 
-	// Rewind (bounded) then short ERASE to reset the tape to blank, and unload it
-	// back to its storage slot.
 	rewindCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
 

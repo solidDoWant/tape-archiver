@@ -1,62 +1,40 @@
-// Package tape drives the tape library changer (directly via SG_IO) and drive
-// (mt, sg_logs) tools. All device paths are injected so the same code targets
-// both mhvtl virtual hardware and real LTO drives.
+// Package tape drives the tape library changer and drives. Device paths are
+// injected so the same code targets mhvtl and real LTO hardware.
 package tape
 
-// Barcode is the canonical tape identity — the volume tag read by the library
-// changer (SPEC.md §6).
+// Barcode is the canonical tape identity: the changer's volume tag (SPEC.md §6).
 type Barcode string
 
-// DriveElement is a data-transfer element (tape drive) reported by READ ELEMENT
-// STATUS.
+// DriveElement is a tape drive reported by READ ELEMENT STATUS.
 type DriveElement struct {
-	// Address is the friendly drive index (0-based), derived from the element
-	// address assignment mode page.
+	// Address is the 0-based friendly drive index.
 	Address int
-	// Barcode is the volume tag of the loaded tape, or empty if the drive is empty.
 	Barcode Barcode
-	// Loaded is true when a tape is in the drive.
-	Loaded bool
-	// SourceSlot is the storage slot number the tape was loaded from, when Loaded is true.
-	// It is 0 when the drive is empty or the source slot is unknown.
+	Loaded  bool
+	// SourceSlot is the storage slot the tape came from; 0 when empty or unknown.
 	SourceSlot int
-	// Serial is the drive's unit serial number, read from the DTE's DVCID device
-	// identifier in the READ ELEMENT STATUS response (the last whitespace-delimited
-	// token of the primary device identifier — for a T10 vendor designator the
-	// vendor/product prefix is dropped, leaving the serial that also appears in the
-	// drive's INQUIRY Unit Serial Number VPD page 0x80). It is the identity the Load
-	// phase pairs a configured drive device node to its changer element by, instead
-	// of trusting set position (issue #137). It is empty when the library does not
-	// report DVCID device identifiers.
+	// Serial is the unit serial from the DVCID identifier (matches INQUIRY VPD
+	// 0x80); Load pairs device nodes to elements by it (#137). Empty when the
+	// library does not report DVCID.
 	Serial string
 }
 
 // StorageElement is a storage slot reported by READ ELEMENT STATUS.
 type StorageElement struct {
-	// Address is the friendly, 1-indexed storage slot number, derived from the
-	// element address assignment mode page.
+	// Address is the 1-based friendly slot number.
 	Address int
-	// Barcode is the volume tag of the stored tape, or empty if the slot is empty.
 	Barcode Barcode
-	// Full is true when a tape is in the slot.
-	Full bool
+	Full    bool
 }
 
-// IOElement is an import/export (I/O) station slot reported by READ ELEMENT
-// STATUS.
+// IOElement is an import/export station slot reported by READ ELEMENT STATUS.
 type IOElement struct {
-	// Address is the friendly slot number (numbered after the storage slots),
-	// derived from the element address assignment mode page.
+	// Address is the friendly slot number, numbered after the storage slots.
 	Address int
-	// Barcode is the volume tag of the tape in the slot, or empty if empty.
 	Barcode Barcode
-	// Full is true when a tape is in the slot.
-	Full bool
-	// Accessible reflects the SCSI READ ELEMENT STATUS import/export ACCESS bit
-	// for this slot: true when the changer robot can reach the element (the I/O
-	// station door is closed), false when the operator has the station open. The
-	// operator-in-the-loop Eject phase uses it to auto-resume once the operator has
-	// cleared and closed the station (SPEC §4.3 phase 8).
+	Full    bool
+	// Accessible is the ACCESS bit: false while the operator has the station
+	// open. The Eject phase uses it to auto-resume (SPEC §4.3 phase 8).
 	Accessible bool
 }
 
@@ -65,21 +43,16 @@ type Inventory struct {
 	Drives  []DriveElement
 	Slots   []StorageElement
 	IOSlots []IOElement
-	// IOAccessReported is true when the library reports import/export elements
-	// (see IOElement.Accessible). READ ELEMENT STATUS always carries the ACCESS
-	// bit, so any library with an I/O station reports it — enabling the Eject
-	// phase to detect the station door cycle and auto-resume (SPEC §4.3 phase 8).
+	// IOAccessReported is true when the library reports I/O elements, and so
+	// their ACCESS bits.
 	IOAccessReported bool
 }
 
 // TapeAlertFlag is a single TapeAlert indicator from log page 0x2e.
 type TapeAlertFlag struct {
-	// Number is the flag number (e.g. 1 for "Read warning").
-	Number int
-	// Description is the human-readable flag label from sg_logs output.
+	Number      int
 	Description string
-	// Set is true when the flag is active (value 0x1).
-	Set bool
+	Set         bool
 }
 
 // TapeAlertResult holds all TapeAlert flags parsed from sg_logs page 0x2e.
@@ -101,16 +74,10 @@ func (r TapeAlertResult) AnySet() bool {
 // LogPageResult holds drive health indicators scraped from sg_logs.
 type LogPageResult struct {
 	TapeAlert TapeAlertResult
-	// Repositions is the number of write suspensions (back-hitches / tape
-	// repositions) since the last reset, read as total_suspended_writes
-	// (parameter code 5) from the Tape usage log page (0x30, LTO-5/6). It is
-	// meaningful only when RepositionsMeasured is true; when that is false the
-	// counter could not be read (the drive does not support page 0x30) and this
-	// value is a zero placeholder, not a measured zero.
+	// Repositions counts write suspensions (back-hitches) from log page 0x30
+	// parameter 5. Meaningful only when RepositionsMeasured is true.
 	Repositions int64
-	// RepositionsMeasured is true when the reposition counter was actually read
-	// from page 0x30. It distinguishes "measured as zero" (true, Repositions==0)
-	// from "not measured" (false), so an unread counter can never certify a clean
-	// streaming write.
+	// RepositionsMeasured separates "measured zero" from "not measured", so an
+	// unread counter can never certify a clean streaming write.
 	RepositionsMeasured bool
 }

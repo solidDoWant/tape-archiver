@@ -116,9 +116,8 @@ func TestSourceLabel(t *testing.T) {
 	}
 }
 
-// TestArchiveDirNameSharedLabel proves the on-tape directory is unique per source
-// even when two sources produce the identical label, because the zero-padded source
-// index prefixes the directory.
+// TestArchiveDirNameSharedLabel: identical labels still yield distinct
+// directories via the source-index prefix.
 func TestArchiveDirNameSharedLabel(t *testing.T) {
 	t.Parallel()
 
@@ -130,10 +129,8 @@ func TestArchiveDirNameSharedLabel(t *testing.T) {
 	assert.NotEqual(t, first, second, "same label on different sources must not collide")
 }
 
-// TestArchiveDirNameCollisionAcrossSources exercises every way two sources can
-// arrive at the same label — two identical overrides, two identical derived names,
-// and an override that matches another source's derived name — and asserts each
-// pair still maps to distinct directories.
+// TestArchiveDirNameCollisionAcrossSources covers override/override,
+// derived/derived and override/derived label collisions.
 func TestArchiveDirNameCollisionAcrossSources(t *testing.T) {
 	t.Parallel()
 

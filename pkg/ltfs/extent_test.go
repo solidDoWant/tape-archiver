@@ -11,11 +11,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/ltfs"
 )
 
-// sampleIndex is a format-accurate LTFS 2.4 index covering the cases the
-// extractor must handle: a byte-offset extent that starts mid-block and spans
-// two blocks, a multi-extent file whose extents are listed out of FileOffset
-// order, a zero-length file with no extents, and a nested directory path on the
-// index ("a") partition. Block payloads for these extents live in newSampleTape.
+// sampleIndex is an LTFS 2.4 index covering a mid-block extent spanning two
+// blocks, out-of-order extents, a zero-length file and a nested path.
 const sampleIndex = `<?xml version="1.0" encoding="UTF-8"?>
 <ltfsindex version="2.4.0">
   <creator>tape-archiver test</creator>
@@ -90,10 +87,8 @@ const sampleIndex = `<?xml version="1.0" encoding="UTF-8"?>
   </directory>
 </ltfsindex>`
 
-// newSampleTape returns a fakeTape whose block payloads back sampleIndex's
-// extents, laid out with a deliberately small, uneven block size so the
-// extractor's "read whole blocks until the extent is covered, then slice"
-// logic is exercised across block boundaries.
+// newSampleTape backs sampleIndex with a small uneven block size so extents
+// cross block boundaries.
 func newSampleTape() *fakeTape {
 	return &fakeTape{blocks: map[string]map[uint64][]byte{
 		"b": {
@@ -122,8 +117,6 @@ func TestParseIndex(t *testing.T) {
 	assert.Equal(t, uint64(7), index.Generation)
 	assert.Equal(t, ltfs.IndexLocation{Partition: "a", StartBlock: 5}, index.Location)
 
-	// Files() is path-sorted and carries every regular file, including the
-	// nested one, at its volume-relative slash path.
 	paths := make([]string, 0)
 	for _, file := range index.Files() {
 		paths = append(paths, file.Path)
@@ -131,7 +124,6 @@ func TestParseIndex(t *testing.T) {
 
 	assert.Equal(t, []string{"archives/000/a.000", "empty", "hello.txt", "multi.bin"}, paths)
 
-	// Extents are held sorted by FileOffset regardless of index order.
 	multi, ok := index.Lookup("multi.bin")
 	require.True(t, ok)
 	require.Len(t, multi.Extents, 2)
@@ -217,8 +209,6 @@ func TestExtractFileUnknown(t *testing.T) {
 func TestExtractFilePercentEncodedName(t *testing.T) {
 	t.Parallel()
 
-	// LTFS percent-encodes names it cannot represent directly; the parser must
-	// decode them so the path matches what a recoverer looks up.
 	const encoded = `<ltfsindex version="2.4.0">
   <generationnumber>1</generationnumber>
   <directory>
@@ -253,9 +243,7 @@ func TestExtractFilePercentEncodedName(t *testing.T) {
 func TestExtractFilePercentEncodedNamePlus(t *testing.T) {
 	t.Parallel()
 
-	// LTFS names are %XX path-escaped, not form-encoded: a literal "+" must
-	// survive decoding unchanged while %XX escapes still decode. A form decode
-	// would corrupt the "+" into a space and the recoverer's lookup would miss.
+	// A literal "+" must survive: names are path-escaped, not form-encoded.
 	const encoded = `<ltfsindex version="2.4.0">
   <generationnumber>1</generationnumber>
   <directory>
@@ -290,8 +278,6 @@ func TestExtractFilePercentEncodedNamePlus(t *testing.T) {
 func TestExtractFileOutOfRange(t *testing.T) {
 	t.Parallel()
 
-	// buildIndex renders a one-file, one-extent index so each case can drive a
-	// single field out of range while the others stay valid.
 	buildIndex := func(length, byteOffset, byteCount, fileOffset string) string {
 		return fmt.Sprintf(`<ltfsindex version="2.4.0">
   <generationnumber>1</generationnumber>
@@ -315,13 +301,9 @@ func TestExtractFileOutOfRange(t *testing.T) {
 
 	const (
 		maxUint64 = "18446744073709551615"
-		// twoPow63 is the smallest value that overflows math.MaxInt (2^63-1)
-		// without wrapping uint64: make([]byte, 0, twoPow63) panics with
-		// "makeslice: cap out of range".
+		// twoPow63 overflows math.MaxInt without wrapping uint64, so make would panic.
 		twoPow63 = "9223372036854775808"
-		// twoPow40 (~1 TiB) stays below math.MaxInt, so it does not panic make;
-		// it must still be rejected against the declared length before any tape
-		// work rather than driving an unbounded allocation and read.
+		// twoPow40 (~1 TiB) is allocatable but must be rejected against the length.
 		twoPow40 = "1099511627776"
 	)
 
@@ -334,17 +316,11 @@ func TestExtractFileOutOfRange(t *testing.T) {
 		{name: "fileoffset overruns declared length", index: buildIndex("2", "0", "2", maxUint64), field: "fileoffset"},
 		{name: "byteoffset overflows byte range", index: buildIndex("2", maxUint64, "5", "0"), field: "byteoffset"},
 		{name: "bytecount overflows byte range", index: buildIndex("2", "5", maxUint64, "0"), field: "bytecount"},
-		// Huge non-wrapping bytecount above the allocation ceiling (2^63): the
-		// sum does not wrap uint64 but make would panic. Must return a named
-		// error, not crash. (issue #215 AC1)
+		// #215 AC1: sum does not wrap but make would panic.
 		{name: "bytecount exceeds addressable maximum", index: buildIndex("2", "0", twoPow63, "0"), field: "bytecount"},
-		// Huge non-wrapping byteoffset above the allocation ceiling while the
-		// bytecount fits the declared length: only the alloc-ceiling guard in
-		// readExtent catches this, so it exercises that guard directly. (#215)
+		// Only readExtent's alloc-ceiling guard catches this (#215).
 		{name: "byteoffset exceeds addressable maximum", index: buildIndex("2", twoPow63, "2", "0"), field: "byteoffset"},
-		// Oversized-but-allocatable bytecount (~1 TiB) for a 2-byte file: below
-		// the alloc ceiling, so it must be rejected against the declared length
-		// before any tape repositioning or reads. (issue #215 AC2)
+		// #215 AC2: allocatable but must be rejected before any tape work.
 		{name: "bytecount vastly exceeds declared length", index: buildIndex("2", "0", twoPow40, "0"), field: "bytecount"},
 	}
 
@@ -365,8 +341,7 @@ func TestExtractFileOutOfRange(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.field)
 			assert.Nil(t, got)
-			// Every corrupt extent must be rejected before the tape is
-			// repositioned: fakeTape.Locate is the only thing that sets located.
+			// Rejected before the tape is repositioned.
 			assert.False(t, tape.located, "corrupt extent must be rejected before any tape repositioning or reads")
 		})
 	}
@@ -378,16 +353,12 @@ func TestExtractFileShortRead(t *testing.T) {
 	index, err := ltfs.ParseIndex([]byte(sampleIndex))
 	require.NoError(t, err)
 
-	// A tape that hands back an empty block before the extent is covered must
-	// surface an error rather than silently return truncated bytes.
 	tape := &fakeTape{blocks: map[string]map[uint64][]byte{"b": {100: {}, 101: {}}, "a": {10: []byte("data")}}}
 	_, err = index.ExtractFile(t.Context(), "hello.txt", tape)
 	require.Error(t, err)
 }
 
-// fakeTape is an in-memory BlockReader: a partition -> block -> payload map with
-// a current position that Locate sets and ReadBlock advances. It lets the
-// extractor be tested to the byte with no tape hardware.
+// fakeTape is an in-memory BlockReader.
 type fakeTape struct {
 	blocks    map[string]map[uint64][]byte
 	partition string

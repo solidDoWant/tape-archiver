@@ -15,10 +15,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// tapeFixture is a blanked tape parked in a storage slot, ready for a run to
-// load, plus the library coordinates and the run-config Library block that names
-// it. The data worker (container) performs the actual Load/Write against these
-// same host devices; this fixture only prepares and, on cleanup, restores them.
+// tapeFixture is a blanked tape parked in a storage slot plus the Library block
+// naming it. The fixture only prepares and restores; the data worker writes.
 type tapeFixture struct {
 	changer   *tape.Changer
 	slotAddr  int
@@ -27,21 +25,16 @@ type tapeFixture struct {
 	library   config.Library
 }
 
-// prepareBlankTape prepares a blank tape from storage slot index 2 (the sibling
-// integration whole-run test's convention).
+// prepareBlankTape prepares a blank tape from storage slot index 2.
 func prepareBlankTape(t *testing.T) tapeFixture {
 	t.Helper()
 
 	return prepareBlankTapeAt(t, 2)
 }
 
-// prepareBlankTapeAt mirrors the integration suite's setup: it confirms drive 0 is
-// empty, picks the storage slot at slotIndex, loads and blanks that tape, and
-// unloads it, leaving a genuinely blank tape for the run to load. It registers a
-// cleanup that returns the library to "drive 0 empty, tape in its slot" so a
-// repeat run (and the sibling tests) find the expected starting state. Distinct
-// slots let the FullRun and k8s-source tests each write their own tape without
-// colliding on the shared mhvtl library.
+// prepareBlankTapeAt blanks the tape at slotIndex (drive 0 must be empty) and
+// registers a cleanup restoring "drive 0 empty, tape in its slot". Tests use
+// distinct slots so they never collide on the shared library.
 func prepareBlankTapeAt(t *testing.T, slotIndex int) tapeFixture {
 	t.Helper()
 
@@ -73,8 +66,7 @@ func prepareBlankTapeAt(t *testing.T, slotIndex int) tapeFixture {
 		},
 	}
 
-	// Restore the library before touching the drive, so even an early failure or a
-	// readiness failure leaves drive 0 empty and the tape back in its slot.
+	// Registered before touching the drive so any failure still restores it.
 	t.Cleanup(func() { returnTapeToSlot(fixture) })
 
 	require.NoError(t, changer.Load(t.Context(), fixture.slotAddr, fixture.driveAddr), "pre-load for readiness/blanking")
@@ -87,19 +79,15 @@ func prepareBlankTapeAt(t *testing.T, slotIndex int) tapeFixture {
 	return fixture
 }
 
-// multiTapeFixture is several blanked tapes sharing a single drive, with a Library
-// that names all their slots as blank sources. It backs runs that write more
-// physical tapes than the library has drives (e.g. copies > drives), exercising
-// the drive-set loop end-to-end (issue #66).
+// multiTapeFixture is several blank tapes on one drive, exercising the drive-set
+// loop (issue #66).
 type multiTapeFixture struct {
 	barcodes []tape.Barcode
 	library  config.Library
 }
 
-// prepareBlankTapesAt blanks the tapes at the given storage slot indexes — each via
-// prepareBlankTapeAt, which also registers its own restore-on-cleanup — and returns
-// a single-drive Library naming all of them as blank sources, so a run with more
-// copies than drives writes them across successive drive-sets.
+// prepareBlankTapesAt blanks each slot and returns a single-drive Library naming
+// them all as blank sources.
 func prepareBlankTapesAt(t *testing.T, slotIndexes ...int) multiTapeFixture {
 	t.Helper()
 
@@ -112,8 +100,6 @@ func prepareBlankTapesAt(t *testing.T, slotIndexes ...int) multiTapeFixture {
 	)
 
 	for _, index := range slotIndexes {
-		// prepareBlankTapeAt leaves drive 0 empty when it returns, so the next
-		// slot's blanking finds the "drive 0 must start empty" precondition met.
 		fixture := prepareBlankTapeAt(t, index)
 		barcodes = append(barcodes, fixture.barcode)
 		blankSlots = append(blankSlots, fixture.slotAddr)
@@ -131,10 +117,8 @@ func prepareBlankTapesAt(t *testing.T, slotIndexes ...int) multiTapeFixture {
 	}
 }
 
-// eraseLoadedTape issues a short SCSI ERASE (CDB 0x19, LONG=0) to the tape in the
-// drive, resetting mhvtl's state to blank without a long physical erase. It
-// rewinds first (bounded) so ERASE starts at BOT. Best-effort, mirroring the
-// integration suite.
+// eraseLoadedTape issues a short SCSI ERASE (CDB 0x19, LONG=0), blanking mhvtl
+// without a long erase. It rewinds first so ERASE starts at BOT. Best-effort.
 func eraseLoadedTape(ctx context.Context, stDev, sgDev string) {
 	rewindCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	_ = exec.CommandContext(rewindCtx, "mt", "-f", stDev, "rewind").Run()
@@ -145,9 +129,8 @@ func eraseLoadedTape(ctx context.Context, stDev, sgDev string) {
 		"0x19", "0x00", "0x00", "0x00", "0x00", "0x00").Run()
 }
 
-// returnTapeToSlot restores the library to "drive 0 empty, tape in its storage
-// slot" after a run. It never loads the drive. Best-effort: failures are ignored
-// so cleanup never fails a passing test.
+// returnTapeToSlot best-effort restores "drive 0 empty, tape in its slot"
+// without ever loading the drive.
 func returnTapeToSlot(fixture tapeFixture) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()

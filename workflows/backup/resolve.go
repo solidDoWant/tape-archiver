@@ -14,53 +14,32 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 )
 
-// The Resolve phase (SPEC §4.3 phase 1) expands the run config into a concrete
-// work list and runs the feasibility pre-check, split across two activities by
-// the SPEC §16 ownership rule:
-//
-//   - ResolveK8sSources runs on the control worker, where the Kubernetes API is
-//     reachable: it turns each k8s VolumeSnapshot / label-selector group into the
-//     ZFS snapshot path(s) it maps to.
-//   - ResolveAndCheck runs on the data worker, where the ZFS pool is reachable:
-//     it validates raw ZFS sources, verifies each resolved k8s snapshot exists and
-//     is democratic-csi-managed, sizes every archive, and rejects any single
-//     archive that cannot fit on one tape — all before any data is staged.
-//
-// Both produce ResolvedArchive values; the resolved work list is the only thing
-// this phase leaves behind, in runState.resolved.
+// The Resolve phase (SPEC §4.3 phase 1) expands the config into a work list and
+// runs the feasibility pre-check, split by the SPEC §16 ownership rule: k8s
+// resolution on the control worker (where the API is reachable), ZFS validation
+// and sizing on the data worker (where the pool is).
 
 const (
-	// resolveControlTimeout bounds the control-side k8s resolution. It is a few
-	// Kubernetes API reads per source, so minutes are ample.
 	resolveControlTimeout = 5 * time.Minute
-	// resolveDataTimeout bounds the data-side validation, verification, and
-	// feasibility sizing. Each is a cheap `zfs get`, but a run may name many
-	// sources, so the bound is generous.
-	resolveDataTimeout = 10 * time.Minute
+	resolveDataTimeout    = 10 * time.Minute
 )
 
-// snapshotResolver resolves k8s VolumeSnapshot references to democratic-csi ZFS
-// snapshot paths. It is the seam *k8ssnap.Resolver satisfies, injected so the
-// control activity is unit-testable without a cluster.
+// snapshotResolver is the seam *k8ssnap.Resolver satisfies, injected for tests.
 type snapshotResolver interface {
 	Resolve(ctx context.Context, ref k8ssnap.Ref) (k8ssnap.Snapshot, error)
 	ResolveGroup(ctx context.Context, ref k8ssnap.Ref) (k8ssnap.Group, error)
 }
 
-// poolInspector reads ZFS properties from the pool. It is the seam the zfs
-// package functions are wrapped behind, injected so the data activity is
-// unit-testable without a pool. Its UserProperty method also satisfies
-// k8ssnap.PropertyReader, so it doubles as the reader for ownership verification;
-// UserProperties remains for the raw-source existence check only (zfs exits
-// non-zero for an absent dataset — its returned map is never trusted for values).
+// poolInspector reads ZFS properties; injected for tests. UserProperty also
+// satisfies k8ssnap.PropertyReader. UserProperties is only an existence check (zfs
+// exits non-zero for an absent dataset); its values are never trusted.
 type poolInspector interface {
 	UserProperties(ctx context.Context, dataset string) (map[string]string, error)
 	UserProperty(ctx context.Context, dataset, property string) (string, error)
 	LogicalReferenced(ctx context.Context, dataset string) (int64, error)
 }
 
-// zfsPool is the production poolInspector: a thin adapter over the package-level
-// zfs functions, which shell out to the zfs CLI on the data worker.
+// zfsPool is the production poolInspector over the zfs CLI.
 type zfsPool struct{}
 
 func (zfsPool) UserProperties(ctx context.Context, dataset string) (map[string]string, error) {
@@ -75,19 +54,13 @@ func (zfsPool) LogicalReferenced(ctx context.Context, dataset string) (int64, er
 	return zfs.LogicalReferenced(ctx, dataset)
 }
 
-// ResolveControlActivities hosts the control-side Resolve activity. It builds the
-// k8s resolver lazily on first use, so a run that names only raw ZFS sources
-// needs no Kubernetes access at all.
+// ResolveControlActivities hosts the control-side Resolve activity.
 type ResolveControlActivities struct {
-	// newResolver constructs the k8s resolver. It is a factory rather than a
-	// stored resolver so the (possibly failing) Kubernetes client is built only
-	// when a run actually has k8s sources, and so tests can inject a fake.
+	// newResolver is a factory so the Kubernetes client is built only when a run
+	// has k8s sources; raw-ZFS-only runs need no cluster access.
 	newResolver func() (snapshotResolver, error)
 }
 
-// newResolveControlActivities returns the production control-side Resolve
-// activity, building its resolver from the ambient Kubernetes config and
-// democratic-csi's datasetParentName.
 func newResolveControlActivities(datasetParent string) *ResolveControlActivities {
 	return &ResolveControlActivities{
 		newResolver: func() (snapshotResolver, error) {
@@ -101,12 +74,9 @@ func newResolveControlActivities(datasetParent string) *ResolveControlActivities
 	}
 }
 
-// ResolveK8sSources resolves every k8s source in cfg to the ZFS snapshot(s) it
-// maps to (SPEC §4.3 phase 1, control side). A source with a Name resolves to a
-// single snapshot; one with a LabelSelector resolves to a group, all packed into
-// one archive (SPEC §5). Raw ZFS sources are skipped here — they are the data
-// worker's job. A single resolution failure fails the run before any data is
-// staged.
+// ResolveK8sSources resolves every k8s source to its ZFS snapshot(s); a
+// LabelSelector source becomes one grouped archive (SPEC §5). Raw ZFS sources are
+// left to the data worker.
 func (a *ResolveControlActivities) ResolveK8sSources(ctx context.Context, cfg config.Config) ([]ResolvedArchive, error) {
 	var resolver snapshotResolver
 
@@ -142,8 +112,6 @@ func (a *ResolveControlActivities) ResolveK8sSources(ctx context.Context, cfg co
 	return resolved, nil
 }
 
-// resolveK8sSource resolves one k8s source to a ResolvedArchive, dispatching on
-// whether it names a single VolumeSnapshot or a label-selector group.
 func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int, source config.Source) (ResolvedArchive, error) {
 	k8s := source.K8s
 	ref := k8ssnap.Ref{Namespace: k8s.Namespace, Name: k8s.Name, LabelSelector: k8s.LabelSelector}
@@ -172,8 +140,6 @@ func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int,
 	return archive, nil
 }
 
-// snapshotFromK8s maps a k8ssnap.Snapshot to the run-state ResolvedSnapshot,
-// carrying both the ZFS location and the k8s provenance.
 func snapshotFromK8s(snapshot k8ssnap.Snapshot) ResolvedSnapshot {
 	return ResolvedSnapshot{
 		ZFSPath:        snapshot.ZFSPath(),
@@ -185,49 +151,32 @@ func snapshotFromK8s(snapshot k8ssnap.Snapshot) ResolvedSnapshot {
 	}
 }
 
-// ResolveDataInput is the payload for the data-side Resolve activity: the run
-// config plus the k8s archives the control worker already resolved (keyed back to
-// their source by SourceIndex).
+// ResolveDataInput is the data-side Resolve payload: the config plus the
+// control-resolved k8s archives, keyed by SourceIndex.
 type ResolveDataInput struct {
 	Config      config.Config
 	K8sArchives []ResolvedArchive
 }
 
-// ResolveDataActivities hosts the data-side Resolve activity, which runs where the
-// ZFS pool is reachable.
+// ResolveDataActivities hosts the data-side Resolve activity.
 type ResolveDataActivities struct {
 	pool poolInspector
 }
 
-// newResolveDataActivities returns the production data-side Resolve activity,
-// reading the pool through the zfs CLI. The tape capacity it checks feasibility
-// against comes from the run config, per source.
 func newResolveDataActivities() *ResolveDataActivities {
 	return &ResolveDataActivities{pool: zfsPool{}}
 }
 
-// ResolveAndCheck completes the work list on the data side (SPEC §4.3 phase 1):
-// it validates raw ZFS sources exist, verifies each control-resolved k8s snapshot
-// exists and is democratic-csi-managed, then sizes every archive and rejects any
-// whose estimate exceeds one tape's usable capacity — the native capacity less the
-// LTFS reserve Pack enforces (usableCapacity), so an archive admitted here is never
-// rejected at Pack only after hours of staging (issue #224). It then derives the
-// run's slice size from the resolved sizes (DeriveSliceSize) and asserts the
-// resulting whole-run slice count keeps an activity payload within Temporal's
-// ~2 MB limit (checkPayloadBound) — an invariant the derivation satisfies by
-// construction since issue #324, no longer an operator-error path. The estimate
-// inflates logicalreferenced by the configured overhead factor and PAR2 % purely
-// for these pre-checks; it is never the authoritative plan (that is the measured
-// Prepare size). It returns the full work list in config-source order.
+// ResolveAndCheck validates and sizes every source on the data side (SPEC §4.3
+// phase 1), rejecting any archive whose inflated estimate exceeds one tape's
+// usable capacity, and returns the work list in config-source order.
 func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input ResolveDataInput) ([]ResolvedArchive, error) {
 	cfg := input.Config
 	overhead := cfg.EffectiveFeasibilityOverhead()
 	par2 := par2Fraction(cfg.Redundancy)
-	// Bound the estimate against the same usable capacity Pack enforces — the
-	// native capacity less the LTFS filesystem reserve — not the raw native
-	// capacity. Comparing against native admitted an incompressible source in the
-	// (usable, native] band that Pack then rejected only after hours of staging
-	// (issue #224); usableCapacity keeps the two checks consistent.
+	// Use the same usable capacity Pack enforces (native less the LTFS reserve):
+	// comparing against native admitted sources Pack then rejected only after
+	// hours of staging (#224).
 	capacity := usableCapacity(cfg.Library.TapeCapacityBytes)
 
 	k8sByIndex := make(map[int]ResolvedArchive, len(input.K8sArchives))
@@ -281,85 +230,43 @@ func (a *ResolveDataActivities) ResolveAndCheck(ctx context.Context, input Resol
 }
 
 const (
-	// temporalPayloadLimitBytes is Temporal's default gRPC blob-size limit for a
-	// single activity payload (~2 MiB). This repo does not override it — there is
-	// no custom DataConverter or gRPC message-size option in
-	// pkg/temporalclient/client.go's buildOptions — so the SDK default governs. A
-	// change that raises it there must revisit this bound.
+	// temporalPayloadLimitBytes is Temporal's default per-payload gRPC limit.
+	// pkg/temporalclient does not override it; if it ever does, revisit this.
 	temporalPayloadLimitBytes = 2 * 1024 * 1024
 
-	// perStagedSliceBytes is a conservative upper estimate of one StagedSlice
-	// entry's serialized cost in an activity payload: an absolute Path, a 64-char
-	// hex SHA256, an int64 SizeBytes, plus JSON field names, quoting, and
-	// punctuation. Measured cost is ~200 B; this rounds up with headroom for long
-	// paths (StagedSlice in types.go).
+	// perStagedSliceBytes is a conservative serialized size of one StagedSlice
+	// (measured ~200 B; headroom for long paths).
 	perStagedSliceBytes = 256
 
-	// payloadBoundBudgetBytes is the slice-metadata budget the whole-run slice
-	// count must fit within: half the Temporal limit, reserving the other half for
-	// the non-slice framing of each payload (StagedArchive / PlannedTape fields)
-	// and for the PAR2 file entries the same payloads also carry.
+	// payloadBoundBudgetBytes reserves half the limit for non-slice framing and
+	// PAR2 file entries.
 	payloadBoundBudgetBytes = temporalPayloadLimitBytes / 2
 )
 
-// Slice-size derivation constants (DeriveSliceSize). Every value below is a
-// deliberate choice, not an incidental magic number — the rationale is why the
-// derivation can replace the old operator-set redundancy.sliceSizeBytes and still
-// satisfy the Resolve payload bound and the per-archive PAR2 regime by
-// construction (issue #324).
+// Slice-size derivation constants (DeriveSliceSize, #324).
 const (
-	// bytesPerGiB is the whole-GiB unit DeriveSliceSize rounds slices up to. Slices
-	// are quoted in GiB throughout the operator-facing surface (report, web), and a
-	// whole-GiB size is legible there and keeps the per-slice PAR2/index overhead a
-	// negligible fraction of each slice.
 	bytesPerGiB = 1 << 30
 
-	// minSliceSizeBytes is the 1 GiB floor. A small run would otherwise derive a
-	// sub-GiB slice, where fixed per-slice overhead (a PAR2 recovery file and an
-	// LTFS index entry per slice) stops being negligible; the floor is also the
-	// contract's stated minimum ("at least 1 GiB", issue #324 criterion 3).
+	// minSliceSizeBytes: below 1 GiB the per-slice PAR2 file and LTFS index entry
+	// stop being negligible (#324 criterion 3).
 	minSliceSizeBytes = bytesPerGiB
 
-	// runSliceCountTarget bounds the WHOLE-RUN slice count: DeriveSliceSize makes
-	// the slice size at least totalEstimated/runSliceCountTarget, so the run's
-	// estimate-based slice count lands near this figure. The hard ceiling is
-	// payloadBoundBudgetBytes/perStagedSliceBytes = 1 MiB / 256 B = 4096 slices
-	// (checkPayloadBound). Targeting 3500 leaves ~596 slices of headroom for the
-	// per-archive ceiling rounding (up to one extra slice per archive, so up to
-	// ~595 archives fit under the ceiling) and for the gap between the inflated
-	// estimate used here and the smaller measured sizes Prepare actually slices.
+	// runSliceCountTarget bounds the whole-run slice count. The hard ceiling is
+	// payloadBoundBudgetBytes/perStagedSliceBytes = 4096; 3500 leaves headroom for
+	// per-archive ceiling rounding (one extra slice per archive).
 	runSliceCountTarget = 3500
 
-	// archiveSliceCountTarget bounds ANY SINGLE archive's slice count:
-	// DeriveSliceSize makes the slice size at least largestEstimated/800, so the
-	// largest archive lands near 800 slices and every other archive lower. That
-	// sits under the 1,000-slice hard cap (issue #324 criterion 3) with margin, and
-	// keeps each archive in the regime where PAR2's block-size targeting stays near
-	// its ~2,000-block sweet spot and the Pack PAR2 reserve (par2.MaxOutputBytes)
-	// stays tight (issue #324 technical context).
+	// archiveSliceCountTarget keeps every archive under the 1,000-slice cap (#324)
+	// and in the regime where PAR2 block sizing stays near ~2,000 blocks and the
+	// Pack PAR2 reserve stays tight.
 	archiveSliceCountTarget = 800
 )
 
-// DeriveSliceSize computes the slice size for a run from its resolved work list,
-// replacing the operator-set redundancy.sliceSizeBytes removed in issue #324. It
-// is a pure function of the archives' inflated EstimatedBytes, so it is
-// deterministic and yields an identical value on every call and on Resolve retry
-// (SPEC §4.3 phase 1) — the Resolve phase, the Prepare/Report run state, and the
-// runsapi Resolve fact all obtain the same figure by calling it.
-//
-// It takes the larger of two lower bounds, then rounds up to a whole GiB (rounding
-// up only lowers the slice count, so both bounds still hold) and floors at 1 GiB:
-//
-//   - totalEstimated/runSliceCountTarget keeps the whole-run slice count within the
-//     Temporal activity-payload budget (checkPayloadBound), so that gate is
-//     satisfied by construction rather than being an operator-error path.
-//   - largestEstimated/archiveSliceCountTarget keeps every archive's slice count
-//     under the per-archive cap, in the PAR2 block-count regime the derivation
-//     depends on.
-//
-// Because EstimatedBytes over-estimates (it inflates logicalreferenced by the
-// feasibility overhead and PAR2 %), the measured sizes Prepare actually slices are
-// smaller, so the real slice counts never exceed the derived-from-estimate bounds.
+// DeriveSliceSize computes a run's slice size from its resolved archives (#324):
+// the larger of totalEstimated/runSliceCountTarget and
+// largestEstimated/archiveSliceCountTarget, rounded up to a whole GiB with a 1 GiB
+// floor. It is pure, so Resolve retries and every consumer get the same value.
+// EstimatedBytes over-estimates, so real slice counts never exceed these bounds.
 func DeriveSliceSize(resolved []ResolvedArchive) int64 {
 	var totalEstimated, largestEstimated int64
 
@@ -375,8 +282,7 @@ func DeriveSliceSize(resolved []ResolvedArchive) int64 {
 		sliceSize = archiveTerm
 	}
 
-	// Round up to a whole GiB, then enforce the 1 GiB floor (which also handles an
-	// empty work list, where both terms are 0).
+	// Rounding up only lowers the slice count; the floor also covers an empty list.
 	sliceSize = ceilDiv(sliceSize, bytesPerGiB) * bytesPerGiB
 	if sliceSize < minSliceSizeBytes {
 		sliceSize = minSliceSizeBytes
@@ -385,24 +291,11 @@ func DeriveSliceSize(resolved []ResolvedArchive) int64 {
 	return sliceSize
 }
 
-// checkPayloadBound is the internal invariant that the derived slice size keeps the
-// run's estimated whole-run slice count within Temporal's activity-payload budget
-// (SPEC §4.3 phase 1). The PrepareArchives result carries every archive's
-// []StagedSlice in one payload, and the same metadata re-ships through Pack,
-// GeneratePAR2, Verify, the per-tape WriteTreeInput, and Report; bounding the
-// whole-run slice count bounds them all. The one payload term that does not scale
-// with slice metadata — the captured LTFS index, which grows with the on-tape file
-// count — is deliberately excluded: FinalizeTape stages it to disk and the
-// post-write phases pass it by path, so it never travels in an activity payload and
-// needs no budget here (issue #221).
-//
-// Since issue #324 the slice size is derived by DeriveSliceSize, whose
-// runSliceCountTarget term satisfies this bound by construction, so this is no
-// longer an operator-fixable config error — a violation is a bug in the derivation.
-// It is retained as a cheap guard so such a regression fails loudly here, before
-// any staging, rather than as an opaque payload-too-large error after up to 24 h of
-// staging. The count is derived from each archive's inflated EstimatedBytes, so it
-// over-estimates and never under-bounds the real payload.
+// checkPayloadBound guards that the whole-run slice metadata fits Temporal's
+// payload budget; it re-ships through Prepare, Pack, PAR2, Verify, Write and
+// Report. The LTFS index is excluded because it is passed by path (#221).
+// DeriveSliceSize satisfies this by construction, so a violation is a derivation
+// bug, caught here rather than after 24 h of staging.
 func checkPayloadBound(resolved []ResolvedArchive, sliceSizeBytes int64) error {
 	if sliceSizeBytes <= 0 {
 		return fmt.Errorf("internal: derived slice size must be positive, got %d bytes", sliceSizeBytes)
@@ -428,8 +321,8 @@ func checkPayloadBound(resolved []ResolvedArchive, sliceSizeBytes int64) error {
 	)
 }
 
-// resolveDataSource produces the data-side ResolvedArchive for one source: it
-// verifies a control-resolved k8s archive, or validates and builds a raw ZFS one.
+// resolveDataSource verifies a control-resolved k8s archive, or validates and
+// builds a raw ZFS one.
 func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int, source config.Source, k8sByIndex map[int]ResolvedArchive) (ResolvedArchive, error) {
 	if source.K8s != nil {
 		archive, ok := k8sByIndex[index]
@@ -447,8 +340,7 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 		return archive, nil
 	}
 
-	// Reading a raw source's user properties doubles as an existence check: zfs
-	// exits non-zero for an absent dataset or snapshot (SPEC §4.3 phase 1).
+	// Existence check: zfs exits non-zero for an absent dataset or snapshot.
 	name := source.ZFSPath.Name
 	if _, err := a.pool.UserProperties(ctx, name); err != nil {
 		return ResolvedArchive{}, fmt.Errorf("validate raw zfs sources[%d] %q: %w", index, name, err)
@@ -462,10 +354,8 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 	}, nil
 }
 
-// estimate returns an archive's summed logicalreferenced and the feasibility
-// estimate derived from it — that same sum inflated by the overhead factor and
-// PAR2 %. The un-inflated sum is returned too because Prepare reports its
-// progress against the source bytes it reads, not against the inflated estimate.
+// estimate returns the summed logicalreferenced (Prepare's progress denominator)
+// and the inflated feasibility estimate.
 func (a *ResolveDataActivities) estimate(ctx context.Context, archive ResolvedArchive, overhead, par2 float64) (logical, estimate int64, err error) {
 	for _, snapshot := range archive.Snapshots {
 		referenced, err := a.pool.LogicalReferenced(ctx, snapshot.ZFSPath)
@@ -479,9 +369,7 @@ func (a *ResolveDataActivities) estimate(ctx context.Context, archive ResolvedAr
 	return logical, feasibilityEstimate(logical, overhead, par2), nil
 }
 
-// compressionEnabled reports whether the Prepare phase should zstd-compress a
-// source's archive, applying the default-on rule when the source leaves it unset
-// (SPEC §8).
+// compressionEnabled defaults to true when unset (SPEC §8).
 func compressionEnabled(source config.Source) bool {
 	if source.Compression != nil {
 		return *source.Compression
@@ -490,11 +378,9 @@ func compressionEnabled(source config.Source) bool {
 	return true
 }
 
-// par2Fraction is the PAR2 redundancy used in the feasibility estimate, as a
-// fraction of archive size. Fixed mode uses its target percentage; fill-to-
-// capacity mode uses its floor — the minimum footprint, since fill only adds
-// parity into otherwise-wasted tape space and so cannot make an archive that
-// fits at the floor stop fitting.
+// par2Fraction is the PAR2 fraction used in the feasibility estimate. Fill mode
+// uses its floor: fill only adds parity into otherwise-wasted space, so it cannot
+// make a fitting archive stop fitting.
 func par2Fraction(redundancy config.Redundancy) float64 {
 	switch {
 	case redundancy.TargetPercentage != nil:
@@ -506,17 +392,13 @@ func par2Fraction(redundancy config.Redundancy) float64 {
 	}
 }
 
-// feasibilityEstimate inflates a logical size by the overhead factor and PAR2
-// fraction, rounding up so the pre-check never under-estimates (SPEC §4.3 phase
-// 1).
+// feasibilityEstimate rounds up so the pre-check never under-estimates.
 func feasibilityEstimate(logical int64, overhead, par2 float64) int64 {
 	return int64(math.Ceil(float64(logical) * overhead * (1 + par2)))
 }
 
-// resolvePhase orchestrates the Resolve phase: control-side k8s resolution, then
-// data-side validation, verification, and the feasibility pre-check. It stores
-// the resolved work list in runState for the Prepare phase. A failure in either
-// activity aborts the run here, before any data is staged.
+// resolvePhase runs control-side k8s resolution then the data-side checks, and
+// stores the work list. A failure aborts the run before any data is staged.
 func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) error {
 	controlCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           TaskQueue,
@@ -545,10 +427,7 @@ func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	}
 
 	state.resolved = resolved
-	// Derive the run's slice size from the resolved sizes once, here, so Prepare
-	// (slicing) and Report (build params) consume one deterministic value rather
-	// than recomputing it (issue #324). DeriveSliceSize is a pure function of the
-	// same EstimatedBytes the data activity validated above.
+	// Derived once here so Prepare and Report share one deterministic value (#324).
 	state.sliceSizeBytes = DeriveSliceSize(resolved)
 
 	return nil

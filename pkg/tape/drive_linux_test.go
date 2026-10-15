@@ -11,10 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestInterpretBlankProbe exercises the blank-probe decision half of IsBlank
-// directly. mhvtl cannot produce a status-only completion, so the status gate
-// that keeps a transient BUSY/RESERVATION CONFLICT from becoming a definitive
-// "not blank" verdict is only reachable via unit test.
+// TestInterpretBlankProbe covers status-only completions, which mhvtl cannot
+// produce.
 func TestInterpretBlankProbe(t *testing.T) {
 	t.Parallel()
 
@@ -45,9 +43,8 @@ func TestInterpretBlankProbe(t *testing.T) {
 			wantErrIs: errUnexpectedSense,
 		},
 		"BUSY status-only completion errors, not a false not-blank": {
-			// The core bug: status-only completion, LLD leaves resid 0 so
-			// transferred>0 on a genuinely blank tape. Must be an error (so the
-			// ready-retry loop retries), never a definitive (false, nil).
+			// Status-only completion with resid 0 looks like data on a blank
+			// tape; it must be an error, never (false, nil).
 			probe:     blankProbe{status: 0x08, transferred: 65536},
 			assertErr: require.Error,
 			wantErrIs: errUnexpectedSense,
@@ -82,18 +79,12 @@ func TestInterpretBlankProbe(t *testing.T) {
 	}
 }
 
-// TestClassEntryForDevNumber exercises the sysfs class-entry lookup that resolves
-// a device node to its kernel name by device number rather than path basename —
-// the core of the fix for a dry-run changer/drive reached through a /dev/mhvtl/*
-// udev symlink whose basename is not a sysfs entry (issue #326). It builds a
-// synthetic sysfs class tree so the logic is testable without root or real
-// hardware; each entry's "dev" file mirrors the kernel's "major:minor\n" format.
+// TestClassEntryForDevNumber covers lookup by device number on a synthetic
+// sysfs tree (#326).
 func TestClassEntryForDevNumber(t *testing.T) {
 	t.Parallel()
 
-	// A class dir modelling /sys/class/scsi_changer with a renamed entry (sch2),
-	// as mhvtl presents it, plus an unrelated neighbour to prove the match is by
-	// number, not by iteration order.
+	// The neighbour proves the match is by number, not iteration order.
 	classDir := t.TempDir()
 	writeClassEntry(t, classDir, "sch0", "86:0")
 	writeClassEntry(t, classDir, "sch2", "86:2")
@@ -141,8 +132,6 @@ func TestClassEntryForDevNumber(t *testing.T) {
 	})
 }
 
-// writeClassEntry creates a sysfs-style class entry <classDir>/<name>/dev holding
-// "<devNumber>\n", matching the kernel's uevent "dev" attribute format.
 func writeClassEntry(t *testing.T, classDir, name, devNumber string) {
 	t.Helper()
 

@@ -20,16 +20,9 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// stageRunTree populates a staging root with what a run leaves behind: two
-// archives' worth of slices and PAR2 recovery files under the run directory, the
-// durable recovery artifacts beside them, and the barcode-keyed mount, work, and
-// index entries at the root. It returns the run directory.
-//
-// It mirrors the real layout exactly — prepare.go stages archives under NNN/ with
-// slices named archive.NNN, par2.go writes archive*.par2 beside them, report.go
-// writes report.pdf / recovery.iso / disc-manifest.sha256 into the run directory,
-// and session.go creates mounts/<barcode>/, work/<barcode>/, and
-// indexes/<barcode>.xml at the root.
+// stageRunTree builds the real staging layout a run leaves behind (archive
+// slices and PAR2 under NNN/, retained artifacts, and barcode-keyed entries at
+// the root) and returns the run directory.
 func stageRunTree(t *testing.T, stagingRoot, runID string, barcodes ...string) string {
 	t.Helper()
 
@@ -63,9 +56,7 @@ func stageRunTree(t *testing.T, stagingRoot, runID string, barcodes ...string) s
 	return runDir
 }
 
-// assertNoStagedBulk asserts no archive slice or PAR2 file survives anywhere
-// beneath runDir — the criterion that matters, stated over the whole tree rather
-// than over the specific paths the fixture happened to create.
+// assertNoStagedBulk asserts no slice or PAR2 file survives anywhere under runDir.
 func assertNoStagedBulk(t *testing.T, runDir string) {
 	t.Helper()
 
@@ -91,10 +82,8 @@ func assertNoStagedBulk(t *testing.T, runDir string) {
 	assert.Empty(t, leftovers, "no staged bulk data may survive cleanup")
 }
 
-// TestCleanupRemovesBulkAndRetainsRecoveryArtifacts covers the success path: the
-// staged slices and PAR2 files are gone while the durable recovery artifacts
-// survive. The burning-disabled case exercises a run that never staged an ISO or
-// disc manifest, proving cleanup does not depend on their presence.
+// TestCleanupRemovesBulkAndRetainsRecoveryArtifacts asserts bulk data is removed
+// and recovery artifacts survive, including when none were staged.
 func TestCleanupRemovesBulkAndRetainsRecoveryArtifacts(t *testing.T) {
 	t.Parallel()
 
@@ -123,7 +112,6 @@ func TestCleanupRemovesBulkAndRetainsRecoveryArtifacts(t *testing.T) {
 			runDir := stageRunTree(t, stagingRoot, "run-id")
 
 			if !test.opticalBurn {
-				// A run without optical burning stages no ISO or disc manifest.
 				require.NoError(t, os.Remove(filepath.Join(runDir, isoFileName)))
 				require.NoError(t, os.Remove(filepath.Join(runDir, discManifestFileName)))
 			}
@@ -147,17 +135,15 @@ func TestCleanupRemovesBulkAndRetainsRecoveryArtifacts(t *testing.T) {
 	}
 }
 
-// TestCleanupRemovesBarcodeKeyedEntries asserts the per-tape LTFS mountpoint,
-// work directory, and staged index file the run created are removed. They live at
-// the staging root rather than under the run directory, so the run-directory sweep
-// cannot reach them and they would otherwise accumulate per barcode forever.
+// TestCleanupRemovesBarcodeKeyedEntries asserts the root-level per-tape entries,
+// which the run-directory sweep cannot reach, are removed.
 func TestCleanupRemovesBarcodeKeyedEntries(t *testing.T) {
 	t.Parallel()
 
 	stagingRoot := t.TempDir()
 	runDir := stageRunTree(t, stagingRoot, "run-id", "TAPE01L6", "TAPE02L6")
 
-	// A barcode from an unrelated prior run that this run never loaded.
+	// From an unrelated prior run; must survive.
 	other := filepath.Join(stagingRoot, "indexes", "OTHER99L6.xml")
 	require.NoError(t, os.WriteFile(other, []byte("staged"), 0o644))
 
@@ -174,10 +160,8 @@ func TestCleanupRemovesBarcodeKeyedEntries(t *testing.T) {
 	assert.FileExists(t, other, "cleanup touches only the barcodes this run loaded")
 }
 
-// TestCleanupToleratesNothingStaged covers the run that fails before Prepare
-// stages anything (e.g. Resolve fails): the run directory never existed, and
-// cleanup must succeed rather than add a spurious error to a run that already has
-// one.
+// TestCleanupToleratesNothingStaged: a run that never staged anything cleans up
+// without error.
 func TestCleanupToleratesNothingStaged(t *testing.T) {
 	t.Parallel()
 
@@ -189,9 +173,7 @@ func TestCleanupToleratesNothingStaged(t *testing.T) {
 		filepath.Join(stagingRoot, "run-that-staged-nothing"), []string{"TAPE01L6"}))
 }
 
-// TestCleanupIsIdempotent asserts a second cleanup of the same run — an activity
-// retry after a partial failure — succeeds rather than failing on the paths the
-// first pass already removed.
+// TestCleanupIsIdempotent: a retried cleanup succeeds.
 func TestCleanupIsIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -206,9 +188,8 @@ func TestCleanupIsIdempotent(t *testing.T) {
 	assertNoStagedBulk(t, runDir)
 }
 
-// TestCleanupStagingRequiresStagingRoot verifies the activity refuses an
-// unconfigured staging root rather than deriving a path relative to the worker's
-// working directory and recursively removing it.
+// TestCleanupStagingRequiresStagingRoot asserts an empty staging root is refused
+// rather than resolving relative to the working directory.
 func TestCleanupStagingRequiresStagingRoot(t *testing.T) {
 	t.Parallel()
 
@@ -218,16 +199,14 @@ func TestCleanupStagingRequiresStagingRoot(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "staging directory")
 
-	// Misconfiguration recurs on every retry, and cleanup is deferred — a
-	// retrying activity would hold the run open. It must be non-retryable.
+	// Deferred cleanup must not retry a misconfiguration forever.
 	var appErr *temporal.ApplicationError
 	require.ErrorAs(t, err, &appErr)
 	assert.True(t, appErr.NonRetryable(), "unconfigured staging root must be non-retryable")
 }
 
-// TestCleanupReportsEveryRemovalFailure asserts a path that cannot be removed is
-// reported rather than silently skipped, and that one stubborn entry does not stop
-// cleanup from reclaiming the rest.
+// TestCleanupReportsEveryRemovalFailure asserts an unremovable path is reported
+// without stopping the rest of the cleanup.
 func TestCleanupReportsEveryRemovalFailure(t *testing.T) {
 	t.Parallel()
 
@@ -238,8 +217,6 @@ func TestCleanupReportsEveryRemovalFailure(t *testing.T) {
 	stagingRoot := t.TempDir()
 	runDir := stageRunTree(t, stagingRoot, "run-id")
 
-	// Make one archive directory unremovable by clearing write permission on it:
-	// its entries cannot be unlinked, so RemoveAll fails for that subtree only.
 	locked := filepath.Join(runDir, "000")
 	require.NoError(t, os.Chmod(locked, 0o555))
 
@@ -251,13 +228,11 @@ func TestCleanupReportsEveryRemovalFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), locked, "the unremovable path is named")
 
-	// The other archive was still reclaimed.
 	assert.NoDirExists(t, filepath.Join(runDir, "001"))
 }
 
-// TestCleanupBarcodes covers the pure barcode-selection logic: it reads the
-// cumulative mounted list (not the in-flight drive-set), de-duplicates a barcode
-// seen twice, and skips the empty barcode of a tape that never mounted.
+// TestCleanupBarcodes asserts the cumulative mounted list is used, de-duplicated,
+// skipping empty barcodes.
 func TestCleanupBarcodes(t *testing.T) {
 	t.Parallel()
 
@@ -295,10 +270,7 @@ func TestCleanupBarcodes(t *testing.T) {
 	}
 }
 
-// recordingCleaner is a CleanupStaging stand-in that records the inputs it was
-// called with, so a workflow test can assert the run dispatched cleanup on a given
-// exit path. cleanupErr, when set, makes the activity fail — modelling a cleanup
-// that cannot reclaim the staging directory.
+// recordingCleaner records CleanupStaging inputs; cleanupErr makes it fail.
 type recordingCleaner struct {
 	mu         sync.Mutex
 	calls      []CleanupInput
@@ -321,17 +293,13 @@ func (r *recordingCleaner) recorded() []CleanupInput {
 	return append([]CleanupInput(nil), r.calls...)
 }
 
-// cleanupTestParam is the serializable input to cleanupTestWorkflow.
 type cleanupTestParam struct {
 	Barcodes []tape.Barcode
-	// Mode selects the exit path: "success" returns cleanly, "fail" returns an
-	// error, "cancel" blocks until the test cancels the run.
+	// Mode is "success", "fail", or "cancel" (blocks until the test cancels).
 	Mode string
 }
 
-// cleanupTestWorkflow exercises the workflow cleanup helper exactly as Backup
-// does: it arms the cleanup before any phase runs, then exits via the requested
-// path.
+// cleanupTestWorkflow mirrors Backup: arm cleanup first, then exit via Mode.
 func cleanupTestWorkflow(ctx workflow.Context, param cleanupTestParam) error {
 	state := &runState{mountedBarcodes: param.Barcodes}
 
@@ -341,8 +309,7 @@ func cleanupTestWorkflow(ctx workflow.Context, param cleanupTestParam) error {
 	case "fail":
 		return errors.New("phase Prepare: boom")
 	case "cancel":
-		// Block until the test cancels the run; on cancellation the deferred
-		// cleanup still fires because it runs on a disconnected context.
+		// The deferred cleanup still fires: it runs on a disconnected context.
 		_ = workflow.Sleep(ctx, time.Hour)
 	}
 
@@ -354,8 +321,7 @@ func newCleanupEnv(cleaner *recordingCleaner) *testsuite.TestWorkflowEnvironment
 
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(cleanupTestWorkflow)
-	// Registered under the real activity's name so the workflow's
-	// ExecuteActivity(activities.CleanupStaging, ...) reference resolves to it.
+	// Registered under the real activity's name.
 	env.RegisterActivity(&CleanupActivities{})
 	env.OnActivity((&CleanupActivities{}).CleanupStaging, mock.Anything, mock.Anything).
 		Return(cleaner.CleanupStaging)
@@ -363,8 +329,7 @@ func newCleanupEnv(cleaner *recordingCleaner) *testsuite.TestWorkflowEnvironment
 	return env
 }
 
-// TestCleanupRunsOnEveryExitPath covers the success and failure exit paths: the
-// staged tree is reclaimed whether the run succeeds or fails.
+// TestCleanupRunsOnEveryExitPath: staging is reclaimed on success and failure.
 func TestCleanupRunsOnEveryExitPath(t *testing.T) {
 	t.Parallel()
 
@@ -399,10 +364,8 @@ func TestCleanupRunsOnEveryExitPath(t *testing.T) {
 	}
 }
 
-// TestCleanupRunsOnCancellation asserts the run reclaims its staging directory
-// even when cancelled — proving cleanupStaging runs on a disconnected context,
-// mirroring TestHoldReleaseOnCancellation. A connected-context activity would
-// never be dispatched once the workflow itself is cancelled.
+// TestCleanupRunsOnCancellation: staging is reclaimed on cancellation, proving
+// cleanup runs on a disconnected context.
 func TestCleanupRunsOnCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -423,10 +386,8 @@ func TestCleanupRunsOnCancellation(t *testing.T) {
 	assert.Equal(t, []string{"TAPE01L6"}, calls[0].Barcodes)
 }
 
-// TestCleanupFailureDoesNotMaskRunOutcome asserts a cleanup that cannot reclaim
-// the staging directory neither fails a successful run nor replaces a failing
-// run's own error. Leftover staging is observable on disk and manually clearable;
-// the run's outcome is what the operator acts on.
+// TestCleanupFailureDoesNotMaskRunOutcome: a failed cleanup neither fails a
+// successful run nor replaces a failing run's error.
 func TestCleanupFailureDoesNotMaskRunOutcome(t *testing.T) {
 	t.Parallel()
 

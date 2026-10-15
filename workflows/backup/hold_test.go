@@ -13,14 +13,9 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-// recordingHolder is a snapshotHolder that records every hold and release it is
-// asked to perform, keyed by tag, so a test can assert which snapshots a run
-// pinned and released. holdErr, when set, makes Hold fail: every call by default,
-// or — when holdErrAfter is set — only from the holdErrAfter'th snapshot onward,
-// so a run can pin a subset before the hold fails (the partial-hold case). When
-// holdBlocks is set, Hold blocks until the activity context is cancelled and then
-// returns its error, modelling a hold that never completes because the run is
-// cancelled mid-hold.
+// recordingHolder records holds and releases by tag. holdErr fails Hold (from
+// the holdErrAfter'th snapshot when set, for a partial hold); holdBlocks blocks
+// Hold until the run is cancelled.
 type recordingHolder struct {
 	mu           sync.Mutex
 	held         map[string][]string
@@ -40,8 +35,6 @@ func newRecordingHolder() *recordingHolder {
 
 func (r *recordingHolder) Hold(ctx context.Context, tag, snapshot string) error {
 	if r.holdBlocks {
-		// Block until the run is cancelled; the activity context is cancelled on
-		// workflow cancellation, so the hold never succeeds and returns an error.
 		<-ctx.Done()
 
 		return ctx.Err()
@@ -52,9 +45,8 @@ func (r *recordingHolder) Hold(ctx context.Context, tag, snapshot string) error 
 
 	r.holds++
 
-	// holdErrAfter selects a partial failure: hold the first holdErrAfter-1
-	// snapshots, then fail from the holdErrAfter'th onward. A zero holdErrAfter
-	// (with holdErr set) fails every hold.
+	// holdErrAfter: hold the first holdErrAfter-1 snapshots, then fail. Zero (with
+	// holdErr) fails every hold.
 	if r.holdErr != nil && r.holds >= r.holdErrAfter {
 		return r.holdErr
 	}
@@ -99,19 +91,14 @@ func (r *recordingHolder) releasedTags() []string {
 	return tags
 }
 
-// holdTestParam is the serializable input to holdTestWorkflow.
 type holdTestParam struct {
 	Archives []ResolvedArchive
-	// Mode selects the exit path after the hold: "success" returns cleanly,
-	// "fail" returns an error, "cancel" blocks until the test cancels the run.
+	// Mode is "success", "fail", or "cancel" (blocks until the test cancels).
 	Mode string
 }
 
-// holdTestWorkflow exercises the workflow hold/release helpers exactly as Backup
-// does: it arms the release before placing the holds — so a partial-hold failure
-// or a cancel mid-hold still releases — then holds every resolved source snapshot,
-// then exits via the requested path. It returns the run's hold tag so a test can
-// key the recorder by it.
+// holdTestWorkflow mirrors Backup: arm the release, hold, then exit via Mode.
+// It returns the hold tag.
 func holdTestWorkflow(ctx workflow.Context, param holdTestParam) (string, error) {
 	state := &runState{resolved: param.Archives}
 	tag := HoldTag(workflow.GetInfo(ctx).WorkflowExecution.RunID)
@@ -126,8 +113,7 @@ func holdTestWorkflow(ctx workflow.Context, param holdTestParam) (string, error)
 	case "fail":
 		return tag, errors.New("boom")
 	case "cancel":
-		// Block until the test cancels the run; on cancellation the deferred
-		// release still fires because it runs on a disconnected context.
+		// The deferred release still fires: it runs on a disconnected context.
 		_ = workflow.Sleep(ctx, time.Hour)
 	}
 
@@ -144,9 +130,8 @@ func newHoldEnv(holder snapshotHolder) *testsuite.TestWorkflowEnvironment {
 	return env
 }
 
-// TestHoldSnapshotPaths covers the pure snapshot-selection logic: it flattens the
-// resolved work list, skips bare-dataset sources (no "@", nothing to hold), and
-// de-duplicates a snapshot shared across archives, preserving first-seen order.
+// TestHoldSnapshotPaths asserts bare datasets are skipped and shared snapshots
+// de-duplicated in first-seen order.
 func TestHoldSnapshotPaths(t *testing.T) {
 	t.Parallel()
 
@@ -188,9 +173,8 @@ func TestHoldSnapshotPaths(t *testing.T) {
 	}
 }
 
-// TestHoldSnapshotsTagsAndSkipsBareDatasets asserts the run holds every resolved
-// source snapshot under a run-id-derived tag, skipping bare datasets and holding
-// a shared snapshot once, and releases the same set on the success exit path.
+// TestHoldSnapshotsTagsAndSkipsBareDatasets asserts holds use the run-id tag and
+// the same set is released on success.
 func TestHoldSnapshotsTagsAndSkipsBareDatasets(t *testing.T) {
 	t.Parallel()
 
@@ -218,8 +202,7 @@ func TestHoldSnapshotsTagsAndSkipsBareDatasets(t *testing.T) {
 		"holds released on the success exit path")
 }
 
-// TestHoldReleaseOnFailure asserts the run releases its holds when a later phase
-// fails (AC2, failure exit path).
+// TestHoldReleaseOnFailure: holds are released when a later phase fails.
 func TestHoldReleaseOnFailure(t *testing.T) {
 	t.Parallel()
 
@@ -239,9 +222,8 @@ func TestHoldReleaseOnFailure(t *testing.T) {
 	assert.ElementsMatch(t, []string{"pool/a@snap1"}, holder.releasedFor(tags[0]))
 }
 
-// TestHoldReleaseOnCancellation asserts the run releases its holds even when the
-// workflow is cancelled — proving the release runs on a disconnected context
-// (AC2, cancellation exit path).
+// TestHoldReleaseOnCancellation: holds are released on cancellation, proving the
+// release runs on a disconnected context.
 func TestHoldReleaseOnCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -261,13 +243,8 @@ func TestHoldReleaseOnCancellation(t *testing.T) {
 	assert.ElementsMatch(t, []string{"pool/a@snap1"}, holder.releasedFor(tags[0]))
 }
 
-// TestHoldSnapshotsFailsRunOnHoldError asserts a hold failure surfaces from the
-// hold helper (the workflow treats it as fatal, failing the run before Prepare)
-// and that the release still fires even when the hold fully failed. The release is
-// armed before the hold, so it fires on the failure exit path; releasing a
-// never-held snapshot is a harmless no-op (issue #218). Pre-fix the release was
-// armed only after a successful hold, so this dispatched nothing and any hold
-// placed before the failure leaked.
+// TestHoldSnapshotsFailsRunOnHoldError asserts a hold failure surfaces and the
+// release still fires, since it is armed before the hold (issue #218).
 func TestHoldSnapshotsFailsRunOnHoldError(t *testing.T) {
 	t.Parallel()
 
@@ -289,11 +266,8 @@ func TestHoldSnapshotsFailsRunOnHoldError(t *testing.T) {
 		"no resolved snapshot retains the run's hold tag")
 }
 
-// TestHoldReleaseOnPartialHoldFailure covers AC1: when HoldSnapshots fails after
-// pinning only a subset of the resolved snapshots, the run ends in failure yet
-// still releases, so no resolved snapshot retains the run's hold tag. Pre-fix the
-// release was armed only after a fully successful hold, so the two snapshots
-// pinned before the third failed would have leaked past the dead run.
+// TestHoldReleaseOnPartialHoldFailure: a hold failing after pinning a subset
+// still releases every snapshot, so none leaks past the dead run.
 func TestHoldReleaseOnPartialHoldFailure(t *testing.T) {
 	t.Parallel()
 
@@ -319,24 +293,16 @@ func TestHoldReleaseOnPartialHoldFailure(t *testing.T) {
 	tag := tags[0]
 	assert.Contains(t, tag, holdTagPrefix)
 
-	// The run pinned the first two snapshots before the third failed.
 	assert.ElementsMatch(t, []string{"pool/a@snap1", "pool/b@snap2"}, holder.heldFor(tag),
 		"the run pinned a subset before the hold failed")
 
-	// Every resolved snapshot is released — the release re-derives the full work
-	// list and releasing a never-held snapshot is a no-op — so no snapshot retains
-	// the run's hold tag.
 	assert.ElementsMatch(t, []string{"pool/a@snap1", "pool/b@snap2", "pool/c@snap3"},
 		holder.releasedFor(tag), "no resolved snapshot retains the run's hold tag")
 }
 
-// TestHoldReleaseOnCancelDuringHold covers AC2: when the operator cancels the run
-// while the Hold phase is still failing/retrying — modelled here by a hold that
-// blocks and never succeeds until the run is cancelled — the run still releases,
-// so no resolved snapshot retains the run's hold tag. This is distinct from
-// TestHoldReleaseOnCancellation, which cancels after a successful hold: here the
-// hold never completes, so pre-fix (release armed only after a successful hold)
-// nothing would have been released.
+// TestHoldReleaseOnCancelDuringHold: cancelling while the hold never completes
+// still releases (unlike TestHoldReleaseOnCancellation, which cancels after a
+// successful hold).
 func TestHoldReleaseOnCancelDuringHold(t *testing.T) {
 	t.Parallel()
 
@@ -358,9 +324,8 @@ func TestHoldReleaseOnCancelDuringHold(t *testing.T) {
 		"no resolved snapshot retains the run's hold tag")
 }
 
-// TestHoldActivitiesIterate covers the hold/release activities directly: each
-// visits every snapshot, HoldSnapshots surfaces the first hold error, and
-// ReleaseSnapshots releases all snapshots under the run tag.
+// TestHoldActivitiesIterate covers the activities directly: every snapshot is
+// visited and the first hold error surfaces.
 func TestHoldActivitiesIterate(t *testing.T) {
 	t.Parallel()
 

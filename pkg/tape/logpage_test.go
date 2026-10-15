@@ -76,12 +76,8 @@ func TestParseTapeAlert(t *testing.T) {
 	}
 }
 
-// TestParseTapeUsage exercises the reposition parse path against real captured
-// output of the pinned sg_logs 2.35 (page 0x30, --json). The backhitch fixture is
-// a real drive capture with total_suspended_writes set non-zero; the test fails
-// if the parser cannot extract that non-zero count. The unsupported fixture is
-// valid sg_logs JSON that lacks the Tape usage page, proving "not measured" is
-// observable and distinct from a measured zero.
+// TestParseTapeUsage runs against real sg_logs 2.35 captures: a non-zero
+// back-hitch count, and JSON lacking page 0x30 (not measured, not zero).
 func TestParseTapeUsage(t *testing.T) {
 	t.Parallel()
 
@@ -135,9 +131,7 @@ func TestParseTapeUsage(t *testing.T) {
 	}
 }
 
-// TestParseTapeUsageMalformed asserts a malformed JSON body is surfaced as an
-// error (a page the drive answered but could not be decoded is a real fault), not
-// silently reported as a measured zero.
+// TestParseTapeUsageMalformed: malformed JSON is an error, not a measured zero.
 func TestParseTapeUsageMalformed(t *testing.T) {
 	t.Parallel()
 

@@ -19,11 +19,9 @@ func mirrorTestWorkflow(ctx workflow.Context, cfg config.Config) error {
 	return runMirrorLibrary(ctx, cfg)
 }
 
-// TestMirrorSkippedOnRealRun is the safety contract. A real run leaves
-// Library.MirrorSourceChanger empty, and the mirror must then never be dispatched
-// at all — not dispatched-and-skipped. Only runsubmit.ApplyDryRun sets that field,
-// so this is what keeps a reprovision from ever being aimed at a production
-// library's configuration.
+// TestMirrorSkippedOnRealRun is the safety contract: a real run (no
+// MirrorSourceChanger) must never dispatch the mirror at all, so a reprovision
+// can never be aimed at a production library.
 func TestMirrorSkippedOnRealRun(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 
@@ -40,7 +38,6 @@ func TestMirrorSkippedOnRealRun(t *testing.T) {
 			return MirrorLibraryResult{}, nil
 		})
 
-	// A real run: the library is configured normally, with no mirror source.
 	env.ExecuteWorkflow(mirrorTestWorkflow, config.Config{
 		Library: config.Library{Changer: "/dev/sch0"},
 	})
@@ -51,9 +48,8 @@ func TestMirrorSkippedOnRealRun(t *testing.T) {
 		"a real run must never dispatch the library mirror")
 }
 
-// TestMirrorDispatchedOnDryRunWithBothChangers checks the dry-run path passes the
-// real changer as the source and the virtual one as the target — the wrong way
-// round would rewrite nothing useful and read the library being reprovisioned.
+// TestMirrorDispatchedOnDryRunWithBothChangers checks the real changer is the
+// source and the virtual one the target, not the reverse.
 func TestMirrorDispatchedOnDryRunWithBothChangers(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 

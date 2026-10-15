@@ -6,124 +6,77 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// This file holds the run-state types that flow between the backup workflow's
-// phases (SPEC §4.3). They are defined here as the scaffold so that each phase
-// sub-issue is purely additive: a sub-issue fills in the fields its phase
-// produces without restructuring the others. Until then they are intentionally
-// sparse placeholders.
-
-// ResolvedArchive is a single config Source resolved by the Resolve phase to the
-// concrete ZFS snapshot(s) that become one archive (SPEC §4.3 phase 1). A k8s
-// single-snapshot source or a raw ZFS path yields one Snapshot; a k8s
-// label-selector group yields one member per matched snapshot, all packed into
-// the same tar (SPEC §5).
+// ResolvedArchive is one config Source resolved to the ZFS snapshot(s) that
+// become a single archive (SPEC §4.3 phase 1, §5).
 type ResolvedArchive struct {
-	// SourceIndex is the position of the originating Source in Config.Sources,
-	// preserved so the resolved work list stays aligned with the run config.
+	// SourceIndex is the originating Source's position in Config.Sources.
 	SourceIndex int
-	// Label is the sanitized descriptive name for this archive's on-tape directory
-	// (archives/NNN-<label>/, SPEC §6): the source's optional label override, or a
-	// name derived from its identity. It is never relied on for uniqueness — the
-	// SourceIndex prefix disambiguates.
+	// Label names the archive's on-tape directory (SPEC §6). It is never relied on
+	// for uniqueness; the SourceIndex prefix disambiguates.
 	Label string
-	// Compression is whether the Prepare phase should zstd-compress this archive,
-	// resolved from the source's optional override (default-on, SPEC §8).
+	// Compression is whether Prepare zstd-compresses this archive.
 	Compression bool
-	// Snapshots are the ZFS snapshots that make up this archive, in resolution
-	// order. A group has more than one; a single source has exactly one.
+	// Snapshots make up this archive, in resolution order.
 	Snapshots []ResolvedSnapshot
-	// EstimatedBytes is the Resolve feasibility estimate: the summed
-	// logicalreferenced of Snapshots inflated by the overhead factor and PAR2 %
-	// (SPEC §4.3 phase 1). It exists only to reject an archive that cannot fit on
-	// one tape before real work; it is never used as the authoritative plan, which
-	// is the measured Prepare size.
+	// EstimatedBytes is the inflated feasibility estimate, used only to reject an
+	// archive that cannot fit on one tape; the measured Prepare size is the plan.
 	EstimatedBytes int64
-	// LogicalBytes is the same measurement before any inflation: the summed
-	// logicalreferenced of Snapshots. It is the denominator the Prepare phase
-	// reports progress against — the source bytes that phase has to read — and,
-	// like EstimatedBytes, is never used as the authoritative plan.
+	// LogicalBytes is the summed logicalreferenced before inflation; Prepare
+	// reports progress against it.
 	LogicalBytes int64
 }
 
-// ResolvedSnapshot is one ZFS snapshot within a ResolvedArchive, with the
-// provenance needed to verify and tar it. ZFSPath is the canonical
-// "dataset@snapshot" the Prepare phase tars and the feasibility pre-check sizes.
+// ResolvedSnapshot is one ZFS snapshot within a ResolvedArchive, with its
+// provenance.
 type ResolvedSnapshot struct {
-	// ZFSPath is the absolute ZFS snapshot path, e.g. bulk-pool-01/archive@daily.
+	// ZFSPath is the absolute snapshot path, e.g. bulk-pool-01/archive@daily.
 	ZFSPath string
-	// Dataset is the ZFS dataset (k8s sources); empty for raw ZFS paths.
-	Dataset string
-	// SnapshotName is the ZFS snapshot short name (k8s sources); empty for raw
-	// ZFS paths. With Dataset it reconstructs the snapshot for ownership
-	// verification (k8ssnap.Verify).
+	// Dataset and SnapshotName are set for k8s sources (for k8ssnap.Verify);
+	// empty for raw ZFS paths.
+	Dataset      string
 	SnapshotName string
-	// Namespace, VolumeSnapshot, and PVC carry the k8s provenance of a resolved
-	// VolumeSnapshot for the report; all empty for raw ZFS sources.
+	// Namespace, VolumeSnapshot, and PVC are the k8s provenance for the report.
 	Namespace      string
 	VolumeSnapshot string
 	PVC            string
 }
 
-// StagedArchive is a prepared archive staged to disk by the Prepare phase
-// (SPEC §4.3 phase 2): tar → optional zstd → age → fixed-size slices, with the
-// exact on-disk size measured and a SHA-256 checksum per slice. Its SizeBytes is
-// the authoritative size the Pack phase bin-packs by — the measured staged size,
-// not the Resolve estimate (SPEC §4.3 phase 3).
+// StagedArchive is an archive staged to disk by Prepare (SPEC §4.3 phase 2).
+// Its SizeBytes is the authoritative size Pack bin-packs by.
 type StagedArchive struct {
-	// SourceIndex ties the staged archive back to its originating Source in
-	// Config.Sources, matching the ResolvedArchive it was prepared from.
 	SourceIndex int
-	// Slices are the staged slice files in order; their concatenation
-	// reconstructs the age stream exactly. Each carries its own SHA-256 and size.
-	Slices []StagedSlice
-	// SizeBytes is the measured total on-disk size across all slices — the
-	// authoritative size for the Pack phase (SPEC §4.3 phases 2–3).
+	// Slices concatenate to the exact age stream.
+	Slices    []StagedSlice
 	SizeBytes int64
 }
 
-// StagedSlice is one fixed-size slice file produced by the Prepare phase's split
-// stage, with the SHA-256 the Verify and Write phases re-check it against.
+// StagedSlice is one staged file on disk with its SHA-256 and size.
 type StagedSlice struct {
-	// Path is the absolute path of the staged slice file on disk.
 	Path string
-	// SHA256 is the lowercase hex SHA-256 digest of the slice file's contents.
-	SHA256 string
-	// SizeBytes is the slice file's size on disk in bytes.
+	// SHA256 is the lowercase hex digest.
+	SHA256    string
 	SizeBytes int64
 }
 
-// TapePlan is the assignment of staged archives to tapes produced by the Pack
-// phase (SPEC §4.3 phase 3): a bin-packing of archives onto tapes by measured
-// size, within capacity, replicated across the configured number of copies.
+// TapePlan is the Pack phase's assignment of staged archives to logical tapes
+// (SPEC §4.3 phase 3).
 type TapePlan struct {
-	// Copies is the number of identical physical copies each logical tape is
-	// written to — the configured copy count, one per drive for parallel
-	// writing (SPEC §4.3 phase 3). The copies are byte-identical, so the staged
-	// tree (slices + PAR2) is planned and generated once per logical tape and
-	// written to all copies; PAR2 sizing therefore depends on the logical plan,
-	// not the copy count.
+	// Copies is the number of byte-identical physical copies per logical tape.
+	// PAR2 is planned once per logical tape, so it does not depend on Copies.
 	Copies int
-	// Tapes are the logical tapes the archives are bin-packed onto, in plan
-	// order. Each is materialized Copies times at write time.
-	Tapes []PlannedTape
+	Tapes  []PlannedTape
 }
 
-// PlannedTape is one logical tape in the Pack plan: the staged archives
-// bin-packed onto it and the capacity accounting that keeps its contents within
-// a single tape.
+// PlannedTape is one logical tape in the Pack plan.
 type PlannedTape struct {
-	// Archives are the staged archives assigned to this tape, in source order.
-	// Each references its StagedArchive by SourceIndex.
 	Archives []PlannedArchive
-	// UsableBytes is the tape's native capacity less the reserved LTFS
-	// filesystem overhead — the ceiling the archives' data plus PAR2 must fit
-	// within (SPEC §4.3 phase 3). The fill-to-capacity PAR2 phase grows recovery
-	// sets into the slack between PlannedBytes and UsableBytes.
+	// UsableBytes is native capacity less reserved LTFS overhead; fill-mode PAR2
+	// grows into the slack above PlannedBytes.
 	UsableBytes int64
 }
 
-// PlannedBytes is the tape's total reserved footprint: every assigned archive's
-// data plus its reserved PAR2. The Pack invariant is PlannedBytes ≤ UsableBytes.
+// PlannedBytes is the tape's data plus reserved PAR2; Pack keeps it within
+// UsableBytes.
 func (t PlannedTape) PlannedBytes() int64 {
 	var total int64
 	for _, archive := range t.Archives {
@@ -133,8 +86,7 @@ func (t PlannedTape) PlannedBytes() int64 {
 	return total
 }
 
-// DataBytes is the total measured archive data on the tape, excluding PAR2 — the
-// base the fill-to-capacity PAR2 percentage is computed against.
+// DataBytes is the tape's archive data excluding PAR2.
 func (t PlannedTape) DataBytes() int64 {
 	var total int64
 	for _, archive := range t.Archives {
@@ -144,342 +96,187 @@ func (t PlannedTape) DataBytes() int64 {
 	return total
 }
 
-// PlannedArchive is one staged archive's placement on a tape: its measured data
-// size and the PAR2 recovery bytes reserved for it during packing.
+// PlannedArchive is one staged archive's placement on a tape.
 type PlannedArchive struct {
-	// SourceIndex ties the placement back to its StagedArchive (and the
-	// originating config Source).
 	SourceIndex int
-	// DataBytes is the archive's measured staged size (StagedArchive.SizeBytes).
-	DataBytes int64
-	// SliceCount is the number of staged slice files the archive's PAR2 recovery
-	// set protects (len(StagedArchive.Slices)). It is carried on the plan so the
-	// fill-to-capacity phase can recompute the per-archive PAR2 upper bound
-	// (par2.MaxOutputBytes) — which depends on the file count through par2's block
-	// sizing and per-file critical packets — without re-plumbing the staged tree.
+	DataBytes   int64
+	// SliceCount is carried so fill mode can recompute par2.MaxOutputBytes, which
+	// depends on the file count.
 	SliceCount int
-	// PAR2ReservedBytes is the PAR2 footprint reserved for the archive during
-	// packing — the minimum recovery set size at the fixed target percentage or
-	// the fill-to-capacity floor. The Generate PAR2 phase may grow the actual set
-	// up to the tape's remaining capacity in fill mode (SPEC §4.3 phases 3–4).
+	// PAR2ReservedBytes is the minimum PAR2 reserved at pack time; fill mode may
+	// grow the real set into remaining capacity.
 	PAR2ReservedBytes int64
 }
 
-// Footprint is the archive's total reserved size on a tape: its measured data
-// plus its reserved PAR2.
+// Footprint is the archive's data plus reserved PAR2.
 func (p PlannedArchive) Footprint() int64 {
 	return p.DataBytes + p.PAR2ReservedBytes
 }
 
-// PAR2Set is the per-archive PAR2 recovery set generated and staged by the
-// Generate PAR2 phase (SPEC §4.3 phase 4): the recovery files written alongside
-// the archive's slices, each checksummed, at the chosen redundancy percentage.
+// PAR2Set is one archive's staged PAR2 recovery set (SPEC §4.3 phase 4).
 type PAR2Set struct {
-	// SourceIndex ties the recovery set back to its StagedArchive.
-	SourceIndex int
-	// RedundancyPercent is the PAR2 redundancy percentage the set was generated
-	// at: the fixed target, or the per-tape fill-to-capacity percentage.
+	SourceIndex       int
 	RedundancyPercent int
-	// Files are the staged PAR2 recovery files (the index plus its volume files),
-	// each with its SHA-256 and on-disk size, in sorted name order. They reuse
-	// StagedSlice — a staged, checksummed file on disk — since that is exactly
-	// their shape.
+	// Files are the index and volume files, sorted by name.
 	Files []StagedSlice
 }
 
-// VerifiedPlan is a TapePlan whose complete staged tree has passed checksum and
-// capacity verification in the Verify phase (SPEC §4.3 phase 5). A run cannot
-// proceed to write without one. Later sub-issues add the verification results.
+// VerifiedPlan marks a TapePlan whose staged tree passed Verify (SPEC §4.3
+// phase 5); no tape is written without one.
 type VerifiedPlan struct{}
 
-// TapeAssignment is one physical tape's placement within a drive-set (SPEC §4.3
-// phases 6–8): which drive writes it, which blank slot holds it, and which
-// (logical tape, copy) pair it materializes. planDriveSets produces these; the
-// Load activity turns each into a LoadedTape.
+// TapeAssignment is one physical tape's placement within a drive-set: its
+// drive, blank slot, and (logical tape, copy) pair.
 type TapeAssignment struct {
-	// Drive is the non-rewinding tape device node (e.g. /dev/nst0) this physical
-	// tape is loaded into and written on. The Load phase pairs it to the changer's
-	// data-transfer element by the drive's unit serial identity — not by the
-	// assignment's position in the set — so a retry-shaped (non-prefix) set or a
-	// kernel probe order that disagrees with the changer's element order still
-	// loads, blank-checks, formats, and writes the tape on this one physical drive
-	// (issue #137).
+	// Drive is the non-rewinding device node. Load pairs it to the changer's
+	// element by unit serial, not set position, so non-prefix sets and mismatched
+	// kernel probe order still use this exact drive (issue #137).
 	Drive string
-	// DriveIndex is the 0-based index of Drive in cfg.Library.Drives — the config
-	// drive this tape is written on, carried explicitly so it is recorded on the
-	// LoadedTape regardless of the tape's position within the drive-set. Drive is
-	// always cfg.Library.Drives[DriveIndex].
+	// DriveIndex is Drive's index in cfg.Library.Drives.
 	DriveIndex int
-	// BlankSlot is the storage slot address holding the blank tape to load. Every
-	// physical tape across the whole run has its own blank slot.
+	// BlankSlot is unique per physical tape across the run.
 	BlankSlot int
-	// TapeIndex is the 0-based logical tape (an index into plan.Tapes) this
-	// physical tape carries. All copies of a logical tape share it.
 	TapeIndex int
-	// CopyIndex is the 0-based copy number (0..plan.Copies-1) of this physical tape.
 	CopyIndex int
 }
 
-// driveSet is the batch of physical tapes written in parallel in one pass of the
-// tape path — at most len(Drives) of them (SPEC §4.3 phases 6–8). A run spanning
-// more physical tapes than the library has drives is written as a sequence of
-// drive-sets, each loaded, written, and ejected before the next begins.
+// driveSet is the batch of at most len(Drives) tapes written in parallel; each
+// set is loaded, written, and ejected before the next.
 type driveSet []TapeAssignment
 
-// LoadedTape is one physical tape loaded into a drive by the Load phase
-// (SPEC §4.3 phase 6). It carries the device and slot provenance the Write and
-// Eject phases need to format, mount, and return the tape.
+// LoadedTape is one physical tape loaded into a drive (SPEC §4.3 phase 6).
 type LoadedTape struct {
-	// Barcode is the tape's library barcode (the SCSI volume tag), used as the
-	// LTFS volume name and as the manifest and report identity (SPEC §6).
+	// Barcode is the volume tag, used as the LTFS volume name (SPEC §6).
 	Barcode tape.Barcode
-	// DriveIndex is the 0-based index in cfg.Library.Drives of the drive that
-	// physically wrote this tape — carried from the TapeAssignment, not the tape's
-	// position within the drive-set. It ties the tape to its physical drive for the
-	// Write phase and for the run record (issue #137).
+	// DriveIndex comes from the TapeAssignment, not set position (issue #137).
 	DriveIndex int
-	// TapeIndex is the 0-based index of the logical tape this physical tape
-	// carries (an index into plan.Tapes). All copies of the same logical tape
-	// share the same TapeIndex.
-	TapeIndex int
-	// CopyIndex is the 0-based copy number (0..plan.Copies-1) among the
-	// copies of this logical tape.
-	CopyIndex int
-	// SourceSlot is the storage slot address the blank tape was loaded from.
-	// The Eject phase unloads the tape back to this slot before transferring
-	// it to an I/O station.
+	TapeIndex  int
+	CopyIndex  int
+	// SourceSlot is where Eject returns the tape before exporting it.
 	SourceSlot int
-	// STDevice is the non-rewinding tape device node (e.g. /dev/nst0).
-	STDevice string
-	// SGDevice is the SCSI generic device node (e.g. /dev/sg1) used by LTFS
-	// and the FormatTape activity (the reference LTFS sg backend).
-	SGDevice string
-	// OverwroteNonBlank is true when this tape was found to be non-blank at load
-	// and written anyway because the run set Library.AllowNonBlankTapes. It is
-	// false for the normal (blank) path. The Write phase carries it onto the
-	// WrittenTape so the run report can record the deliberate overwrite (SPEC §9).
+	STDevice   string
+	SGDevice   string
+	// OverwroteNonBlank is set when a non-blank tape was written under
+	// Library.AllowNonBlankTapes, so the report records it (SPEC §9).
 	OverwroteNonBlank bool
 }
 
-// WrittenTape records a tape written during the Write phase (SPEC §4.3 phase 7).
-// It carries all state needed by the Eject phase and the run report.
+// WrittenTape records a tape written during the Write phase, for Eject and the
+// report.
 type WrittenTape struct {
-	// Barcode is the tape's library barcode, its canonical identity (SPEC §6).
-	Barcode tape.Barcode
-	// DriveIndex is the 0-based drive index within cfg.Library.Drives.
+	Barcode    tape.Barcode
 	DriveIndex int
-	// TapeIndex is the 0-based logical-tape index within plan.Tapes.
-	TapeIndex int
-	// CopyIndex is the 0-based copy number among the copies of this logical tape.
-	CopyIndex int
-	// SourceSlot is the storage slot the blank tape was loaded from; the Eject
-	// phase unloads the tape to this slot before transferring it to I/O.
+	TapeIndex  int
+	CopyIndex  int
 	SourceSlot int
-	// IndexXMLPath is the filesystem path, on the data worker's staging volume,
-	// to the captured LTFS index FinalizeTape staged to disk — byte-identical to
-	// the index LTFS wrote to the tape's index partition at unmount (SPEC §6,
-	// §10). The Report phase reads it from disk (it runs on the same data worker)
-	// to include the index in the recovery ISO. It is a path rather than the
-	// bytes so the multi-MB index never travels in an activity payload (issue
-	// #221).
+	// IndexXMLPath is the staged copy of the LTFS index written at unmount. A
+	// path, not bytes, so the multi-MB index never rides an activity payload
+	// (issue #221).
 	IndexXMLPath string
-	// WriteHealth is the observational write-health measurement for this tape
-	// (sustained throughput, repositions, TapeAlert flags), taken after the write
-	// window closed. It never affects run success (SPEC §2 principle 2, §14).
+	// WriteHealth is observational only and never affects run success (SPEC §14).
 	WriteHealth WriteHealth
-	// MediaGeneration is the LTO generation of the tape itself (e.g. "LTO-5"),
-	// read from the medium while it was still loaded. The report names it as the
-	// generation a recoverer needs a drive for; it is empty or "unknown" when the
-	// medium could not be read (SPEC §9, issue #340).
-	MediaGeneration string
-	// OverwroteNonBlank is true when this tape was non-blank at load and written
-	// over because the run set Library.AllowNonBlankTapes. The run report records
-	// it so the deliberate overwrite is observable (SPEC §9).
+	// MediaGeneration is the medium's LTO generation, or empty/"unknown" if it
+	// could not be read (issue #340).
+	MediaGeneration   string
 	OverwroteNonBlank bool
 }
 
-// EjectResult reports the outcome of one Eject activity call (SPEC §4.3 phase 8).
-// The Eject activity exports as many tapes as the free I/O-station slots hold and,
-// rather than failing when the station fills, returns the tapes it could not yet
-// export so the workflow can pause for the operator and resume.
+// EjectResult is one Eject call's outcome. Tapes that did not fit the I/O
+// station are returned instead of failing, so the workflow can pause.
 type EjectResult struct {
-	// InIOStation lists the barcodes of this run's written tapes currently sitting
-	// in I/O-station slots — the tapes ready for the operator to remove. It is the
-	// full set across every Eject call so far, not just this call's transfers.
+	// InIOStation is every run tape now in the I/O station, across all calls.
 	InIOStation []tape.Barcode
-	// Remaining lists the written tapes not yet exported. Each has been unloaded
-	// from its drive to its source storage slot (so no tape is left in a drive),
-	// and awaits a free I/O slot. Empty means the Eject phase is complete.
+	// Remaining are tapes back in their source slots awaiting a free I/O slot;
+	// empty means Eject is complete.
 	Remaining []WrittenTape
 }
 
-// IOStatus is a read-only snapshot of the import/export station used to decide
-// whether a paused Eject phase can resume automatically (SPEC §4.3 phase 8).
+// IOStatus is an I/O-station snapshot used to auto-resume a paused Eject.
 type IOStatus struct {
-	// FreeSlots is the number of empty I/O-station slots.
 	FreeSlots int
-	// AccessReported is true when the library annotates the import/export ACCESS
-	// bit (tape.Inventory.IOAccessReported). When false the door cycle cannot be
-	// detected and the workflow waits for the explicit operator signal instead.
+	// AccessReported is false when the library does not report the ACCESS bit;
+	// the workflow then waits for an explicit operator signal.
 	AccessReported bool
-	// StationClosed is true when every I/O-station slot reports accessible to the
-	// changer robot — the operator has closed the station. It is only meaningful
-	// when AccessReported is true.
+	// StationClosed is only meaningful when AccessReported is true.
 	StationClosed bool
 }
 
-// CanAutoResume reports whether a paused Eject phase may resume without an
-// explicit operator signal: the library reports access state, the station is
-// closed, and at least one I/O slot is free (SPEC §4.3 phase 8 AC2).
+// CanAutoResume reports whether a paused Eject may resume without an operator
+// signal (SPEC §4.3 phase 8 AC2).
 func (s IOStatus) CanAutoResume() bool {
 	return s.AccessReported && s.StationClosed && s.FreeSlots > 0
 }
 
-// Result is the backup workflow's success return value. For now it reports the
-// phases that ran to completion, in order; later sub-issues enrich it with a
-// run summary (tapes written, sizes, checksums) for the report.
+// Result is the backup workflow's success value.
 type Result struct {
-	// CompletedPhases lists the phases that ran to completion, in execution
-	// order. On success it contains all phases from Resolve through Deliver.
+	// CompletedPhases lists completed phases in execution order.
 	CompletedPhases []string
 }
 
-// PauseKind identifies which operator-in-the-loop pause (SPEC §4.3 phase 8,
-// §4.3 phases 6-8, §10) is currently active, for the CurrentPauseQuery. The
-// zero value, PauseNone, means the run is not currently paused.
+// PauseKind identifies the active operator pause for CurrentPauseQuery;
+// PauseNone means not paused.
 type PauseKind string
 
 const (
-	// PauseNone means the run is not currently paused.
 	PauseNone PauseKind = ""
-	// PauseEject means the Eject phase is paused because the import/export
-	// station filled (SPEC §4.3 phase 8). Only OperatorResumeSignal applies —
-	// every tape is already safely written by the time this pause fires, so
-	// there is nothing for OperatorAbortSignal to do (waitForIOCleared never
-	// listens for it).
+	// PauseEject: the I/O station filled. Only resume applies — every tape is
+	// already written, so waitForIOCleared never listens for abort.
 	PauseEject PauseKind = "eject"
-	// PauseWriteFailure means the tape path is paused because a Load or Write
-	// failed for one drive-set (SPEC §4.3 phases 6-8). Both
-	// OperatorResumeSignal and OperatorAbortSignal apply.
+	// PauseWriteFailure: a Load or Write failed for a drive-set. Resume or abort.
 	PauseWriteFailure PauseKind = "write-failure"
-	// PauseBurn means the Burn phase is paused — a burn/verify failure within a
-	// set, or a between-set manual disc swap (SPEC §10). Both
-	// OperatorResumeSignal and OperatorAbortSignal apply.
+	// PauseBurn: a burn/verify failure or between-set disc swap. Resume or abort.
 	PauseBurn PauseKind = "burn"
 )
 
-// CurrentPause is the CurrentPauseQuery result: which operator-in-the-loop
-// pause (if any) is blocking the run right now, and enough context for an
-// operator to act on it without consulting the Temporal UI event history. It
-// exposes only state the workflow already tracks for the pause alerts
-// (OperatorPauseInput/WritePathPauseInput/BurnPauseInput in failure.go) — no
-// new state is invented. Kind is PauseNone when the run is not currently
-// paused; every other field is then the zero value.
+// CurrentPause is the CurrentPauseQuery result: the active pause and enough
+// context to act on it. All fields are zero when not paused.
 type CurrentPause struct {
-	// Kind is which pause is active.
 	Kind PauseKind
-	// Phase is the failing phase for a write-failure pause ("Load" or
-	// "Write"); empty for an eject or burn pause.
+	// Phase is "Load" or "Write" for a write-failure pause.
 	Phase string
-	// AffectedTapes lists barcodes the operator should act on: for a
-	// write-failure pause, the tapes to remove and replace with fresh blanks
-	// (empty for a Load failure, which has no loaded tapes to name); for an
-	// eject pause, the tapes currently sitting in the I/O station ready for
-	// removal. Empty for a burn pause.
+	// AffectedTapes are tapes to replace (write failure) or remove from the I/O
+	// station (eject).
 	AffectedTapes []string
-	// ReloadSlots lists the storage slots to restock with fresh blank tapes
-	// before resuming a write-failure pause. Empty otherwise.
+	// ReloadSlots are slots to restock with blanks (write failure).
 	ReloadSlots []int
-	// AwaitingExport is the count of written tapes still to be exported once
-	// I/O slots free, for an eject pause. Zero otherwise.
+	// AwaitingExport counts tapes still to export (eject).
 	AwaitingExport int
-	// Devices lists the optical burner device nodes needing a fresh blank
-	// disc, for a burn pause. Empty otherwise.
+	// Devices are burners needing a fresh blank disc (burn).
 	Devices []string
-	// ErrorSummary is the pause reason rendered as text: the Load/Write/burn
-	// failure. Empty for an eject pause, and for a burn pause that is a
-	// between-set disc swap rather than a failure.
+	// ErrorSummary is the failure text; empty for eject and disc-swap pauses.
 	ErrorSummary string
 }
 
-// runState carries data produced by each phase to the phases that follow it,
-// plus the progress marker the lastCompletedPhase query reads. It is mutated in
-// workflow (single-threaded, deterministic) order as phases complete. The typed
-// run-state fields above are threaded through here by their respective phase
-// sub-issues; today only the progress marker is populated.
+// runState carries phase outputs to later phases, mutated in deterministic
+// workflow order.
 type runState struct {
-	// lastCompletedPhase is the name of the most recently completed phase, or
-	// the empty string before any phase has completed. Read by the
-	// LastCompletedPhaseQuery handler.
+	// lastCompletedPhase backs LastCompletedPhaseQuery.
 	lastCompletedPhase string
-	// currentPause is which operator-in-the-loop pause (if any) is active right
-	// now (PauseNone when not paused). Set immediately before a pause's wait
-	// begins (after its alert dispatches) and cleared immediately once the wait
-	// returns, by ejectPhase (library.go), waitForOperator (writepause.go), and
-	// waitForBurnOperator (burnpause.go). Read by the CurrentPauseQuery handler.
+	// currentPause backs CurrentPauseQuery; set after a pause's alert dispatches
+	// and cleared when its wait returns.
 	currentPause CurrentPause
-	// resolved is the concrete work list the Resolve phase produces (SPEC §4.3
-	// phase 1): every config Source expanded to its ZFS snapshot(s), verified and
-	// feasibility-checked. The Prepare phase consumes it.
-	resolved []ResolvedArchive
-	// sliceSizeBytes is the run's slice size, derived from the resolved sizes by
-	// DeriveSliceSize at the end of the Resolve phase (SPEC §4.3 phase 1, issue
-	// #324) — it is no longer an operator-set config field. The Prepare phase
-	// slices every encrypted archive at this size and the Report phase records it.
+	resolved     []ResolvedArchive
+	// sliceSizeBytes is derived by DeriveSliceSize at the end of Resolve, not
+	// configured (issue #324).
 	sliceSizeBytes int64
-	// staged is the prepared work list the Prepare phase produces (SPEC §4.3
-	// phase 2): each resolved archive tarred, optionally compressed, encrypted,
-	// sliced, and checksummed on disk, with its measured size. The Pack phase
-	// consumes it.
-	staged []StagedArchive
-	// plan is the bin-packing the Pack phase produces (SPEC §4.3 phase 3): the
-	// staged archives assigned to logical tapes within capacity, replicated
-	// across the configured copies. The Generate PAR2 and later phases consume it.
-	plan TapePlan
-	// par2 is the per-archive PAR2 recovery sets the Generate PAR2 phase produces
-	// (SPEC §4.3 phase 4), staged and checksummed alongside the slices. The
-	// Verify and Write phases consume it.
-	par2 []PAR2Set
-	// verified is the plan the Verify phase produces (SPEC §4.3 phase 5): the
-	// Pack plan once its complete staged tree has passed checksum and capacity
-	// verification on disk. The Load phase requires it before any tape is touched.
+	staged         []StagedArchive
+	plan           TapePlan
+	par2           []PAR2Set
+	// verified is required before any tape is touched.
 	verified VerifiedPlan
-	// loaded holds the tapes the current drive-set loaded into drives (SPEC §4.3
-	// phase 6). The tape path processes drive-sets one at a time, so this is the
-	// in-flight set (at most len(Drives) tapes), overwritten as each set loads.
+	// loaded is the in-flight drive-set only.
 	loaded []LoadedTape
-	// mountedBarcodes accumulates the barcode of every tape the run loaded, across
-	// all drive-sets. It is distinct from loaded (only the in-flight set) and from
-	// written (only the tapes that wrote successfully): the Write phase derives a
-	// tape's LTFS mountpoint and work directory from its barcode as soon as it
-	// mounts, so a tape that later failed to write still left staging entries
-	// behind. Staging cleanup reads this to remove them on exit (SPEC §4.3).
+	// mountedBarcodes is every tape the run mounted: a tape that later failed to
+	// write still left staging entries that cleanup must remove.
 	mountedBarcodes []tape.Barcode
-	// written accumulates every tape written by the Write phase across all
-	// drive-sets (SPEC §4.3 phase 7). Each set's tapes are appended as it
-	// completes; the Report phase uses the full list (barcodes, staged index
-	// paths) for the report and recovery ISO.
-	written []WrittenTape
-	// reportPath is the on-disk path of the PDF report the Report phase builds
-	// (SPEC §4.3 phase 9), staged on the data worker. The Deliver phase uploads it.
-	reportPath string
-	// uncompressedISOPath is the on-disk path of the uncompressed recovery ISO 9660
-	// image the Report phase stages only when optical burning is enabled
-	// (delivery.opticalBurn). It is the mountable image the Burn phase consumes;
-	// empty when burning is disabled.
+	written         []WrittenTape
+	reportPath      string
+	// uncompressedISOPath and discManifestPath are set only when optical burning
+	// is enabled.
 	uncompressedISOPath string
-	// discManifestPath is the on-disk sha256sum manifest of the recovery ISO's
-	// contents, staged by the Report phase only when optical burning is enabled.
-	// The Burn phase passes it to VerifyDisc so each burned disc is read back and
-	// checked against it (SPEC §10). Empty when burning is disabled.
-	discManifestPath string
-	// reportDate is the run's report timestamp (workflow.Now at the Report phase),
-	// captured once so the post-burn re-render of the delivered report carries the
-	// same date as the on-disc copy that predates the burn (SPEC §10).
-	reportDate time.Time
-	// burnedDiscs accumulates every recovery disc the Burn phase burned and
-	// verified, across all burn-sets (SPEC §4.3, §10). The post-burn report
-	// re-render records them (including any deliberate overwrite). Empty when
-	// optical burning is disabled.
+	discManifestPath    string
+	// reportDate is captured once so the post-burn report re-render keeps the
+	// on-disc copy's date (SPEC §10).
+	reportDate  time.Time
 	burnedDiscs []BurnResult
 }

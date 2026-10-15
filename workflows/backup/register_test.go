@@ -10,11 +10,8 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
-// recordingWorker is a worker.Worker that records what is registered on it
-// without standing up a real Temporal worker. It embeds the interface so it
-// satisfies worker.Worker; only the registration methods the backup package
-// calls are implemented — any other call would panic, flagging an unexpected
-// dependency.
+// recordingWorker records registrations; it embeds worker.Worker so any other
+// call panics, flagging an unexpected dependency.
 type recordingWorker struct {
 	worker.Worker
 
@@ -42,10 +39,7 @@ func TestRegisterControl(t *testing.T) {
 
 	RegisterControl(rw, ControlConfig{FailureWebhookURL: "https://discord.example/webhook"})
 
-	// The control worker registers the Backup workflow (under the contract's
-	// WorkflowType so clients can start it by name) and the Eject-pause
-	// auto-resume child workflow (issue #168), which keeps the run's history
-	// bounded across long pauses by ContinueAsNew'ing its own poll loop.
+	// Backup plus the Eject-pause child workflow (#168).
 	require.Len(t, rw.workflows, 2)
 
 	backupWorkflow := findWorkflow(t, rw.workflows, WorkflowType)
@@ -62,17 +56,12 @@ func TestRegisterControl(t *testing.T) {
 		"the workflow registered under IOStationWaitWorkflowType must be ioStationWaitWorkflow",
 	)
 
-	// The failure-alert activity is registered wired with the configured URL.
 	failureActivities := findFailureActivities(t, rw.activities)
 	assert.Equal(t, "https://discord.example/webhook", failureActivities.WebhookURL)
 
-	// The control-side Resolve activity is registered (k8s resolution runs on the
-	// control worker, SPEC §16).
 	assert.True(t, hasActivity[*ResolveControlActivities](rw.activities),
 		"the control worker must register the Resolve control activity")
 
-	// The Pack activity is registered: bin-packing is pure planning and runs on
-	// the control worker (SPEC §4.1, §4.3 phase 3).
 	assert.True(t, hasActivity[*PackActivities](rw.activities),
 		"the control worker must register the Pack activity")
 }
@@ -88,11 +77,6 @@ func TestRegisterData(t *testing.T) {
 		RecoverySourcesDir:  "/opt/recovery-src",
 	})
 
-	// The data worker hosts no workflow; it only registers the bulk-data phase
-	// activities: Resolve data, Hold, Prepare, Generate PAR2, Verify, MirrorLibrary
-	// (dry runs only), Load, Write (WriteActivities + TeardownActivities sharing a
-	// registry), WriteHealth, Eject, Report, Deliver, the per-disc optical
-	// Burn/Verify, and the staging Cleanup activity.
 	assert.Empty(t, rw.workflows)
 	assert.Len(t, rw.activities, 15)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
@@ -128,8 +112,6 @@ func TestRegisterData(t *testing.T) {
 		"the data worker must register the staging Cleanup activity")
 }
 
-// findWorkflow returns the recorded workflow registered under the given name,
-// failing the test if none matches.
 func findWorkflow(t *testing.T, workflows []recordedWorkflow, name string) recordedWorkflow {
 	t.Helper()
 
@@ -144,7 +126,6 @@ func findWorkflow(t *testing.T, workflows []recordedWorkflow, name string) recor
 	return recordedWorkflow{}
 }
 
-// hasActivity reports whether any registered activity is of type T.
 func hasActivity[T any](activities []any) bool {
 	for _, activity := range activities {
 		if _, ok := activity.(T); ok {
@@ -155,8 +136,6 @@ func hasActivity[T any](activities []any) bool {
 	return false
 }
 
-// findFailureActivities returns the single *FailureActivities among the
-// registered activities, failing the test if it is absent.
 func findFailureActivities(t *testing.T, activities []any) *FailureActivities {
 	t.Helper()
 

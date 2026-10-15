@@ -30,22 +30,10 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// TestRecoveryFromReportAlone is the report's real acceptance test (issue #340):
-// it runs a backup, then recovers the written tape using nothing but what the
-// delivered report says.
-//
-// Every fact it acts on — the mount command, the on-tape layout, the per-file
-// checksums, whether the archive is compressed, and the decryption identity — is
-// read out of the rendered PDF, never from the run config or this repository. A
-// recoverer decades from now holds that printout and the tapes; if a step cannot be
-// followed from the page, the report has failed at its job however correct the bytes
-// on the tape are. Each of the report defects this issue fixes would fail a step
-// here.
-//
-// It deliberately does not exercise the disc-manifest verification of printed step
-// 4: that artifact ships on the recovery ISO, which a run without optical burning
-// never produces. The per-file checksums printed in the report cover the same
-// ground.
+// TestRecoveryFromReportAlone runs a backup, then recovers the tape using only
+// facts read from the rendered PDF report, never the config or this repo
+// (issue #340): a recoverer decades from now has only the printout and tapes.
+// Disc-manifest verification is not exercised; a run without burning has no ISO.
 func TestRecoveryFromReportAlone(t *testing.T) {
 	requireTemporalAddress(t)
 	testutil.SkipIfMhvtlUnavailable(t)
@@ -68,9 +56,7 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	require.GreaterOrEqual(t, len(inv.Drives), 1, "at least one drive required")
 	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
 
-	// Storage slot index 8 is this test's alone on the shared mhvtl library
-	// (indexes 0-7 belong to the session, tape-path, whole-run, medium-generation
-	// and multi-drive-set tests).
+	// Slot index 8 is reserved for this test on the shared mhvtl library.
 	require.GreaterOrEqual(t, len(inv.Slots), 9, "at least nine storage slots required")
 	slot := inv.Slots[8]
 	require.True(t, slot.Full, "slot index 8 must hold a tape")
@@ -109,10 +95,8 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	mountpoint := filepath.Join(work, "tape")
 	require.NoError(t, os.Mkdir(mountpoint, 0o755))
 
-	// Printed steps 1-2: load a tape and mount its volume read-only with the
-	// command exactly as printed, substituting only the placeholders the text
-	// itself names. The run's Eject phase parked the tape in the I/O station, so
-	// it is fetched by barcode — the identity a recoverer reads off the cartridge.
+	// Printed steps 1-2: load the tape (Eject parked it in the I/O station, so
+	// fetch it by barcode) and mount with the command exactly as printed.
 	loadWrittenTape(t, changer, inv, barcode, driveAddr)
 
 	mount := strings.NewReplacer("/dev/sgN", sgDev, "<mountpoint>", mountpoint).Replace(mountCmd)
@@ -124,8 +108,7 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(work, string(barcode)), 0o755))
 	runRecoveryStep(t, work, "cp", "-r", filepath.Join(mountpoint, "archives"), filepath.Join(work, string(barcode)))
 
-	// Printed step 4: verify every copied file against the checksums the report
-	// prints, so corruption is caught before anything is decrypted.
+	// Printed step 4: verify against the printed checksums before decrypting.
 	archiveDir := filepath.Join(work, string(barcode), directory)
 
 	for name, want := range checksums {
@@ -149,8 +132,7 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	decrypted := filepath.Join(work, "archive.tar.zst")
 	runRecoveryStep(t, work, "age", "-d", "-i", identityFile, "-o", decrypted, stream)
 
-	// Printed step 7: decompress only when the report says this archive is
-	// compressed — the recoverer follows the report, not the bytes.
+	// Printed step 7: decompress only if the report says so.
 	tarball := filepath.Join(work, "archive.tar")
 	if compressed {
 		runRecoveryStep(t, work, "zstd", "-d", decrypted, "-o", tarball)
@@ -163,19 +145,16 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	require.NoError(t, os.Mkdir(unpacked, 0o755))
 	runRecoveryStep(t, work, "tar", "-xf", tarball, "-C", unpacked)
 
-	// The recovered tree must be the source snapshot, file for file. This is the
-	// only assertion that reaches outside the report: it is what "recovered" means.
-	// It also holds the printed unpack step to account — a single-volume archive
-	// lands with no wrapping directory, exactly as step 8 says.
+	// The only assertion outside the report: the recovered tree equals the source,
+	// with no wrapping directory, as step 8 says.
 	sourceTree := filepath.Join(testutil.PoolMount(t), ".zfs", "snapshot", snapshot)
 
 	out, err := exec.Command("diff", "-rq", sourceTree, unpacked).CombinedOutput()
 	assert.NoErrorf(t, err, "the recovered tree must match the source snapshot:\n%s", out)
 }
 
-// runBackupCapturingReport runs one backup of source onto the tape in slotAddr
-// with real control and data workers, and returns the extracted text of the PDF
-// report it delivers.
+// runBackupCapturingReport runs one backup onto the tape in slotAddr and returns
+// the delivered PDF report's text.
 func runBackupCapturingReport(t *testing.T, source, stDev string, slotAddr int) string {
 	t.Helper()
 
@@ -266,9 +245,8 @@ func extractReportText(t *testing.T, reportPDF []byte) string {
 	return string(text)
 }
 
-// reportMountCommand extracts the LTFS mount command the report prints. A command
-// naming no device cannot be followed at all, so the pattern requires the device
-// option to be part of what was printed.
+// reportMountCommand extracts the printed LTFS mount command, which must name
+// the device to be followable.
 func reportMountCommand(t *testing.T, report string) string {
 	t.Helper()
 
@@ -288,8 +266,7 @@ func reportIdentity(t *testing.T, report string) string {
 	return match
 }
 
-// reportChecksums pulls the printed contents manifest's file name / SHA-256 pairs
-// out of the report: the rows a recoverer verifies their copy against.
+// reportChecksums extracts the printed manifest's file name / SHA-256 pairs.
 func reportChecksums(t *testing.T, report string) map[string]string {
 	t.Helper()
 
@@ -303,8 +280,7 @@ func reportChecksums(t *testing.T, report string) map[string]string {
 	return checksums
 }
 
-// reportArchiveDirectory extracts the archive's on-tape directory, so the copy is
-// laid out where the report says its files live.
+// reportArchiveDirectory extracts the archive's on-tape directory.
 func reportArchiveDirectory(t *testing.T, report string) string {
 	t.Helper()
 
@@ -314,8 +290,7 @@ func reportArchiveDirectory(t *testing.T, report string) string {
 	return match
 }
 
-// reportSaysCompressed reads the archive's compression from the report, which is
-// what tells a recoverer whether the printed decompress step applies.
+// reportSaysCompressed reads the archive's compression from the report.
 func reportSaysCompressed(t *testing.T, report string) bool {
 	t.Helper()
 
@@ -329,16 +304,13 @@ func reportSaysCompressed(t *testing.T, report string) bool {
 	return zstd
 }
 
-// collapseSpaces folds every run of whitespace to a single space, so patterns
-// match regardless of how the PDF extractor wrapped or spaced the text.
+// collapseSpaces folds whitespace runs so patterns survive PDF text wrapping.
 func collapseSpaces(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// loadWrittenTape puts the run's tape back in the drive, standing in for the
-// operator of printed step 1 carrying a cartridge to a standalone drive. It
-// locates the tape by barcode: the run's Eject phase parks written tapes in the
-// I/O station, so it is no longer in the slot it was loaded from.
+// loadWrittenTape loads the run's tape by barcode, standing in for printed step
+// 1; Eject parked it in the I/O station.
 func loadWrittenTape(t *testing.T, changer *tape.Changer, inv tape.Inventory, barcode tape.Barcode, driveAddr int) {
 	t.Helper()
 
@@ -355,7 +327,6 @@ func loadWrittenTape(t *testing.T, changer *tape.Changer, inv tape.Inventory, ba
 
 	for _, slot := range current.IOSlots {
 		if slot.Full && slot.Barcode == barcode {
-			// Load only takes storage slots, so bring it back in first.
 			for _, storage := range current.Slots {
 				if !storage.Full {
 					require.NoError(t, changer.Transfer(t.Context(), slot.Address, storage.Address), "move the written tape out of the I/O station")
@@ -380,14 +351,9 @@ func loadWrittenTape(t *testing.T, changer *tape.Changer, inv tape.Inventory, ba
 	})
 }
 
-// mountTape runs the report's printed mount command, retrying while the drive
-// settles after the load. A drive that has just taken a cartridge — moments after
-// the run's own write and eject — can still report not-ready, which is a timing
-// property of the library rather than anything the report got wrong.
-//
-// It fails, and deliberately never skips, once the budget is spent: a skip here
-// would report the suite green while the very thing this test exists to check —
-// that the printed procedure works — went unexercised.
+// mountTape runs the printed mount command, retrying while a just-loaded drive
+// reports not-ready. It fails rather than skips when out of budget, so the suite
+// cannot go green without exercising the printed procedure.
 func mountTape(t *testing.T, dir, command, mountpoint string) {
 	t.Helper()
 
@@ -420,8 +386,7 @@ func mountTape(t *testing.T, dir, command, mountpoint string) {
 		attempts, time.Duration(attempts)*delay, command, mountpoint, out)
 }
 
-// runRecoveryStep runs one step of the printed procedure, failing the test with
-// the tool's own output when the step does not work as printed.
+// runRecoveryStep runs one printed step, failing with the tool's output.
 func runRecoveryStep(t *testing.T, dir, name string, args ...string) {
 	t.Helper()
 
@@ -450,8 +415,7 @@ func concatenate(t *testing.T, path string, parts []string) {
 	}
 }
 
-// sha256Of returns a file's lowercase hex SHA-256, using the system sha256sum the
-// report's verification step names.
+// sha256Of returns a file's hex SHA-256 via the system sha256sum the report names.
 func sha256Of(t *testing.T, path string) string {
 	t.Helper()
 

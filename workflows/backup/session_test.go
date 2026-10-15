@@ -10,18 +10,14 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// TestValidateBarcodes exercises the pure pre-write barcode invariant: every
-// tape in a drive-set must carry a non-empty barcode and no two may share one
-// (issue #170). Empty barcodes are named by drive index, duplicates by the
-// shared barcode value and the drives that carry it; a valid set returns nil.
+// TestValidateBarcodes covers the pre-write barcode invariant (#170).
 func TestValidateBarcodes(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		loaded     []LoadedTape
-		requireErr require.ErrorAssertionFunc
-		// wantSubstrings are fragments the joined error must name (offenders).
+		name           string
+		loaded         []LoadedTape
+		requireErr     require.ErrorAssertionFunc
 		wantSubstrings []string
 	}{
 		{
@@ -87,8 +83,6 @@ func TestValidateBarcodes(t *testing.T) {
 	}
 }
 
-// TestValidateBarcodesTriplicate confirms a barcode shared by three drives lists
-// all three drive indices in the error (single-pass encounter order).
 func TestValidateBarcodesTriplicate(t *testing.T) {
 	t.Parallel()
 
@@ -102,11 +96,9 @@ func TestValidateBarcodesTriplicate(t *testing.T) {
 	assert.ErrorContains(t, err, "[0 1 2]")
 }
 
-// TestMountRegistryUnmountState covers the registry mechanism that makes
-// FinalizeTape's retry idempotent across the unmount boundary (issue #152 AC3):
-// a mount parked by WriteTree starts not-unmounted, MarkUnmounted flips the flag
-// while keeping the entry present (so a retry is not misdiagnosed as a lost
-// mount), and only Delete removes it.
+// TestMountRegistryUnmountState covers the bookkeeping that makes FinalizeTape
+// retries idempotent (#152 AC3): MarkUnmounted keeps the entry, only Delete
+// removes it.
 func TestMountRegistryUnmountState(t *testing.T) {
 	t.Parallel()
 
@@ -117,34 +109,27 @@ func TestMountRegistryUnmountState(t *testing.T) {
 	_, _, ok := registry.getEntry(device)
 	assert.False(t, ok, "an unknown device has no entry")
 
-	// A freshly parked mount is present and not yet unmounted. A nil *ltfs.Mount
-	// is fine here: this test exercises only the entry's unmount-state bookkeeping.
+	// nil mount: only the bookkeeping is exercised.
 	registry.Put(device, nil)
 
 	_, unmounted, ok := registry.getEntry(device)
 	require.True(t, ok, "Put must register the entry")
 	assert.False(t, unmounted, "a freshly parked mount must not be marked unmounted")
 
-	// MarkUnmounted flips the flag but keeps the entry, so a FinalizeTape retry
-	// after a successful Unmount re-reads the captured index instead of hitting
-	// the mount-lost branch and re-driving a finalized tape (SPEC §14).
 	registry.MarkUnmounted(device)
 
 	_, unmounted, ok = registry.getEntry(device)
 	require.True(t, ok, "the entry must survive MarkUnmounted so the retry is not mount-lost")
 	assert.True(t, unmounted, "MarkUnmounted must record the unmount")
 
-	// Only a successful finalize deletes the entry.
 	registry.Delete(device)
 
 	_, _, ok = registry.getEntry(device)
 	assert.False(t, ok, "Delete must remove the entry")
 }
 
-// TestFinalizeTapeMountLostIsNonRetryable covers the sole terminal case (issue
-// #152 AC3): a genuinely absent registry entry — only ever caused by a data-worker
-// restart that wiped the in-memory registry — fails fast and non-retryably rather
-// than retrying an unrecoverable state until the session timeout.
+// TestFinalizeTapeMountLostIsNonRetryable: an absent entry (only a data-worker
+// restart causes one) fails fast and non-retryably (#152 AC3).
 func TestFinalizeTapeMountLostIsNonRetryable(t *testing.T) {
 	t.Parallel()
 

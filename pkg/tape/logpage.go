@@ -9,17 +9,13 @@ import (
 )
 
 const (
-	// sgLogsAttempts / sgLogsRetryDelay bound the retry that absorbs a transient
-	// UNIT ATTENTION. Just after the drive powers on or is reset, its first SCSI
-	// command draws a UNIT ATTENTION check condition (sg_logs exits non-zero);
-	// the condition is cleared once reported, so a retry succeeds. A persistent
-	// failure still surfaces after the attempts are exhausted.
+	// The first command after a power-on or reset draws a UNIT ATTENTION, which
+	// clears once reported, so a retry succeeds.
 	sgLogsAttempts   = 5
 	sgLogsRetryDelay = 500 * time.Millisecond
 )
 
-// runSgLogs invokes sg_logs, retrying to ride out a transient UNIT ATTENTION
-// (see sgLogsAttempts). It returns the last attempt's output and error.
+// runSgLogs invokes sg_logs, retrying a transient UNIT ATTENTION.
 func runSgLogs(ctx context.Context, args ...string) ([]byte, error) {
 	var (
 		out []byte
@@ -42,22 +38,18 @@ func runSgLogs(ctx context.Context, args ...string) ([]byte, error) {
 	return out, err
 }
 
-// LogPageReader reads SCSI log pages from a tape drive via sg_logs.
-// It targets the SCSI generic device node (e.g. /dev/sg1).
+// LogPageReader reads a drive's SCSI log pages via sg_logs on its sg node.
 type LogPageReader struct {
 	sgDevice string
 }
 
-// NewLogPageReader returns a LogPageReader targeting the given SCSI generic
-// device (e.g. /dev/sg1).
+// NewLogPageReader returns a LogPageReader for an sg node (e.g. /dev/sg1).
 func NewLogPageReader(sgDevice string) *LogPageReader {
 	return &LogPageReader{sgDevice: sgDevice}
 }
 
-// ReadLogPages reads TapeAlert flags (page 0x2e) and the reposition/back-hitch
-// count from the Tape usage log page (0x30, LTO-5/6) in one call. The reposition
-// count is total_suspended_writes (parameter code 5) — the drive's write-
-// suspension counter, each of which is a mid-stream stop-and-reposition.
+// ReadLogPages reads TapeAlert flags (page 0x2e) and the back-hitch count
+// (page 0x30 total_suspended_writes).
 func (r *LogPageReader) ReadLogPages(ctx context.Context) (LogPageResult, error) {
 	taResult, err := r.readTapeAlert(ctx)
 	if err != nil {
@@ -76,11 +68,8 @@ func (r *LogPageReader) ReadLogPages(ctx context.Context) (LogPageResult, error)
 	}, nil
 }
 
-// readTapeAlert runs "sg_logs --page=0x2e --json <sgDevice>" and parses the
-// output. The JSON form is used rather than the decoded text because it is a
-// stable, structured contract (it carries a json_format_version) and exposes
-// the flag number, name, and value directly — the decoded text format omits
-// the flag number for named flags and varies across sg3-utils releases.
+// readTapeAlert uses sg_logs --json: the decoded text omits flag numbers for
+// named flags and varies across sg3-utils releases.
 func (r *LogPageReader) readTapeAlert(ctx context.Context) (TapeAlertResult, error) {
 	out, err := runSgLogs(ctx, "--page=0x2e", "--json", r.sgDevice)
 	if err != nil {
@@ -90,31 +79,19 @@ func (r *LogPageReader) readTapeAlert(ctx context.Context) (TapeAlertResult, err
 	return parseTapeAlert(string(out))
 }
 
-// readRepositions runs "sg_logs --page=0x30 --json <sgDevice>" and extracts the
-// reposition/back-hitch count (total_suspended_writes, parameter code 5). It
-// returns the count, whether it was measured, and an error.
-//
-// A drive that does not support page 0x30 (not an LTO-5/6, so the page is not in
-// its supported-pages list) fails the log-sense with ILLEGAL REQUEST; sg_logs
-// exits non-zero. That is reported as (0, false, nil) — not measured — rather
-// than an error, so an unsupported reposition counter never masks a good
-// TapeAlert read and never fails the observational activity. A malformed JSON
-// body from a page the drive did answer is a real fault and is returned as an
-// error.
+// readRepositions reads the back-hitch count from page 0x30. Drives without the
+// page (not LTO-5/6) report not measured rather than an error, so the
+// observational read never fails on them; malformed JSON is still an error.
 func (r *LogPageReader) readRepositions(ctx context.Context) (count int64, measured bool, err error) {
 	out, err := runSgLogs(ctx, "--page=0x30", "--json", r.sgDevice)
 	if err != nil {
-		// Page 0x30 is LTO-5/6-specific; an unsupported drive rejects it. Treat
-		// as not measured rather than failing the observational read.
 		return 0, false, nil
 	}
 
 	return parseTapeUsage(string(out))
 }
 
-// tapeAlertJSON models the subset of "sg_logs --page=0x2e --json" output we
-// consume: each parameter carries its code (flag number), decoded meaning, and
-// the flag value.
+// tapeAlertJSON models the consumed subset of "sg_logs --page=0x2e --json".
 type tapeAlertJSON struct {
 	Page struct {
 		Params []struct {
@@ -147,15 +124,11 @@ func parseTapeAlert(output string) (TapeAlertResult, error) {
 	return result, nil
 }
 
-// tapeUsageParamSuspendedWrites is the Tape usage log page (0x30) parameter code
-// carrying total_suspended_writes — the drive's write-suspension (back-hitch)
-// count. A write suspension is a mid-stream stop-and-reposition, i.e. exactly the
-// shoe-shining the anti-back-hitch measurement (SPEC §14) exists to detect.
+// tapeUsageParamSuspendedWrites carries total_suspended_writes: each is a
+// mid-stream reposition, i.e. the shoe-shining SPEC §14 measures.
 const tapeUsageParamSuspendedWrites = 5
 
-// tapeUsageJSON models the subset of "sg_logs --page=0x30 --json" output we
-// consume: the Tape usage log page's parameter list. Each parameter carries its
-// code and, for parameter code 5, total_suspended_writes.
+// tapeUsageJSON models the consumed subset of "sg_logs --page=0x30 --json".
 type tapeUsageJSON struct {
 	Page struct {
 		Params []struct {
@@ -165,12 +138,8 @@ type tapeUsageJSON struct {
 	} `json:"tape_usage_log_page"`
 }
 
-// parseTapeUsage extracts the reposition count (total_suspended_writes,
-// parameter code 5) from "sg_logs --page=0x30 --json" output. measured is true
-// only when the Tape usage page and that parameter are present; when the page or
-// parameter is absent it returns (0, false, nil) so a not-measured counter is
-// observable rather than indistinguishable from a measured zero. err is returned
-// only when the JSON body is malformed.
+// parseTapeUsage extracts total_suspended_writes; measured is false when the
+// parameter is absent, so it is never confused with a measured zero.
 func parseTapeUsage(output string) (count int64, measured bool, err error) {
 	var doc tapeUsageJSON
 	if err := json.Unmarshal([]byte(output), &doc); err != nil {

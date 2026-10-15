@@ -9,25 +9,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/config"
 )
 
-// The Burn phase's operator pause reuses the same signals and pauseOutcome as the
-// tape write path (writepause.go): OperatorResumeSignal / OperatorAbortSignal and
-// pauseResumed / pauseAborted / pauseTimedOut. Two situations pause the Burn
-// phase, both waiting on the same signals: a burn/verify failure within a set
-// (retry the failed discs on resume) and a between-set disc swap (no optical
-// autoloader, so every later set is a manual load). The wait mirrors
-// waitForWritePathCleared, swapping in the optical-burn operator-wait timeout.
-
 // waitForBurnOperator alerts the operator to a Burn-phase pause and waits for
-// their decision (SPEC §10, §11). cause is the burn/verify failure for a
-// within-set pause, or nil for a between-set disc swap; devices names the burners
-// the operator loads fresh blanks into. It fires the best-effort pause alert,
-// then blocks on resume, abort, or the configured burn-wait timeout, returning
-// which fired.
-//
-// state.currentPause (read by CurrentPauseQuery) is set to PauseBurn for the
-// duration of the wait and cleared as soon as it returns — a plain struct-field
-// assignment around the pre-existing wait call, with no effect on its timing or
-// signal handling.
+// resume, abort, or the burn-wait timeout. cause is nil for a between-set disc swap.
 func waitForBurnOperator(ctx workflow.Context, cfg config.Config, state *runState, devices []string, cause error) pauseOutcome {
 	// Drain before the alert is dispatched so only genuinely-stale (pre-alert)
 	// resumes/aborts are discarded and a resume or abort prompted by this alert
@@ -54,10 +37,8 @@ func waitForBurnOperator(ctx workflow.Context, cfg config.Config, state *runStat
 	return outcome
 }
 
-// waitForBurnCleared blocks until the operator resumes or aborts the run, or the
-// configured burn-wait timeout elapses (SPEC §10). Like the write-path pause and
-// unlike the Eject pause there is no library state to poll, so resume is always an
-// explicit operator signal (there is no optical autoloader).
+// waitForBurnCleared blocks until the operator resumes or aborts, or the burn-wait
+// timeout elapses. There is no library state to poll, so resume is always explicit.
 func waitForBurnCleared(ctx workflow.Context, cfg config.Config) pauseOutcome {
 	resumeCh := workflow.GetSignalChannel(ctx, OperatorResumeSignal)
 	abortCh := workflow.GetSignalChannel(ctx, OperatorAbortSignal)
@@ -85,9 +66,8 @@ func waitForBurnCleared(ctx workflow.Context, cfg config.Config) pauseOutcome {
 	return outcome
 }
 
-// notifyBurnPause runs the best-effort burn-pause alert activity on the control
-// worker (SPEC §11). Like notifyWritePathPause it never propagates an error: a
-// dispatch failure is logged so a webhook outage never aborts a paused run.
+// notifyBurnPause sends the best-effort burn-pause alert; failures are only logged
+// so a webhook outage never aborts a paused run.
 func notifyBurnPause(ctx workflow.Context, devices []string, cause error) {
 	summary := "the burn-set is complete; load fresh blank recovery discs for the next set"
 	if cause != nil {
@@ -114,8 +94,7 @@ func notifyBurnPause(ctx workflow.Context, devices []string, cause error) {
 	}
 }
 
-// joinFailedDiscs renders the per-disc burn/verify failures into one error for
-// the operator alert and the aborted/timed-out run result.
+// joinFailedDiscs joins the per-disc failures into one error.
 func joinFailedDiscs(failed []failedDisc) error {
 	errs := make([]error, 0, len(failed))
 	for _, disc := range failed {

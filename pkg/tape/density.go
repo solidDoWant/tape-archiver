@@ -7,16 +7,9 @@ import (
 	"os/exec"
 )
 
-// ltoDensityCodes maps a SCSI medium density code to the LTO generation of the
-// medium carrying it. These are the LTO generations' assigned density codes; the
-// values match mhvtl's own table (include/vtlcart.h), and 0x58 is corroborated by
-// the Linux st driver, which reports an LTO-5 cartridge as "Density code 0x58
-// (LTO-5)".
-//
-// LTO-8 media come in two densities: the LTO-7 Type M ("M8") initialization of an
-// LTO-7 cartridge (0x5d) and native LTO-8 (0x5e). They are distinguished because
-// they are not interchangeable to a recoverer — M8 media are readable only by
-// LTO-8 drives.
+// ltoDensityCodes maps a medium density code to its LTO generation (values
+// match mhvtl's include/vtlcart.h). M8 is kept distinct from LTO-8 because only
+// LTO-8 drives can read it.
 var ltoDensityCodes = map[byte]string{
 	0x40: "LTO-1",
 	0x42: "LTO-2",
@@ -30,29 +23,20 @@ var ltoDensityCodes = map[byte]string{
 	0x60: "LTO-9",
 }
 
-// MediumGeneration reports the LTO generation of the medium currently loaded in
-// the drive at sgDevice (a SCSI generic node, e.g. /dev/sg1), read from the
-// density code in the MODE SENSE block descriptor.
+// MediumGeneration reports the LTO generation of the medium loaded in the
+// drive at sgDevice, from the MODE SENSE density code.
 //
-// This is the generation of the *tape*, which is what a recoverer needs a drive
-// for — deliberately not the drive's own generation (DeviceInfo.LTOGeneration),
-// which says only what wrote it. An LTO-6 drive writes LTO-5 media, and an LTO-8
-// drive can read neither, so reporting the writing drive's generation would send a
-// recoverer after the wrong hardware (issue #340).
-//
-// An empty drive has no medium to describe, and some drives (mhvtl among them)
-// keep reporting the last medium's density after an unload, so the drive must
-// first answer TEST UNIT READY. An unrecognized density code yields unknownGeneration rather than an
-// error, so a medium this table does not know is still reported honestly.
+// It reports the tape's generation, not the drive's: a recoverer needs a drive
+// that reads the medium, and an LTO-6 drive writing LTO-5 media would otherwise
+// send them after the wrong hardware (#340). TEST UNIT READY comes first
+// because mhvtl keeps reporting the last medium's density after an unload.
 func MediumGeneration(ctx context.Context, sgDevice string) (string, error) {
 	if err := testUnitReady(ctx, sgDevice); err != nil {
 		return unknownGeneration, fmt.Errorf("drive %s has no ready medium: %w", sgDevice, err)
 	}
 
-	// --raw emits the MODE SENSE response verbatim, so the density code is read
-	// at its fixed offset in the SCSI structure. sg_modes' decoded text carries
-	// the same value but its layout varies across sg3-utils releases, and unlike
-	// sg_logs (see logpage.go) sg_modes has no --json output to parse instead.
+	// sg_modes' decoded text varies across sg3-utils releases and it has no
+	// --json, so read the density at its fixed offset in the raw response.
 	out, err := exec.CommandContext(ctx, "sg_modes", "--raw", sgDevice).Output()
 	if err != nil {
 		return unknownGeneration, fmt.Errorf("sg_modes --raw %s: %w", sgDevice, err)
@@ -71,12 +55,9 @@ func MediumGeneration(ctx context.Context, sgDevice string) (string, error) {
 	return generation, nil
 }
 
-// densityCode extracts the medium density code from a MODE SENSE(10) response:
-// an 8-byte mode parameter header whose last two bytes hold the block descriptor
-// length, followed by the block descriptors themselves, the first of which opens
-// with the density code. It reports false when the response is truncated or the
-// drive returned no block descriptor (nothing loaded, or descriptors disabled),
-// so a missing density is never mistaken for density code 0x00.
+// densityCode extracts the density code from a MODE SENSE(10) response,
+// reporting false when there is no block descriptor so a missing density is
+// never mistaken for code 0x00.
 func densityCode(response []byte) (byte, bool) {
 	const headerLen = 8
 

@@ -17,27 +17,16 @@ import (
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
-// TestControlWorkerAutoscaling exercises the opt-in KEDA scale-to-zero control-worker
-// path (parent #113; blockers #115 idle-exit, #116 ScaledJob chart) end to end. It
-// removes the shared always-on Deployment worker from the control queue (scale to 0)
-// so a KEDA-spawned worker is the sole poller, then installs the worker in its
-// ScaledJob shape with a fast-cycle overlay (short WORKER_IDLE_EXIT_AFTER, low KEDA
-// pollingInterval) so the full 0 -> 1 -> 0 -> 1 cycle is observable in seconds.
-//
-// Both subtests share that setup; each starts from and returns to zero running control
-// pods, and each submits its run under the singleton workflow ID and terminates it on
-// cleanup. The shared Deployment is only replica-toggled — restored to one replica
-// afterwards — so the rest of the suite still exercises the baseline Deployment shape.
+// TestControlWorkerAutoscaling exercises KEDA scale-to-zero (#113, #115, #116)
+// with the shared Deployment scaled to 0 so the KEDA-spawned worker is the sole
+// poller. Each subtest starts and ends at zero running control pods.
 func TestControlWorkerAutoscaling(t *testing.T) {
 	h := requireHarness(t)
 
-	// Single-poller isolation: the always-on Deployment worker would grab every
-	// workflow task and make scale-from-zero unobservable, so take it off the control
-	// queue for the duration and restore it afterwards.
+	// The always-on Deployment would take every task and hide scale-from-zero.
 	h.scaleControlDeployment(t, 0)
 	t.Cleanup(h.restoreControlReplicas)
 
-	// Install the control worker in its ScaledJob shape (fast scale-to-zero overlay).
 	h.installScaledJobWorker(t)
 
 	t.Run("ScaleUpSelfExitRespawn", func(t *testing.T) {
@@ -49,14 +38,10 @@ func TestControlWorkerAutoscaling(t *testing.T) {
 	})
 }
 
-// podPollTimeout bounds the wait for a scale transition. KEDA's pollingInterval (5s)
-// plus WORKER_IDLE_EXIT_AFTER (20s) plus image start and workflow replay all fit
-// comfortably inside it, so a genuine regression (a transition that never happens)
-// fails rather than flakes.
+// podPollTimeout comfortably covers pollingInterval + idle exit + start + replay.
 const podPollTimeout = 90 * time.Second
 
-// requireControlPods asserts the ScaledJob release settles at the wanted number of
-// running control pods within podPollTimeout — the load-bearing scale assertions.
+// requireControlPods asserts the ScaledJob release settles at want running pods.
 func requireControlPods(t *testing.T, h *e2eHarness, want int, msg string) {
 	t.Helper()
 
@@ -65,9 +50,7 @@ func requireControlPods(t *testing.T, h *e2eHarness, want int, msg string) {
 	}, podPollTimeout, 2*time.Second, "%s (want %d running control pod(s))", msg, want)
 }
 
-// requireControlPodsAtLeast asserts at least one running control pod appears within
-// podPollTimeout, used for the scale-up and respawn transitions where the exact count
-// is bounded by maxReplicaCount but only "a worker came back" matters.
+// requireControlPodsAtLeast asserts at least one running control pod appears.
 func requireControlPodsAtLeast(t *testing.T, h *e2eHarness, min int, msg string) {
 	t.Helper()
 
@@ -76,12 +59,9 @@ func requireControlPodsAtLeast(t *testing.T, h *e2eHarness, min int, msg string)
 	}, podPollTimeout, 2*time.Second, "%s (want >= %d running control pod(s))", msg, min)
 }
 
-// testScaleUpSelfExitRespawn drives the full autoscaling cycle through an
-// I/O-station-overflow run (AC3 + AC4): idle at zero; a submitted run scales a worker
-// up; the Eject phase fills the station and pauses, the control queue goes idle, and
-// the worker self-exits back to zero *during* the pause; `tapectl resume` (a durable
-// signal, delivered with no worker running) enqueues a workflow task that respawns a
-// worker, which replays and drives the run to completion; then it returns to zero.
+// testScaleUpSelfExitRespawn (AC3, AC4): an I/O-station-overflow run scales up,
+// self-exits to zero during the Eject pause, and respawns on the durable
+// `tapectl resume` signal to finish.
 func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 	source := testutil.PoolDataset(t) + "@" + testutil.TestSnapshot(t)
 
@@ -96,8 +76,8 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 		require.Falsef(t, io.Full, "I/O slot %d must start empty", io.Address)
 	}
 
-	// One more physical copy than the library has I/O slots, so the final eject
-	// overflows the station and pauses. Slots 20+ are clear of every other test.
+	// One more copy than I/O slots, so the final eject overflows and pauses.
+	// Slots 20+ are clear of every other test.
 	copies := ioSlots + 1
 
 	slotIndexes := make([]int, copies)
@@ -127,17 +107,13 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 20*time.Minute)
 	defer cancel()
 
-	// No run in progress: no control worker is running.
 	requireControlPods(t, h, 0, "control worker must start scaled to zero")
 
 	h.submitRun(t, cfg)
 	terminateOnCleanup(t, temporalClient)
 
-	// Scale-up: KEDA sees the workflow task on the control backlog and spawns a worker.
 	requireControlPodsAtLeast(t, h, 1, "submitting a run must scale a control worker up from zero")
 
-	// The run exports ioSlots tapes into the station, then the next eject fills it and
-	// pauses with the last tape unloaded back to its source slot (drive empty).
 	lastBarcode := fixture.barcodes[copies-1]
 	lastSlot := fixture.library.BlankSlots[copies-1]
 
@@ -166,13 +142,10 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 		return full == ioSlots && lastParked
 	}, 15*time.Minute, 2*time.Second, "the Eject phase must fill the I/O station and pause")
 
-	// Self-exit during the pause: the run is parked awaiting the resume signal, so the
-	// control queue goes idle and the worker drains and exits, scaling back to zero
-	// mid-run — the load-bearing self-exit that makes scale-to-zero worthwhile.
+	// The paused run leaves the control queue idle, so the worker exits mid-run.
 	requireControlPods(t, h, 0, "the control worker must self-exit to zero while the run is paused")
 
-	// Simulate the operator removing one exported tape: move the first exported tape
-	// from its I/O slot back to its source storage slot, freeing an I/O slot.
+	// Simulate the operator freeing an I/O slot.
 	cur, err := changer.Inventory(runCtx)
 	require.NoError(t, err, "inventory at pause")
 
@@ -191,11 +164,9 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 	require.NotEqualf(t, -1, ioAddr, "exported tape %s must be in an I/O slot at the pause", firstBarcode)
 	require.NoError(t, changer.Transfer(runCtx, ioAddr, firstSlot), "operator clears one I/O slot")
 
-	// Resume through the operator CLI. The signal is durable and lands with no worker
-	// running; it enqueues a control workflow task that KEDA respawns a worker to serve.
+	// The durable signal lands with no worker running; KEDA respawns one.
 	h.resumeRun(t)
 
-	// Respawn: a worker comes back from zero to finish the run.
 	requireControlPodsAtLeast(t, h, 1, "resuming a paused run must respawn a control worker from zero")
 
 	var result backup.Result
@@ -214,18 +185,12 @@ func testScaleUpSelfExitRespawn(t *testing.T, h *e2eHarness) {
 		assert.Containsf(t, report, string(barcode), "report must list tape barcode %s", barcode)
 	}
 
-	// Once the completed run drains the control queue, the worker self-exits again.
 	requireControlPods(t, h, 0, "the control worker must return to zero after the run completes")
 }
 
-// testFailureAlertFromZero asserts a run that fails while the control worker was
-// scaled to zero still delivers its failure alert to DISCORD_FAILURE_WEBHOOK_URL via a
-// KEDA-spawned worker (AC5). With the shared Deployment off the control queue, any
-// worker that runs — including the one that posts the failure alert — was spawned by
-// KEDA from zero. It reuses the Verify-fault injection: a staged slice is corrupted
-// after Prepare, so the run fails at Verify and the workflow's failure path fires.
+// testFailureAlertFromZero asserts a Verify-fault failure starting from zero
+// workers still delivers its failure alert via a KEDA-spawned worker (AC5).
 func testFailureAlertFromZero(t *testing.T, h *e2eHarness) {
-	// Start from a genuine scaled-to-zero state so the alert is provably KEDA-spawned.
 	requireControlPods(t, h, 0, "control worker must be scaled to zero before the failing run")
 
 	source := testutil.PoolDataset(t) + "@" + testutil.TestSnapshot(t)
@@ -251,38 +216,25 @@ func testFailureAlertFromZero(t *testing.T, h *e2eHarness) {
 	h.submitRun(t, cfg)
 	terminateOnCleanup(t, temporalClient)
 
-	// Corrupt one staged slice after Prepare so Verify's checksum recompute fails.
-	// Watch from submission: a fresh worker can drive the run past Verify within
-	// the pod-count poll below.
+	// Watch from submission: a fresh worker can pass Verify within the poll below.
 	corruptAfterPrepare(t, temporalClient, h.stagingHostDir, 4*time.Minute)
 
-	// KEDA must have spawned a worker to drive the run from zero.
 	requireControlPodsAtLeast(t, h, 1, "submitting the run must scale a control worker up from zero")
 
-	// The run must fail, attributed to the Verify phase.
 	err := temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, new(backup.Result))
 	require.Error(t, err, "run must fail after the injected checksum fault")
 	assert.Contains(t, err.Error(), backup.PhaseVerify, "failure must be attributed to the Verify phase")
 
-	// AC5: the failure alert still reaches the webhook, posted by the KEDA-spawned
-	// worker — a control worker at zero does not swallow failure alerting.
+	// AC5.
 	assertFailureAlert(t, h, backupWorkflowID, backup.PhaseVerify)
 }
 
-// TestControlWorkerMultipleReplicas covers the multi-worker edge case: at steady state
-// a single worker polls the control queue, but two control workers must be able to
-// poll it concurrently without double-processing the singleton run. It scales the
-// shared Deployment to two replicas, drives a full backup, and asserts the run
-// completes exactly once — exactly the two artifacts delivered, no duplicate delivery —
-// which holds because Temporal serializes workflow-task processing per execution.
-//
-// (KEDA's backlog-driven scaler cannot be deterministically pushed past one Job for a
-// single-workflow backlog, so a fixed two-replica Deployment is the reliable way to
-// force two concurrent pollers.)
+// TestControlWorkerMultipleReplicas asserts two concurrent control pollers don't
+// double-process the singleton run. A two-replica Deployment is used because KEDA
+// can't be reliably pushed past one Job for a single-workflow backlog.
 func TestControlWorkerMultipleReplicas(t *testing.T) {
 	h := requireHarness(t)
 
-	// Two concurrent pollers on the singleton control queue; restore to one afterwards.
 	h.scaleControlDeployment(t, 2)
 	t.Cleanup(h.restoreControlReplicas)
 
@@ -306,7 +258,6 @@ func TestControlWorkerMultipleReplicas(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
 	defer cancel()
 
-	// Both workers are up and polling before the run is submitted.
 	require.Equal(t, 2, h.runningControlPods(t, helmRelease), "two control workers must be polling the control queue")
 
 	h.submitRun(t, cfg)
@@ -318,8 +269,7 @@ func TestControlWorkerMultipleReplicas(t *testing.T) {
 
 	assert.Equal(t, orderedPhases, result.CompletedPhases, "all ten phases must complete in order")
 
-	// Exactly-once: two concurrent workers must not double-process the run, so exactly
-	// one report is delivered (report-only delivery, SPEC §5) — never a duplicate.
+	// Exactly one report (report-only delivery, SPEC §5), never a duplicate.
 	uploads := h.rec.uploadsFor(runID)
 	require.Len(t, uploads, 1, "exactly one report is delivered — no duplicate from the second worker")
 

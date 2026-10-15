@@ -7,14 +7,11 @@ import (
 	"errors"
 )
 
-// errRawReadUnsupported is returned by the RawReader stubs off Linux, where the
-// SG_IO LOCATE/READ path is not built (see rawread_linux.go). The data worker
-// runs exclusively on Linux; these stubs exist so the package still builds on
-// other platforms for tooling and editors.
+// errRawReadUnsupported is returned off Linux; the stubs only keep the package
+// building elsewhere.
 var errRawReadUnsupported = errors.New("tape: raw block read is only supported on Linux (SG_IO)")
 
-// RawReader is the raw-block reader; its behavior is Linux-only (see
-// rawread_linux.go). This stub type keeps the package building elsewhere.
+// RawReader is the raw-block reader; it is Linux-only.
 type RawReader struct{}
 
 // OpenRawReader is only implemented on Linux.

@@ -13,12 +13,6 @@ import (
 	"unsafe"
 )
 
-// This file issues the changer's SCSI commands directly via SG_IO, reusing the
-// cgo-free plumbing in drive_linux.go (sgIOHdr, sgIoctl, parseSense,
-// scsiAddressOf, timeoutMs, and the dxfer/driver-status constants). It replaces
-// the former mtx subprocess; the binary decoding it feeds lives in
-// changer_decode.go.
-
 // SCSI opcodes issued to the changer.
 const (
 	opcodeModeSense6        = 0x1A // MODE SENSE(6)
@@ -27,79 +21,44 @@ const (
 )
 
 const (
-	// modeSenseDBD disables block descriptors so the mode page follows the
-	// 4-byte header directly.
-	modeSenseDBD = 0x08
-	// readElementVoltag sets VOLTAG in the READ ELEMENT STATUS CDB so each
-	// descriptor carries its primary volume tag (element type code 0 = all
-	// types).
+	// modeSenseDBD disables block descriptors.
+	modeSenseDBD      = 0x08
 	readElementVoltag = 0x10
-	// readElementDVCID sets DVCID (byte 6, bit 0) in the READ ELEMENT STATUS CDB
-	// so each data-transfer element descriptor carries the drive's primary device
-	// identifier (its unit serial). The Load phase pairs a configured drive device
-	// node to its changer element by that identity — not by set position — so a
-	// probe-order or retry-set mismatch can never load a blank into one physical
-	// drive while blank-checking another (issue #137). Libraries that do not
-	// implement DVCID simply omit the identifier; the decode tolerates its absence.
-	readElementDVCID = 0x01
-	// readElementAllElements is the "number of elements" CDB field value that
-	// requests every element the library has.
+	// readElementDVCID requests each drive's device identifier so Load pairs a
+	// device node to its element by serial, not set position, and can never load
+	// a blank into one drive while blank-checking another (#137). Libraries
+	// without DVCID simply omit it.
+	readElementDVCID       = 0x01
 	readElementAllElements = 0xFFFF
-	// elementStatusBufSize bounds the READ ELEMENT STATUS transfer. It is far
-	// larger than any supported library's report (the production 3573-TL and the
-	// mhvtl L700 are well under 4 KiB), so a truncated response is not expected.
-	// decodeElementStatus enforces this rather than assuming it: it compares the
-	// report's declared byte count against the bytes transferred and rejects any
-	// response that would have overrun this buffer.
+	// elementStatusBufSize is far above any supported library's report;
+	// decodeElementStatus still rejects a truncated response.
 	elementStatusBufSize = 128 * 1024
-	// modeSenseBufSize bounds the MODE SENSE transfer; the 0x1D page plus header
-	// is 24 bytes.
-	modeSenseBufSize = 64
-	// senseBufferLen sizes the SCSI sense buffer for every changer command; a
-	// fixed-format sense response fits well within it.
-	senseBufferLen = 32
+	modeSenseBufSize     = 64
+	senseBufferLen       = 32
 )
 
-// Changer command timeouts. A MOVE MEDIUM is a physical robot move and can take
-// a while on real hardware; the status reads are near-instant.
+// Changer command timeouts; MOVE MEDIUM is a physical robot move.
 const (
 	moveMediumTimeout  = 5 * time.Minute
 	changerReadTimeout = 60 * time.Second
 )
 
-// senseKeyUnitAttention is the SCSI sense key for a UNIT ATTENTION: a condition
-// the target queues per initiator after a state change and clears by the act of
-// reporting it.
 const senseKeyUnitAttention = 0x06
 
-// unitAttentionAttempts / unitAttentionRetryDelay bound the retry that absorbs a
-// transient UNIT ATTENTION, mirroring runSgLogs (logpage.go) for the SG_IO path.
-//
-// A target queues a UNIT ATTENTION for each initiator after a state change — a
-// library re-inventory, a magazine or door access, a bus reset — and reports it on
-// that initiator's next command. The command is terminated WITHOUT being
-// performed, and reporting clears the condition, so re-issuing it succeeds. That
-// "not performed" guarantee is what makes the retry safe for MOVE MEDIUM as well
-// as for the status reads: the robot did not move.
-//
-// The condition stays queued until something reads it, so the first command a run
-// issues to a given device is the likeliest to draw one — however long the device
-// has sat idle. That is how a self-clearing transient killed a whole run once the
-// dry-run library mirror became the first code to talk to the real changer
-// (issue #335).
+// A UNIT ATTENTION is queued per initiator after a state change (re-inventory,
+// door access, bus reset) and reported on the next command, which is NOT
+// performed — so retrying is safe even for MOVE MEDIUM. It stays queued however
+// long the device sits idle, so a run's first command is the likeliest to draw
+// one (#335).
 const (
 	unitAttentionAttempts   = 5
 	unitAttentionRetryDelay = 500 * time.Millisecond
 )
 
-// scsiChangerClassDir is the sysfs class directory for SCSI media changers,
-// paralleling scsiTapeClassDir/scsiGenericClassDir in drive_linux.go.
 const scsiChangerClassDir = "/sys/class/scsi_changer"
 
-// Inventory reads the library's element status via READ ELEMENT STATUS (0xB8)
-// and returns the decoded topology with friendly drive/slot numbers. The
-// import/export ACCESS bit is reported for every I/O slot (Inventory.IOAccessReported),
-// which the operator-in-the-loop Eject phase uses to auto-resume (SPEC §4.3 phase 8).
+// Inventory reads the library's element status via READ ELEMENT STATUS (0xB8),
+// including the I/O-slot ACCESS bit the Eject phase uses to auto-resume.
 func (c *Changer) Inventory(ctx context.Context) (Inventory, error) {
 	sgDevice, addressing, err := c.resolve(ctx)
 	if err != nil {
@@ -125,8 +84,7 @@ func (c *Changer) Inventory(ctx context.Context) (Inventory, error) {
 	return inv, nil
 }
 
-// Load moves the tape in the given storage slot into the given drive (both
-// friendly numbers: a 1-based storage slot and a 0-based drive index).
+// Load moves the tape in a 1-based storage slot into a 0-based drive.
 func (c *Changer) Load(ctx context.Context, slot, drive int) error {
 	sgDevice, addressing, err := c.resolve(ctx)
 	if err != nil {
@@ -146,8 +104,7 @@ func (c *Changer) Load(ctx context.Context, slot, drive int) error {
 	return c.move(ctx, sgDevice, addressing, src, dst)
 }
 
-// Unload moves the tape from the given drive (0-based index) into the given
-// storage slot (1-based).
+// Unload moves the tape from a 0-based drive into a 1-based storage slot.
 func (c *Changer) Unload(ctx context.Context, slot, drive int) error {
 	sgDevice, addressing, err := c.resolve(ctx)
 	if err != nil {
@@ -167,10 +124,8 @@ func (c *Changer) Unload(ctx context.Context, slot, drive int) error {
 	return c.move(ctx, sgDevice, addressing, src, dst)
 }
 
-// Transfer moves media from srcSlot to dstSlot. Both are friendly slot numbers in
-// mtx's combined storage+I/O numbering (storage slots first, then I/O-station
-// slots), so this moves a tape between a storage slot and an I/O station slot in
-// either direction.
+// Transfer moves media between two slots in mtx's combined storage+I/O
+// numbering.
 func (c *Changer) Transfer(ctx context.Context, srcSlot, dstSlot int) error {
 	sgDevice, addressing, err := c.resolve(ctx)
 	if err != nil {
@@ -190,17 +145,13 @@ func (c *Changer) Transfer(ctx context.Context, srcSlot, dstSlot int) error {
 	return c.move(ctx, sgDevice, addressing, src, dst)
 }
 
-// move issues a MOVE MEDIUM from raw source to raw destination using the
-// library's transport element as the robot.
 func (c *Changer) move(ctx context.Context, sgDevice string, addressing *elementAddressing, src, dst int) error {
 	return withSGFile(sgDevice, func(f *os.File) error {
 		return scsiMoveMedium(ctx, f, addressing.transportElement(), src, dst)
 	})
 }
 
-// resolve lazily resolves and caches the SCSI generic node and the element
-// address map (mode page 0x1D), so repeated calls on the same Changer issue the
-// mode sense only once.
+// resolve lazily resolves and caches the sg node and element address map.
 func (c *Changer) resolve(ctx context.Context) (string, *elementAddressing, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -226,9 +177,6 @@ func (c *Changer) resolve(ctx context.Context) (string, *elementAddressing, erro
 	return c.resolvedSG, c.addressing, nil
 }
 
-// sgNode returns the SCSI generic node to issue commands to: the explicit
-// override if set, the device itself when it is already an sg node, otherwise the
-// node resolved from the changer device's SCSI address.
 func (c *Changer) sgNode() (string, error) {
 	if c.sgDevice != "" {
 		return c.sgDevice, nil
@@ -241,9 +189,8 @@ func (c *Changer) sgNode() (string, error) {
 	return sgDeviceForChangerNode(c.device)
 }
 
-// sgDeviceForChangerNode resolves the SCSI generic node (/dev/sgN) that shares
-// the same physical unit as the given changer node (/dev/schN), matching on the
-// SCSI address (H:C:T:L). It mirrors sgDeviceForTapeNode.
+// sgDeviceForChangerNode resolves the /dev/sgN sharing a /dev/schN's SCSI
+// address.
 func sgDeviceForChangerNode(device string) (string, error) {
 	changerAddr, err := scsiAddressOfDevNode(scsiChangerClassDir, device)
 	if err != nil {
@@ -258,8 +205,6 @@ func sgDeviceForChangerNode(device string) (string, error) {
 		"set it explicitly with WithChangerSGDevice", device, changerAddr)
 }
 
-// readElementAddressing issues MODE SENSE(6) for the Element Address Assignment
-// page (0x1D) and decodes the raw↔friendly address map.
 func readElementAddressing(ctx context.Context, sgDevice string) (*elementAddressing, error) {
 	var addressing *elementAddressing
 
@@ -280,10 +225,8 @@ func readElementAddressing(ctx context.Context, sgDevice string) (*elementAddres
 	return addressing, nil
 }
 
-// withSGFile opens the SCSI generic node read/write, runs fn, and closes it,
-// surfacing a close error only when fn itself succeeded. Issuing SCSI commands
-// requires CAP_SYS_RAWIO plus device access — the same privilege the blank check
-// and the former mtx invocation needed.
+// withSGFile runs fn on the sg node opened read/write; this needs
+// CAP_SYS_RAWIO.
 func withSGFile(device string, fn func(*os.File) error) (err error) {
 	f, err := os.OpenFile(device, os.O_RDWR, 0)
 	if err != nil {
@@ -299,8 +242,6 @@ func withSGFile(device string, fn func(*os.File) error) (err error) {
 	return fn(f)
 }
 
-// scsiModeSense6 issues MODE SENSE(6) for the given page (block descriptors
-// disabled) and returns the raw response bytes.
 func scsiModeSense6(ctx context.Context, f *os.File, page byte) ([]byte, error) {
 	buf := make([]byte, modeSenseBufSize)
 	sense := make([]byte, senseBufferLen)
@@ -326,8 +267,6 @@ func scsiModeSense6(ctx context.Context, f *os.File, page byte) ([]byte, error) 
 	return buf[:int(hdr.dxferLen)-int(hdr.resid)], nil
 }
 
-// scsiReadElementStatus issues READ ELEMENT STATUS (0xB8) for all element types
-// with volume tags and returns the raw response bytes.
 func scsiReadElementStatus(ctx context.Context, f *os.File) ([]byte, error) {
 	buf := make([]byte, elementStatusBufSize)
 	sense := make([]byte, senseBufferLen)
@@ -363,8 +302,6 @@ func scsiReadElementStatus(ctx context.Context, f *os.File) ([]byte, error) {
 	return buf[:int(hdr.dxferLen)-int(hdr.resid)], nil
 }
 
-// scsiMoveMedium issues MOVE MEDIUM (0xA5) to move media from src to dst using
-// the given transport element (robot) as the origin of the arm.
 func scsiMoveMedium(ctx context.Context, f *os.File, transport, src, dst int) error {
 	sense := make([]byte, senseBufferLen)
 
@@ -392,16 +329,9 @@ func scsiMoveMedium(ctx context.Context, f *os.File, transport, src, dst int) er
 	return sgCommand(ctx, f, &hdr, cdb, sense, nil, fmt.Sprintf("MOVE MEDIUM (src=%d dst=%d)", src, dst))
 }
 
-// sgCommand runs one SG_IO command and turns a transport failure or CHECK
-// CONDITION into a descriptive error naming the SCSI sense. dxferBuf is the data
-// buffer to keep alive (nil for non-data commands). It is the package's shared
-// SG_IO runner, used by the changer commands here and by INQUIRY (inquiry_linux.go).
-//
-// A UNIT ATTENTION is retried rather than reported, since it says only that the
-// target had something to tell this initiator, not that the command cannot be
-// performed (see unitAttentionAttempts). Every other CHECK CONDITION fails at
-// once. Re-issuing overwrites hdr's result fields and the caller's data buffer, so
-// a caller reading them after a retried command sees the successful attempt.
+// sgCommand runs one SG_IO command, retrying UNIT ATTENTION and turning any
+// other failure into an error naming the sense. dxferBuf is kept alive for the
+// call (nil for non-data commands).
 func sgCommand(ctx context.Context, f *os.File, hdr *sgIOHdr, cdb, sense, dxferBuf []byte, name string) error {
 	return retryUnitAttention(ctx, unitAttentionRetryDelay, func() (bool, error) {
 		err := sgIoctl(f.Fd(), hdr)
@@ -427,14 +357,9 @@ func sgCommand(ctx context.Context, f *os.File, hdr *sgIOHdr, cdb, sense, dxferB
 	})
 }
 
-// retryUnitAttention runs issue until it succeeds, fails for any reason other than
-// a UNIT ATTENTION, or exhausts unitAttentionAttempts, pausing delay between
-// attempts. issue reports whether the error it returns was a UNIT ATTENTION, and
-// is expected to re-issue the same command each time.
-//
-// The last attempt's error is returned unwrapped, so a target genuinely stuck
-// reporting UNIT ATTENTION still surfaces the sense rather than a retry-shaped
-// error hiding it.
+// retryUnitAttention re-runs issue while it reports a UNIT ATTENTION, up to
+// unitAttentionAttempts. The last error is returned unwrapped so a stuck target
+// still surfaces its sense.
 func retryUnitAttention(ctx context.Context, delay time.Duration, issue func() (unitAttention bool, err error)) error {
 	var err error
 

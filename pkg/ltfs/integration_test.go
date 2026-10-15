@@ -18,11 +18,8 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// TestFormatMountWriteUnmountReadIndex exercises the full LTFS path against the
-// mhvtl virtual library: format a blank tape, mount it with the index sync
-// deferred to unmount, write a tree of files, unmount (writing the index once),
-// read the captured index back, and finally re-mount to confirm the files
-// persisted on tape. This covers the package's acceptance criteria (issue #12).
+// TestFormatMountWriteUnmountReadIndex runs format, mount, write, unmount, read
+// index and re-mount against mhvtl (#12).
 func TestFormatMountWriteUnmountReadIndex(t *testing.T) {
 	testutil.SkipIfMhvtlUnavailable(t)
 	testutil.SkipIfLTFSUnavailable(t)
@@ -44,7 +41,6 @@ func TestFormatMountWriteUnmountReadIndex(t *testing.T) {
 	require.NoError(t, changer.Load(t.Context(), slot.Address, driveAddr), "load tape into drive 0")
 
 	t.Cleanup(func() {
-		// Survive the test's own cancellation so the tape is always returned.
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 60*time.Second)
 		defer cancel()
 
@@ -53,14 +49,10 @@ func TestFormatMountWriteUnmountReadIndex(t *testing.T) {
 
 	testutil.SkipIfDriveNotReady(t, testutil.Drive0Dev(t))
 
-	// pkg/ltfs drives the tape through the SCSI generic node (the reference LTFS
-	// "sg" backend), not the nst node.
 	volume := ltfs.NewVolume(testutil.Drive0SgDev(t))
 
-	// --- Format (AC: tape formatted, LTFS volume name set to the barcode) ------
 	require.NoError(t, volume.Format(t.Context(), barcode), "format tape")
 
-	// --- Mount + write (AC: FUSE mount with sync_type=unmount; writes persist) -
 	files := map[string]string{
 		"manifest.txt":     "tape-archiver integration manifest\n",
 		"provenance.txt":   "run-id integration barcode " + string(barcode) + "\n",
@@ -72,17 +64,14 @@ func TestFormatMountWriteUnmountReadIndex(t *testing.T) {
 
 	writeFiles(t, mount.Mountpoint(), files)
 
-	// --- Unmount (AC: index written exactly once, at unmount; clean release) ---
-	// A nil error here means the single deferred index write completed; see
-	// Unmount. The drive is released so the changer can unload it.
+	// A nil error means the single deferred index write completed.
 	require.NoError(t, mount.Unmount(t.Context()), "unmount LTFS volume")
 
-	// --- ReadIndex (AC: returns the LTFS XML index for the tape) ---------------
 	index, err := mount.ReadIndex(t.Context())
 	require.NoError(t, err, "read captured LTFS index")
 
 	assert.True(t, bytes.HasPrefix(bytes.TrimSpace(index), []byte("<?xml")), "index should be XML")
-	// The LTFS volume name (the tape's root directory) is the barcode (SPEC §6).
+	// The LTFS volume name is the barcode (SPEC §6).
 	assert.Contains(t, string(index), "<name>"+string(barcode)+"</name>", "index names the volume by barcode")
 
 	for name := range files {
@@ -90,7 +79,6 @@ func TestFormatMountWriteUnmountReadIndex(t *testing.T) {
 			"index should list %q", name)
 	}
 
-	// --- Re-mount (AC: files present and readable when the tape is re-mounted) -
 	remount, err := volume.Mount(t.Context(), filepath.Join(t.TempDir(), "mnt2"), filepath.Join(t.TempDir(), "work2"))
 	require.NoError(t, err, "re-mount LTFS volume")
 
@@ -103,8 +91,7 @@ func TestFormatMountWriteUnmountReadIndex(t *testing.T) {
 	require.NoError(t, remount.Unmount(t.Context()), "unmount after verification")
 }
 
-// writeFiles writes each name->content pair under root, creating parent
-// directories on the LTFS mount as needed.
+// writeFiles writes each name->content pair under root.
 func writeFiles(t *testing.T, root string, files map[string]string) {
 	t.Helper()
 

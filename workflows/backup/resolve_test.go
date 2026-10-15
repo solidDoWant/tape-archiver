@@ -14,12 +14,10 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/k8ssnap"
 )
 
-// testTapeCapacity is a roomy tape capacity (2.5 TB native) for the size cases
-// that should comfortably fit; capacity-limit cases set their own small value.
+// testTapeCapacity is a roomy 2.5 TB; capacity-limit cases set their own.
 const testTapeCapacity = 2_500_000_000_000
 
-// fakeResolver is a snapshotResolver returning canned results keyed by the ref it
-// is called with, for testing the control activity without a cluster.
+// fakeResolver returns canned results keyed by ref.
 type fakeResolver struct {
 	resolve      map[string]k8ssnap.Snapshot
 	resolveGroup map[string]k8ssnap.Group
@@ -41,8 +39,7 @@ func (f fakeResolver) ResolveGroup(_ context.Context, ref k8ssnap.Ref) (k8ssnap.
 
 	group := f.resolveGroup[ref.LabelSelector]
 
-	// Mirror the real Resolver: a selector matching zero snapshots is an error,
-	// not an empty group, so the workflow's surfacing path is exercised faithfully.
+	// Mirror the real Resolver: an empty match is an error, not an empty group.
 	if len(group.Members) == 0 {
 		return k8ssnap.Group{}, fmt.Errorf("label selector %q matched no VolumeSnapshots (namespace %q)",
 			ref.LabelSelector, ref.Namespace)
@@ -51,10 +48,8 @@ func (f fakeResolver) ResolveGroup(_ context.Context, ref k8ssnap.Ref) (k8ssnap.
 	return group, nil
 }
 
-// fakePool is a poolInspector serving canned ZFS properties and sizes keyed by
-// dataset/snapshot path, for testing the data activity without a pool. A path
-// absent from properties errors, mirroring how zfs exits non-zero for a missing
-// dataset.
+// fakePool serves canned properties and sizes; an absent path errors, as zfs
+// does for a missing dataset.
 type fakePool struct {
 	properties map[string]map[string]string
 	sizes      map[string]int64
@@ -70,9 +65,7 @@ func (f fakePool) UserProperties(_ context.Context, dataset string) (map[string]
 	return properties, nil
 }
 
-// UserProperty reads one named property, mirroring zfs: a missing dataset errors
-// (the existence check ownership verification leans on), and an unset property on
-// an existing dataset yields "-".
+// UserProperty mirrors zfs: a missing dataset errors and an unset property is "-".
 func (f fakePool) UserProperty(_ context.Context, dataset, property string) (string, error) {
 	properties, ok := f.properties[dataset]
 	if !ok {
@@ -118,8 +111,7 @@ func zfsSource(name string) config.Source {
 	return config.Source{ZFSPath: &config.ZFSPathSource{Name: name}}
 }
 
-// managed is the user-property map democratic-csi stamps on a managed snapshot,
-// which k8ssnap.Verify requires.
+// managed is the property map k8ssnap.Verify requires of a democratic-csi snapshot.
 var managed = map[string]string{"democratic-csi:managed_resource": "true"}
 
 func TestResolveK8sSources(t *testing.T) {
@@ -201,9 +193,6 @@ func TestResolveK8sSources(t *testing.T) {
 	}
 }
 
-// capturingResolver records the Ref passed to ResolveGroup so a test can assert
-// the resolved reference (notably an empty, cluster-wide Namespace) is plumbed
-// through unchanged.
 type capturingResolver struct {
 	gotRef k8ssnap.Ref
 }
@@ -218,10 +207,8 @@ func (c *capturingResolver) ResolveGroup(_ context.Context, ref k8ssnap.Ref) (k8
 	return k8ssnap.Group{}, nil
 }
 
-// TestResolveK8sSourcesClusterWide asserts a labelSelector source with the namespace
-// omitted resolves end to end, passing an empty Namespace through to ResolveGroup so
-// resolution spans all namespaces (cluster-wide; SPEC §5). This proves the reconciled
-// contract works, not just that the config validates (AC1).
+// TestResolveK8sSourcesClusterWide (AC1): an omitted namespace passes an empty
+// Namespace through to ResolveGroup, resolving cluster-wide (SPEC §5).
 func TestResolveK8sSourcesClusterWide(t *testing.T) {
 	t.Parallel()
 
@@ -242,16 +229,12 @@ func TestResolveK8sSourcesClusterWide(t *testing.T) {
 	assert.Equal(t, "backup=nightly", resolver.gotRef.LabelSelector)
 }
 
-// TestResolveK8sSourcesEmptyGroupFails asserts that a label-selector group
-// matching zero VolumeSnapshots fails the run at Resolve (before any data is
-// staged or written to tape), with an error identifying both the source and its
-// selector (issue #132 AC1).
+// TestResolveK8sSourcesEmptyGroupFails (#132 AC1): an empty-match group fails at
+// Resolve, naming the source and its selector.
 func TestResolveK8sSourcesEmptyGroupFails(t *testing.T) {
 	t.Parallel()
 
 	activities := &ResolveControlActivities{
-		// resolveGroup has no entry for "app=gone", so the fake resolver mirrors
-		// the real Resolver and returns an empty-match error.
 		newResolver: func() (snapshotResolver, error) { return fakeResolver{}, nil },
 	}
 
@@ -262,8 +245,6 @@ func TestResolveK8sSourcesEmptyGroupFails(t *testing.T) {
 	assert.Contains(t, err.Error(), "app=gone")
 }
 
-// TestResolveK8sSourcesResolverBuildFailure asserts a k8s source whose resolver
-// cannot be built fails the run before any data is staged (AC2).
 func TestResolveK8sSourcesResolverBuildFailure(t *testing.T) {
 	t.Parallel()
 
@@ -275,8 +256,7 @@ func TestResolveK8sSourcesResolverBuildFailure(t *testing.T) {
 	require.ErrorContains(t, err, "build k8s resolver")
 }
 
-// TestResolveK8sSourcesRawOnlyNeedsNoResolver asserts a raw-ZFS-only run never
-// builds the k8s resolver — newResolver panics if called.
+// TestResolveK8sSourcesRawOnlyNeedsNoResolver: newResolver panics if called.
 func TestResolveK8sSourcesRawOnlyNeedsNoResolver(t *testing.T) {
 	t.Parallel()
 
@@ -296,7 +276,6 @@ func TestResolveK8sSourcesRawOnlyNeedsNoResolver(t *testing.T) {
 func TestResolveAndCheck(t *testing.T) {
 	t.Parallel()
 
-	// fixedRedundancy is a 10% target redundancy used across the size cases.
 	fixedRedundancy := config.Redundancy{TargetPercentage: floatPtr(10)}
 
 	tests := []struct {
@@ -382,12 +361,8 @@ func TestResolveAndCheck(t *testing.T) {
 			assertErr: require.Error,
 		},
 		{
-			// AC1 (issue #224): a source whose estimate fits within the tape's native
-			// capacity but exceeds the usable capacity Pack enforces (native less the
-			// LTFS reserve) must be rejected here, in Resolve, before any staging —
-			// not admitted only to fail at Pack after hours of staging. Native 1000 →
-			// usable 950; estimate 990 sits in the (usable, native] band that the old
-			// native-capacity bound wrongly admitted.
+			// #224 AC1: an estimate within native but above usable capacity must be
+			// rejected at Resolve, not after hours of staging at Pack.
 			name:    "rejects an archive that exceeds usable capacity though it fits native capacity",
 			sources: []config.Source{zfsSource("pool/band@snap")},
 			pool: fakePool{
@@ -396,16 +371,13 @@ func TestResolveAndCheck(t *testing.T) {
 			},
 			redundancy: fixedRedundancy,
 			overhead:   floatPtr(1.0),
-			// Estimate ceil(900 * 1.0 * 1.10) = 990. usable = 1000 - ceil(1000*0.05)
-			// = 950. 990 > 950 (reject) yet 990 <= 1000 (fits native).
+			// Estimate 990; usable 950 (reject) yet 990 <= native 1000.
 			capacity:    1000,
 			assertErr:   require.Error,
 			errContains: "usable capacity",
 		},
 		{
-			// AC2 (issue #224): a source whose estimate is within the usable capacity
-			// must still pass the feasibility pre-check — no over-rejection regression
-			// from tightening the bound.
+			// #224 AC2: an estimate within usable capacity still passes.
 			name:    "admits an archive whose estimate is within usable capacity",
 			sources: []config.Source{zfsSource("pool/fits@snap")},
 			pool: fakePool{
@@ -485,11 +457,8 @@ func TestResolveAndCheck(t *testing.T) {
 			assertErr:  require.Error,
 		},
 		{
-			// A 500 GB source fits on one tape (estimate 577.5 GB < 2.5 TB capacity).
-			// Before issue #324 an operator-set 1 MB slice would have yielded ~577k
-			// slices and been rejected here for blowing the Temporal payload bound;
-			// now the slice size is derived to satisfy that bound by construction, so
-			// the source resolves cleanly instead of failing before any staging.
+			// Before #324 a 1 MB operator slice size would have blown the payload bound
+			// here; the derived slice size now satisfies it by construction.
 			name:    "large source resolves; the derived slice size satisfies the payload bound",
 			sources: []config.Source{zfsSource("pool/big@snap")},
 			pool: fakePool{
@@ -573,7 +542,6 @@ func TestFeasibilityEstimateRoundsUp(t *testing.T) {
 func TestCheckPayloadBound(t *testing.T) {
 	t.Parallel()
 
-	// archive is a ResolvedArchive carrying only the field the bound reads.
 	archive := func(estimatedBytes int64) ResolvedArchive {
 		return ResolvedArchive{EstimatedBytes: estimatedBytes}
 	}
@@ -585,49 +553,40 @@ func TestCheckPayloadBound(t *testing.T) {
 		assertErr      require.ErrorAssertionFunc
 	}{
 		{
-			// Budget is half of 2 MiB = 1048576 bytes; at 256 B/slice that is 4096
-			// slices. A 1 MiB estimate at a 256 B slice size is exactly 4096 slices,
-			// landing on the budget — it must pass.
+			// Budget 1 MiB / 256 B = 4096 slices; exactly on the budget passes.
 			name:           "estimate exactly on the budget passes",
 			resolved:       []ResolvedArchive{archive(1024 * 1024)},
 			sliceSizeBytes: 256,
 			assertErr:      require.NoError,
 		},
 		{
-			// One byte more of source pushes to 4097 slices, one over the budget.
 			name:           "estimate one slice over the budget is rejected",
 			resolved:       []ResolvedArchive{archive(1024*1024 + 1)},
 			sliceSizeBytes: 256,
 			assertErr:      require.Error,
 		},
 		{
-			// A comfortably-sized config (1 GiB slices on a modest source) is far
-			// under the budget (AC2).
 			name:           "comfortably-sized slice is not rejected",
 			resolved:       []ResolvedArchive{archive(3 * 1024 * 1024 * 1024)},
 			sliceSizeBytes: 1 << 30,
 			assertErr:      require.NoError,
 		},
 		{
-			// A too-small slice on a large source is rejected up front (AC1):
-			// 500 GB at 100 MiB slices is ~4769 slices, over the 4096 budget.
+			// AC1: 500 GB at 100 MiB slices is ~4769 slices, over the 4096 budget.
 			name:           "tiny slice on a large source is rejected",
 			resolved:       []ResolvedArchive{archive(500_000_000_000)},
 			sliceSizeBytes: 100 * 1024 * 1024,
 			assertErr:      require.Error,
 		},
 		{
-			// The whole-run count is summed across archives: two archives that each
-			// fit alone can jointly exceed the budget.
+			// The count is summed across archives.
 			name:           "slice counts sum across archives",
 			resolved:       []ResolvedArchive{archive(600_000), archive(600_000)},
 			sliceSizeBytes: 256,
 			assertErr:      require.Error,
 		},
 		{
-			// The slice size is derived (DeriveSliceSize) and is always >= 1 GiB, so a
-			// non-positive size can only be a derivation bug. The invariant flags it
-			// rather than dividing by zero.
+			// Derived sizes are always >= 1 GiB, so a non-positive size is a derivation bug.
 			name:           "non-positive slice size is flagged as an invariant violation",
 			resolved:       []ResolvedArchive{archive(1 << 40)},
 			sliceSizeBytes: 0,
@@ -644,11 +603,8 @@ func TestCheckPayloadBound(t *testing.T) {
 	}
 }
 
-// TestDeriveSliceSize covers the slice-size derivation that replaced the
-// operator-set redundancy.sliceSizeBytes (issue #324): the result is always a whole
-// number of GiB, at least 1 GiB, keeps the whole-run slice count within the payload
-// bound and every archive under the 1,000-slice cap, and — being a pure function —
-// is identical on repeated calls.
+// TestDeriveSliceSize (#324): whole GiB, at least 1 GiB, within the payload bound
+// and the 1,000-slice per-archive cap, and deterministic.
 func TestDeriveSliceSize(t *testing.T) {
 	t.Parallel()
 
@@ -664,20 +620,18 @@ func TestDeriveSliceSize(t *testing.T) {
 		want     int64
 	}{
 		{
-			// A tiny run floors at 1 GiB rather than deriving a sub-GiB slice.
 			name:     "small run floors at 1 GiB",
 			resolved: []ResolvedArchive{archive(1024)},
 			want:     gib,
 		},
 		{
-			// An empty work list also floors at 1 GiB (both derivation terms are 0).
+			// Both derivation terms are 0.
 			name:     "empty work list floors at 1 GiB",
 			resolved: nil,
 			want:     gib,
 		},
 		{
-			// The whole-run term dominates: 7 TB total / 3500 = 2 GB, rounded up to
-			// 2 GiB. (Each of the 7 archives alone is well under the per-archive term.)
+			// Whole-run term dominates: 7 TB / 3500 = 2 GB → 2 GiB.
 			name: "whole-run term dominates and rounds up to a whole GiB",
 			resolved: []ResolvedArchive{
 				archive(1_000_000_000_000), archive(1_000_000_000_000), archive(1_000_000_000_000),
@@ -687,9 +641,7 @@ func TestDeriveSliceSize(t *testing.T) {
 			want: 2 * gib,
 		},
 		{
-			// The per-archive term dominates: one 800 GB archive / 800 = 1 GB, and the
-			// whole-run term (800 GB / 3500) is far smaller — so the derived size is
-			// the 1 GiB floor, keeping that archive at ~745 slices (< 1,000).
+			// Per-archive term: 800 GB / 800 = 1 GB → the 1 GiB floor, ~745 slices.
 			name:     "single large archive is bounded by the per-archive term",
 			resolved: []ResolvedArchive{archive(800_000_000_000)},
 			want:     gib,
@@ -703,15 +655,11 @@ func TestDeriveSliceSize(t *testing.T) {
 			got := DeriveSliceSize(test.resolved)
 			assert.Equal(t, test.want, got, "derived slice size")
 
-			// Whole GiB and at least 1 GiB (issue #324 criterion 3).
 			assert.Zero(t, got%gib, "slice size must be a whole number of GiB")
 			assert.GreaterOrEqual(t, got, gib, "slice size must be at least 1 GiB")
 
-			// Deterministic: a second call yields the identical value (criterion 4).
 			assert.Equal(t, got, DeriveSliceSize(test.resolved), "derivation must be deterministic")
 
-			// The derived size keeps the whole-run count within the payload bound and
-			// every archive under the 1,000-slice cap (criterion 3).
 			require.NoError(t, checkPayloadBound(test.resolved, got))
 
 			for _, resolvedArchive := range test.resolved {
@@ -722,8 +670,7 @@ func TestDeriveSliceSize(t *testing.T) {
 	}
 }
 
-// TestResolveFailureAbortsBeforePrepare asserts that when Resolve fails, the run
-// fails before any data is staged: the Prepare activity is never invoked (AC2/AC3).
+// TestResolveFailureAbortsBeforePrepare (AC2/AC3): Prepare is never invoked.
 func TestResolveFailureAbortsBeforePrepare(t *testing.T) {
 	t.Parallel()
 
@@ -732,7 +679,6 @@ func TestResolveFailureAbortsBeforePrepare(t *testing.T) {
 	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
 		Return(nil, errors.New("VolumeSnapshot not found"))
 
-	// Prepare must never run; if it does, the test fails.
 	env.OnActivity((&PrepareActivities{}).PrepareArchives, mock.Anything, mock.Anything).
 		Return(func(_ context.Context, _ PrepareInput) ([]StagedArchive, error) {
 			t.Error("Prepare ran despite a Resolve failure")
@@ -753,12 +699,9 @@ func TestResolveFailureAbortsBeforePrepare(t *testing.T) {
 	assert.Empty(t, lastCompleted)
 }
 
-// confirm *k8ssnap.Resolver satisfies snapshotResolver (compile-time check that
-// the production resolver fits the seam the activity depends on).
 var _ snapshotResolver = (*k8ssnap.Resolver)(nil)
 
-// confirm zfsPool satisfies poolInspector and that its UserProperties also
-// satisfies k8ssnap.PropertyReader, so it doubles as the verification reader.
+// zfsPool also doubles as the k8ssnap.PropertyReader for verification.
 var (
 	_ poolInspector          = zfsPool{}
 	_ k8ssnap.PropertyReader = zfsPool{}

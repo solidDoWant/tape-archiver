@@ -1,22 +1,9 @@
 //go:build e2e
 
-// TestWebUIEndToEnd (this file) is the web UI's own end-to-end test (issue
-// #260, sub-issue 9 of the web UI epic #239): a real headless browser
-// (Playwright, web/e2e/) driven against cmd/web deployed the way it ships in
-// production — its own Helm chart (deploy/charts/tape-archiver-web) + image
-// — into the SAME kind cluster + mhvtl + dev Temporal topology the rest of
-// this package's tests already stand up (harness_test.go), rather than a
-// second, duplicated topology. It additionally deploys the web chart, starts
-// an in-process fake OIDC provider (no real IdP exists in this sandbox —
-// internal/testutil.NewFakeOIDCProvider, already reused by cmd/web's own
-// integration tests), and port-forwards the web Service to the host, then
-// shells out to `npx playwright test` (web/e2e/, driven by
-// web/playwright.config.ts) to do the actual browser-driving.
-//
-// This is a per-test prerequisite check (webE2EPrereqReason), not part of
-// checkPrerequisites/setupHarness: a missing Node/Playwright/Chromium
-// toolchain skips only this test, not the whole shared harness (and thus
-// not the rest of the backup-workflow e2e suite in this same binary).
+// TestWebUIEndToEnd (issue #260) drives Playwright (web/e2e/) against cmd/web
+// deployed via its Helm chart into the shared harness topology, with a fake
+// OIDC provider and a port-forward. Its toolchain prerequisites are checked
+// per test, so a missing Node/Playwright skips only this test.
 package e2e
 
 import (
@@ -42,65 +29,35 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
 )
 
-// webRepo is the web image's published name, mirroring controlRepo/dataRepo
-// above (harness_test.go) — kept local to this file since only this test
-// needs it.
 const webRepo = "ghcr.io/soliddowant/tape-archiver/web"
 
-// webChartDir/webHelmRelease/webK8sNamespace/webSecretName name the chart
-// path, the Helm release, and the Secret this test creates for the web UI's
-// OIDC client secret + session key — separate from the control worker's own
-// helmRelease/namespace constants above so `helm uninstall`/`kubectl delete`
-// here can never touch the control worker's release.
+// These are distinct from the control worker's so cleanup here can never
+// touch its release.
 const (
 	webChartDir     = "deploy/charts/tape-archiver-web"
 	webHelmRelease  = "ta-web-e2e"
 	webK8sNamespace = namespace // "default" — same namespace the control worker deploys into
 	webSecretName   = "ta-web-e2e-secrets"
 
-	// webOIDCClientID/webOIDCClientSecret are the confidential-client
-	// credentials this test's fake OIDC provider and the deployed web chart
-	// both use — fixed, non-sensitive values (this whole topology is
-	// throwaway and torn down at the end of the test).
+	// Fixed, non-sensitive credentials for the throwaway fake OIDC provider.
 	webOIDCClientID     = "tape-archiver-web-e2e"
 	webOIDCClientSecret = "web-e2e-fake-client-secret"
 
-	// webBlankSlot is the mhvtl storage slot index (into Inventory.Slots, so
-	// element address webBlankSlot+1) this test blanks and uses. It
-	// must not collide with any slot index the other e2e tests in this
-	// package use — see tape_test.go's prepareBlankTapeAt callers (2, 3, 4,
-	// 5, 6, 8, 9, 12+, 20+, 24, 26) — comfortably clear of all of them.
+	// webBlankSlot is a slot index (element address +1) that must not collide
+	// with other tests' prepareBlankTapeAt slots (2-6, 8, 9, 12+, 20+, 24, 26).
 	webBlankSlot = 30
 
-	// webFormBlankSlot is a second, separate blank slot for
-	// config-form-and-tapes.spec.ts's own dry-run submission (issue #281) —
-	// distinct from webBlankSlot above, which submit-monitor-history.spec.ts
-	// already writes to; the two specs run sequentially against the same
-	// singleton `backup` workflow (SPEC §4.2, playwright.config.ts's
-	// workers: 1), so their tapes must not collide. Like webBlankSlot it is a
-	// slot index; the spec is handed the slot's element address.
+	// webFormBlankSlot is config-form-and-tapes.spec.ts's own blank slot
+	// (issue #281), so its tape never collides with webBlankSlot's.
 	webFormBlankSlot = 31
 
-	// webLibrarySlotCount is the storage-slot count the deployed cmd/web
-	// advertises via GET /api/config/ui, so the Form-mode config builder can
-	// draw its topology-bounded blank-slot grid (issue #305/#310's
-	// SlotGridEditor — the picker numbers storage slots 1..slotCount and only
-	// lets an operator select real ones). It mirrors the mhvtl library's 47
-	// storage slots (scripts/mhvtl-up.sh), which is what makes webFormBlankSlot's
-	// address a selectable slot in config-form-and-tapes.spec.ts. Without a
-	// declared topology the grid renders "not configured" and the Form-mode
-	// spec has no slot to click. The mhvtl I/O-station MAPs are separate SCSI
-	// element addresses, not storage-slot numbers 1..47, so no storage slot is
-	// reserved here (cleaning/ioStation left empty).
+	// webLibrarySlotCount mirrors mhvtl's 47 storage slots so the Form-mode slot
+	// grid (issue #305/#310) can select webFormBlankSlot.
 	webLibrarySlotCount = 47
 )
 
-// webE2EPrereqReason returns a skip reason when a prerequisite specific to
-// the Playwright suite (beyond the shared harness's own — checkPrerequisites
-// already covers docker/kind/helm/nix/mhvtl/Temporal) is unavailable, or ""
-// when the suite can run. Checked lazily, only by TestWebUIEndToEnd, so a
-// missing Node/Playwright/Chromium toolchain never fails — or slows down —
-// the rest of the e2e suite in this same binary (AC3).
+// webE2EPrereqReason returns a skip reason for missing Playwright-specific
+// prerequisites, or "". Checked lazily so it never affects other tests (AC3).
 func webE2EPrereqReason(repoRoot string) string {
 	for _, tool := range []string{"npx", "npm", "kubectl"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -124,13 +81,8 @@ func webE2EPrereqReason(repoRoot string) string {
 	return ""
 }
 
-// TestWebUIEndToEnd is the whole-stack browser test: OIDC login -> submit a
-// dry-run config through the real form -> watch its phase update live via
-// SSE, with no manual reload -> see it (while Running, and again once
-// Completed) in the run-history view. See this file's package doc comment
-// for the topology and internal/testutil/oidc.go's NewFakeOIDCProviderOn for
-// how the fake IdP is made reachable from both the kind cluster and this
-// host process's browser.
+// TestWebUIEndToEnd: OIDC login, submit a dry-run through the form, watch
+// phases update live via SSE, and see the run in history.
 func TestWebUIEndToEnd(t *testing.T) {
 	h := requireHarness(t)
 
@@ -140,13 +92,8 @@ func TestWebUIEndToEnd(t *testing.T) {
 
 	source := testutil.PoolDataset(t) + "@" + testutil.TestSnapshot(t)
 	fixture := prepareBlankTapeAt(t, webBlankSlot)
-	// config-form-and-tapes.spec.ts's Form-mode submission needs its own
-	// separate blank slot (typed directly into the page, not read from a
-	// config file) — prepareBlankTapeAt's own assertions (drive empty, slot
-	// holds a tape) are exactly the precondition check that submission
-	// needs too; only the slot's element address (not the rest of the fixture)
-	// is passed through, since the dry-run toggle overwrites
-	// Library.Changer/Drives server-side regardless of what the form typed.
+	// Only the element address is passed on; dry-run overwrites the devices
+	// server-side.
 	formFixture := prepareBlankTapeAt(t, webFormBlankSlot)
 	identity, recipient := generateTestKeypair(t)
 
@@ -162,61 +109,36 @@ func TestWebUIEndToEnd(t *testing.T) {
 	}
 	require.NoError(t, cfg.Validate(), "run config must be valid")
 
-	// Every other submitting e2e test in this package pairs its submission
-	// with terminateOnCleanup — the backup workflow ID is a singleton, so an
-	// abandoned run (a Playwright assertion failing/timing out before the run
-	// reaches Completed) would otherwise keep running while this test's own
-	// tape-unload cleanup and the shared harness's final data-worker teardown
-	// fire, risking a race against an in-flight Load/Write on the same tape
-	// (CLAUDE.md's "never write to a non-blank tape" / handle physical
-	// operations with care). Registered here, before the run is ever
-	// submitted through the browser, so it applies regardless of how far the
-	// test gets.
+	// Registered before submission: an abandoned run would otherwise race the
+	// tape-unload cleanup with an in-flight Load/Write on the same tape.
 	terminateOnCleanup(t, dialTemporal(t))
 
-	// The web form's dry-run toggle overwrites Library.Changer/Drives with
-	// whatever MHVTL_*_DEV values the deployed web chart carries (below) —
-	// pkg/runsubmit.ApplyDryRun — so this config's own device paths are only
-	// there to satisfy cfg.Validate() above; what actually reaches the
-	// workflow comes from the chart's config.web.dryRun.* values, set to the
-	// same real mhvtl devices the shared data worker container already has
-	// (harness_test.go's startDataWorker).
+	// Dry-run (pkg/runsubmit.ApplyDryRun) replaces these devices with the
+	// chart's config.web.dryRun.* values; they only need to validate.
 	configData, err := json.Marshal(cfg)
 	require.NoError(t, err, "marshal run config")
 
 	configPath := filepath.Join(t.TempDir(), "run-config.json")
 	require.NoError(t, os.WriteFile(configPath, configData, 0o600))
 
-	// --- kind: load the web image (already built by setupHarness's shared
-	// buildImages step, since `make build-images` builds it alongside the
-	// worker images) ---
+	// The web image is built by the shared buildImages step.
 	_, err = execOut(h.repoRoot, nil, "kind", "load", "docker-image", webRepo+":"+imageVersion, "--name", clusterName)
 	require.NoError(t, err, "kind load web image")
 
-	// --- fake OIDC provider, reachable from both kind pods and this host's
-	// browser via the kind bridge gateway IP. Binds 0.0.0.0 and advertises the
-	// gateway IP separately, the same as startWebhook above — not a listener
-	// bound directly to h.gatewayIP: that address is only guaranteed to be
-	// reachable (any docker bridge peer can dial it), not guaranteed to be
-	// locally bindable on every Docker network topology (e.g. rootless
-	// Docker/dockerd-rootless, or Docker running inside its own network
-	// namespace, can make the bridge gateway a proxied address this process's
-	// own network namespace cannot own as a local interface). Binding all
-	// interfaces avoids that failure mode entirely.
+	// The fake OIDC provider binds 0.0.0.0 and advertises the gateway IP: the
+	// gateway is reachable but not always locally bindable (e.g. rootless Docker).
 	idpListener, err := net.Listen("tcp", "0.0.0.0:0")
 	require.NoError(t, err, "listen for fake OIDC provider")
 
 	idp := testutil.NewFakeOIDCProviderOn(t, webOIDCClientID, webOIDCClientSecret, idpListener)
 	idp.Server.URL = fmt.Sprintf("http://%s:%d", h.gatewayIP, idpListener.Addr().(*net.TCPAddr).Port)
 
-	// --- reserve the local port the browser will use, and bake it into the
-	// OIDC redirect URL before the chart (which bakes OIDC_REDIRECT_URL into
-	// the pod's env) is installed ---
+	// The browser's port must be known before install: the chart bakes it into
+	// OIDC_REDIRECT_URL.
 	localPort := freeLocalPort(t)
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", localPort)
 	redirectURL := baseURL + "/auth/callback"
 
-	// --- Secret: OIDC client secret + session key ---
 	sessionKey := make([]byte, 32)
 	_, err = rand.Read(sessionKey)
 	require.NoError(t, err)
@@ -235,17 +157,12 @@ func TestWebUIEndToEnd(t *testing.T) {
 			"-n", webK8sNamespace, "--ignore-not-found")
 	})
 
-	// --- deploy the web chart ---
 	_, err = execOut(h.repoRoot, nil, "helm", "dependency", "build", webChartDir)
 	require.NoError(t, err, "helm dependency build (web chart)")
 
 	imagePath := "resources.controllers.main.containers.main.image"
 
-	// Register the uninstall before installing (matching installScaledJobWorker's
-	// documented reasoning above) so a failed/partial install — e.g. a --wait
-	// timeout, a realistic CI scenario — still cleans up whatever the release
-	// did manage to create, instead of leaving a stray "ta-web-e2e" release
-	// (and its Secret) in the shared kind cluster for the rest of the process.
+	// Registered before install so a partial install is still cleaned up.
 	t.Cleanup(func() {
 		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", webHelmRelease,
 			"--namespace", webK8sNamespace, "--wait", "--timeout", "2m", "--ignore-not-found")
@@ -264,20 +181,11 @@ func TestWebUIEndToEnd(t *testing.T) {
 		"--set", "config.web.dryRun.mhvtlChangerDev="+testutil.ChangerDev(t),
 		"--set", "config.web.dryRun.mhvtlDrive0Dev="+testutil.Drive0Dev(t),
 		"--set", "config.web.dryRun.mhvtlDrive1Dev="+testutil.Drive1Dev(t),
-		// Deploy-owned library devices the guided Form mode sources read-only
-		// (issue #304): the Form-mode e2e spec builds a config that must pass the
-		// Review step's client-side validation (changer non-empty, >=1 drive), so
-		// the deployed cmd/web has to serve real values via GET /api/config/ui.
-		// The dry-run submission still redirects to the mhvtl nodes server-side
-		// (pkg/runsubmit.ApplyDryRun), so these need only be non-empty/valid.
+		// Form mode needs non-empty devices to pass client-side validation
+		// (issue #304); dry-run redirects them to mhvtl server-side.
 		"--set", "config.web.library.changer="+testutil.ChangerDev(t),
 		"--set", "config.web.library.drives={"+testutil.Drive0Dev(t)+","+testutil.Drive1Dev(t)+"}",
-		// Library topology (issue #305/#310): advertise the mhvtl storage-slot
-		// count so the Form-mode config builder draws its blank-slot grid with
-		// webFormBlankSlot selectable (config-form-and-tapes.spec.ts). Without
-		// this the grid renders "topology not configured" and there is no slot
-		// to click. Cleaning/I/O-station slots are left at their empty defaults
-		// (no storage slot 1..47 is reserved in the mhvtl library).
+		// Without a slot count the Form-mode grid has no slot to click (issue #305/#310).
 		"--set", "config.web.library.topology.slotCount="+strconv.Itoa(webLibrarySlotCount),
 		"--set-string", imagePath+".repository="+webRepo,
 		"--set-string", imagePath+".tag="+imageVersion,
@@ -295,8 +203,6 @@ func TestWebUIEndToEnd(t *testing.T) {
 
 	startKubectlPortForward(t, h.kubeconfig, webK8sNamespace, "svc/"+svcName, localPort, 8080)
 
-	// --- run the real Playwright suite against the deployed, port-forwarded
-	// web UI ---
 	playwrightCtx, cancel := context.WithTimeout(t.Context(), 20*time.Minute)
 	defer cancel()
 
@@ -316,11 +222,7 @@ func TestWebUIEndToEnd(t *testing.T) {
 	t.Logf("playwright output:\n%s", out)
 }
 
-// freeLocalPort reserves an available TCP port on 127.0.0.1 by binding and
-// immediately closing a listener, returning just the port number. There is
-// an inherent (accepted, matching an existing pattern elsewhere in this
-// repo — cmd/web/main_integration_test.go's freeAddr) TOCTOU race between
-// this and whatever later binds the same port; acceptable for test infra.
+// freeLocalPort returns a free 127.0.0.1 port (with an accepted TOCTOU race).
 func freeLocalPort(t *testing.T) int {
 	t.Helper()
 
@@ -333,12 +235,8 @@ func freeLocalPort(t *testing.T) int {
 	return port
 }
 
-// startKubectlPortForward starts `kubectl port-forward` for target (e.g.
-// "svc/my-service") in the background, waits for it to report ready
-// ("Forwarding from ..."), and registers a t.Cleanup that kills it. Output
-// after readiness is drained via log.Printf (not t.Log — this runs from a
-// goroutine that outlives the synchronous portion of the test, and t.Log
-// from a goroutine after the test could otherwise return is unsafe).
+// startKubectlPortForward runs `kubectl port-forward` until ready and kills it on
+// cleanup. Later output goes to log.Printf, since t.Log after return is unsafe.
 func startKubectlPortForward(t *testing.T, kubeconfig, k8sNamespace, target string, localPort, remotePort int) {
 	t.Helper()
 

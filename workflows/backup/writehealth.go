@@ -11,42 +11,16 @@ import (
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
-// Write-health measurement (SPEC §2 principle 2, §14) is purely observational: it
-// records how well each tape streamed so the anti-shoe-shining rate can be evaluated
-// on every run against the real workload. It never gates, fails, or aborts a run — a
-// scrape or timing failure is logged and the run still completes.
-//
-// After a tape's write window closes (WriteTree → FinalizeTape, i.e. unmount and the
-// deferred LTFS index sync have settled), the MeasureWriteHealth activity scrapes the
-// drive's SCSI log pages (repositions as total_suspended_writes from the Tape usage
-// page 0x30, TapeAlert flags from page 0x2e) via pkg/tape.LogPageReader, and computes
-// sustained write throughput as the bytes written to the tape (archive slices + PAR2
-// recovery files) divided by the write-window elapsed time measured by the workflow.
-
-// bytesPerMB is the decimal megabyte (1e6 bytes) used for throughput, matching how
-// drive/tape rates are conventionally quoted (MB/s, not MiB/s).
+// Write-health measurement (SPEC §2 principle 2, §14) is purely observational:
+// it records how well each tape streamed and never gates or fails a run.
+// bytesPerMB is the decimal megabyte, as drive rates are quoted.
 const bytesPerMB = 1_000_000.0
 
-// speedMatchingFloorsMBps maps an LTO generation to its speed-matching floor: the
-// lowest native data rate the drive can dynamically slow to before it must stop and
-// back-hitch. A sustained throughput below the floor means the drive could not stream
-// and likely shoe-shined (SPEC §2 principle 2, §14). The floor is generation-specific
-// — higher generations stream much faster, so a single hard-coded value would badly
-// mis-flag other drives.
-//
-// Values are the published minimum native speed-matching (data-rate-matching) rates,
-// nominal and slightly vendor-dependent (IBM vs HPE drives differ by a few MB/s); the
-// conservative figure is used so the below-floor flag under- rather than over-reports:
-//
-//	LTO-5  40 MB/s  (IBM: 14 speeds, 40–140; HP drives ~47)
-//	LTO-6  50 MB/s  (SPEC §2/§14; within IBM ~32–160 / HPE ~53.5–160)
-//	LTO-7 100 MB/s  (IBM and HPE data-rate-matching range 100/101–300)
-//	LTO-8 112 MB/s  (IBM drive specifications, range 112–360)
-//	LTO-9 180 MB/s  (IBM drive specifications, range 180–400)
-//
-// A capacity that maps to no known generation (below LTO-5 or unrecognized) is treated
-// as unknown by writeHealthFloor rather than assigned a guessed value, so the
-// below-floor verdict is never asserted against a number we cannot defend.
+// speedMatchingFloorsMBps maps an LTO generation to the lowest rate the drive
+// can slow to before it must back-hitch; sustained throughput below it means the
+// drive likely shoe-shined (SPEC §14). Values are the conservative published
+// minimums (vendors differ by a few MB/s) so the flag under- rather than
+// over-reports. Unknown generations get no floor rather than a guessed one.
 var speedMatchingFloorsMBps = map[string]float64{
 	"LTO-5": 40,
 	"LTO-6": 50,
@@ -55,65 +29,43 @@ var speedMatchingFloorsMBps = map[string]float64{
 	"LTO-9": 180,
 }
 
-// writeHealthFloor returns the speed-matching floor for the tape generation implied by
-// the configured native capacity (SPEC §5 library.tapeCapacityBytes), classifying the
-// generation with ltoGeneration. known is false when the generation has no sourced
-// floor, in which case the below-floor verdict is not evaluated (writeHealthFloor never
-// invents a floor).
+// writeHealthFloor returns the floor for the generation implied by the native
+// capacity; known is false when no sourced floor exists.
 func writeHealthFloor(capacityBytes int64) (floorMBps float64, known bool) {
 	floor, ok := speedMatchingFloorsMBps[ltoGeneration(capacityBytes)]
 
 	return floor, ok
 }
 
-// WriteHealth is the per-tape write-health measurement carried on WrittenTape and
-// rendered into the run report and Prometheus metrics. It is observational only.
+// WriteHealth is the observational per-tape write-health measurement.
 type WriteHealth struct {
-	// Measured is true when a measurement was taken. It is false when the
-	// MeasureWriteHealth activity could not run at all; the run still succeeds.
+	// Measured is false when the activity could not run at all.
 	Measured bool
-	// ThroughputMBps is the sustained write throughput over the tape's write
-	// window: bytes written to tape (slices + PAR2) / elapsed seconds, in MB/s
-	// (decimal, 1 MB = 1e6 B).
+	// ThroughputMBps is bytes written (slices + PAR2) / write-window seconds.
 	ThroughputMBps float64
-	// FloorMBps is the speed-matching floor ThroughputMBps was compared against,
-	// derived from the tape generation. Zero and meaningless when FloorKnown is false.
+	// FloorMBps is meaningless when FloorKnown is false.
 	FloorMBps float64
-	// FloorKnown is true when a speed-matching floor is known for the tape's
-	// generation. When false the throughput is still reported but no below-floor
-	// verdict is made (no floor is guessed).
+	// FloorKnown false means no below-floor verdict is made.
 	FloorKnown bool
-	// BelowFloor is true when a throughput was measured against a known floor and
-	// fell below it.
 	BelowFloor bool
-	// Repositions is the drive's back-hitch count (total_suspended_writes) from the
-	// Tape usage log page 0x30. Meaningful only when RepositionsMeasured is true.
+	// Repositions is the back-hitch count (total_suspended_writes, page 0x30).
 	Repositions int64
-	// RepositionsMeasured is true when the reposition counter was actually read
-	// from page 0x30. When false the drive did not support the page (or the scrape
-	// failed) and Repositions is a placeholder, not a measured zero — so a clean
-	// streaming write is never certified from an unread counter.
+	// RepositionsMeasured is false when page 0x30 was unread, so Repositions is
+	// a placeholder and a clean write is never certified from it.
 	RepositionsMeasured bool
-	// TapeAlertFlags are the labels of the active TapeAlert flags from page 0x2e.
+	// TapeAlertFlags labels the active TapeAlert flags (page 0x2e).
 	TapeAlertFlags []string
 }
 
-// Healthy reports whether the tape streamed cleanly: measured against a known floor,
-// at or above it, with the reposition counter measured and zero, and no active
-// TapeAlert flags. A tape whose generation has no known floor, or whose reposition
-// counter could not be read, is never reported healthy — its streaming could not be
-// judged.
+// Healthy reports whether the tape streamed cleanly. A tape with no known floor
+// or an unread reposition counter is never healthy, since it cannot be judged.
 func (h WriteHealth) Healthy() bool {
 	return h.Measured && h.FloorKnown && !h.BelowFloor &&
 		h.RepositionsMeasured && h.Repositions == 0 && len(h.TapeAlertFlags) == 0
 }
 
-// evaluateWriteHealth computes the write-health verdict from the bytes written to the
-// tape (slices + PAR2), its write-window elapsed time, and the scraped log pages. It
-// is pure so the flag logic is unit-testable without hardware. Throughput is only
-// meaningful for a positive elapsed time; a non-positive elapsed yields a zero
-// throughput that is not flagged below-floor (the rate could not be measured, not that
-// it was slow).
+// evaluateWriteHealth computes the verdict. A non-positive elapsed yields zero
+// throughput that is not flagged below-floor (unmeasurable, not slow).
 func evaluateWriteHealth(bytesWritten int64, elapsed time.Duration, logs tape.LogPageResult, floorMBps float64, floorKnown bool) WriteHealth {
 	health := WriteHealth{
 		Measured:            true,
@@ -140,8 +92,7 @@ func evaluateWriteHealth(bytesWritten int64, elapsed time.Duration, logs tape.Lo
 	return health
 }
 
-// tapeAlertLabel renders an active TapeAlert flag for the report and logs: its number
-// and description, or just the number when the description is unknown.
+// tapeAlertLabel renders an active TapeAlert flag for the report and logs.
 func tapeAlertLabel(flag tape.TapeAlertFlag) string {
 	if flag.Description != "" {
 		return fmt.Sprintf("%d: %s", flag.Number, flag.Description)
@@ -150,9 +101,7 @@ func tapeAlertLabel(flag tape.TapeAlertFlag) string {
 	return fmt.Sprintf("flag %d", flag.Number)
 }
 
-// writeHealthMetrics holds the Prometheus gauges write-health is exported through,
-// each labelled by tape barcode. It is nil when metrics are disabled (no registry) or
-// when registration failed, in which case record is a no-op.
+// writeHealthMetrics holds the per-barcode gauges; nil means metrics are off.
 type writeHealthMetrics struct {
 	throughput  *prometheus.GaugeVec
 	repositions *prometheus.GaugeVec
@@ -160,10 +109,7 @@ type writeHealthMetrics struct {
 	belowFloor  *prometheus.GaugeVec
 }
 
-// newWriteHealthMetrics registers the write-health gauges against reg. A nil reg
-// (metrics disabled) yields a nil *writeHealthMetrics. A registration error is
-// returned so the caller can decide how to degrade — write-health is observability
-// only, so a failure here must never take down the worker.
+// newWriteHealthMetrics registers the gauges; a nil reg yields nil.
 func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, error) {
 	if reg == nil {
 		return nil, nil
@@ -207,8 +153,7 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 	return metrics, nil
 }
 
-// record sets the gauges for one tape from its write-health verdict. It is a no-op on
-// a nil receiver (metrics disabled) and when the measurement was not taken.
+// record sets one tape's gauges; a no-op on nil or an unmeasured tape.
 func (m *writeHealthMetrics) record(barcode string, health WriteHealth) {
 	if m == nil || !health.Measured {
 		return
@@ -218,22 +163,17 @@ func (m *writeHealthMetrics) record(barcode string, health WriteHealth) {
 	m.throughput.With(labels).Set(health.ThroughputMBps)
 	m.tapeAlerts.With(labels).Set(float64(len(health.TapeAlertFlags)))
 
-	// Only export the reposition gauge when the counter was actually read; leaving
-	// it unset when the drive does not support page 0x30 avoids implying a measured
-	// zero back-hitch count from an unread counter (SPEC §14).
+	// Left unset when unread so a zero is never implied (SPEC §14).
 	if health.RepositionsMeasured {
 		m.repositions.With(labels).Set(float64(health.Repositions))
 	}
 
-	// Only export the below-floor gauge when a floor is known; leaving it unset for
-	// an unknown generation avoids implying "not below floor" when the floor could
-	// not be evaluated.
+	// Left unset for an unknown generation rather than implying "not below".
 	if health.FloorKnown {
 		m.belowFloor.With(labels).Set(boolToFloat(health.BelowFloor))
 	}
 }
 
-// boolToFloat maps a bool to the Prometheus 1/0 convention for a boolean gauge.
 func boolToFloat(b bool) float64 {
 	if b {
 		return 1
@@ -242,16 +182,13 @@ func boolToFloat(b bool) float64 {
 	return 0
 }
 
-// WriteHealthActivities hosts the data-side MeasureWriteHealth activity. It holds the
-// Prometheus gauges write-health is exported through (nil when metrics are disabled).
+// WriteHealthActivities hosts the data-side MeasureWriteHealth activity.
 type WriteHealthActivities struct {
 	metrics *writeHealthMetrics
 }
 
-// newWriteHealthActivities builds the write-health activity, registering its gauges
-// against reg. Because write-health is observability only, a metrics registration
-// failure degrades to metrics-off (gauges disabled) with a warning rather than
-// failing worker startup; the report still records write-health.
+// newWriteHealthActivities degrades to metrics-off on a registration failure
+// rather than failing worker startup; write-health is observability only.
 func newWriteHealthActivities(reg prometheus.Registerer) *WriteHealthActivities {
 	metrics, err := newWriteHealthMetrics(reg)
 	if err != nil {
@@ -265,50 +202,29 @@ func newWriteHealthActivities(reg prometheus.Registerer) *WriteHealthActivities 
 
 // MeasureWriteHealthInput is the payload for the MeasureWriteHealth activity.
 type MeasureWriteHealthInput struct {
-	// Device is the SCSI generic node of the drive that wrote the tape (e.g.
-	// /dev/sg1), scraped for log pages.
-	Device string
-	// Barcode identifies the tape in the report and metric labels.
+	// Device is the drive's SCSI generic node, scraped for log pages.
+	Device  string
 	Barcode tape.Barcode
-	// BytesWritten is the total bytes physically written to the tape in the measured
-	// window — the archive slices plus the PAR2 recovery files — the numerator of
-	// the throughput.
+	// BytesWritten is slices plus PAR2 files written in the window.
 	BytesWritten int64
-	// Elapsed is the write-window wall-clock the workflow measured around the
-	// WriteTree → FinalizeTape span — the denominator of the throughput.
-	Elapsed time.Duration
-	// FloorMBps is the speed-matching floor for the tape generation being written,
-	// derived by the workflow from the configured native capacity. Meaningful only
-	// when FloorKnown is true.
-	FloorMBps float64
-	// FloorKnown is true when a floor is known for the tape generation. When false
-	// no below-floor verdict is made.
+	// Elapsed spans WriteTree through FinalizeTape.
+	Elapsed    time.Duration
+	FloorMBps  float64
 	FloorKnown bool
 }
 
-// TapeMeasurement is what the post-write scrape records for one physical tape:
-// its observational write health, and the LTO generation of the medium itself.
-//
-// Both are read from the drive in the same window, while the tape is still
-// loaded. The medium generation cannot be read later — by the time the Report
-// phase runs the tape has been unloaded and exported (SPEC §4.3 phases 8-9), and
-// an empty drive describes no medium (issue #340).
+// TapeMeasurement is the post-write scrape of one tape. The medium generation
+// must be read now, while loaded: by Report the tape is exported and an empty
+// drive describes no medium (#340).
 type TapeMeasurement struct {
-	// Health is the tape's observational write-health verdict.
 	Health WriteHealth
-	// MediaGeneration is the LTO generation of the tape itself (e.g. "LTO-5"),
-	// which is what a recoverer needs a drive for — not the generation of the
-	// drive that wrote it. It is "unknown" when it could not be read.
+	// MediaGeneration is the tape's own generation (what a recoverer needs),
+	// not the writing drive's; "unknown" when unreadable.
 	MediaGeneration string
 }
 
-// MeasureWriteHealth scrapes the drive after the write window closed and returns the
-// tape's write-health verdict and the loaded medium's LTO generation, also recording
-// the health to Prometheus. It is read-only and idempotent, so it is safely
-// retriable. It is observational only: a scrape failure is logged and degraded (empty
-// log pages, an unknown generation) rather than failing — the throughput, which needs
-// no hardware, is still reported. It therefore returns a nil error on the normal path
-// so a measurement problem never fails the run.
+// MeasureWriteHealth scrapes the drive after the write window. It is read-only
+// and retriable, and a scrape failure degrades rather than failing the run.
 func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input MeasureWriteHealthInput) (TapeMeasurement, error) {
 	logs, err := tape.NewLogPageReader(input.Device).ReadLogPages(ctx)
 	if err != nil {

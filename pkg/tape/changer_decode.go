@@ -6,14 +6,11 @@ import (
 	"strings"
 )
 
-// This file holds the platform-independent halves of the SG_IO changer: the
-// raw↔friendly element-address arithmetic and the binary decoders for the
-// MODE SENSE Element Address Assignment page (0x1D) and READ ELEMENT STATUS
-// (0xB8) responses. Keeping them free of os/syscall makes them unit-testable on
-// every platform; the ioctl plumbing lives in changer_linux.go.
+// Platform-independent halves of the SG_IO changer (element-address arithmetic
+// and the 0x1D / 0xB8 response decoders), kept free of syscalls so they are
+// unit-testable everywhere.
 
-// SCSI element type codes (SMC-3), as reported in READ ELEMENT STATUS pages and
-// used to select the mode-page fields for address translation.
+// SCSI element type codes (SMC-3).
 const (
 	elementTypeMediumTransport = 1 // robot arm / picker
 	elementTypeStorage         = 2 // storage slot
@@ -28,67 +25,41 @@ const (
 )
 
 const (
-	// modePageElementAddr is the Element Address Assignment mode page.
 	modePageElementAddr = 0x1D
-	// modePageCodeMask masks the page code out of a mode page's first byte
-	// (bit 7 is PS, bit 6 is SPF).
+	// modePageCodeMask strips PS (bit 7) and SPF (bit 6).
 	modePageCodeMask = 0x3F
 )
 
 const (
-	// pvoltagBit is the PVOLTAG flag in a READ ELEMENT STATUS page header (at
-	// pageFlagsOffset): when set, each descriptor carries a primary volume tag.
 	pvoltagBit = 0x80
-	// svalidBit is the SVALID flag in a data-transfer element descriptor (at
-	// descSVALIDOffset): when set, the source storage element address is valid.
-	svalidBit = 0x80
-	// primaryVolumeTagOffset and primaryVolumeTagLen bound the barcode within an
-	// element descriptor when PVOLTAG is set. The full primary volume tag field
-	// is 36 bytes; the first 32 are the volume identifier (barcode), the rest a
-	// reserved area and sequence number we do not use.
+	svalidBit  = 0x80
+	// The first 32 bytes of the 36-byte primary volume tag are the barcode.
 	primaryVolumeTagOffset = 12
 	primaryVolumeTagLen    = 32
-	// primaryVolumeTagFieldLen is the full width of the primary volume tag field
-	// (32-byte volume identifier + a 4-byte reserved/sequence area). When PVOLTAG
-	// is set the field is present in every descriptor, so the DVCID device
-	// identifier that follows a data-transfer descriptor starts this far past the
-	// volume tag offset.
+	// primaryVolumeTagFieldLen is the full tag width; the DVCID identifier of a
+	// data-transfer descriptor follows it when PVOLTAG is set.
 	primaryVolumeTagFieldLen = 36
 )
 
-// DVCID primary device identifier (a SPC designation descriptor appended to each
-// data-transfer element descriptor when DVCID is set in the READ ELEMENT STATUS
-// CDB) layout and the code sets we decode a serial from.
+// DVCID designation descriptor layout (SPC) and the code sets we read a serial
+// from.
 const (
-	// deviceIDHeaderLen is the designation descriptor header: byte 0 code set,
-	// byte 1 designator type, byte 2 reserved, byte 3 designator length.
-	deviceIDHeaderLen = 4
-	// deviceIDCodeSetOffset and deviceIDLengthOffset locate the code set and the
-	// designator length within that header.
+	deviceIDHeaderLen     = 4
 	deviceIDCodeSetOffset = 0
 	deviceIDLengthOffset  = 3
-	// deviceIDCodeSetMask masks the code set out of byte 0 (the upper nibble is
-	// the protocol identifier).
+	// deviceIDCodeSetMask drops the protocol identifier in the upper nibble.
 	deviceIDCodeSetMask = 0x0F
-	// codeSetASCII and codeSetUTF8 are the printable-text code sets we extract a
-	// serial from; a binary (code set 1) designator carries no ASCII serial.
-	codeSetASCII = 0x02
-	codeSetUTF8  = 0x03
+	codeSetASCII        = 0x02
+	codeSetUTF8         = 0x03
 )
 
-// MODE SENSE(6) response layout (Element Address Assignment page). The page
-// follows a 4-byte mode parameter header plus any block descriptors.
+// MODE SENSE(6) response layout.
 const (
-	// modeParamHeaderLen is the length of the MODE SENSE(6) mode parameter header.
-	modeParamHeaderLen = 4
-	// modeParamBlockDescLenOffset is the header byte holding the block descriptor
-	// length (the page starts after the header and those descriptors).
+	modeParamHeaderLen          = 4
 	modeParamBlockDescLenOffset = 3
 )
 
-// Byte offsets of the (first-address, count) fields within the Element Address
-// Assignment mode page body (after its 2-byte page code / length header), plus
-// the body length that must be present to read them all.
+// Field offsets within the Element Address Assignment page body.
 const (
 	eaaFirstMediumTransport = 2
 	eaaNumMediumTransport   = 4
@@ -101,18 +72,12 @@ const (
 	eaaBodyLen              = 18
 )
 
-// READ ELEMENT STATUS response layout: an element status data header, then one
-// element status page per element type, each with its own header followed by
-// fixed-length element descriptors.
+// READ ELEMENT STATUS response layout.
 const (
-	// elementStatusHeaderLen is the length of the element status data header.
 	elementStatusHeaderLen = 8
-	// elementStatusReportOffset is the offset of the "byte count of report
-	// available" field (24-bit) within the element status data header. It counts
-	// the report bytes that follow the header, and equals the bytes transferred
-	// after the header when — and only when — the response was not truncated.
-	elementStatusReportOffset = 5
-	// elementStatusPageHeaderLen is the length of each element status page header.
+	// elementStatusReportOffset is the 24-bit "byte count of report available",
+	// which exceeds the bytes transferred only when the report was truncated.
+	elementStatusReportOffset  = 5
 	elementStatusPageHeaderLen = 8
 )
 
@@ -133,10 +98,9 @@ const (
 	descSourceMinLen  = 12 // enough to read SVALID + source address
 )
 
-// elementAddressing maps between a library's raw SCSI element addresses and the
-// friendly drive/slot numbers callers use, derived from the Element Address
-// Assignment mode page (0x1D). This is the same computation mtx performs, so the
-// friendly numbers — and therefore blankSlots configs — are byte-compatible.
+// elementAddressing maps raw SCSI element addresses to friendly drive/slot
+// numbers using the same computation as mtx, so blankSlots configs stay
+// compatible.
 //
 // Friendly numbering:
 //   - drive index d          ↔ raw firstDTE + d          (0-based)
@@ -150,24 +114,16 @@ type elementAddressing struct {
 	firstDTE, numDTE         int
 }
 
-// friendlyDrive converts a raw data-transfer element address to a 0-based drive
-// index.
 func (a *elementAddressing) friendlyDrive(raw int) int { return raw - a.firstDTE }
 
-// friendlyStorage converts a raw storage element address to a 1-based storage
-// slot number.
 func (a *elementAddressing) friendlyStorage(raw int) int { return raw - a.firstStorage + 1 }
 
-// friendlyIO converts a raw import/export element address to its friendly slot
-// number (numbered after the storage slots).
 func (a *elementAddressing) friendlyIO(raw int) int { return a.numStorage + (raw - a.firstIE) + 1 }
 
-// isStorageRaw reports whether a raw address falls within the storage range.
 func (a *elementAddressing) isStorageRaw(raw int) bool {
 	return raw >= a.firstStorage && raw < a.firstStorage+a.numStorage
 }
 
-// rawStorage converts a 1-based friendly storage slot to its raw address.
 func (a *elementAddressing) rawStorage(slot int) (int, error) {
 	if slot < 1 || slot > a.numStorage {
 		return 0, fmt.Errorf("storage slot %d out of range (1..%d)", slot, a.numStorage)
@@ -176,7 +132,6 @@ func (a *elementAddressing) rawStorage(slot int) (int, error) {
 	return a.firstStorage + (slot - 1), nil
 }
 
-// rawDrive converts a 0-based friendly drive index to its raw address.
 func (a *elementAddressing) rawDrive(index int) (int, error) {
 	if index < 0 || index >= a.numDTE {
 		return 0, fmt.Errorf("drive index %d out of range (0..%d)", index, a.numDTE-1)
@@ -185,10 +140,8 @@ func (a *elementAddressing) rawDrive(index int) (int, error) {
 	return a.firstDTE + index, nil
 }
 
-// rawSlot converts a friendly slot number in mtx's combined storage+I/O
-// numbering (1..numStorage are storage slots, numStorage+1..numStorage+numIE are
-// I/O slots) to its raw element address. Transfer uses this for both endpoints,
-// which may be either a storage slot or an I/O-station slot.
+// rawSlot converts a slot in mtx's combined storage+I/O numbering to its raw
+// address.
 func (a *elementAddressing) rawSlot(friendly int) (int, error) {
 	switch {
 	case friendly >= 1 && friendly <= a.numStorage:
@@ -201,10 +154,8 @@ func (a *elementAddressing) rawSlot(friendly int) (int, error) {
 	}
 }
 
-// transportElement returns the raw medium-transport (robot) element address to
-// use as MOVE MEDIUM's first operand. It is the first transport element the
-// library declares; libraries with no transport element use 0 (the default
-// transport).
+// transportElement returns the robot address for MOVE MEDIUM; 0 selects the
+// default transport when the library declares none.
 func (a *elementAddressing) transportElement() int {
 	if a.numMTE > 0 {
 		return a.firstMTE
@@ -214,17 +165,12 @@ func (a *elementAddressing) transportElement() int {
 }
 
 // parseElementAddressing decodes a MODE SENSE(6) response for the Element
-// Address Assignment page (0x1D). The response is a 4-byte mode parameter header
-// (whose byte 3 is the block descriptor length), optional block descriptors,
-// then the mode page: byte 0 page code, byte 1 page length, then four
-// (first-address, count) 16-bit big-endian pairs for medium-transport, storage,
-// import/export, and data-transfer elements.
+// Address Assignment page (0x1D).
 func parseElementAddressing(data []byte) (*elementAddressing, error) {
 	if len(data) < modeParamHeaderLen {
 		return nil, fmt.Errorf("mode sense: short response (%d bytes)", len(data))
 	}
 
-	// Skip the mode parameter header and any block descriptors it declares.
 	page := modeParamHeaderLen + int(data[modeParamBlockDescLenOffset])
 
 	if len(data) < page+eaaBodyLen {
@@ -246,18 +192,7 @@ func parseElementAddressing(data []byte) (*elementAddressing, error) {
 }
 
 // decodeElementStatus decodes a READ ELEMENT STATUS (0xB8) response into an
-// Inventory, using addressing to translate raw element addresses to friendly
-// numbers. The response is an 8-byte status header followed by one Element
-// Status Page per element type; each page has an 8-byte header (type code, a
-// PVOLTAG flag, the per-descriptor length, and the total descriptor byte count)
-// followed by fixed-length element descriptors.
-//
-// The device may truncate its report to the transfer buffer without signalling
-// an error, in which case the descriptor walk would stop early and yield a
-// partial Inventory. To catch that, the header's 24-bit "byte count of report
-// available" is compared against the report bytes actually transferred (after
-// the header); a report claiming more than was transferred is rejected as
-// truncated rather than decoded into a partial inventory.
+// Inventory.
 func decodeElementStatus(data []byte, addressing *elementAddressing) (Inventory, error) {
 	var inv Inventory
 
@@ -265,9 +200,7 @@ func decodeElementStatus(data []byte, addressing *elementAddressing) (Inventory,
 		return inv, fmt.Errorf("read element status: short response (%d bytes)", len(data))
 	}
 
-	// The report byte count covers the bytes after the 8-byte header. If it
-	// exceeds what was transferred, the library truncated its report to the
-	// transfer buffer and the pages below are incomplete — refuse to decode a
+	// Devices may silently truncate the report to the transfer buffer; refuse a
 	// partial inventory rather than plan moves from wrong state.
 	if reportByteCount := be24(data, elementStatusReportOffset); reportByteCount > len(data)-elementStatusHeaderLen {
 		return Inventory{}, fmt.Errorf(
@@ -275,7 +208,6 @@ func decodeElementStatus(data []byte, addressing *elementAddressing) (Inventory,
 			reportByteCount, len(data)-elementStatusHeaderLen)
 	}
 
-	// Walk the element status pages that follow the status data header.
 	for pos := elementStatusHeaderLen; pos+elementStatusPageHeaderLen <= len(data); {
 		elementType := data[pos]
 		pvoltag := data[pos+pageFlagsOffset]&pvoltagBit != 0
@@ -298,12 +230,7 @@ func decodeElementStatus(data []byte, addressing *elementAddressing) (Inventory,
 	return inv, nil
 }
 
-// decodeDescriptor decodes one element descriptor and appends it to inv. The
-// common descriptor prefix is: bytes 0-1 element address, byte 2 flags (FULL
-// 0x01, ACCESS 0x08). A data-transfer descriptor additionally carries an SVALID
-// flag (byte 9, 0x80) and source storage element address (bytes 10-11). When the
-// page's PVOLTAG flag is set and the element is full, the barcode is the primary
-// volume tag at byte 12.
+// decodeDescriptor decodes one element descriptor and appends it to inv.
 func decodeDescriptor(elementType byte, pvoltag bool, desc []byte, addressing *elementAddressing, inv *Inventory) {
 	if len(desc) < descMinLen {
 		return
@@ -322,17 +249,13 @@ func decodeDescriptor(elementType byte, pvoltag bool, desc []byte, addressing *e
 	case elementTypeDataTransfer:
 		el := DriveElement{Address: addressing.friendlyDrive(addr), Loaded: full, Barcode: barcode}
 
-		// Recover the source storage slot for a loaded drive, mirroring mtx's
-		// "(Storage Element N Loaded)" annotation, when the library reports it.
 		if full && len(desc) >= descSourceMinLen && desc[descSVALIDOffset]&svalidBit != 0 {
 			if src := int(be16(desc, descSourceOffset)); addressing.isStorageRaw(src) {
 				el.SourceSlot = addressing.friendlyStorage(src)
 			}
 		}
 
-		// Pair a drive device node to this element by its unit serial: decode the
-		// DVCID device identifier that follows the (optional) primary volume tag
-		// (issue #137). Absent when the library does not implement DVCID.
+		// The DVCID serial pairs a drive device node to this element (#137).
 		el.Serial = decodeDriveSerial(desc, pvoltag)
 
 		inv.Drives = append(inv.Drives, el)
@@ -351,24 +274,16 @@ func decodeDescriptor(elementType byte, pvoltag bool, desc []byte, addressing *e
 			Barcode:    barcode,
 			Accessible: access,
 		})
-		// READ ELEMENT STATUS always carries the ACCESS bit, so any library that
-		// answers with I/O elements reports access state — unlike the mtx text
-		// scrape this replaces, which dropped it entirely.
+		// READ ELEMENT STATUS always carries ACCESS (mtx's text output drops it).
 		inv.IOAccessReported = true
 
 	case elementTypeMediumTransport:
-		// The robot itself is not surfaced in Inventory; its address is taken
-		// from the mode page for MOVE MEDIUM.
+		// The robot is not surfaced in Inventory.
 	}
 }
 
-// decodeDriveSerial extracts a data-transfer element's unit serial from the DVCID
-// device identifier appended to its descriptor. The identifier is a single SPC
-// designation descriptor sitting after the 12-byte descriptor prefix and, when the
-// page's PVOLTAG flag is set, the 36-byte primary volume tag. It returns "" when
-// the descriptor carries no identifier (the library did not report DVCID, or the
-// descriptor is too short) or the designator is not printable text — so a
-// non-reporting library still decodes with an empty Serial rather than failing.
+// decodeDriveSerial extracts a drive's unit serial from the DVCID identifier
+// appended to its descriptor, returning "" when absent or not printable text.
 func decodeDriveSerial(desc []byte, pvoltag bool) string {
 	start := primaryVolumeTagOffset
 	if pvoltag {
@@ -394,12 +309,8 @@ func decodeDriveSerial(desc []byte, pvoltag bool) string {
 	return serialFromDeviceID(header[deviceIDHeaderLen : deviceIDHeaderLen+idLen])
 }
 
-// serialFromDeviceID reduces a T10 device-identifier string to the drive's unit
-// serial: the last whitespace-delimited token. A T10 vendor designator is the
-// vendor id, optionally the product id, then the serial (all space-padded); a
-// serial contains no spaces, so the final token is the serial — matching the value
-// the drive returns in INQUIRY VPD page 0x80. It handles a null-terminated field
-// and returns "" when no token is present.
+// serialFromDeviceID returns the last token of a T10 device identifier (vendor,
+// product, serial), which matches the serial in INQUIRY VPD page 0x80.
 func serialFromDeviceID(identifier []byte) string {
 	if i := bytes.IndexByte(identifier, 0); i >= 0 {
 		identifier = identifier[:i]
@@ -413,10 +324,8 @@ func serialFromDeviceID(identifier []byte) string {
 	return fields[len(fields)-1]
 }
 
-// trimVolumeTag extracts a barcode from a fixed-width primary volume tag field.
-// SCSI volume tags are left-justified and space-padded (and may be
-// null-terminated); the barcode is the field up to the first null with
-// surrounding whitespace removed.
+// trimVolumeTag extracts a barcode from a space-padded, possibly
+// null-terminated volume tag field.
 func trimVolumeTag(field []byte) Barcode {
 	if i := bytes.IndexByte(field, 0); i >= 0 {
 		field = field[:i]
@@ -425,12 +334,10 @@ func trimVolumeTag(field []byte) Barcode {
 	return Barcode(strings.TrimSpace(string(field)))
 }
 
-// be16 reads a 16-bit big-endian value at off. Callers guarantee the bounds.
 func be16(b []byte, off int) uint16 {
 	return uint16(b[off])<<8 | uint16(b[off+1])
 }
 
-// be24 reads a 24-bit big-endian value at off. Callers guarantee the bounds.
 func be24(b []byte, off int) int {
 	return int(b[off])<<16 | int(b[off+1])<<8 | int(b[off+2])
 }
