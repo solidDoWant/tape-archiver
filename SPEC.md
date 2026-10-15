@@ -231,7 +231,9 @@ write window.
    cannot clear the condition, so this is a fatal fault, not an operator pause. On this or
    any other fault before the first format (e.g. the Write session cannot be created), the
    set's tapes are first returned to their storage slots, and the failure names where they
-   were left.
+   were left. The return waits for a data worker only as long as session creation does,
+   so an unreachable data worker still fails the run and fires its alert, noting the
+   tapes may still be in the drives.
    `mkltfs` each tape in the set (setting the LTFS volume name to the tape's
    barcode), mount LTFS **with index sync deferred to unmount** (`-o sync_type=unmount`),
    and stream the staged tree to tape. The set's tapes write to their drives in parallel.

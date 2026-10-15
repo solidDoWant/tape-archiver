@@ -572,10 +572,14 @@ func returnLoadedTapes(ctx workflow.Context, cfg config.Config, loaded []LoadedT
 	disconnected, cancel := workflow.NewDisconnectedContext(ctx)
 	defer cancel()
 
+	// The fault being handled is often an unreachable data worker; without a
+	// schedule-to-start bound this would sit in Scheduled until it returns and
+	// hold back the failure alert.
 	dataCtx := workflow.WithActivityOptions(disconnected, workflow.ActivityOptions{
-		TaskQueue:           DataTaskQueue,
-		StartToCloseTimeout: ejectTimeout,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
+		TaskQueue:              DataTaskQueue,
+		ScheduleToStartTimeout: sessionCreationTimeout,
+		StartToCloseTimeout:    ejectTimeout,
+		RetryPolicy:            &temporal.RetryPolicy{MaximumAttempts: 1},
 	})
 
 	var acts *LoadActivities
