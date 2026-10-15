@@ -68,13 +68,13 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	require.GreaterOrEqual(t, len(inv.Drives), 1, "at least one drive required")
 	require.False(t, inv.Drives[0].Loaded, "drive 0 must start empty")
 
-	// Storage slot index 4 is this test's alone: the session (0), tape-path (1),
-	// whole-run (2), and medium-generation (3) tests each own an earlier slot on
-	// the shared mhvtl library.
-	require.GreaterOrEqual(t, len(inv.Slots), 5, "at least five storage slots required")
-	slot := inv.Slots[4]
-	require.True(t, slot.Full, "slot 4 must hold a tape")
-	require.NotEmpty(t, slot.Barcode, "slot 4 tape must have a barcode")
+	// Storage slot index 8 is this test's alone on the shared mhvtl library
+	// (indexes 0-7 belong to the session, tape-path, whole-run, medium-generation
+	// and multi-drive-set tests).
+	require.GreaterOrEqual(t, len(inv.Slots), 9, "at least nine storage slots required")
+	slot := inv.Slots[8]
+	require.True(t, slot.Full, "slot index 8 must hold a tape")
+	require.NotEmpty(t, slot.Barcode, "slot index 8 tape must have a barcode")
 
 	stDev := testutil.Drive0Dev(t)
 	sgDev := testutil.Drive0SgDev(t)
@@ -82,7 +82,12 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	slotAddr := slot.Address
 	barcode := slot.Barcode
 
-	t.Cleanup(func() { returnTapeToSlot(changer, slotAddr, driveAddr, barcode) })
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 240*time.Second)
+		defer cancel()
+
+		returnAndBlank(ctx, changer, stDev, sgDev, driveAddr, slotAddr, barcode)
+	})
 
 	require.NoError(t, changer.Load(t.Context(), slotAddr, driveAddr), "pre-load for readiness/blanking")
 	testutil.SkipIfDriveNotReady(t, stDev)
