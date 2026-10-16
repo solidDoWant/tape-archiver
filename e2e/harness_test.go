@@ -589,11 +589,15 @@ func (h *e2eHarness) removeScaledJobWorker(t *testing.T) {
 		"-n", namespace, "-l", selector, "--cascade=foreground", "--wait", "--timeout=3m", "--ignore-not-found")
 	assert.NoError(t, err, "delete the autoscaling ScaledJob's Jobs")
 
-	assert.Eventuallyf(t, func() bool {
+	// EventuallyWithT so a timeout names the leftover pods (or the list error).
+	assert.EventuallyWithTf(t, func(collect *assert.CollectT) {
 		out, listErr := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "get", "pods",
 			"-n", namespace, "-l", selector, "-o", "name")
+		if !assert.NoError(collect, listErr, "list %s pods", scaledJobRelease) {
+			return
+		}
 
-		return listErr == nil && strings.TrimSpace(out) == ""
+		assert.Empty(collect, strings.Fields(out), "remaining %s pods", scaledJobRelease)
 	}, 3*time.Minute, 2*time.Second, "no %s pod may outlive the autoscaling test to poll later tests' control queue", scaledJobRelease)
 
 	_, err = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", scaledJobRelease,
