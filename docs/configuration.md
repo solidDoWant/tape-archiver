@@ -145,12 +145,18 @@ At Resolve the control worker follows each claim to its bound PersistentVolume a
 `spec.csi.volumeHandle`, prefixed with `TAPE_K8S_DATASET_PARENT`, as the ZFS dataset. Only
 **democratic-csi zfs-generic-nfs** volumes are accepted, recognised by the PV's CSI driver
 name: `TAPE_K8S_CSI_DRIVER` (chart value `config.controlWorker.k8sCSIDriver`), default
-`org.democratic-csi.nfs`. Set it to your deployment's `csiDriver.name`
-(`kubectl get csidrivers`) if that differs. The run fails at Resolve, naming the claim, for:
+`org.democratic-csi.nfs` (democratic-csi's example name). It **must match** your cluster's
+`CSIDriver` name (the deployment's `csiDriver.name`; `kubectl get csidrivers`), which
+deployments commonly rename (e.g. `nfs.zfs.democratic-csi.local`); a mismatch fails every
+claim with an error naming both the PV's driver and the expected one. The run fails at
+Resolve, naming the claim, for:
 
-- a claim that is not `Bound`, or whose PV does not point back at it;
+- a claim that is not `Bound`, or whose PV's `claimRef` does not point back at it (namespace,
+  name and UID);
 - a PV that is not a CSI volume, or uses another CSI driver;
-- an unusable `volumeHandle` (empty, absolute, containing `..`, `@`, `%` or `,`).
+- an unusable `volumeHandle`: anything but a relative dataset path whose components use ZFS
+  name characters (`A-Z a-z 0-9 _ : . -`) and do not start with `-` or `.` (so no `..`,
+  `@`, absolute path or empty component).
 
 A `labelSelector` matching no claims fails Resolve naming the source. The data worker then
 re-checks that the dataset carries `democratic-csi:managed_resource=true` before
@@ -565,7 +571,7 @@ alerting works even when config parsing fails.
 | `WORKER_IDLE_EXIT_AFTER` | no | **Control worker only.** Go duration (e.g. `15m`); when set to a positive value, the control worker drains in-flight work and exits `0` once it has run no activity for this long, letting a KEDA-spawned Job scale back to zero — see [Control-worker idle-exit](#control-worker-idle-exit). Empty/unset (the default) disables it: the worker runs until `SIGINT`/`SIGTERM`. A negative or unparseable value fails startup. Ignored (inert) for the `data` role. |
 | `DISCORD_FAILURE_WEBHOOK_URL` | no | Discord webhook URL for run failure alerts. When absent, failure alerting is silently disabled. |
 | `TAPE_K8S_DATASET_PARENT` | no | democratic-csi's `datasetParentName` (e.g. `bulk-pool-01/k8s/democratic-csi/nfs/pvcs`), prepended to a relative CSI `snapshotHandle` (or a PersistentVolume's `volumeHandle`) to rebuild the absolute ZFS path during k8s resolution on the control worker. Only needed when a run names k8s sources; when absent, handles are treated as already absolute. |
-| `TAPE_K8S_CSI_DRIVER` | no | CSI driver name of the democratic-csi zfs-generic-nfs deployment, read by the control worker. A `PersistentVolumeClaim` source is accepted only when its bound PV uses this driver; anything else fails Resolve naming the claim. Default `org.democratic-csi.nfs` (democratic-csi's example `csiDriver.name`); set it when your deployment names the driver differently. |
+| `TAPE_K8S_CSI_DRIVER` | no | CSI driver name of the democratic-csi zfs-generic-nfs deployment, read by the control worker. A `PersistentVolumeClaim` source is accepted only when its bound PV uses this driver; anything else fails Resolve naming the claim. Default `org.democratic-csi.nfs` (democratic-csi's example `csiDriver.name`); it must match the cluster's `CSIDriver` name (`kubectl get csidrivers`), so set it when your deployment names the driver differently. |
 | `TAPE_STAGING_DIR` | yes (data worker) | Directory the Prepare phase stages prepared archives into — a plain subdirectory of an existing dataset on the storage host (e.g. `/mnt/bulk-pool-01/archive/.tape-staging`), bind-mounted into the data worker container. Each run isolates its output in a subdirectory keyed by run id. Required on the data worker; the Prepare activity fails when it is empty. Ignored by the control worker. On every run exit — success, failure, or cancellation — the run's staged archive slices and PAR2 recovery files are removed, retaining only `report.pdf` and, when optical burning is enabled, `recovery.iso`/`disc-manifest.sha256` (see [maintenance.md](maintenance.md#reclaiming-a-leaked-staging-directory)); those retained artifacts accumulate across runs by design and are an operator-pruned archive, not something the run itself expires. A hard `Terminate` (as opposed to a cancel) skips this cleanup, the same way it skips releasing the run's snapshot hold. |
 | `TAPE_RECOVERY_BINARIES_DIR` | image default | Directory holding the statically linked recovery binaries (`age`, `par2`, `zstd`, `tar`) staged into the recovery ISO's `/bin` (SPEC §10). Every top-level regular file must be a statically linked native executable; the Report phase fails the run otherwise. The data worker image bakes the recovery set in at `/recovery/bin` and defaults this variable there — from the same pinned nixpkgs as the rest of the tooling, so the disc cannot drift from the write path. Override only to relocate the set. Ignored by the control worker. |
 | `TAPE_RECOVERY_SOURCES_DIR` | image default | Directory holding the recovery tools' upstream source archives staged into the recovery ISO's `/src` (SPEC §2, §10 — "…plus their source"). It is the sibling `$out/src` of `TAPE_RECOVERY_BINARIES_DIR`'s `$out/bin` from `nix/recovery-binaries.nix`. Its top-level regular files are staged verbatim (not linkage-checked — these are archives, not executables); the Report phase fails the run if it is empty or yields no files, so a disc can never silently ship without the source needed to rebuild the tools on future hardware. The data worker image bakes it in at `/recovery/src` and defaults this variable there, alongside the binaries. Override only to relocate the set. Ignored by the control worker. |

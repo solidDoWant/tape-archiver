@@ -129,9 +129,10 @@ config:
     # sources; leave empty to treat handles as already absolute.
     k8sDatasetParent: ""
     # k8sCSIDriver is the CSI driver name of the democratic-csi zfs-generic-nfs deployment
-    # (its csiDriver.name; `kubectl get csidrivers` lists it). A PersistentVolumeClaim source
-    # is only accepted when its bound PV uses this driver. Surfaced as TAPE_K8S_CSI_DRIVER;
-    # leave empty for the worker's default, org.democratic-csi.nfs.
+    # (its csiDriver.name; `kubectl get csidrivers` lists it). It must match the cluster's
+    # CSIDriver name: a PersistentVolumeClaim source is only accepted when its bound PV uses
+    # this driver. Surfaced as TAPE_K8S_CSI_DRIVER; empty means the worker's default,
+    # org.democratic-csi.nfs (democratic-csi's example name, often renamed in deployments).
     k8sCSIDriver: ""
     # The worker always exposes /metrics on port 9090 regardless of this value. The toggle
     # controls whether a PodMonitor is created for cluster-side scraping. Leave false when

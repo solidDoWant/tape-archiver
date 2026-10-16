@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -17,7 +18,7 @@ const testDriver = "org.democratic-csi.nfs"
 // boundClaim builds a claim bound to a democratic-csi volume with handle.
 func boundClaim(namespace, name, volume, handle string, labels map[string]string) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume) {
 	claim := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name, UID: types.UID(namespace + "-" + name), Labels: labels},
 		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: volume},
 		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
@@ -25,7 +26,7 @@ func boundClaim(namespace, name, volume, handle string, labels map[string]string
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: volume},
 		Spec: corev1.PersistentVolumeSpec{
-			ClaimRef: &corev1.ObjectReference{Namespace: namespace, Name: name},
+			ClaimRef: &corev1.ObjectReference{Namespace: namespace, Name: name, UID: types.UID(namespace + "-" + name)},
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				CSI: &corev1.CSIPersistentVolumeSource{Driver: testDriver, VolumeHandle: handle},
 			},
@@ -52,6 +53,7 @@ func TestResolveClaim(t *testing.T) {
 		want        Claim
 		assertErr   require.ErrorAssertionFunc
 		unsupported bool
+		errContains string
 	}{
 		{
 			name: "bound democratic-csi volume",
@@ -90,6 +92,7 @@ func TestResolveClaim(t *testing.T) {
 				pv.Spec.CSI.Driver = "ebs.csi.aws.com"
 			},
 			unsupported: true,
+			errContains: `"ebs.csi.aws.com", expected "` + testDriver + `"`,
 		},
 		{
 			name: "snapshot-shaped handle",
@@ -99,12 +102,28 @@ func TestResolveClaim(t *testing.T) {
 			unsupported: true,
 		},
 		{
-			name: "escaping handle",
+			name: "volume bound to a recreated claim of the same name",
 			mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
-				pv.Spec.CSI.VolumeHandle = "../other"
+				pv.Spec.ClaimRef.UID = "old-uid"
 			},
 			unsupported: true,
 		},
+		{
+			name: "nested handle",
+			mutate: func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+				pv.Spec.CSI.VolumeHandle = "group/pvc-1"
+			},
+			want: Claim{Namespace: "media", Name: "library", Volume: "pvc-1", Dataset: "pool/k8s/group/pvc-1"},
+		},
+		{name: "escaping handle", mutate: withHandle("../other"), unsupported: true},
+		{name: "dot component handle", mutate: withHandle("./pvc-1"), unsupported: true},
+		{name: "empty component handle", mutate: withHandle("a//pvc-1"), unsupported: true},
+		{name: "absolute handle", mutate: withHandle("/pool/pvc-1"), unsupported: true},
+		{name: "option-like handle", mutate: withHandle("-r"), unsupported: true},
+		{name: "option-like nested handle", mutate: withHandle("a/-r"), unsupported: true},
+		{name: "bookmark handle", mutate: withHandle("pvc-1#mark"), unsupported: true},
+		{name: "whitespace handle", mutate: withHandle("pvc 1"), unsupported: true},
+		{name: "empty handle", mutate: withHandle(""), unsupported: true},
 		{
 			name: "missing volume is retryable",
 			mutate: func(claim *corev1.PersistentVolumeClaim, _ *corev1.PersistentVolume) {
@@ -138,10 +157,15 @@ func TestResolveClaim(t *testing.T) {
 
 			if err != nil {
 				assert.ErrorContains(t, err, "media/library", "the error names the claim")
+				assert.ErrorContains(t, err, test.errContains)
 				assert.Equal(t, test.unsupported, errorIsUnsupported(err))
 			}
 		})
 	}
+}
+
+func withHandle(handle string) func(*corev1.PersistentVolumeClaim, *corev1.PersistentVolume) {
+	return func(_ *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) { pv.Spec.CSI.VolumeHandle = handle }
 }
 
 func errorIsUnsupported(err error) bool {

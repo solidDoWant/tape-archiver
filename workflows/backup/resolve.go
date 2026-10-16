@@ -40,6 +40,10 @@ const (
 	// resolveUnsupportedClaimErrorType marks a PersistentVolumeClaim that is not
 	// a bound democratic-csi zfs-generic-nfs volume.
 	resolveUnsupportedClaimErrorType = "resolve-unsupported-claim"
+
+	// resolveLabelCollisionErrorType marks two claims whose derived archive
+	// labels collide.
+	resolveLabelCollisionErrorType = "resolve-label-collision"
 )
 
 // snapshotResolver is the seam *k8ssnap.Resolver satisfies, injected for tests.
@@ -888,7 +892,7 @@ func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 
 		expanded, err := expandClaimSources(cfg.Sources, matches)
 		if err != nil {
-			return temporal.NewNonRetryableApplicationError(err.Error(), resolveNoMatchErrorType, nil)
+			return temporal.NewNonRetryableApplicationError(err.Error(), resolveLabelCollisionErrorType, nil)
 		}
 
 		cfg.Sources = expanded

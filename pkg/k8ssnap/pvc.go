@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -110,7 +111,8 @@ func (r *ClaimResolver) ResolveClaim(ctx context.Context, ref ClaimRef) (Claim, 
 		return Claim{}, fmt.Errorf("get PersistentVolume %s for PersistentVolumeClaim %s: %w", claim.Spec.VolumeName, id, err)
 	}
 
-	if back := volume.Spec.ClaimRef; back == nil || back.Namespace != claim.Namespace || back.Name != claim.Name {
+	// The UID guards against a claim deleted and recreated under the same name.
+	if back := volume.Spec.ClaimRef; back == nil || back.Namespace != claim.Namespace || back.Name != claim.Name || back.UID != claim.UID {
 		return Claim{}, fmt.Errorf("PersistentVolumeClaim %s: PersistentVolume %s is not bound back to it: %w", id, volume.Name, ErrUnsupportedClaim)
 	}
 
@@ -125,8 +127,7 @@ func (r *ClaimResolver) ResolveClaim(ctx context.Context, ref ClaimRef) (Claim, 
 	}
 
 	handle := csi.VolumeHandle
-	if handle == "" || strings.ContainsAny(handle, "@%,") || strings.HasPrefix(handle, "/") ||
-		slices.Contains(strings.Split(handle, "/"), "..") {
+	if !validVolumeHandle(handle) {
 		return Claim{}, fmt.Errorf("PersistentVolumeClaim %s: PersistentVolume %s has an unusable volumeHandle %q: %w",
 			id, volume.Name, handle, ErrUnsupportedClaim)
 	}
@@ -137,6 +138,22 @@ func (r *ClaimResolver) ResolveClaim(ctx context.Context, ref ClaimRef) (Claim, 
 		Volume:    volume.Name,
 		Dataset:   absoluteDataset(r.datasetParent, handle),
 	}, nil
+}
+
+// handleComponentPattern is one relative dataset path component: ZFS name
+// characters, not starting with "-" (a zfs option) or "." ("." / "..").
+var handleComponentPattern = regexp.MustCompile(`^[A-Za-z0-9_:][A-Za-z0-9_:.-]*$`)
+
+// validVolumeHandle accepts only a relative dataset path, so prefixing it with
+// the dataset parent cannot escape the parent or name a snapshot.
+func validVolumeHandle(handle string) bool {
+	for component := range strings.SplitSeq(handle, "/") {
+		if !handleComponentPattern.MatchString(component) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // VerifyDataset confirms dataset exists and is democratic-csi-managed before
