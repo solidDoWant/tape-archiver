@@ -13,6 +13,7 @@ import (
 	slashpath "path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Tar streams a tar of srcDir's contents (names relative to srcDir) to w.
@@ -268,6 +269,13 @@ func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix string, item 
 	if err != nil {
 		return err
 	}
+
+	// PAX keeps mtime to the nanosecond (an unset Format rounds it to the
+	// second). atime and ctime are dropped: atime would make archives
+	// nondeterministic and ctime cannot be restored.
+	header.Format = tar.FormatPAX
+	header.AccessTime = time.Time{}
+	header.ChangeTime = time.Time{}
 
 	name := filepath.ToSlash(rel)
 	if prefix != "" {

@@ -254,7 +254,11 @@ file** out of an archive:
 
    **What a `tar`-level restore reproduces:** regular files, directories
    (including the volume root), and symlinks, with their permission bits,
-   ownership, and modification time.
+   ownership, and modification time. Modification times are exact to the
+   nanosecond on a filesystem that stores them (the archive records them as PAX
+   `mtime` records, which `bin/tar` applies). Access and change times are not
+   archived: a restored file's access time is the time of the restore, and its
+   change time is set by the filesystem as usual.
    Hardlinked files are restored as hardlinks (stored once in the archive), and
    sparse files are restored with their holes intact — the bundled `bin/tar`
    decodes the GNU sparse 1.0 encoding used to write them. **Not** reproduced:
