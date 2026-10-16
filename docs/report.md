@@ -15,7 +15,9 @@ The report contains, at minimum:
   `tapectl` and the web UI show for that run — not the fixed `backup` workflow id every
   run shares, so a printed report always names the single run it describes.
 - **Contents manifest** — every archive, with its on-tape directory
-  (`archives/NNN-<label>/`), member volumes, source snapshots, whether the archive is
+  (`archives/NNN-<label>/`), member volumes (a Kubernetes volume as `<namespace>_<pvc>`,
+  which is also its subdirectory inside a group archive's tar; a raw ZFS source by its
+  dataset's last component), source snapshots, whether the archive is
   compressed, and per-file sizes and SHA-256 checksums. Compression is configured per
   source ([`sources[].compression`](configuration.md)), so it is recorded per archive:
   it tells a recoverer whether a `zstd` step stands between the decrypted stream and the

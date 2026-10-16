@@ -44,6 +44,10 @@ const (
 	// resolveLabelCollisionErrorType marks two claims whose derived archive
 	// labels collide.
 	resolveLabelCollisionErrorType = "resolve-label-collision"
+
+	// resolveMemberCollisionErrorType marks two group members that would share
+	// one in-archive subdirectory.
+	resolveMemberCollisionErrorType = "resolve-member-collision"
 )
 
 // snapshotResolver is the seam *k8ssnap.Resolver satisfies, injected for tests.
@@ -323,6 +327,10 @@ func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int,
 			archive.Snapshots = append(archive.Snapshots, snapshotFromK8s(member))
 		}
 
+		if err := checkMemberNames(index, archive.Snapshots); err != nil {
+			return ResolvedArchive{}, err
+		}
+
 		return archive, nil
 	}
 
@@ -334,6 +342,33 @@ func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int,
 	archive.Snapshots = append(archive.Snapshots, snapshotFromK8s(snapshot))
 
 	return archive, nil
+}
+
+// checkMemberNames fails a group whose members would share a subdirectory here,
+// before any snapshot is held, rather than in archive.TarMembers at Prepare.
+func checkMemberNames(index int, snapshots []ResolvedSnapshot) error {
+	owners := make(map[string]string, len(snapshots))
+
+	for _, snapshot := range snapshots {
+		name := memberName(snapshot)
+
+		owner := snapshot.ZFSPath
+		if snapshot.VolumeSnapshot != "" {
+			owner = fmt.Sprintf("VolumeSnapshot %s/%s (%s)", snapshot.Namespace, snapshot.VolumeSnapshot, snapshot.ZFSPath)
+		}
+
+		if prior, ok := owners[name]; ok {
+			return temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+				"sources[%d]: %s and %s would both be archived as member subdirectory %q; "+
+					"set select: newestPerPVC or narrow the label selector so each volume matches once",
+				index, prior, owner, name,
+			), resolveMemberCollisionErrorType, nil)
+		}
+
+		owners[name] = owner
+	}
+
+	return nil
 }
 
 // resolveClaimSource resolves a named PersistentVolumeClaim source to its live

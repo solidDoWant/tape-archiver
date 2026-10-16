@@ -588,17 +588,28 @@ func datasetAndSnapshot(snapshot ResolvedSnapshot) (dataset, snapName string) {
 	return snapshot.ZFSPath, ""
 }
 
-// memberName is a group member's subdirectory: the PVC name, else the dataset's
-// last path component.
+// memberName is a member's volume name, used for its group subdirectory and its
+// report entry: the PVC name, else the dataset's last path component, prefixed
+// with "<namespace>_" for a k8s member so same-named PVCs from different
+// namespaces stay distinct (#444).
 func memberName(snapshot ResolvedSnapshot) string {
-	if snapshot.PVC != "" {
-		return snapshot.PVC
+	name := snapshot.PVC
+	if name == "" {
+		dataset, _ := datasetAndSnapshot(snapshot)
+		name = filepath.Base(dataset)
 	}
 
-	dataset, _ := datasetAndSnapshot(snapshot)
+	if snapshot.Namespace != "" {
+		return snapshot.Namespace + memberNamespaceSeparator + name
+	}
 
-	return filepath.Base(dataset)
+	return name
 }
+
+// memberNamespaceSeparator joins a k8s member's namespace and volume name. A
+// namespace (RFC 1123 label) cannot contain it, so the first one always splits
+// the name back unambiguously; "-" could not (a-b + c and a + b-c collide).
+const memberNamespaceSeparator = "_"
 
 // preparePhase runs the data-side Prepare activity and stores the staged
 // archives for Pack. A failure aborts the run before any tape is touched.

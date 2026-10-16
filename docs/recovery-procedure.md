@@ -228,7 +228,10 @@ file** out of an archive:
 
 8. **Extract the specific file** you need (omit the path to extract everything)
    into an empty restore directory. An archive holding several member volumes — a
-   `VolumeGroupSnapshot` — unpacks to one subdirectory per member volume. An
+   `VolumeGroupSnapshot` — unpacks to one subdirectory per member volume, named
+   `<namespace>_<pvc>` after the Kubernetes namespace and PersistentVolumeClaim
+   it came from (e.g. `media_data/`; the report lists these names as the
+   archive's member volumes), so start the path inside the archive with it. An
    archive of a single volume unpacks that volume's own contents directly, with no
    wrapping directory:
 
