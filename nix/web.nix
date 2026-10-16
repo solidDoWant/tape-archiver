@@ -62,7 +62,7 @@ buildGoModule {
 
   # Refresh with `make update-dependencies` whenever the Go imports reachable
   # from cmd/web change. Independent of nix/worker.nix's vendorHash.
-  vendorHash = "sha256-lXPKEyZNFEufurx1DNwrqEqZAsdZCbukgHAvHGLubfE=";
+  vendorHash = "sha256-frcYdbDizbk+/gNjdxEK11hbNgaRNtHQXOXbBG8g8KY=";
 
   # Replace the gitignored (or, in a from-scratch checkout, placeholder-only)
   # cmd/web/dist with the hermetically-built frontend before compiling, so
