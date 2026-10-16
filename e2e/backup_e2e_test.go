@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/internal/testutil"
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
+	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -69,6 +71,60 @@ func TestBackupEndToEnd_FullRun(t *testing.T) {
 	// Issue #333: bulk staging is reclaimed but the report survives on disk for
 	// disc verification and re-burns.
 	assertStagingCleaned(t, filepath.Join(h.stagingHostDir, temporalRunID(t, temporalClient)))
+}
+
+// TestBackupEndToEnd_RunScopedSnapshot (#419) archives a bare dataset: the
+// containerized data worker snapshots it, the report names the snapshot, and
+// the snapshot is gone once the run ends.
+func TestBackupEndToEnd_RunScopedSnapshot(t *testing.T) {
+	h := requireHarness(t)
+
+	dataset := testutil.PoolDataset(t)
+	// Slot 34 avoids the other tests' slots.
+	fixture := prepareBlankTapeAt(t, 34)
+	temporalClient := dialTemporal(t)
+	identity, recipient := generateTestKeypair(t)
+
+	runID := fmt.Sprintf("e2e-backup-run-scoped-%d", time.Now().UnixNano())
+
+	cfg := config.Config{
+		Sources:    []config.Source{{ZFSPath: &config.ZFSPathSource{Name: dataset}}},
+		Copies:     1,
+		Library:    fixture.library,
+		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10)},
+		Encryption: config.Encryption{Recipients: []string{recipient}, Identity: identity},
+		Delivery:   config.Delivery{WebhookURL: h.deliveryURL(runID)},
+	}
+	require.NoError(t, cfg.Validate(), "run config must be valid")
+
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Minute)
+	defer cancel()
+
+	h.submitRun(t, cfg)
+	terminateOnCleanup(t, temporalClient)
+
+	var result backup.Result
+	require.NoError(t, temporalClient.GetWorkflow(runCtx, backupWorkflowID, "").Get(runCtx, &result),
+		"workflow must complete successfully")
+	assert.Equal(t, orderedPhases, result.CompletedPhases)
+
+	temporalRun := temporalRunID(t, temporalClient)
+	snapshot := backup.RunSnapshotName(temporalRun)
+
+	uploads := h.rec.uploadsFor(runID)
+	require.Len(t, uploads, 1)
+
+	// PDF text extraction may break lines anywhere, so compare without whitespace.
+	report := strings.Join(strings.Fields(extractPDFText(t, findUpload(t, uploads, "report.pdf"))), "")
+	assert.Contains(t, report, dataset+"@"+snapshot, "the report names the run-scoped snapshot")
+	assert.Contains(t, report, "takenbythisrunat", "the report records when the snapshot was taken")
+
+	snapshots, err := zfs.Snapshots(t.Context(), dataset)
+	require.NoError(t, err)
+
+	for _, existing := range snapshots {
+		assert.NotEqual(t, snapshot, existing.Name, "the run-scoped snapshot is destroyed after the run")
+	}
 }
 
 // TestBackupEndToEnd_MultipleDriveSets writes two copies on one drive, i.e. two
