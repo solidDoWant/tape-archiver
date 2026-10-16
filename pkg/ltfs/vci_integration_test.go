@@ -33,6 +33,10 @@ func TestWrittenTapeHasUsableVCI(t *testing.T) {
 
 	output := mountReadOnly(t, testutil.Drive0SgDev(t), filepath.Join(t.TempDir(), "ro"))
 
+	// Anchor the negative checks below: without the mount's own success line in
+	// the captured log they would pass vacuously on an empty or redirected log.
+	require.Contains(t, output, "LTFS11031I", "ltfs log must record the volume mount; ltfs log:\n%s", output)
+
 	for _, message := range []string{
 		"LTFS12062W", // VCI signature unreadable
 		"LTFS11016W", // index partition MAM unusable
