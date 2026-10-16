@@ -111,6 +111,14 @@ must provide:
   worker never creates or destroys a dataset. The pool bind mount must use
   `shared`/`rslave` propagation so the on-demand `.zfs/snapshot/<snap>/` automounts are
   visible inside the container.
+- **Memory headroom for PAR2.** Generate PAR2 passes `par2` an explicit memory limit
+  (`-m`): enough to hold the recovery data for the fewest passes over the archive,
+  capped at half the memory available to the container (`MemAvailable`, or the cgroup
+  v2 limit's headroom when that is smaller) and at 8 GiB. At ~2,000 source blocks and
+  10% redundancy, an archive over ~65 GB uses about 7 GiB. With less memory, `par2`
+  makes more, smaller strided passes over the archive, which is slower on a spinning
+  pool but produces the same output. A container memory limit should leave this
+  headroom.
 
 The entrypoint is `/bin/worker`; run configuration is supplied via the environment and
 the Temporal workflow payload (SPEC §4.1, §5).

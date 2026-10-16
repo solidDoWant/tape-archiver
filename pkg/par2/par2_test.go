@@ -30,7 +30,32 @@ func TestGenerate(t *testing.T) {
 		redundancyPercent int
 		// corruptBytes stays well within the redundancy so repair must succeed.
 		corruptBytes int
+		// memoryBudget, when set, is passed via WithMemoryBudget.
+		memoryBudget int64
+		// deleteSlice removes the first slice instead of corrupting it.
+		deleteSlice bool
 	}{
+		{
+			// A 1 MiB budget forces par2 into many strided passes.
+			name:              "multi-pass under a tight memory budget",
+			sliceSizes:        []int{4_000_000, 4_000_000, 4_000_000},
+			redundancyPercent: 20,
+			corruptBytes:      100_000,
+			memoryBudget:      1 << 20,
+		},
+		{
+			name:              "multi-pass repairs a deleted slice",
+			sliceSizes:        []int{1_000_000, 1_000_000, 1_000_000, 1_000_000},
+			redundancyPercent: 30,
+			memoryBudget:      1 << 20,
+			deleteSlice:       true,
+		},
+		{
+			name:              "single pass repairs a deleted slice",
+			sliceSizes:        []int{100_000, 100_000, 100_000, 100_000},
+			redundancyPercent: 30,
+			deleteSlice:       true,
+		},
 		{
 			name:              "several equal slices",
 			sliceSizes:        []int{100_000, 100_000, 100_000},
@@ -67,7 +92,16 @@ func TestGenerate(t *testing.T) {
 
 			recoverySetPath := filepath.Join(dir, "archive.par2")
 
-			err := par2.Generate(t.Context(), recoverySetPath, paths, test.redundancyPercent)
+			var opts []par2.Option
+
+			if test.memoryBudget > 0 {
+				plan := par2.PlanMemory(sliceSizes(test.sliceSizes), test.redundancyPercent, test.memoryBudget)
+				require.Greater(t, plan.Passes, int64(1), "the budget must force multiple passes")
+
+				opts = append(opts, par2.WithMemoryBudget(test.memoryBudget))
+			}
+
+			err := par2.Generate(t.Context(), recoverySetPath, paths, test.redundancyPercent, opts...)
 			require.NoError(t, err)
 
 			assert.FileExists(t, recoverySetPath)
@@ -80,9 +114,13 @@ func TestGenerate(t *testing.T) {
 			assert.LessOrEqual(t, blockCount, maxSourceBlocks,
 				"source block count must not exceed PAR2's 32,768-block limit")
 
-			corrupt(t, paths[0], test.corruptBytes)
-			require.NotEqual(t, originals[0], readFile(t, paths[0]),
-				"corruption must actually change the slice")
+			if test.deleteSlice {
+				require.NoError(t, os.Remove(paths[0]))
+			} else {
+				corrupt(t, paths[0], test.corruptBytes)
+				require.NotEqual(t, originals[0], readFile(t, paths[0]),
+					"corruption must actually change the slice")
+			}
 
 			par2Repair(t, recoverySetPath)
 
@@ -285,7 +323,16 @@ func repeatSizes(count, size int) []int {
 	return sizes
 }
 
-func writeSlices(t *testing.T, dir string, sizes []int) ([]string, [][]byte) {
+func sliceSizes(sizes []int) []int64 {
+	converted := make([]int64, len(sizes))
+	for index, size := range sizes {
+		converted[index] = int64(size)
+	}
+
+	return converted
+}
+
+func writeSlices(t testing.TB, dir string, sizes []int) ([]string, [][]byte) {
 	t.Helper()
 
 	paths := make([]string, len(sizes))
