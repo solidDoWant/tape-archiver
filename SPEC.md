@@ -762,7 +762,9 @@ refinement as issues are implemented.
 
 - `cmd/worker` — Temporal worker; role (control | data) selects task queue + registered
   activities.
-- `cmd/tapectl` — CLI to submit a run config to Temporal, trigger dry-runs, inspect.
+- `cmd/tapectl` — CLI to submit a run config to Temporal, trigger dry-runs, inspect
+  (`tapectl status` derives the phase from workflow history via `pkg/runsapi` when the
+  live `LastCompletedPhaseQuery` fails, e.g. while KEDA has the control worker at zero).
 - `cmd/gen-config-schema` — emits the committed JSON schema for the run config.
 - `cmd/web` — web UI HTTP server (epic #239): serves the embedded React SPA at `/` and
   the JSON API (`pkg/runsapi`) under `/api/*` — `GET /api/runs`/`GET

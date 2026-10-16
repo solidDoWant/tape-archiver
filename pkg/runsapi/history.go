@@ -17,6 +17,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	historypb "go.temporal.io/api/history/v1"
 	workflowservicepb "go.temporal.io/api/workflowservice/v1"
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
@@ -104,10 +105,16 @@ type runHistory struct {
 	FailingSummary string
 }
 
+// HistoryReader is the slice of the Temporal client needed to read a run's
+// history; client.Client satisfies it.
+type HistoryReader interface {
+	GetWorkflowHistory(ctx context.Context, workflowID string, runID string, isLongPoll bool, filterType enumspb.HistoryEventFilterType) client.HistoryEventIterator
+}
+
 // fetchRunHistory reads and parses runID's full history. Errors are returned
 // unwrapped so writeHistoryError can classify them.
-func fetchRunHistory(ctx context.Context, temporalClient TemporalClient, runID string) (runHistory, error) {
-	iterator := temporalClient.GetWorkflowHistory(ctx, backup.WorkflowID, runID, false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
+func fetchRunHistory(ctx context.Context, historyReader HistoryReader, runID string) (runHistory, error) {
+	iterator := historyReader.GetWorkflowHistory(ctx, backup.WorkflowID, runID, false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
 
 	var history runHistory
 
