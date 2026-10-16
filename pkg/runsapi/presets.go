@@ -227,7 +227,9 @@ func fillDeployPlaceholders(cfg *config.Config) {
 	}
 }
 
-// hasPath reports whether the nested object key path is present in tree.
+// hasPath reports whether the nested object key path is present in tree. Keys
+// match case-insensitively, as encoding/json decodes them, so a placeholder
+// never overwrites a field the preset sets under different casing.
 func hasPath(tree map[string]any, keys ...string) bool {
 	current := any(tree)
 
@@ -237,11 +239,25 @@ func hasPath(tree map[string]any, keys ...string) bool {
 			return false
 		}
 
-		current, ok = object[key]
+		current, ok = lookupFold(object, key)
 		if !ok {
 			return false
 		}
 	}
 
 	return true
+}
+
+func lookupFold(object map[string]any, key string) (any, bool) {
+	if value, ok := object[key]; ok {
+		return value, true
+	}
+
+	for name, value := range object {
+		if strings.EqualFold(name, key) {
+			return value, true
+		}
+	}
+
+	return nil, false
 }

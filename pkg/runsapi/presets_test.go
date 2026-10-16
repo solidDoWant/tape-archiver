@@ -79,6 +79,8 @@ func TestGetUIConfigPresets(t *testing.T) {
 				{Name: "unknown-field", Config: json.RawMessage(`{"copiez":1}`)},
 				{Name: "wrong-type", Config: json.RawMessage(`{"copies":"two"}`)},
 				{Name: "zero-copies", Config: json.RawMessage(`{"copies":0}`)},
+				{Name: "zero-copies-other-case", Config: json.RawMessage(`{"Copies":0}`)},
+				{Name: "empty-sources-other-case", Config: json.RawMessage(`{"Sources":[]}`)},
 				{Name: "empty-sources", Config: json.RawMessage(`{"sources":[]}`)},
 				{Name: "bad-source", Config: json.RawMessage(`{"sources":[{"zfsPath":{"name":""}}]}`)},
 				{Name: "slots-not-multiple", Config: json.RawMessage(`{"copies":2,"library":{"blankSlots":[1,2,3]}}`)},
