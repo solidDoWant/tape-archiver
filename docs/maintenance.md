@@ -245,16 +245,16 @@ tree destroys work the Write phase has not yet read onto tape.
 and clears it only when it exits cleanly. When the Write phase cannot unmount a tape it
 kills `ltfs`, then detaches the dead FUSE mountpoint and clears the lock itself, so the
 tape is still ejected (SPEC §4.3). A data worker that dies with a mount live (container
-restart, host crash) cannot do that: the changer then refuses to unload the tape (sense
-ASC/ASCQ 53/02 or 53/03, "medium removal prevented") and the mountpoint under
-`TAPE_STAGING_DIR/mounts/` fails with `Transport endpoint is not connected`. That tape's
-write did not complete and must be re-written anyway. On the storage host, with no run
-using the drive:
+restart, host crash) cannot do that, so the changer then refuses to unload the tape (sense
+ASC/ASCQ 53/02 or 53/03, "medium removal prevented"). That tape's write did not complete
+and must be re-written anyway. The dead worker's FUSE mount lived only in its container's
+mount namespace (the pool is bind-mounted `rslave`), so there is no stale mountpoint to
+clean up on the host. Find the stuck drive's sg node with `lsscsi -g`, then on the storage
+host, with no run using the drive:
 
 ```
-fusermount -uz /mnt/bulk-pool-01/archive/.tape-staging/mounts/<barcode>  # stale mount, if any
-sg_prevent --allow /dev/sg<N>                                           # the drive's sg node
-mtx -f /dev/sch0 unload <slot> <drive>
+sg_prevent --allow /dev/sgN          # N: the stuck drive's sg node
+mtx -f /dev/sch0 unload SLOT DRIVE   # DRIVE: mtx's 0-based drive number
 ```
 
 Clear the lock only once nothing is using the drive: it is what stops the changer pulling

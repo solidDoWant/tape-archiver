@@ -274,3 +274,28 @@ func TestAbortKillsThenReleasesDrive(t *testing.T) {
 		})
 	}
 }
+
+// TestExitedBySignal: Volume.Mount releases the drive after an ltfs that died by
+// a signal mid-mount (it skipped its own unlock), but not after an orderly exit.
+func TestExitedBySignal(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		cmd  []string
+		want bool
+	}{
+		"exit 0":         {cmd: []string{"true"}, want: false},
+		"exit 1":         {cmd: []string{"false"}, want: false},
+		"crash SIGSEGV":  {cmd: []string{"sh", "-c", "kill -SEGV $$"}, want: true},
+		"killed SIGKILL": {cmd: []string{"sh", "-c", "kill -KILL $$"}, want: true},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := exec.Command(test.cmd[0], test.cmd[1:]...).Run()
+			assert.Equal(t, test.want, exitedBySignal(err))
+		})
+	}
+}

@@ -107,12 +107,15 @@ func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount,
 	if err := m.waitForMount(ctx); err != nil {
 		select {
 		case <-m.done:
-			// ltfs exited on its own, releasing whatever it held.
-			return nil, err
+			// An orderly exit runs ltfs's device close, which clears the lock. A
+			// crash (killed by a signal) does not, so release that like a kill.
+			if !exitedBySignal(m.waitErr) {
+				return nil, err
+			}
 		default:
 		}
 
-		// Killed mid-mount, possibly after ltfs locked the drive.
+		// Killed (or crashed) mid-mount, possibly after ltfs locked the drive.
 		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), AbortTimeout)
 		defer cancel()
 
@@ -255,6 +258,19 @@ func (m *Mount) Abort(ctx context.Context) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// exitedBySignal reports whether a Wait error means the process was terminated
+// by a signal (a crash or an external kill) rather than exiting on its own.
+func exitedBySignal(waitErr error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		return false
+	}
+
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+
+	return ok && status.Signaled()
 }
 
 // detachStale lazily unmounts the mountpoint if a killed ltfs left it mounted.
