@@ -335,6 +335,13 @@ The config defines, at minimum:
   - **k8s snapshots:** `VolumeSnapshot` / snapshot-group references (by name/namespace
     and/or label selector across namespaces). A snapshot **group is archived as a
     single tar** (one subdirectory per member volume), giving cross-volume consistency.
+    Each member's subdirectory, and its name in the report, is `<namespace>_<pvc>` (the
+    snapshot's dataset last component in place of `<pvc>` when it has no source PVC), so
+    same-named PVCs from different namespaces never collide; `_` is legal in neither
+    name, so the first `_` always splits it back. Members that would still share a
+    subdirectory (e.g. two snapshots of one PVC under `select: all`), or whose name
+    exceeds 255 bytes and so could not be extracted, fail Resolve, before any snapshot
+    is held or staged.
     A label selector archives every match by default; `select: newestPerPVC` keeps only
     each source PVC's newest `ReadyToUse` snapshot by `status.creationTime`, ignoring
     not-yet-ready ones.

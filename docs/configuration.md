@@ -80,7 +80,7 @@ Exactly one of `name` or `labelSelector` must be set.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `apiVersion` | `string` | yes | API group and version, e.g. `snapshot.storage.k8s.io/v1`, `groupsnapshot.storage.k8s.io/v1alpha1`, or `v1` (required for `PersistentVolumeClaim`). |
-| `kind` | `string` | yes | Resource kind: `VolumeSnapshot`, `VolumeGroupSnapshot`, or `PersistentVolumeClaim`. A `VolumeGroupSnapshot` is archived as a single tar stream (one subdirectory per member volume). A `PersistentVolumeClaim` is archived from a run-scoped snapshot, one archive per claim — see [PersistentVolumeClaim sources](#persistentvolumeclaim-sources). |
+| `kind` | `string` | yes | Resource kind: `VolumeSnapshot`, `VolumeGroupSnapshot`, or `PersistentVolumeClaim`. A `VolumeGroupSnapshot` is archived as a single tar stream (one `<namespace>_<pvc>` subdirectory per member volume — see [Group member subdirectories](#group-member-subdirectories)). A `PersistentVolumeClaim` is archived from a run-scoped snapshot, one archive per claim — see [PersistentVolumeClaim sources](#persistentvolumeclaim-sources). |
 | `namespace` | `string` | no† | Kubernetes namespace containing the resource. |
 | `name` | `string` | no* | Name of a specific resource. |
 | `labelSelector` | `string` | no* | Label selector matching one or more resources (e.g. `app=myapp`). Matches within `namespace` when set; when `namespace` is omitted, it matches across all namespaces (cluster-wide, SPEC §5). |
@@ -110,6 +110,22 @@ Example entries:
 
 The third entry omits `namespace`, so its `labelSelector` matches `VolumeSnapshot`
 resources across all namespaces (cluster-wide).
+
+#### Group member subdirectories
+
+A `labelSelector` source is archived as one tar with one subdirectory per matched
+snapshot, named `<namespace>_<pvc>` from the snapshot's namespace and source PVC (e.g.
+`plex_config/`, `media_data/`). A snapshot with no source PVC uses its ZFS dataset's last
+component in place of `<pvc>`. The report lists the same names under each archive's member
+volumes. Kubernetes names cannot contain `_`, so two PVCs both called `data` in different
+namespaces get distinct subdirectories (`apps_data/`, `media_data/`), and the first `_`
+always separates the namespace from the volume.
+
+If two matched snapshots would still share a subdirectory — two snapshots of the same PVC,
+as `select: all` keeps every match — the run fails at Resolve, before any snapshot is held,
+naming both snapshots. Use `"select": "newestPerPVC"` or narrow the selector. A member
+whose `<namespace>_<pvc>` name is longer than 255 bytes also fails Resolve, since a
+restore could not create a directory with that name.
 
 #### Selecting the newest snapshot per PVC
 
@@ -160,8 +176,9 @@ Resolve, naming the claim, for:
 
 A `labelSelector` matching no claims fails Resolve naming the source. The data worker then
 re-checks that the dataset carries `democratic-csi:managed_resource=true` before
-snapshotting it. The report names each archive by `namespace/name`, its member volume by
-claim name, and its run-scoped snapshot.
+snapshotting it. The report names each archive by `namespace/name`, its member volume as
+`<namespace>_<name>` (see [Group member subdirectories](#group-member-subdirectories)),
+and its run-scoped snapshot.
 
 When two archived claims share a name in different namespaces, each is labelled
 `<namespace>-<name>` instead (an explicit `label` on a named source is kept as is). If those

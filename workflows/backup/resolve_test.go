@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/k8ssnap"
@@ -268,6 +270,112 @@ func TestResolveK8sSourcesSelectMode(t *testing.T) {
 			_, err := activities.ResolveK8sSources(t.Context(), config.Config{Sources: []config.Source{source}})
 			require.NoError(t, err)
 			assert.Equal(t, test.newest, resolver.gotRef.NewestPerPVC)
+		})
+	}
+}
+
+// TestResolveK8sSourcesMemberNames (#444): a group whose members would share a
+// subdirectory fails Resolve, before any hold or staging; same-named PVCs in
+// different namespaces do not collide.
+func TestResolveK8sSourcesMemberNames(t *testing.T) {
+	t.Parallel()
+
+	member := func(namespace, volumeSnapshot, pvc, dataset string) k8ssnap.Snapshot {
+		return k8ssnap.Snapshot{
+			Dataset: dataset, SnapshotName: "snapshot-" + volumeSnapshot,
+			Namespace: namespace, VolumeSnapshot: volumeSnapshot, PVC: pvc,
+		}
+	}
+
+	tests := []struct {
+		name         string
+		members      []k8ssnap.Snapshot
+		assertErr    require.ErrorAssertionFunc
+		wantSubdirs  []string
+		wantErrParts []string
+		wantErrType  string
+	}{
+		{
+			name: "same PVC name in different namespaces",
+			members: []k8ssnap.Snapshot{
+				member("apps", "apps-data-1", "data", "pool/pvc-a"),
+				member("media", "media-data-1", "data", "pool/pvc-b"),
+			},
+			wantSubdirs: []string{"apps_data", "media_data"},
+		},
+		{
+			name: "distinct PVCs in one namespace",
+			members: []k8ssnap.Snapshot{
+				member("apps", "db-1", "db", "pool/pvc-a"),
+				member("apps", "web-1", "web", "pool/pvc-b"),
+			},
+			wantSubdirs: []string{"apps_db", "apps_web"},
+		},
+		{
+			name: "two snapshots of one PVC fail naming both",
+			members: []k8ssnap.Snapshot{
+				member("apps", "data-1", "data", "pool/pvc-a"),
+				member("apps", "data-2", "data", "pool/pvc-a"),
+			},
+			assertErr:    require.Error,
+			wantErrParts: []string{"sources[0]", "apps/data-1", "apps/data-2", `"apps_data"`, "newestPerPVC"},
+			wantErrType:  resolveMemberCollisionErrorType,
+		},
+		{
+			name: "longest extractable subdirectory resolves",
+			members: []k8ssnap.Snapshot{
+				member("apps", "long-1", strings.Repeat("a", 250), "pool/pvc-a"),
+			},
+			wantSubdirs: []string{"apps_" + strings.Repeat("a", 250)},
+		},
+		{
+			name: "subdirectory too long to extract fails",
+			members: []k8ssnap.Snapshot{
+				member("apps", "long-1", strings.Repeat("a", 251), "pool/pvc-a"),
+			},
+			assertErr:    require.Error,
+			wantErrParts: []string{"sources[0]", "apps/long-1", "256 bytes", "over 255 bytes"},
+			wantErrType:  resolveMemberNameTooLongErrorType,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if test.assertErr == nil {
+				test.assertErr = require.NoError
+			}
+
+			activities := &ResolveControlActivities{
+				newResolver: func() (snapshotResolver, error) {
+					return fakeResolver{resolveGroup: map[string]k8ssnap.Group{
+						"backup=nightly": {Members: test.members},
+					}}, nil
+				},
+			}
+
+			source := k8sGroupSource("backup=nightly")
+			source.K8s.Namespace = ""
+
+			got, err := activities.ResolveK8sSources(t.Context(), config.Config{Sources: []config.Source{source}})
+			test.assertErr(t, err)
+
+			for _, part := range test.wantErrParts {
+				assert.ErrorContains(t, err, part)
+			}
+
+			if err != nil {
+				var applicationErr *temporal.ApplicationError
+				require.ErrorAs(t, err, &applicationErr)
+				assert.True(t, applicationErr.NonRetryable(), "a member name failure is deterministic; retrying cannot fix it")
+				assert.Equal(t, test.wantErrType, applicationErr.Type())
+
+				return
+			}
+
+			require.Len(t, got, 1)
+			assert.Equal(t, test.wantSubdirs, memberVolumes(got[0]))
 		})
 	}
 }

@@ -139,50 +139,124 @@ func TestPrepareArchivePipeline(t *testing.T) {
 }
 
 // TestPrepareGroupArchive: a group is one archive, one subdirectory per member
-// (SPEC §5).
+// (SPEC §5), namespace-qualified so same-named PVCs never collide (#444).
 func TestPrepareGroupArchive(t *testing.T) {
 	t.Parallel()
 
-	identity, recipient := generateKeypair(t)
-
-	dirA := writeTree(t, map[string]string{"data.txt": "from volume a"})
-	dirB := writeTree(t, map[string]string{"data.txt": "from volume b"})
-
-	groupArchive := ResolvedArchive{
-		SourceIndex: 0,
-		Compression: false,
-		Snapshots: []ResolvedSnapshot{
-			{ZFSPath: "pool/a@snap", PVC: "pvc-a"},
-			{ZFSPath: "pool/b@snap", PVC: "pvc-b"},
+	tests := []struct {
+		name      string
+		snapshots []ResolvedSnapshot
+		want      map[string]string
+	}{
+		{
+			name: "same PVC name in different namespaces",
+			snapshots: []ResolvedSnapshot{
+				{ZFSPath: "pool/a@snap", Namespace: "apps", PVC: "data"},
+				{ZFSPath: "pool/b@snap", Namespace: "media", PVC: "data"},
+			},
+			want: map[string]string{
+				"apps_data/data.txt":  "from volume a",
+				"media_data/data.txt": "from volume b",
+			},
+		},
+		{
+			name: "distinct PVCs in one namespace",
+			snapshots: []ResolvedSnapshot{
+				{ZFSPath: "pool/a@snap", Namespace: "apps", PVC: "pvc-a"},
+				{ZFSPath: "pool/b@snap", Namespace: "apps", PVC: "pvc-b"},
+			},
+			want: map[string]string{
+				"apps_pvc-a/data.txt": "from volume a",
+				"apps_pvc-b/data.txt": "from volume b",
+			},
 		},
 	}
 
-	activities := &PrepareActivities{
-		stagingRoot: t.TempDir(),
-		locator: fakeLocator{dirs: map[string]string{
-			"pool/a@snap": dirA,
-			"pool/b@snap": dirB,
-		}},
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	input := PrepareInput{
-		Config: config.Config{
-			Encryption: config.Encryption{Recipients: []string{recipient}},
+			identity, recipient := generateKeypair(t)
+
+			dirA := writeTree(t, map[string]string{"data.txt": "from volume a"})
+			dirB := writeTree(t, map[string]string{"data.txt": "from volume b"})
+
+			activities := &PrepareActivities{
+				stagingRoot: t.TempDir(),
+				locator: fakeLocator{dirs: map[string]string{
+					"pool/a@snap": dirA,
+					"pool/b@snap": dirB,
+				}},
+			}
+
+			input := PrepareInput{
+				Config: config.Config{
+					Encryption: config.Encryption{Recipients: []string{recipient}},
+				},
+				Archives:       []ResolvedArchive{{SourceIndex: 0, Snapshots: test.snapshots}},
+				SliceSizeBytes: 1 << 20,
+			}
+
+			staged, err := activities.prepare(t.Context(), t.TempDir(), input, nil)
+			require.NoError(t, err)
+			require.Len(t, staged, 1)
+
+			tarBytes := decryptWithAge(t, concatSlices(t, staged[0].Slices), identity)
+
+			assert.Equal(t, test.want, readTarFiles(t, tarBytes))
+		})
+	}
+}
+
+// TestMemberName: k8s members are "<namespace>_<volume>"; raw ZFS members keep
+// the dataset's last component (#444).
+func TestMemberName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		snapshot ResolvedSnapshot
+		want     string
+	}{
+		{
+			name:     "k8s snapshot is namespace-qualified",
+			snapshot: ResolvedSnapshot{ZFSPath: "pool/k8s/pvc-1@snap", Dataset: "pool/k8s/pvc-1", SnapshotName: "snap", Namespace: "apps", PVC: "data"},
+			want:     "apps_data",
 		},
-		Archives:       []ResolvedArchive{groupArchive},
-		SliceSizeBytes: 1 << 20,
+		{
+			name:     "same PVC in another namespace differs",
+			snapshot: ResolvedSnapshot{ZFSPath: "pool/k8s/pvc-2@snap", Dataset: "pool/k8s/pvc-2", SnapshotName: "snap", Namespace: "media", PVC: "data"},
+			want:     "media_data",
+		},
+		{
+			name:     "k8s snapshot without a source PVC falls back to its dataset",
+			snapshot: ResolvedSnapshot{ZFSPath: "pool/k8s/pvc-3@snap", Dataset: "pool/k8s/pvc-3", SnapshotName: "snap", Namespace: "apps"},
+			want:     "apps_pvc-3",
+		},
+		{
+			name:     "PersistentVolumeClaim run-scoped snapshot",
+			snapshot: ResolvedSnapshot{ZFSPath: "pool/k8s/pvc-4@tape-archiver-run", Dataset: "pool/k8s/pvc-4", SnapshotName: "tape-archiver-run", Namespace: "media", PVC: "library", RunScoped: true},
+			want:     "media_library",
+		},
+		{
+			name:     "raw ZFS snapshot",
+			snapshot: ResolvedSnapshot{ZFSPath: "bulk-pool-01/archive@daily"},
+			want:     "archive",
+		},
+		{
+			name:     "raw ZFS dataset",
+			snapshot: ResolvedSnapshot{ZFSPath: "bulk-pool-01/media"},
+			want:     "media",
+		},
 	}
 
-	staged, err := activities.prepare(t.Context(), t.TempDir(), input, nil)
-	require.NoError(t, err)
-	require.Len(t, staged, 1)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	tarBytes := decryptWithAge(t, concatSlices(t, staged[0].Slices), identity)
-
-	assert.Equal(t, map[string]string{
-		"pvc-a/data.txt": "from volume a",
-		"pvc-b/data.txt": "from volume b",
-	}, readTarFiles(t, tarBytes))
+			assert.Equal(t, test.want, memberName(test.snapshot))
+		})
+	}
 }
 
 // TestPrepareGroupArchiveDuplicateMember: two snapshots of one PVC derive the same
