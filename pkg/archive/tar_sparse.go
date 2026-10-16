@@ -21,6 +21,27 @@ const blockSize = 512
 // w.tw is flushed first and every piece here is whole 512-byte blocks, so later
 // w.tw entries stay aligned.
 func (w *tarWriter) writeSparseEntry(ctx context.Context, header *tar.Header, file *os.File, regions []sparseRegion) error {
+	physicalSize, err := w.writeSparseHeader(header, regions)
+	if err != nil {
+		return err
+	}
+
+	if err := w.copyRegions(ctx, file, regions); err != nil {
+		return fmt.Errorf("write sparse data %s: %w", header.Name, err)
+	}
+
+	if pad := blockPadding(int(physicalSize)); pad > 0 {
+		if _, err := w.raw.Write(make([]byte, pad)); err != nil {
+			return fmt.Errorf("pad sparse data %s: %w", header.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// writeSparseHeader writes the member's PAX header, data header, and sparse
+// map, returning the member's physical size (map plus data regions).
+func (w *tarWriter) writeSparseHeader(header *tar.Header, regions []sparseRegion) (int64, error) {
 	realSize := header.Size
 	realName := header.Name
 
@@ -42,44 +63,38 @@ func (w *tarWriter) writeSparseEntry(ctx context.Context, header *tar.Header, fi
 	}
 	records = appendTimeRecords(records, header)
 
+	// Fields that don't fit USTAR go in PAX records, as archive/tar does for
+	// regular entries: GNU base-256 makes Go's reader reject the header, and
+	// truncation loses data.
+	dataHeader := rawHeader{
+		name:     ustarName(realName),
+		mode:     octalOrRecord(&records, "", 8, header.Mode),
+		uid:      octalOrRecord(&records, "uid", 8, int64(header.Uid)),
+		gid:      octalOrRecord(&records, "gid", 8, int64(header.Gid)),
+		size:     octalOrRecord(&records, "size", 12, physicalSize),
+		modTime:  octalOrRecord(&records, "", 12, header.ModTime.Unix()), // mtime record above
+		typeflag: tar.TypeReg,
+		uname:    stringOrRecord(&records, "uname", 32, header.Uname),
+		gname:    stringOrRecord(&records, "gname", 32, header.Gname),
+	}
+
 	if err := w.tw.Flush(); err != nil {
-		return fmt.Errorf("flush before sparse %s: %w", realName, err)
+		return 0, fmt.Errorf("flush before sparse %s: %w", realName, err)
 	}
 
 	if err := writePaxExtendedHeader(w.raw, realName, records); err != nil {
-		return fmt.Errorf("write sparse pax header %s: %w", realName, err)
+		return 0, fmt.Errorf("write sparse pax header %s: %w", realName, err)
 	}
 
-	dataHeader := rawHeader{
-		name:     ustarName(realName),
-		mode:     header.Mode,
-		uid:      int64(header.Uid),
-		gid:      int64(header.Gid),
-		size:     physicalSize,
-		modTime:  header.ModTime.Unix(),
-		typeflag: tar.TypeReg,
-		uname:    header.Uname,
-		gname:    header.Gname,
-	}
 	if err := dataHeader.writeTo(w.raw); err != nil {
-		return fmt.Errorf("write sparse data header %s: %w", realName, err)
+		return 0, fmt.Errorf("write sparse data header %s: %w", realName, err)
 	}
 
 	if _, err := w.raw.Write(sparseMap); err != nil {
-		return fmt.Errorf("write sparse map %s: %w", realName, err)
+		return 0, fmt.Errorf("write sparse map %s: %w", realName, err)
 	}
 
-	if err := w.copyRegions(ctx, file, regions); err != nil {
-		return fmt.Errorf("write sparse data %s: %w", realName, err)
-	}
-
-	if pad := blockPadding(int(physicalSize)); pad > 0 {
-		if _, err := w.raw.Write(make([]byte, pad)); err != nil {
-			return fmt.Errorf("pad sparse data %s: %w", realName, err)
-		}
-	}
-
-	return nil
+	return physicalSize, nil
 }
 
 func (w *tarWriter) copyRegions(ctx context.Context, file *os.File, regions []sparseRegion) error {
@@ -135,6 +150,32 @@ func buildSparseMap(regions []sparseRegion, realSize int64) []byte {
 	}
 
 	return encoded
+}
+
+// octalOrRecord returns x if it fits a width-byte USTAR octal field, else
+// records it under key (if any) and returns 0, as archive/tar does.
+func octalOrRecord(records *[]paxRecord, key string, width int, x int64) int64 {
+	if fitsOctal(width, x) {
+		return x
+	}
+
+	if key != "" {
+		*records = append(*records, paxRecord{key, strconv.FormatInt(x, 10)})
+	}
+
+	return 0
+}
+
+// stringOrRecord returns s if it is ASCII and fits a width-byte USTAR field,
+// else records it under key and returns the ASCII part, as archive/tar does.
+func stringOrRecord(records *[]paxRecord, key string, width int, s string) string {
+	if len(s) <= width && isASCII(s) {
+		return s
+	}
+
+	*records = append(*records, paxRecord{key, s})
+
+	return toASCII(s)
 }
 
 // appendTimeRecords records mtime to the nanosecond, matching writeEntry's PAX
@@ -197,8 +238,14 @@ func formatPaxRecord(key, value string) string {
 }
 
 func formatPaxTime(t time.Time) string {
-	if nanos := t.Nanosecond(); nanos != 0 {
-		return fmt.Sprintf("%d.%09d", t.Unix(), nanos)
+	secs, nanos := t.Unix(), t.Nanosecond()
+	if nanos != 0 && secs < 0 {
+		// The fraction extends the magnitude: -1.25s is Unix -2 plus 750ms.
+		return fmt.Sprintf("-%d.%09d", -(secs + 1), 1_000_000_000-nanos)
+	}
+
+	if nanos != 0 {
+		return fmt.Sprintf("%d.%09d", secs, nanos)
 	}
 
 	return strconv.FormatInt(t.Unix(), 10)
@@ -247,27 +294,48 @@ func copyField(field []byte, s string) {
 	copy(field, s)
 }
 
-// putNumber encodes octal with a trailing NUL, or GNU base-256 if it won't fit.
+// putNumber encodes octal with a trailing NUL; callers ensure x fits.
 func putNumber(field []byte, x int64) {
-	if x >= 0 && x < int64(1)<<uint(3*(len(field)-1)) {
-		for i := range field {
-			field[i] = '0'
+	for i := range field {
+		field[i] = '0'
+	}
+
+	field[len(field)-1] = 0
+
+	octal := strconv.FormatInt(x, 8)
+	copy(field[len(field)-1-len(octal):], octal)
+}
+
+func fitsOctal(width int, x int64) bool {
+	return x >= 0 && x < int64(1)<<uint(3*(width-1))
+}
+
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] >= 0x80 || s[i] == 0 {
+			return false
 		}
-
-		field[len(field)-1] = 0
-
-		octal := strconv.FormatInt(x, 8)
-		copy(field[len(field)-1-len(octal):], octal)
-
-		return
 	}
 
-	for i := len(field) - 1; i >= 0; i-- {
-		field[i] = byte(x)
-		x >>= 8
+	return true
+}
+
+// toASCII drops non-ASCII and NUL bytes: Go's reader rejects a header block
+// holding any byte >= 0x80.
+func toASCII(s string) string {
+	if isASCII(s) {
+		return s
 	}
 
-	field[0] |= 0x80
+	var builder strings.Builder
+
+	for i := range len(s) {
+		if s[i] < 0x80 && s[i] != 0 {
+			builder.WriteByte(s[i])
+		}
+	}
+
+	return builder.String()
 }
 
 // putChecksum sums every byte with the checksum field taken as spaces.
@@ -288,6 +356,7 @@ func putChecksum(block *[blockSize]byte) {
 
 // ustarName is only a fallback; the real name is in the PAX records.
 func ustarName(name string) string {
+	name = toASCII(name)
 	if len(name) <= 100 {
 		return name
 	}
@@ -296,7 +365,7 @@ func ustarName(name string) string {
 }
 
 func paxHeaderName(name string) string {
-	base := slashpath.Base(name)
+	base := toASCII(slashpath.Base(name))
 
 	full := "PaxHeaders.0/" + base
 	if len(full) > 100 {

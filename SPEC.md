@@ -441,7 +441,11 @@ All formats are open and widely implemented, for 20-year recoverability.
     logically deduplicated dataset (e.g. the *arr-managed media dataset) is not written
     twice. Sparse files are stored in **GNU sparse 1.0** (PAX `GNU.sparse.*`) form —
     their holes are not written out and are restored as zeros — a construct the shipped
-    static GNU `tar` decodes natively.
+    static GNU `tar` decodes natively. On every entry, sparse or not, a value too large
+    for its USTAR header field (a uid/gid above 2097151, a user or group name longer
+    than 32 bytes or not ASCII, a stored size of 8 GiB or more) is carried in a PAX
+    record rather than GNU base-256 encoding or truncation, so both GNU `tar` and
+    other PAX readers restore it exactly.
   - **What the archive does NOT capture:** extended attributes (`user.*`, `security.*`),
     POSIX ACLs, and file capabilities (`security.capability`, e.g. `setcap` binaries)
     are **not** preserved; a `tar`-level restore reproduces file contents and the mode
