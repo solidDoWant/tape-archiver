@@ -3,11 +3,14 @@ package archive_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -203,6 +206,22 @@ func TestSplitCancelledMidSlice(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Split did not return after cancellation; per-read cancellation is not working")
 	}
+}
+
+// TestSplitSourceErrorMidSlice: a source failure partway through a later slice
+// fails the whole Split, so no digest is ever returned for a partial staging
+// (SPEC §2 principle 1).
+func TestSplitSourceErrorMidSlice(t *testing.T) {
+	t.Parallel()
+
+	sourceErr := errors.New("upstream stage failed")
+
+	// Two full 256-byte slices, then 100 bytes into the third, then the error.
+	src := io.MultiReader(bytes.NewReader(make([]byte, 2*256+100)), iotest.ErrReader(sourceErr))
+
+	slices, err := archive.Split(t.Context(), src, 256, t.TempDir(), "archive")
+	require.ErrorIs(t, err, sourceErr)
+	assert.Nil(t, slices)
 }
 
 // cancelThenBlockReader yields one chunk and cancels, then blocks forever.
