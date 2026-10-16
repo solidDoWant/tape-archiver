@@ -22,6 +22,11 @@ const phaseUnavailable = "unavailable"
 
 const phaseNone = "none"
 
+// statusQueryTimeout bounds the live phase query: until the server notices no
+// worker is polling, such a query waits out its deadline, and history answers
+// without one.
+const statusQueryTimeout = 5 * time.Second
+
 // statusClient is the slice of the Temporal client status needs.
 type statusClient interface {
 	DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
@@ -86,6 +91,9 @@ func writeStatus(ctx context.Context, temporalClient statusClient, out io.Writer
 }
 
 func queryLastCompletedPhase(ctx context.Context, temporalClient statusClient, runID string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, statusQueryTimeout)
+	defer cancel()
+
 	response, err := temporalClient.QueryWorkflow(ctx, backupWorkflowID, runID, backup.LastCompletedPhaseQuery)
 	if err != nil {
 		return "", err

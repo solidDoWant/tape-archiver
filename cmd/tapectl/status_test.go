@@ -72,6 +72,9 @@ type fakeStatusClient struct {
 	queryErr   error
 	events     []*historypb.HistoryEvent
 	historyErr error
+	// blockQuery makes the query wait for its context, like a query to a task
+	// queue no worker is polling.
+	blockQuery bool
 }
 
 func (f *fakeStatusClient) DescribeWorkflowExecution(context.Context, string, string) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
@@ -83,9 +86,15 @@ func (f *fakeStatusClient) DescribeWorkflowExecution(context.Context, string, st
 	}, nil
 }
 
-func (f *fakeStatusClient) QueryWorkflow(_ context.Context, _, runID, queryType string, _ ...interface{}) (converter.EncodedValue, error) {
+func (f *fakeStatusClient) QueryWorkflow(ctx context.Context, _, runID, queryType string, _ ...interface{}) (converter.EncodedValue, error) {
 	if runID != statusTestRunID || queryType != backup.LastCompletedPhaseQuery {
 		return nil, errors.New("unexpected query")
+	}
+
+	if f.blockQuery {
+		<-ctx.Done()
+
+		return nil, ctx.Err()
 	}
 
 	if f.queryErr != nil {
@@ -168,6 +177,12 @@ func TestWriteStatus(t *testing.T) {
 			wantCurrent:       preparing,
 		},
 		{
+			name:              "query blocks with no worker polling, history derives the phase",
+			client:            &fakeStatusClient{blockQuery: true, events: preparingHistory()},
+			wantLastCompleted: backup.PhaseResolve,
+			wantCurrent:       preparing,
+		},
+		{
 			name:              "query and history both fail",
 			client:            &fakeStatusClient{queryErr: errNoWorker, historyErr: errors.New("history unavailable")},
 			wantLastCompleted: phaseUnavailable,
@@ -184,7 +199,11 @@ func TestWriteStatus(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var out bytes.Buffer
+
+			started := time.Now()
+
 			require.NoError(t, writeStatus(t.Context(), test.client, &out))
+			assert.Less(t, time.Since(started), statusQueryTimeout+time.Second, "status must not wait on an unanswered query")
 
 			want := "Workflow:             " + backupWorkflowID + "\n" +
 				"Status:               Running\n" +

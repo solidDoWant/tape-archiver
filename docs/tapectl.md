@@ -176,7 +176,7 @@ Last completed phase: Resolve
 Current phase:        Prepare (running since 2026-10-01T12:03:00Z)
 ```
 
-The last completed phase is read via a Temporal query answered by the running workflow. A query needs a polling control worker, which KEDA scales to zero during long data-queue activities such as Prepare and Write, so when the query fails the phase is derived from the run's workflow history instead — the same derivation the web UI's phase timeline uses. It is reported as `unavailable` only when the history cannot be read either; the execution status is still shown. Before any phase has completed it is reported as `none`.
+The last completed phase is read via a Temporal query answered by the running workflow. A query needs a polling control worker, which KEDA scales to zero during long data-queue activities such as Prepare and Write, so the query is given 5 seconds, and when it fails or times out the phase is derived from the run's workflow history instead — the same derivation the web UI's phase timeline uses. It is reported as `unavailable` only when the history cannot be read either; the execution status is still shown. Before any phase has completed it is reported as `none`.
 
 The current phase is always derived from workflow history and matches the web UI's active phase(s), each with the time its first activity was scheduled (UTC). The interleaved Load/Write/Eject path can list more than one, comma-separated. It is `none` once the run has closed (or before any activity is scheduled) and `unavailable` when the history cannot be read.
 
