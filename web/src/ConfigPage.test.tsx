@@ -739,3 +739,95 @@ describe('ConfigPage', () => {
     await settle()
   })
 })
+
+// uiConfigWithPresets is the default stub's deploy config plus run presets (issue #417).
+function uiConfigWithPresets(presets: unknown[]) {
+  return {
+    status: 200,
+    body: {
+      temporalUiBaseUrl: '',
+      temporalNamespace: '',
+      library: { changer: '/dev/sch0', drives: ['/dev/nst0'], slotCount: 8, cleaningSlots: [], ioStationSlots: [] },
+      delivery: { webhookConfigured: true, opticalBurnDrives: [] },
+      presets,
+    },
+  }
+}
+
+const archivePreset = {
+  name: 'host-archive',
+  description: 'Host datasets on the bulk pool',
+  config: {
+    sources: [{ zfsPath: { name: 'bulk-pool-01/archive' } }],
+    copies: 1,
+    encryption: { recipients: ['age1pq1zl8m99jvxqmkqq5jwgq8n6j9w66rlahzh5lrpttmr7pldgxqn7uqf4'] },
+  },
+}
+
+describe('ConfigPage run presets (issue #417)', () => {
+  it('offers each preset by name and description', async () => {
+    renderPage({
+      '/api/config/ui': uiConfigWithPresets([
+        archivePreset,
+        { name: 'nightly-apps', description: 'Nightly app snapshots', config: {} },
+      ]),
+    })
+
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Presets' })).toBeInTheDocument())
+    expect(screen.getByText('host-archive')).toBeInTheDocument()
+    expect(screen.getByText('Host datasets on the bulk pool')).toBeInTheDocument()
+    expect(screen.getByText('nightly-apps')).toBeInTheDocument()
+    expect(screen.getByText('Nightly app snapshots')).toBeInTheDocument()
+
+    await settle()
+  })
+
+  it('shows no preset picker when the deployment configures none', async () => {
+    renderPage({ '/api/config/ui': uiConfigWithPresets([]) })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Slot 1' })).toBeInTheDocument())
+    expect(screen.queryByRole('region', { name: 'Presets' })).not.toBeInTheDocument()
+
+    await settle()
+  })
+
+  it('loads a preset into the form, keeps it editable, and submits it with the deploy-owned fields', async () => {
+    const onViewRun = vi.fn()
+    const fetchMock = renderPage(
+      {
+        '/api/config/ui': uiConfigWithPresets([archivePreset]),
+        'POST /api/runs': { status: 201, body: { workflowId: 'backup', runId: 'run-preset-1' } },
+      },
+      onViewRun,
+    )
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Slot 1' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Load preset host-archive' }))
+
+    expect(screen.getByPlaceholderText('bulk-pool-01/dataset')).toHaveValue('bulk-pool-01/archive')
+    expect(screen.getByLabelText('copies')).toHaveValue(1)
+    expect(screen.getByText(/loaded preset "host-archive"/i)).toBeInTheDocument()
+
+    // Every non-deploy field stays editable after loading.
+    fireEvent.change(screen.getByPlaceholderText('bulk-pool-01/dataset'), { target: { value: 'bulk-pool-01/edited' } })
+    fireEvent.change(screen.getByLabelText(/identity \/ private key/i), { target: { value: 'AGE-SECRET-KEY-PQ-1EXAMPLE' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Slot 3' }))
+
+    fireEvent.click(screen.getByRole('button', { name: /review →/i }))
+    await waitFor(() => expect(screen.getByText('STEP 2 · REVIEW')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /^submit run$/i }))
+    await waitFor(() => expect(onViewRun).toHaveBeenCalledWith('run-preset-1'))
+
+    const submitCall = fetchMock.mock.calls.find(([url, init]) => url === '/api/runs' && init?.method === 'POST')
+    const submitted = JSON.parse(String(submitCall?.[1]?.body)) as {
+      config: { sources: unknown[]; copies: number; library: { changer: string; drives: string[]; blankSlots: number[] } }
+    }
+    expect(submitted.config.sources).toEqual([{ zfsPath: { name: 'bulk-pool-01/edited' }, compression: true }])
+    expect(submitted.config.copies).toBe(1)
+    expect(submitted.config.library.changer).toBe('/dev/sch0')
+    expect(submitted.config.library.drives).toEqual(['/dev/nst0'])
+    expect(submitted.config.library.blankSlots).toEqual([3])
+
+    await settle()
+  })
+})

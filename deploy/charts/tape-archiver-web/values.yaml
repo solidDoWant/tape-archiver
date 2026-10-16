@@ -228,6 +228,25 @@ config:
       # can still supply them per run via the config page's JSON / paste mode.
       opticalBurnDrives: []
 
+    # presets are named partial run configs the "Start new run" page offers to
+    # pre-fill its form (issue #417 — docs/web-ui.md "Run presets"). Each entry
+    # has a unique name, an optional description, and a config holding any subset
+    # of the run config (schemas/run-config.schema.json), typically sources plus
+    # copies/encryption.recipients. Rendered into a ConfigMap mounted into the pod
+    # (RUN_PRESETS_FILE). cmd/web validates each preset at startup merged with the
+    # deploy-owned fields above; an invalid one is logged by name and not offered.
+    # A preset must not set encryption.identity or delivery.webhookUrl (secrets).
+    # Example:
+    #   presets:
+    #     - name: host-archive
+    #       description: Host datasets on the bulk pool
+    #       config:
+    #         sources:
+    #           - zfsPath:
+    #               name: bulk-pool-01/archive
+    #         copies: 2
+    presets: []
+
 # resources follows the bjw-s app-template schema, same convention as
 # deploy/charts/tape-archiver-control-worker. Values here are deep-merged over the
 # chart-computed controller, Service, env vars, and podMonitor; user-supplied values

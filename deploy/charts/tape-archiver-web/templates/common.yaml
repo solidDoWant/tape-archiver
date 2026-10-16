@@ -5,6 +5,7 @@
 {{- $temporalConfigDir  := "/etc/temporal" -}}
 {{- $temporalTLSRoot    := "/etc/temporal-tls" -}}
 {{- $temporalConfigFile := printf "%s/temporal.toml" $temporalConfigDir -}}
+{{- $presetsDir         := "/etc/tape-archiver/presets" -}}
 
 {{/* The single controller and its container are both named "main" so operator
    overrides have a stable path (resources.controllers.main.containers.main.*). */}}
@@ -350,6 +351,18 @@ resolution (deploy/charts/tape-archiver-control-worker/templates/common.yaml).
   "identifier" "temporal-config"
   "advancedMounts" (dict $controllerName (dict $containerName (list $temporalConfigMount)))
 ) -}}
+
+{{/* Run presets (issue #417): a JSON array in a ConfigMap, read once at startup. */}}
+{{- $presets := .Values.config.web.presets | default list -}}
+{{- if $presets -}}
+  {{- $_ := set $computedConfigMaps "run-presets" (dict "data" (dict "presets.json" ($presets | toJson))) -}}
+  {{- $_ := set $computedPersistence "run-presets" (dict
+    "type" "configMap"
+    "identifier" "run-presets"
+    "advancedMounts" (dict $controllerName (dict $containerName (list (dict "path" $presetsDir "readOnly" true))))
+  ) -}}
+  {{- $_ := set $env "RUN_PRESETS_FILE" (printf "%s/presets.json" $presetsDir) -}}
+{{- end -}}
 
 {{/* TLS Secret mounts (one per unique Secret name), mounted RO. Each mount projects
    the entire Secret as a directory under <tls-root>/<secret>/; the TOML references

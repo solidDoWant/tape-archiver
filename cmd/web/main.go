@@ -163,6 +163,12 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 	deployCleaningSlots := splitIntList(getenv("LIBRARY_CLEANING_SLOTS"))
 	deployIOStationSlots := splitIntList(getenv("LIBRARY_IO_STATION_SLOTS"))
 
+	// Run presets (issue #417) are optional; an unreadable file must not stop the UI.
+	presets, err := runsapi.LoadPresetsFile(getenv("RUN_PRESETS_FILE"))
+	if err != nil {
+		slog.Error("web: run presets unavailable", "error", err)
+	}
+
 	handler, err := webserver.NewHandler(assets, runsapi.New(
 		temporalClient,
 		runsapi.WithDrainContext(drainCtx),
@@ -170,6 +176,7 @@ func run(ctx context.Context, getenv func(string) string, ready func(addr string
 		runsapi.WithDeployConfig(deployChanger, deployDrives, deployWebhookURL),
 		runsapi.WithOpticalBurnerDrives(deployOpticalBurnerDrives),
 		runsapi.WithLibraryTopology(deploySlotCount, deployCleaningSlots, deployIOStationSlots),
+		runsapi.WithPresets(presets),
 	))
 	if err != nil {
 		return fmt.Errorf("build web server handler: %w", err)

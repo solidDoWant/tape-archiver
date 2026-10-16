@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { apiFetch } from './api'
-import type { DeployConfig } from './configModel'
+import type { DeployConfig, RunConfig } from './configModel'
 
 // UiConfig mirrors pkg/runsapi's GET /api/config/ui JSON shape: server-provided
 // deploy-time config the SPA needs. temporalUiBaseUrl is the browsable Temporal
@@ -34,6 +34,21 @@ export interface UiConfig {
   // own webhook to every submitted run server-side. opticalBurnDrives is []
   // (never null) when the deployment did not configure any burner drives.
   delivery: { webhookConfigured: boolean; opticalBurnDrives: string[] }
+  // presets are the deployment's valid run presets (issue #417); optional so an
+  // older server (or a test stub) without the field reads as "no presets".
+  presets?: RunPreset[]
+}
+
+// RunPreset is a named partial run config the "Start new run" page can load.
+export interface RunPreset {
+  name: string
+  description: string
+  config: Partial<RunConfig>
+}
+
+// presetsFrom yields the offered presets, [] until loaded or on error.
+export function presetsFrom(state: UiConfigState): RunPreset[] {
+  return state.status === 'loaded' && Array.isArray(state.config.presets) ? state.config.presets : []
 }
 
 export type UiConfigState =
