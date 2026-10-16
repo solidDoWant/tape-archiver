@@ -63,6 +63,12 @@ func TestSparseHeaderFieldsUsePAX(t *testing.T) {
 			},
 		},
 		{
+			name: "uid and gid one above the octal limit",
+			modify: func(header *tar.Header) {
+				header.Uid, header.Gid = maxOctal8+1, maxOctal8+1
+			},
+		},
+		{
 			name: "uid and gid above the octal limit",
 			modify: func(header *tar.Header) {
 				header.Uid, header.Gid = 3_000_000, 4_000_000
