@@ -108,6 +108,33 @@ one is removed) and `tape_archiver_write_below_floor` is `0`. A dry run mirrors 
 library, so its virtual tapes carry real barcodes: alert on `dry_run="false"`, so a
 rehearsal never fires on, or overwrites, a real tape's reading.
 
+`tape_archiver_write_measured_timestamp_seconds` (same labels) is the Unix time the
+other gauges were last set for that `barcode`/`dry_run`. Like them, it is set once per
+tape write and kept for the data worker's lifetime.
+
+### Alerting on write health
+
+The write-health gauges never expire: a tape written weeks ago keeps its last reading
+until the data worker restarts. An alert on a gauge alone therefore fires indefinitely
+after a single bad write. Bound every write-health alert by the measurement time, e.g.
+to writes in the last 24 hours:
+
+```promql
+# TapeAlert flags raised by a recent real write
+tape_archiver_write_tapealert_flags{dry_run="false"} > 0
+  and on(barcode, dry_run)
+(time() - tape_archiver_write_measured_timestamp_seconds) < 86400
+
+# Recent real write below the speed-matching floor
+tape_archiver_write_below_floor{dry_run="false"} == 1
+  and on(barcode, dry_run)
+(time() - tape_archiver_write_measured_timestamp_seconds) < 86400
+```
+
+Choose the window to cover at least one evaluation/notification cycle after a run;
+the alert resolves once the window passes, and the per-run report and Discord summary
+remain the durable record.
+
 ## The age private identity is included on purpose
 
 The report **intentionally** contains the age private identity

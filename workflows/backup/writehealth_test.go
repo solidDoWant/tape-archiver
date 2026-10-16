@@ -394,7 +394,7 @@ func TestNewWriteHealthActivitiesNilRegisterer(t *testing.T) {
 	assert.Nil(t, activities.metrics, "a nil registry disables the gauges")
 
 	assert.NotPanics(t, func() {
-		activities.metrics.record("TAPE0001L6", false, WriteHealth{Measured: true, ThroughputMBps: 100})
+		activities.metrics.record("TAPE0001L6", false, WriteHealth{Measured: true, ThroughputMBps: 100}, time.Now())
 	})
 }
 
@@ -487,4 +487,57 @@ func TestWriteHealthNotFalseFlaggedByPAR2Window(t *testing.T) {
 	assert.InDelta(t, 120.0, slicesOnly.ThroughputMBps, 0.001)
 	assert.True(t, slicesOnly.BelowFloor,
 		"slice-only counting mismeasures the fill-to-capacity window as below floor — the bug this fixes")
+}
+
+// TestMeasureWriteHealthRecordsMeasuredTimestamp: each barcode/dry_run series
+// carries the time of its own latest measurement, so alerts can bound the
+// never-expiring gauges by recency (#445).
+func TestMeasureWriteHealthRecordsMeasuredTimestamp(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	activities := newWriteHealthActivities(reg)
+	require.NotNil(t, activities.metrics)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	base := time.Date(2026, 10, 16, 12, 0, 0, 500_000_000, time.UTC)
+
+	measurements := []struct {
+		barcode string
+		dryRun  bool
+		at      time.Time
+	}{
+		{barcode: "JCY632L5", dryRun: false, at: base},
+		{barcode: "JCY632L5", dryRun: true, at: base.Add(time.Hour)},
+		{barcode: "JCY633L5", dryRun: false, at: base.Add(2 * time.Hour)},
+		// A later write of the same tape refreshes only its own series.
+		{barcode: "JCY633L5", dryRun: false, at: base.Add(3 * time.Hour)},
+	}
+
+	for _, measurement := range measurements {
+		activities.now = func() time.Time { return measurement.at }
+
+		_, err := activities.MeasureWriteHealth(ctx, MeasureWriteHealthInput{
+			Device: "/dev/does-not-exist", Barcode: tape.Barcode(measurement.barcode),
+			BytesWritten: 6_000_000_000, Elapsed: 60 * time.Second, FloorMBps: 40, FloorKnown: true,
+			DryRun: measurement.dryRun,
+		})
+		require.NoError(t, err)
+	}
+
+	expected := map[[2]string]time.Time{
+		{"JCY632L5", "false"}: base,
+		{"JCY632L5", "true"}:  base.Add(time.Hour),
+		{"JCY633L5", "false"}: base.Add(3 * time.Hour),
+	}
+
+	assert.Equal(t, len(expected), testutil.CollectAndCount(activities.metrics.measuredAt))
+
+	for labels, at := range expected {
+		assert.InDelta(t, float64(at.UnixNano())/1e9,
+			testutil.ToFloat64(activities.metrics.measuredAt.WithLabelValues(labels[0], labels[1])), 0.001,
+			"measured timestamp for %v", labels)
+	}
 }
