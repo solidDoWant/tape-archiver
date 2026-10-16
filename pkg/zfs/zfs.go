@@ -1,5 +1,6 @@
-// Package zfs provides read-only access to ZFS snapshots (via .zfs/snapshot/,
-// not zfs send) and dataset properties via the zfs CLI (SPEC.md §4.3, §6).
+// Package zfs reads ZFS snapshots (via .zfs/snapshot/, not zfs send) and
+// dataset properties, and holds, creates and destroys snapshots, via the zfs
+// CLI (SPEC.md §4.3, §6). It never creates or destroys datasets.
 package zfs
 
 import (
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -365,4 +367,196 @@ func parseLogicalReferenced(out []byte) (int64, error) {
 	}
 
 	return value, nil
+}
+
+// run executes zfs and returns stdout and trimmed stderr, folding stderr into
+// any error.
+func run(ctx context.Context, args ...string) ([]byte, string, error) {
+	cmd := exec.CommandContext(ctx, "zfs", args...)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+
+	msg := strings.TrimSpace(stderr.String())
+
+	switch {
+	case err == nil:
+		return out, msg, nil
+	case msg != "":
+		return out, msg, fmt.Errorf("%s: %w: %s", cmd, err, msg)
+	default:
+		return out, msg, fmt.Errorf("%s: %w", cmd, err)
+	}
+}
+
+// CreateSnapshots takes every snapshot in one `zfs snapshot` call, which is
+// atomic when they share a pool, setting properties on each at creation.
+func CreateSnapshots(ctx context.Context, properties map[string]string, snapshots []string) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(properties))
+	for key := range properties {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	args := []string{"snapshot"}
+	for _, key := range keys {
+		args = append(args, "-o", key+"="+properties[key])
+	}
+
+	_, _, err := run(ctx, append(args, snapshots...)...)
+
+	return err
+}
+
+// DestroySnapshot destroys one snapshot. It refuses anything but a single plain
+// snapshot name (no dataset, range, list or option syntax). An absent snapshot is
+// success, so it can run on every exit path.
+func DestroySnapshot(ctx context.Context, snapshot string) error {
+	dataset, name, found := strings.Cut(snapshot, "@")
+	if !found || dataset == "" || name == "" || strings.HasPrefix(dataset, "-") || strings.ContainsAny(name, "@%,") {
+		return fmt.Errorf("refusing to destroy %q: not a single snapshot name", snapshot)
+	}
+
+	_, msg, err := run(ctx, "destroy", snapshot)
+	if err != nil && (strings.Contains(msg, ErrNotExist.Error()) || strings.Contains(msg, "could not find any snapshots")) {
+		return nil
+	}
+
+	return err
+}
+
+// Creation returns a dataset's or snapshot's creation time in Unix seconds.
+func Creation(ctx context.Context, name string) (int64, error) {
+	out, _, err := run(ctx, "get", "-Hp", "-o", "value", "creation", name)
+	if err != nil {
+		return 0, err
+	}
+
+	creation, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse creation of %s: %w", name, err)
+	}
+
+	return creation, nil
+}
+
+// PropertySource returns where property's value on name comes from: "local",
+// "inherited from <dataset>", "-" when unset, and so on.
+func PropertySource(ctx context.Context, name, property string) (string, error) {
+	out, _, err := run(ctx, "get", "-H", "-o", "source", property, name)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(out)), nil
+}
+
+// PropertyRecord is one dataset's value of a property.
+type PropertyRecord struct {
+	Name  string
+	Value string
+}
+
+// LocalProperty lists the datasets of datasetType ("filesystem", "snapshot")
+// where property is set locally, at or below root, or in every pool when root
+// is empty. A value may embed a newline that fabricates a record, so confirm a
+// record with UserProperty and PropertySource before acting on it.
+func LocalProperty(ctx context.Context, property, datasetType, root string) ([]PropertyRecord, error) {
+	args := []string{"get", "-Hp", "-s", "local", "-t", datasetType, "-o", "name,value"}
+	if root != "" {
+		args = append(args, "-r", property, root)
+	} else {
+		args = append(args, property)
+	}
+
+	out, _, err := run(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return parsePropertyRecords(out), nil
+}
+
+func parsePropertyRecords(out []byte) []PropertyRecord {
+	var records []PropertyRecord
+
+	for _, line := range strings.Split(string(out), "\n") {
+		name, value, found := strings.Cut(line, "\t")
+		if !found || name == "" {
+			continue
+		}
+
+		records = append(records, PropertyRecord{Name: name, Value: value})
+	}
+
+	return records
+}
+
+// Filesystem is one filesystem dataset and where it is mounted.
+type Filesystem struct {
+	Name       string
+	Mountpoint string
+	Mounted    bool
+}
+
+// Filesystems lists every filesystem dataset in every pool.
+func Filesystems(ctx context.Context) ([]Filesystem, error) {
+	out, _, err := run(ctx, "list", "-Hp", "-t", "filesystem", "-o", "name,mountpoint,mounted")
+	if err != nil {
+		return nil, err
+	}
+
+	return parseFilesystems(out)
+}
+
+func parseFilesystems(out []byte) ([]Filesystem, error) {
+	var filesystems []Filesystem
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("unexpected zfs list output line: %q", line)
+		}
+
+		filesystems = append(filesystems, Filesystem{Name: fields[0], Mountpoint: fields[1], Mounted: fields[2] == "yes"})
+	}
+
+	return filesystems, nil
+}
+
+// ContainingFilesystem returns the mounted filesystem whose mountpoint is the
+// longest prefix of path, or "" when path is on none of them.
+func ContainingFilesystem(filesystems []Filesystem, path string) string {
+	path = filepath.Clean(path)
+
+	best, bestLen := "", -1
+
+	for _, filesystem := range filesystems {
+		if !filesystem.Mounted || !filepath.IsAbs(filesystem.Mountpoint) {
+			continue
+		}
+
+		mount := filepath.Clean(filesystem.Mountpoint)
+		if path != mount && !strings.HasPrefix(path, strings.TrimSuffix(mount, "/")+"/") {
+			continue
+		}
+
+		if len(mount) > bestLen {
+			best, bestLen = filesystem.Name, len(mount)
+		}
+	}
+
+	return best
 }

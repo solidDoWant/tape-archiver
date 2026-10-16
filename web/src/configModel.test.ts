@@ -121,8 +121,36 @@ describe('buildConfig', () => {
 
     expect(roundTripped.sources[0].zfsSnapshot).toBe('newest')
     expect(roundTripped.sources[0].zfsPrefix).toBe('daily-')
-    expect(roundTripped.sources[1].zfsSnapshot).toBe('live')
+    expect(roundTripped.sources[1].zfsSnapshot).toBe('named')
     expect(roundTripped.sources[2].k8sSelect).toBe('newestPerPVC')
+  })
+
+  it('builds a zfsProperty source (root optional) and round-trips it', () => {
+    const form = defaultFormState()
+    form.sources = [
+      {
+        ...newSourceFormState(),
+        type: 'zfsProperty',
+        label: 'dropped',
+        zfsPropertyName: ' tape:archive ',
+        zfsPropertyValue: 'true',
+        zfsPropertyUnder: ' pool ',
+      },
+      { ...newSourceFormState(), type: 'zfsProperty', zfsPropertyName: 'tape:archive', zfsPropertyValue: 'yes' },
+    ]
+
+    const config = buildConfig(form, testDeploy)
+
+    expect(config.sources[0]).toEqual({ compression: true, zfsProperty: { name: 'tape:archive', value: 'true', under: 'pool' } })
+    expect(config.sources[1].zfsProperty).toEqual({ name: 'tape:archive', value: 'yes' })
+
+    const roundTripped = configToFormState(config)
+
+    expect(roundTripped.sources[0].type).toBe('zfsProperty')
+    expect(roundTripped.sources[0].zfsPropertyName).toBe('tape:archive')
+    expect(roundTripped.sources[0].zfsPropertyValue).toBe('true')
+    expect(roundTripped.sources[0].zfsPropertyUnder).toBe('pool')
+    expect(roundTripped.sources[1].zfsPropertyUnder).toBe('')
   })
 
   it('builds fillToCapacity redundancy instead of targetPercentage when that mode is selected', () => {

@@ -19,7 +19,11 @@ The report contains, at minimum:
   compressed, and per-file sizes and SHA-256 checksums. Compression is configured per
   source ([`sources[].compression`](configuration.md)), so it is recorded per archive:
   it tells a recoverer whether a `zstd` step stands between the decrypted stream and the
-  tar, rather than leaving them to identify the format from its magic bytes.
+  tar, rather than leaving them to identify the format from its magic bytes. A snapshot
+  the run took of a live dataset ([run-scoped](configuration.md#run-scoped-snapshots)) is
+  listed as `<dataset>@tape-archiver-<run id> (taken by this run at <UTC time>; destroyed
+  after it)`, so the report records the archive's point in time even though the snapshot
+  no longer exists.
 - **Tapes** — which physical tape (by barcode/label) holds what. A tape that was written
   over a non-blank tape (because the run set [`library.allowNonBlankTapes`](configuration.md))
   is annotated here as `[Overwrote a non-blank tape]`, so a deliberate, irreversible

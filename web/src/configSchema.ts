@@ -23,7 +23,7 @@
 // hand-rolled router, icons.tsx's hand-drawn icons).
 //
 // One thing this validator deliberately does NOT check: cross-field "exactly
-// one of" invariants (Source's zfsPath/k8s, Redundancy's targetPercentage/
+// one of" invariants (Source's zfsPath/zfsProperty/k8s, Redundancy's targetPercentage/
 // fillToCapacity, K8sRef's name/labelSelector) documented in
 // docs/configuration.md. The committed JSON Schema itself does not encode
 // them either (only K8sRef's one-directional "if name then namespace" rule

@@ -40,7 +40,7 @@ func TestResolveNewestSnapshotIntegration(t *testing.T) {
 		Redundancy: config.Redundancy{TargetPercentage: ptrFloat(10)},
 	}
 
-	resolved, err := newResolveDataActivities().ResolveAndCheck(t.Context(), ResolveDataInput{Config: cfg})
+	resolved, err := newResolveDataActivities("").ResolveAndCheck(t.Context(), ResolveDataInput{Config: cfg})
 	require.NoError(t, err)
 	require.Len(t, resolved, 1)
 	assert.Equal(t, []ResolvedSnapshot{{ZFSPath: want}}, resolved[0].Snapshots)
@@ -64,6 +64,6 @@ func TestResolveNewestSnapshotIntegration(t *testing.T) {
 		"Prepare stages from the chosen snapshot, got %s", dir)
 
 	cfg.Sources[0].ZFSPath.Prefix = "monthly-"
-	_, err = newResolveDataActivities().ResolveAndCheck(t.Context(), ResolveDataInput{Config: cfg})
+	_, err = newResolveDataActivities("").ResolveAndCheck(t.Context(), ResolveDataInput{Config: cfg})
 	require.ErrorContains(t, err, "sources[0]", "no match fails Resolve naming the source")
 }

@@ -285,6 +285,69 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "sources[0].zfsPath.prefix",
 		},
 		{
+			name: "zfsProperty with root",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "tape.home.arpa:archive", Value: "true", Under: "pool"}}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "zfsProperty with zfsPath",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSProperty = &ZFSPropertySource{Name: "tape:archive", Value: "true"}
+			},
+			wantErr:     require.Error,
+			errContains: "exactly one of k8s, zfsPath or zfsProperty",
+		},
+		{
+			name: "zfsProperty name without colon",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "archive", Value: "true"}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].zfsProperty.name",
+		},
+		{
+			name: "zfsProperty name uppercase",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "Tape:Archive", Value: "true"}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].zfsProperty.name",
+		},
+		{
+			name: "zfsProperty empty value",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "tape:archive"}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].zfsProperty.value",
+		},
+		{
+			name: "zfsProperty value with newline",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "tape:archive", Value: "a\nb"}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].zfsProperty.value",
+		},
+		{
+			name: "zfsProperty under a snapshot",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "tape:archive", Value: "true", Under: "pool@snap"}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].zfsProperty.under",
+		},
+		{
+			name: "zfsProperty with label",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "tape:archive", Value: "true"}, Label: ptr("x")}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].label",
+		},
+		{
 			name:        "copies zero",
 			mutate:      func(c *Config) { c.Copies = 0 },
 			wantErr:     require.Error,
@@ -772,6 +835,7 @@ func TestSchemaValidation(t *testing.T) {
 	modeConfig.Sources = []Source{
 		{ZFSPath: &ZFSPathSource{Name: "pool/data", Snapshot: SnapshotNewest, Prefix: "daily-"}},
 		{K8s: &K8sRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", LabelSelector: "a=b", Select: SelectNewestPerPVC}},
+		{ZFSProperty: &ZFSPropertySource{Name: "tape:archive", Value: "true", Under: "pool"}},
 	}
 	modeJSON, err := json.Marshal(modeConfig)
 	require.NoError(t, err)

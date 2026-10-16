@@ -52,17 +52,23 @@ size produced by the Prepare phase, never this estimate.
 
 ## Source
 
-Each element of `sources` archives exactly one item — a Kubernetes snapshot resource or
-a raw ZFS dataset/snapshot. Exactly one of `k8s` or `zfsPath` must be set.
+Each element of `sources` archives a Kubernetes snapshot resource, a raw ZFS
+dataset/snapshot, or every dataset marked by a ZFS user property. Exactly one of `k8s`,
+`zfsPath` or `zfsProperty` must be set.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `compression` | `boolean` | no | Enable zstd compression before encryption. Defaults to `true` when absent. |
 | `k8s` | `K8sRef` | no* | Reference to a Kubernetes snapshot resource. |
 | `zfsPath` | `ZFSPathSource` | no* | Explicit ZFS dataset or snapshot name. |
-| `label` | `string` | no | Overrides the descriptive on-tape archive directory name (`archives/NNN-<label>/`). When absent, a label is derived from the source's identity (a raw ZFS source's dataset last component, a named k8s resource's name, or its label selector). The value is lowercased and sanitized to `[a-z0-9._-]` (`/`, `@`, `:`, and whitespace become `-`) and truncated to 40 characters, so it need not already be filesystem-safe. It must not be blank when set. It need not be unique — the zero-padded source-index prefix keeps directories distinct. |
+| `zfsProperty` | `ZFSPropertySource` | no* | Every dataset with a ZFS user property set locally to a value; each becomes its own archive. |
+| `label` | `string` | no | Overrides the descriptive on-tape archive directory name (`archives/NNN-<label>/`). When absent, a label is derived from the source's identity (a raw ZFS source's dataset last component, a named k8s resource's name, or its label selector). The value is lowercased and sanitized to `[a-z0-9._-]` (`/`, `@`, `:`, and whitespace become `-`) and truncated to 40 characters, so it need not already be filesystem-safe. It must not be blank when set. It need not be unique — the zero-padded archive-index prefix keeps directories distinct. Not allowed with `zfsProperty`, whose matches are each labelled by their dataset's last component. |
 
-\* Exactly one of `k8s` or `zfsPath` must be set.
+\* Exactly one of `k8s`, `zfsPath` or `zfsProperty` must be set.
+
+The `NNN` directory prefix is the archive's position in the run's resolved work list. It
+equals the source's index in `sources` unless an earlier `zfsProperty` source expanded
+into several archives; the report lists each archive's directory.
 
 ### K8sRef
 
@@ -132,7 +138,7 @@ An explicit ZFS dataset or snapshot by name.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | `string` | yes | ZFS dataset or snapshot name, e.g. `bulk-pool-01/archive@snap-20240101` or `bulk-pool-01/media`. |
-| `snapshot` | `string` | no | `newest` archives the bare dataset `name`'s newest snapshot instead of its live mountpoint. Requires a bare dataset name (no `@`). |
+| `snapshot` | `string` | no | `newest` archives the bare dataset `name`'s newest existing snapshot instead of a snapshot the run takes. Requires a bare dataset name (no `@`). |
 | `prefix` | `string` | no | With `snapshot: newest`, consider only snapshots whose name (after `@`) starts with this prefix, e.g. `daily-`. Requires `snapshot`. |
 
 With `"snapshot": "newest"` the data worker lists the dataset's own snapshots (not its
@@ -146,14 +152,62 @@ Resolve naming the source.
 { "zfsPath": { "name": "bulk-pool-01/archive", "snapshot": "newest", "prefix": "daily-" } }
 ```
 
-Without `snapshot`, a bare dataset name (no `@`) is archived from the dataset's live mountpoint. The dataset
-must be mounted: if it is not, the run fails during Prepare — before any tape is written —
-rather than archiving whatever directory shadows the (unmounted) mountpoint, which would
-silently certify a stale or empty archive. Only the dataset itself is archived, matching
-what a snapshot of it contains: its `.zfs` control directory (visible with
-`snapdir=visible`) is skipped, and a child dataset or any other filesystem mounted below
-the mountpoint is archived as an empty directory. Name each child dataset as its own
-source to archive it.
+#### Run-scoped snapshots
+
+Without `snapshot`, a bare dataset name (no `@`) is archived from a **run-scoped
+snapshot**: after Resolve and before Prepare, the data worker takes
+`<dataset>@tape-archiver-<run id>` (characters ZFS rejects in a snapshot name become `-`),
+so the archive is one consistent point in time rather than a copy of a changing live
+mount. There is no option to copy the live mount instead. The snapshot:
+
+- is created with the ZFS user property `tape-archiver:run-id=<run id>`, which is how
+  tape-archiver later proves it created the snapshot. All of a run's run-scoped snapshots
+  in one pool are taken in a single atomic `zfs snapshot` call;
+- is held for the run like any other source snapshot, and named in the report with its
+  creation time;
+- is destroyed when the run ends — on success, failure or cancellation — after its hold
+  is released. A destroy that keeps failing is retried for a few minutes, then logged
+  and, on a failed run, appended to the failure alert;
+- if leaked anyway (a crash, a `Terminate`, a destroy that kept failing), is removed at
+  the start of the next run that takes run-scoped snapshots: only one run is ever active,
+  so any snapshot named `tape-archiver-<id>` whose local `tape-archiver:run-id` is that
+  other `<id>` is a leak. tape-archiver's own `tape-archiver-hold-*` holds on it are
+  released first; a snapshot without the property, or held by anything else, is never
+  touched. See [maintenance.md](maintenance.md#removing-leaked-run-scoped-snapshots) for
+  the manual procedure.
+
+The dataset must be mounted: if it is not, the run fails during Prepare — before any tape
+is written — since its snapshot is reached through the mountpoint's `.zfs/snapshot/`.
+Only the dataset itself is archived, as with any snapshot: its `.zfs` control directory
+is skipped, and a child dataset or any other filesystem mounted below the mountpoint is
+archived as an empty directory. Name each child dataset as its own source to archive it.
+
+### ZFSPropertySource
+
+Selects every ZFS **filesystem** whose user property `name` is set **locally** to `value`
+— a dataset that only inherits the value does not match, so marking a parent does not
+also select its children. Each matched dataset becomes its own archive, archived exactly
+like a bare `zfsPath` dataset (a run-scoped snapshot of that dataset only; child datasets
+appear as empty directories — set the property on a child too to archive it). Its label is
+the dataset's last path component.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | `string` | yes | ZFS user property name: lowercase, containing a colon, e.g. `tape.home.arpa:archive`. |
+| `value` | `string` | yes | Value the property must have, compared exactly (no tabs or newlines). |
+| `under` | `string` | no | Only consider this dataset and its descendants. When absent, every imported pool is searched. |
+
+The datasets are found on the data worker at Resolve and recorded in the run, so the rest
+of the run (and a replay) uses exactly that list. The dataset holding `TAPE_STAGING_DIR`,
+and anything below it, is never selected. If nothing matches, the run fails at Resolve
+naming the source.
+
+```json
+{ "zfsProperty": { "name": "tape.home.arpa:archive", "value": "true", "under": "bulk-pool-01" } }
+```
+
+Mark a dataset with `zfs set tape.home.arpa:archive=true bulk-pool-01/archive`; unmark it
+with `zfs inherit tape.home.arpa:archive bulk-pool-01/archive`.
 
 ---
 

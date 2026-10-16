@@ -88,10 +88,11 @@ let
     mhvtlUserspace # make_vtl_media / mktape, for the dry-run mirror of the real
     # library onto mhvtl (pkg/mhvtl). The mhvtl daemons stay host-side. Inert on
     # a deployment with no virtual library.
-    zfs # `zfs get` — the data-side Resolve/Verify/Prepare activities read
-    # dataset properties (logicalreferenced, mountpoint, user properties) and
-    # locate the .zfs/snapshot/ tree through the zfs CLI (pkg/zfs). It needs
-    # /dev/zfs passed through at run time (read-only ioctls; no `zfs create`).
+    zfs # the data-side activities read dataset properties (logicalreferenced,
+    # mountpoint, user properties), locate the .zfs/snapshot/ tree, hold/release
+    # source snapshots, and create/destroy the run's own snapshots through the
+    # zfs CLI (pkg/zfs). It needs /dev/zfs passed through at run time; it never
+    # creates or destroys a dataset.
     fuse # `fusermount` — reference LTFS is FUSE-based; pkg/ltfs unmounts a
     # written volume with `fusermount -u` (mount uses libfuse directly). Same
     # fuse (v2) that `ltfs` links against, so the userspace helper matches.

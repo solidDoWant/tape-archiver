@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,6 +33,9 @@ const (
 
 	// resolveInfeasibleErrorType marks a source that cannot fit one tape.
 	resolveInfeasibleErrorType = "resolve-infeasible"
+
+	// resolveNoMatchErrorType marks a selector source that matched nothing.
+	resolveNoMatchErrorType = "resolve-no-match"
 )
 
 // snapshotResolver is the seam *k8ssnap.Resolver satisfies, injected for tests.
@@ -183,13 +187,184 @@ type ResolveDataInput struct {
 	K8sArchives []ResolvedArchive
 }
 
-// ResolveDataActivities hosts the data-side Resolve activity.
+// ResolveDataActivities hosts the data-side Resolve activities.
 type ResolveDataActivities struct {
-	pool poolInspector
+	pool     poolInspector
+	selector datasetSelector
+	// stagingRoot's dataset is never selected by a zfsProperty source.
+	stagingRoot string
 }
 
-func newResolveDataActivities() *ResolveDataActivities {
-	return &ResolveDataActivities{pool: zfsPool{}}
+func newResolveDataActivities(stagingRoot string) *ResolveDataActivities {
+	return &ResolveDataActivities{pool: zfsPool{}, selector: zfsSelector{}, stagingRoot: stagingRoot}
+}
+
+// datasetSelector finds the datasets a zfsProperty source selects; injected
+// for tests.
+type datasetSelector interface {
+	LocalProperty(ctx context.Context, property, datasetType, root string) ([]zfs.PropertyRecord, error)
+	UserProperty(ctx context.Context, name, property string) (string, error)
+	PropertySource(ctx context.Context, name, property string) (string, error)
+	Filesystems(ctx context.Context) ([]zfs.Filesystem, error)
+}
+
+type zfsSelector struct{}
+
+func (zfsSelector) LocalProperty(ctx context.Context, property, datasetType, root string) ([]zfs.PropertyRecord, error) {
+	return zfs.LocalProperty(ctx, property, datasetType, root)
+}
+
+func (zfsSelector) UserProperty(ctx context.Context, name, property string) (string, error) {
+	return zfs.UserProperty(ctx, name, property)
+}
+
+func (zfsSelector) PropertySource(ctx context.Context, name, property string) (string, error) {
+	return zfs.PropertySource(ctx, name, property)
+}
+
+func (zfsSelector) Filesystems(ctx context.Context) ([]zfs.Filesystem, error) {
+	return zfs.Filesystems(ctx)
+}
+
+// PropertyMatches is the datasets one zfsProperty source selected.
+type PropertyMatches struct {
+	SourceIndex int
+	Datasets    []string
+}
+
+// ResolvePropertySources resolves every zfsProperty source to the filesystems
+// with the property set locally to the value (inherited values never match),
+// excluding the staging dataset and its descendants. A source matching nothing
+// fails naming it.
+func (a *ResolveDataActivities) ResolvePropertySources(ctx context.Context, cfg config.Config) ([]PropertyMatches, error) {
+	stagingDataset, err := a.stagingDataset(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var matches []PropertyMatches
+
+	for index, source := range cfg.Sources {
+		if source.ZFSProperty == nil {
+			continue
+		}
+
+		datasets, err := a.selectDatasets(ctx, *source.ZFSProperty, stagingDataset)
+		if err != nil {
+			return nil, fmt.Errorf("resolve sources[%d] zfsProperty %s: %w", index, source.ZFSProperty.Name, err)
+		}
+
+		if len(datasets) == 0 {
+			property := source.ZFSProperty
+
+			return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+				"sources[%d] zfsProperty %s=%s (under %q) matched no datasets with the property set locally",
+				index, property.Name, property.Value, property.Under), resolveNoMatchErrorType, nil)
+		}
+
+		slog.InfoContext(ctx, "resolve: selected datasets by ZFS property",
+			"sourceIndex", index, "property", source.ZFSProperty.Name, "datasets", datasets)
+
+		matches = append(matches, PropertyMatches{SourceIndex: index, Datasets: datasets})
+	}
+
+	return matches, nil
+}
+
+// stagingDataset is the filesystem holding the staging directory, or "" when
+// no staging directory is configured or it is not on ZFS.
+func (a *ResolveDataActivities) stagingDataset(ctx context.Context) (string, error) {
+	if a.stagingRoot == "" {
+		return "", nil
+	}
+
+	filesystems, err := a.selector.Filesystems(ctx)
+	if err != nil {
+		return "", fmt.Errorf("find the staging directory's dataset: %w", err)
+	}
+
+	return zfs.ContainingFilesystem(filesystems, a.stagingRoot), nil
+}
+
+func (a *ResolveDataActivities) selectDatasets(ctx context.Context, property config.ZFSPropertySource, stagingDataset string) ([]string, error) {
+	records, err := a.selector.LocalProperty(ctx, property.Name, "filesystem", property.Under)
+	if err != nil {
+		return nil, err
+	}
+
+	var datasets []string
+
+	for _, record := range records {
+		// A fabricated record may name a snapshot or a dataset outside Under.
+		if record.Value != property.Value || !datasetWithin(record.Name, property.Under) {
+			continue
+		}
+
+		if stagingDataset != "" && (record.Name == stagingDataset || strings.HasPrefix(record.Name, stagingDataset+"/")) {
+			slog.WarnContext(ctx, "resolve: not selecting the staging dataset or a dataset under it",
+				"dataset", record.Name, "stagingDataset", stagingDataset)
+
+			continue
+		}
+
+		// A value with an embedded newline can fabricate a listed record, so
+		// confirm each with single-property reads.
+		value, err := a.selector.UserProperty(ctx, record.Name, property.Name)
+		if err != nil {
+			return nil, err
+		}
+
+		source, err := a.selector.PropertySource(ctx, record.Name, property.Name)
+		if err != nil {
+			return nil, err
+		}
+
+		if value != property.Value || source != "local" {
+			continue
+		}
+
+		datasets = append(datasets, record.Name)
+	}
+
+	return datasets, nil
+}
+
+// datasetWithin reports whether name is a dataset (not a snapshot) at or below
+// root, or anywhere when root is empty.
+func datasetWithin(name, root string) bool {
+	if strings.Contains(name, "@") {
+		return false
+	}
+
+	return root == "" || name == root || strings.HasPrefix(name, root+"/")
+}
+
+// expandPropertySources replaces each zfsProperty source with one bare zfsPath
+// source per matched dataset, keeping its compression.
+func expandPropertySources(sources []config.Source, matches []PropertyMatches) []config.Source {
+	byIndex := make(map[int][]string, len(matches))
+	for _, match := range matches {
+		byIndex[match.SourceIndex] = match.Datasets
+	}
+
+	expanded := make([]config.Source, 0, len(sources))
+
+	for index, source := range sources {
+		if source.ZFSProperty == nil {
+			expanded = append(expanded, source)
+
+			continue
+		}
+
+		for _, dataset := range byIndex[index] {
+			expanded = append(expanded, config.Source{
+				Compression: source.Compression,
+				ZFSPath:     &config.ZFSPathSource{Name: dataset},
+			})
+		}
+	}
+
+	return expanded
 }
 
 // ResolveAndCheck validates and sizes every source on the data side (SPEC §4.3
@@ -365,6 +540,10 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 		return archive, nil
 	}
 
+	if source.ZFSPath == nil {
+		return ResolvedArchive{}, fmt.Errorf("internal: sources[%d] is not a zfsPath source after zfsProperty expansion", index)
+	}
+
 	name := source.ZFSPath.Name
 	if source.ZFSPath.Snapshot == config.SnapshotNewest {
 		newest, err := a.newestSnapshot(ctx, name, source.ZFSPath.Prefix)
@@ -464,9 +643,30 @@ func feasibilityEstimate(logical int64, overhead, par2 float64) int64 {
 	return int64(math.Ceil(float64(logical) * overhead * (1 + par2)))
 }
 
-// resolvePhase runs control-side k8s resolution then the data-side checks, and
-// stores the work list. A failure aborts the run before any data is staged.
+// resolvePhase expands zfsProperty sources, runs control-side k8s resolution
+// then the data-side checks, and stores the work list with every live dataset
+// pointed at the run's own snapshot. A failure aborts the run before any data
+// is staged.
 func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) error {
+	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           DataTaskQueue,
+		StartToCloseTimeout: resolveDataTimeout,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: resolveMaxAttempts},
+	})
+
+	var data *ResolveDataActivities
+
+	// The matches are recorded in history, so the expansion replays identically.
+	if slices.ContainsFunc(cfg.Sources, func(source config.Source) bool { return source.ZFSProperty != nil }) {
+		var matches []PropertyMatches
+		if err := workflow.ExecuteActivity(dataCtx, data.ResolvePropertySources, cfg).Get(dataCtx, &matches); err != nil {
+			return err
+		}
+
+		cfg.Sources = expandPropertySources(cfg.Sources, matches)
+		state.sources = cfg.Sources
+	}
+
 	controlCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		TaskQueue:           TaskQueue,
 		StartToCloseTimeout: resolveControlTimeout,
@@ -480,20 +680,14 @@ func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 		return err
 	}
 
-	dataCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		TaskQueue:           DataTaskQueue,
-		StartToCloseTimeout: resolveDataTimeout,
-		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: resolveMaxAttempts},
-	})
-
-	var data *ResolveDataActivities
-
 	input := ResolveDataInput{Config: cfg, K8sArchives: k8sArchives}
 
 	var resolved []ResolvedArchive
 	if err := workflow.ExecuteActivity(dataCtx, data.ResolveAndCheck, input).Get(dataCtx, &resolved); err != nil {
 		return err
 	}
+
+	planRunScopedSnapshots(resolved, workflow.GetInfo(ctx).WorkflowExecution.RunID)
 
 	state.resolved = resolved
 	// Derived once here so Prepare and Report share one deterministic value (#324).

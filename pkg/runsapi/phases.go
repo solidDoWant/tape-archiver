@@ -232,12 +232,13 @@ func activitySpan(records []activityRecord) (start, end time.Time) {
 	return start, end
 }
 
-// phaseForActivity maps an activity type to its phase. NotifyFailure and
-// ReleaseSnapshots return ok == false: the latter runs on every exit path and
-// would otherwise stretch Resolve's window to the end of the run.
+// phaseForActivity maps an activity type to its phase. NotifyFailure,
+// ReleaseSnapshots and DestroyRunSnapshots return ok == false: the latter two
+// run on every exit path and would otherwise stretch Resolve's window to the
+// end of the run.
 func phaseForActivity(name string, input *commonpb.Payloads) (string, bool) {
 	switch name {
-	case "ResolveK8sSources", "ResolveAndCheck", "HoldSnapshots":
+	case "ResolvePropertySources", "ResolveK8sSources", "ResolveAndCheck", "CreateRunSnapshots", "HoldSnapshots":
 		return backup.PhaseResolve, true
 	case "PrepareArchives":
 		return backup.PhasePrepare, true

@@ -348,7 +348,9 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
       <div className={cardClass}>
         <div className="mb-3.5 flex items-center gap-2">
           <span className={sectionTitleClass}>Sources</span>
-          <span className="font-mono text-[11px] text-text-faint">ZFS datasets or k8s VolumeSnapshots</span>
+          <span className="font-mono text-[11px] text-text-faint">
+            ZFS datasets, datasets marked by a ZFS property, or k8s VolumeSnapshots
+          </span>
         </div>
 
         <div className="flex flex-col gap-3">
@@ -365,6 +367,13 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                   </button>
                   <button
                     type="button"
+                    className={segmentButtonClass(source.type === 'zfsProperty')}
+                    onClick={() => updateSource(source.id, { type: 'zfsProperty' })}
+                  >
+                    ZFS property
+                  </button>
+                  <button
+                    type="button"
                     className={segmentButtonClass(source.type === 'k8s')}
                     onClick={() => updateSource(source.id, { type: 'k8s' })}
                   >
@@ -373,11 +382,12 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                 </div>
 
                 <input
-                  value={source.label}
-                  placeholder="label (optional)"
+                  value={source.type === 'zfsProperty' ? '' : source.label}
+                  placeholder={source.type === 'zfsProperty' ? 'labelled per dataset' : 'label (optional)'}
                   aria-label={`Source ${index + 1} label`}
+                  disabled={source.type === 'zfsProperty'}
                   onChange={(event) => updateSource(source.id, { label: event.target.value })}
-                  className="min-w-0 flex-1 rounded-lg border border-border-strong bg-surface px-2.5 py-1.5 font-mono text-[12px] text-text outline-none"
+                  className="min-w-0 flex-1 rounded-lg border border-border-strong bg-surface px-2.5 py-1.5 font-mono text-[12px] text-text outline-none disabled:opacity-50"
                 />
 
                 <button
@@ -406,8 +416,8 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                   <div className={segmentedWrapClass} role="group" aria-label={`Source ${index + 1} ZFS snapshot`}>
                     <button
                       type="button"
-                      className={segmentButtonClass(source.zfsSnapshot === 'live')}
-                      onClick={() => updateSource(source.id, { zfsSnapshot: 'live' })}
+                      className={segmentButtonClass(source.zfsSnapshot === 'named')}
+                      onClick={() => updateSource(source.id, { zfsSnapshot: 'named' })}
                     >
                       As named
                     </button>
@@ -419,6 +429,13 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                       Newest snapshot
                     </button>
                   </div>
+
+                  {source.zfsSnapshot === 'named' && (
+                    <span className="font-mono text-[11px] text-text-faint">
+                      a bare dataset is archived from a snapshot this run takes and destroys afterwards;
+                      dataset@snapshot archives that snapshot
+                    </span>
+                  )}
 
                   {source.zfsSnapshot === 'newest' && (
                     <div>
@@ -433,6 +450,44 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                       />
                     </div>
                   )}
+                </div>
+              ) : source.type === 'zfsProperty' ? (
+                <div className="flex flex-col gap-2.5">
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                    <div>
+                      <label className={fieldLabelClass}>user property</label>
+                      <input
+                        value={source.zfsPropertyName}
+                        placeholder="tape.home.arpa:archive"
+                        onChange={(event) => updateSource(source.id, { zfsPropertyName: event.target.value })}
+                        className={inputClass}
+                      />
+                    </div>
+                    <div>
+                      <label className={fieldLabelClass}>value</label>
+                      <input
+                        value={source.zfsPropertyValue}
+                        placeholder="true"
+                        onChange={(event) => updateSource(source.id, { zfsPropertyValue: event.target.value })}
+                        className={inputClass}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className={fieldLabelClass}>
+                      under <span className="text-text-faint">(optional — all pools if empty)</span>
+                    </label>
+                    <input
+                      value={source.zfsPropertyUnder}
+                      placeholder="bulk-pool-01"
+                      onChange={(event) => updateSource(source.id, { zfsPropertyUnder: event.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+                  <span className="font-mono text-[11px] text-text-faint">
+                    each dataset with the property set locally (not inherited) becomes its own archive, from a
+                    snapshot this run takes
+                  </span>
                 </div>
               ) : (
                 <div className="flex flex-col gap-2.5">

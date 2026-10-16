@@ -45,14 +45,16 @@ func (c *Config) EffectiveFeasibilityOverhead() float64 {
 	return DefaultFeasibilityOverhead
 }
 
-// Source is a single item to archive. Exactly one of K8s or ZFSPath must be set.
-// Compression defaults to enabled when nil.
+// Source is a single item to archive. Exactly one of K8s, ZFSPath or
+// ZFSProperty must be set. Compression defaults to enabled when nil.
 type Source struct {
-	Compression *bool          `json:"compression,omitempty"`
-	K8s         *K8sRef        `json:"k8s,omitempty"`
-	ZFSPath     *ZFSPathSource `json:"zfsPath,omitempty"`
+	Compression *bool              `json:"compression,omitempty"`
+	K8s         *K8sRef            `json:"k8s,omitempty"`
+	ZFSPath     *ZFSPathSource     `json:"zfsPath,omitempty"`
+	ZFSProperty *ZFSPropertySource `json:"zfsProperty,omitempty"`
 	// Label overrides the on-tape archive directory name (archives/NNN-label/). It
-	// is sanitized and length-bounded; uniqueness comes from the NNN prefix.
+	// is sanitized and length-bounded; uniqueness comes from the NNN prefix. Not
+	// allowed on a zfsProperty source, whose matches are labelled by dataset.
 	Label *string `json:"label,omitempty"`
 }
 
@@ -88,10 +90,11 @@ func (K8sRef) JSONSchemaExtend(schema *jsonschema.Schema) {
 	schema.Then = &jsonschema.Schema{Required: []string{"namespace"}}
 }
 
-// ZFSPathSource is an explicit ZFS snapshot or dataset on the pool.
+// ZFSPathSource is an explicit ZFS snapshot or dataset on the pool. A bare
+// dataset with no Snapshot is archived from a snapshot the run takes itself.
 type ZFSPathSource struct {
 	Name string `json:"name" jsonschema:"minLength=1"`
-	// Snapshot picks a snapshot of the bare dataset Name at Resolve; empty archives Name as given.
+	// Snapshot picks an existing snapshot of the bare dataset Name at Resolve.
 	Snapshot ZFSSnapshotMode `json:"snapshot,omitempty" jsonschema:"enum=newest"`
 	// Prefix limits Snapshot to snapshots whose short name starts with it.
 	Prefix string `json:"prefix,omitempty" jsonschema:"minLength=1"`
@@ -102,6 +105,15 @@ type ZFSSnapshotMode string
 
 // SnapshotNewest archives the dataset's newest snapshot by creation time.
 const SnapshotNewest ZFSSnapshotMode = "newest"
+
+// ZFSPropertySource selects every filesystem whose user property Name is set
+// locally to Value, optionally only at or below the dataset Under. Each match
+// becomes its own archive, archived like a bare zfsPath dataset.
+type ZFSPropertySource struct {
+	Name  string `json:"name" jsonschema:"minLength=1"`
+	Value string `json:"value" jsonschema:"minLength=1"`
+	Under string `json:"under,omitempty" jsonschema:"minLength=1"`
+}
 
 // Library specifies the tape library hardware and the blank tapes to use.
 type Library struct {

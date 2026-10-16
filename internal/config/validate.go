@@ -130,19 +130,51 @@ func (s Source) validate(index int) error {
 		return fmt.Errorf("sources[%d].label: must not be blank when set", index)
 	}
 
-	hasK8s := s.K8s != nil
+	set := 0
 
-	hasZFS := s.ZFSPath != nil
-	switch {
-	case !hasK8s && !hasZFS:
-		return fmt.Errorf("sources[%d]: exactly one of k8s or zfsPath must be set", index)
-	case hasK8s && hasZFS:
-		return fmt.Errorf("sources[%d]: k8s and zfsPath are mutually exclusive", index)
-	case hasK8s:
-		return s.K8s.validate(index)
-	default:
-		return s.ZFSPath.validate(index)
+	for _, present := range []bool{s.K8s != nil, s.ZFSPath != nil, s.ZFSProperty != nil} {
+		if present {
+			set++
+		}
 	}
+
+	if set != 1 {
+		return fmt.Errorf("sources[%d]: exactly one of k8s, zfsPath or zfsProperty must be set", index)
+	}
+
+	switch {
+	case s.K8s != nil:
+		return s.K8s.validate(index)
+	case s.ZFSPath != nil:
+		return s.ZFSPath.validate(index)
+	default:
+		if s.Label != nil {
+			return fmt.Errorf("sources[%d].label: not allowed on a zfsProperty source; each match is labelled by its dataset", index)
+		}
+
+		return s.ZFSProperty.validate(index)
+	}
+}
+
+// zfsPropertyNameChars is the ZFS user-property name alphabet; a user property
+// name must also contain a colon.
+const zfsPropertyNameChars = "abcdefghijklmnopqrstuvwxyz0123456789:-_.+"
+
+func (z *ZFSPropertySource) validate(index int) error {
+	if !strings.Contains(z.Name, ":") || strings.Trim(z.Name, zfsPropertyNameChars) != "" {
+		return fmt.Errorf("sources[%d].zfsProperty.name: must be a ZFS user property (lowercase, containing a colon), got %q", index, z.Name)
+	}
+
+	// Matching compares raw zfs output, which a tab or newline would split.
+	if z.Value == "" || strings.ContainsAny(z.Value, "\t\n\r") {
+		return fmt.Errorf("sources[%d].zfsProperty.value: must be non-empty with no tabs or newlines", index)
+	}
+
+	if strings.Contains(z.Under, "@") {
+		return fmt.Errorf("sources[%d].zfsProperty.under: must be a dataset, got snapshot %q", index, z.Under)
+	}
+
+	return nil
 }
 
 func (z *ZFSPathSource) validate(index int) error {

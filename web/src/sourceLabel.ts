@@ -2,10 +2,11 @@
 // configModel.Source (the config page) and ConfigSummary's RunConfigSource (the
 // run-detail config viewer), so both surfaces derive a source's display
 // identity from one place instead of two near-copies that can drift.
-// internal/config.Source sets exactly one of zfsPath/k8s.
+// internal/config.Source sets exactly one of zfsPath/zfsProperty/k8s.
 export interface LabeledSource {
   label?: string
   zfsPath?: { name: string; snapshot?: string; prefix?: string }
+  zfsProperty?: { name: string; value: string; under?: string }
   k8s?: { kind: string; namespace?: string; name?: string; labelSelector?: string; select?: string }
 }
 
@@ -41,6 +42,12 @@ export function sourceLabel(source: LabeledSource, opts?: { detail?: boolean }):
     }
 
     return source.zfsPath.name
+  }
+
+  if (source.zfsProperty?.name) {
+    const under = source.zfsProperty.under ? ` under ${source.zfsProperty.under}` : ''
+
+    return `${source.zfsProperty.name}=${source.zfsProperty.value ?? ''}${under}`
   }
 
   const newestPerPVC = source.k8s?.labelSelector && source.k8s.select === 'newestPerPVC' ? ' (newest per PVC)' : ''

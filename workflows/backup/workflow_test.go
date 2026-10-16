@@ -35,13 +35,21 @@ var orderedPhases = []string{
 func newBackupEnv(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 
+	return newBackupEnvWith(t, &ResolveDataActivities{})
+}
+
+// newBackupEnvWith is newBackupEnv with the given data-side Resolve activities.
+func newBackupEnvWith(t *testing.T, resolveData *ResolveDataActivities) *testsuite.TestWorkflowEnvironment {
+	t.Helper()
+
 	var suite testsuite.WorkflowTestSuite
 
 	env := suite.NewTestWorkflowEnvironment()
 	env.RegisterWorkflow(Backup)
 
 	env.RegisterActivity(&ResolveControlActivities{})
-	env.RegisterActivity(&ResolveDataActivities{})
+	env.RegisterActivity(resolveData)
+	env.RegisterActivity(newRunSnapshotActivities())
 	env.RegisterActivity(newHoldActivities())
 	// A real staging root, since Prepare rejects an empty one.
 	env.RegisterActivity(newPrepareActivities(t.TempDir()))

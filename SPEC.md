@@ -155,10 +155,11 @@ write window.
 1. **Resolve.** Expand the config into a concrete work list: resolve k8s
    `VolumeSnapshot`/snapshot-group references to ZFS snapshots (cross-checked against
    the democratic-csi `managed_resource` property to confirm ownership before staging),
-   and validate raw ZFS snapshot/dataset paths. "Newest snapshot" selections (§5) are
-   decided here, once, and recorded in the work list, so the rest of the run and the
-   report use exactly the chosen snapshots; a selection with no match fails Resolve
-   naming the source. Run a cheap
+   resolve ZFS-property sources to their matching datasets (on the data worker), and
+   validate raw ZFS snapshot/dataset paths. "Newest snapshot" selections and
+   ZFS-property matches (§5) are decided here, once, and recorded in the work list, so
+   the rest of the run and the report use exactly the chosen snapshots and datasets; a
+   selection with no match fails Resolve naming the source. Run a cheap
    feasibility pre-check from `zfs` properties (`logicalreferenced`, inflated by a small
    `tar` overhead and the configured PAR2 %) purely to reject any single archive that
    cannot fit on one tape *before* doing real work. From the same resolved sizes it also
@@ -167,7 +168,23 @@ write window.
    archive's slice count in the PAR2 block-count regime. Slice size is therefore not an
    operator-set field; the payload bound is satisfied by construction and remains only as
    an internal invariant. This is an estimate, not the plan.
-   Immediately after Resolve produces the work list — before any staging — the run
+   Immediately after Resolve — before the hold and before any staging, never in the write
+   window — the data worker takes a **run-scoped snapshot** of every live dataset in the
+   work list (a bare `zfsPath` dataset, or a ZFS-property match):
+   `<dataset>@tape-archiver-<run-id>`, created with the user property
+   `tape-archiver:run-id=<run-id>`, all of a pool's in one atomic `zfs snapshot` call. The
+   archive is staged from it, so a live dataset is archived at one point in time, never
+   copied live. It is destroyed on every exit path (success, failure, cancellation) after
+   the hold release, with the release's retry window; a destroy only ever touches a
+   snapshot carrying this run's id, and a missing one is a no-op. Ownership is proven by
+   the name *and* the property, never the name alone. Because only one run is ever active
+   (§4.2's fixed workflow id), the same step first destroys any snapshot leaked by an
+   earlier run — named `tape-archiver-<id>` with a local `tape-archiver:run-id=<id>` for
+   another `<id>` — after releasing tape-archiver's own holds on it; this needs no
+   cross-run state, since the leak is found from the pool itself. A leak that cannot be
+   destroyed is logged and left (`docs/maintenance.md`). The data worker therefore
+   creates and destroys snapshots (never datasets), besides holding and releasing them.
+   Then the run
    places a `zfs hold` on every resolved source snapshot and keeps it for the run's
    duration, so an external `zfs destroy` cannot prune a snapshot mid-run; the holds are
    released on every exit path (success, failure, cancellation). The hold tag is derived
@@ -178,8 +195,8 @@ write window.
    failing is retried with backoff for a bounded window of a few minutes, enough to ride
    out transient faults. After that the hold is leaked: the release failure is logged
    and, on a failed run, appended to the failure alert. It never blocks the failure
-   alert or the run from closing. Raw bare-dataset sources have no snapshot and
-   are not held.
+   alert or the run from closing. Run-scoped snapshots are held like any other source
+   snapshot.
 2. **Prepare.** For each archive: `tar` the snapshot contents → optional `zstd`
    compression → `age`-encrypt → split into fixed-size slices → compute SHA-256
    checksums. All output is staged to disk and its exact size measured.
@@ -295,8 +312,10 @@ than reclaimed — they are the durable recovery artifacts, and `recovery.iso` i
 archived master ISO the annual disc-verification cadence (§10, `docs/maintenance.md`)
 reads a burned disc back against. Retained artifacts accumulate across runs by design
 and are pruned manually, not by the run itself. A hard Terminate (as opposed to a
-cancel) skips this cleanup, the same way it skips releasing the snapshot hold; a
-leaked staging directory is harmless but reclaimed by hand (`docs/maintenance.md`).
+cancel) skips this cleanup, the same way it skips releasing the snapshot hold and
+destroying the run-scoped snapshots; a leaked staging directory is harmless but reclaimed
+by hand (`docs/maintenance.md`), and a leaked run-scoped snapshot is destroyed by the next
+run that takes run-scoped snapshots, or by hand.
 
 ## 5. Run configuration
 
@@ -314,15 +333,22 @@ The config defines, at minimum:
     each source PVC's newest `ReadyToUse` snapshot by `status.creationTime`, ignoring
     not-yet-ready ones.
   - **Raw ZFS paths:** explicit ZFS snapshot or dataset paths on the pool not visible
-    to k8s (e.g. `bulk-pool-01/archive`, `bulk-pool-01/media`). `snapshot: newest` (with
-    an optional name `prefix`) on a bare dataset archives its newest snapshot by ZFS
-    `creation` instead. Otherwise a raw **dataset** path is
-    archived from its live mountpoint; if the dataset is not mounted (its `mounted`
-    property is `no`), the run fails during Prepare rather than archiving whatever
-    directory shadows the mountpoint — a stale or empty shadow would otherwise be
-    silently certified. Like a snapshot, it covers only that dataset: the root's
-    `.zfs` control directory is skipped and filesystems mounted below it (child
+    to k8s (e.g. `bulk-pool-01/archive`, `bulk-pool-01/media`). `dataset@snap` archives
+    that snapshot. `snapshot: newest` (with an optional name `prefix`) on a bare dataset
+    archives its newest existing snapshot by ZFS `creation`. Otherwise a bare
+    **dataset** path is archived from a run-scoped snapshot the run takes (§4.3 phase 1)
+    — there is no live-copy option, since a copy of a changing mount has no
+    point-in-time consistency (§2 principle 1). If the dataset is not mounted (its
+    `mounted` property is `no`), the run fails during Prepare, since its snapshot is
+    reached through the mountpoint. Like any snapshot, it covers only that dataset: the
+    root's `.zfs` control directory is skipped and filesystems mounted below it (child
     datasets) are archived as empty directories.
+  - **ZFS-property selection:** every filesystem whose ZFS user property `name` is set
+    *locally* to `value` (an inherited value does not match), optionally only at or
+    below a root dataset `under`. Resolved on the data worker; each match becomes its own
+    archive, archived exactly like a bare dataset path (run-scoped snapshot, label from
+    the dataset's last component). The dataset holding `TAPE_STAGING_DIR`, and anything
+    below it, is never selected; no match fails Resolve naming the source.
 - **Copies (N)** — number of identical physical tape copies to produce (required; must
   be at least 1, with no default). Up to `len(Drives)` copies write in parallel; a copy count exceeding the
   drive count is written across successive drive-sets (§4.3 steps 6–8). The library must
@@ -354,7 +380,8 @@ All formats are open and widely implemented, for 20-year recoverability.
   barcode-labeled and read by the library.)
 - **Directory layout within LTFS:**
   - `archives/NNN-<label>/` — one directory per archive, where `NNN` is the zero-padded
-    source index and `<label>` a short, sanitized descriptive name for the source
+    archive index (the source's index in the config, counting each ZFS-property match as
+    its own source) and `<label>` a short, sanitized descriptive name for the source
     (e.g. `archives/000-photos/`, `archives/001-plex-group-snap/`). The `NNN` prefix
     orders the directories and keeps them unique even when two sources share a label;
     `<label>` is the source's optional `label` override, or a name derived from its
@@ -466,7 +493,8 @@ Produced by the data worker (§4.1: its inputs — staged files, pinned tool ver
 recovery binaries, captured LTFS indexes — all live there). Contains, at minimum: the
 **run id** (the run's own identifier, not the fixed `backup` workflow id every run
 shares — §4.2 — so a printed report names the one run it describes) and date; full
-contents manifest (archives, member volumes, source snapshots, per-archive compression,
+contents manifest (archives, member volumes, source snapshots — a run-scoped one with the
+time the run took it — per-archive compression,
 sizes, SHA-256 checksums);
 which physical tape(s) (by barcode/label) hold what (annotating any tape written over a
 non-blank tape under `library.allowNonBlankTapes`, §4.3 step 6); per-tape **write health** (§14);

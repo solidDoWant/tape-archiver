@@ -3,6 +3,7 @@ package backup
 import (
 	"time"
 
+	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
@@ -31,14 +32,18 @@ type ResolvedArchive struct {
 type ResolvedSnapshot struct {
 	// ZFSPath is the absolute snapshot path, e.g. bulk-pool-01/archive@daily.
 	ZFSPath string
-	// Dataset and SnapshotName are set for k8s sources (for k8ssnap.Verify);
-	// empty for raw ZFS paths.
+	// Dataset and SnapshotName are set for k8s sources (for k8ssnap.Verify) and
+	// run-scoped snapshots; empty for other raw ZFS paths.
 	Dataset      string
 	SnapshotName string
 	// Namespace, VolumeSnapshot, and PVC are the k8s provenance for the report.
 	Namespace      string
 	VolumeSnapshot string
 	PVC            string
+	// RunScoped marks a snapshot of a live dataset taken by this run and
+	// destroyed when it ends; CreatedAt is its creation time once taken.
+	RunScoped bool
+	CreatedAt time.Time
 }
 
 // StagedArchive is an archive staged to disk by Prepare (SPEC §4.3 phase 2).
@@ -256,6 +261,9 @@ type runState struct {
 	// and cleared when its wait returns.
 	currentPause CurrentPause
 	resolved     []ResolvedArchive
+	// sources is the config's sources with each zfsProperty source expanded
+	// into one zfsPath source per matched dataset; nil when none were expanded.
+	sources []config.Source
 	// sliceSizeBytes is derived by DeriveSliceSize at the end of Resolve, not
 	// configured (issue #324).
 	sliceSizeBytes int64

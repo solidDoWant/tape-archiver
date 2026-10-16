@@ -78,9 +78,11 @@ func TestRegisterData(t *testing.T) {
 	})
 
 	assert.Empty(t, rw.workflows)
-	assert.Len(t, rw.activities, 15)
+	assert.Len(t, rw.activities, 16)
 	assert.True(t, hasActivity[*ResolveDataActivities](rw.activities),
 		"the data worker must register the Resolve data activity")
+	assert.True(t, hasActivity[*RunSnapshotActivities](rw.activities),
+		"the data worker must register the run-scoped snapshot activities")
 	assert.True(t, hasActivity[*HoldActivities](rw.activities),
 		"the data worker must register the source-snapshot Hold activity")
 	assert.True(t, hasActivity[*PrepareActivities](rw.activities),

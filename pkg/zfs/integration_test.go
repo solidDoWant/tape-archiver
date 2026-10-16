@@ -327,6 +327,85 @@ func TestSnapshotsIntegration(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestSnapshotLifecycleIntegration (#419): CreateSnapshots takes several
+// snapshots in one call with a property set at creation, Creation reads them,
+// and DestroySnapshot removes one and is idempotent.
+func TestSnapshotLifecycleIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	ctx := t.Context()
+	first, second := poolRoot(t)+"/lifecycle a", poolRoot(t)+"/lifecycle b"
+	createDataset(t, first)
+	createDataset(t, second)
+
+	snapshots := []string{first + "@run-1", second + "@run-1"}
+	require.NoError(t, zfs.CreateSnapshots(ctx, map[string]string{"tape-archiver-test:marker": "run-1"}, snapshots))
+
+	for _, snapshot := range snapshots {
+		value, err := zfs.UserProperty(ctx, snapshot, "tape-archiver-test:marker")
+		require.NoError(t, err)
+		assert.Equal(t, "run-1", value, "the property is set at creation")
+
+		source, err := zfs.PropertySource(ctx, snapshot, "tape-archiver-test:marker")
+		require.NoError(t, err)
+		assert.Equal(t, "local", source)
+
+		creation, err := zfs.Creation(ctx, snapshot)
+		require.NoError(t, err)
+		assert.Equal(t, zfsGetRaw(t, "creation", snapshot), strconv.FormatInt(creation, 10))
+	}
+
+	require.NoError(t, zfs.Hold(ctx, "tape-archiver-test-hold", snapshots[0]))
+	require.Error(t, zfs.DestroySnapshot(ctx, snapshots[0]), "a held snapshot is not destroyed")
+	require.NoError(t, zfs.Release(ctx, "tape-archiver-test-hold", snapshots[0]))
+
+	require.NoError(t, zfs.DestroySnapshot(ctx, snapshots[0]))
+	require.NoError(t, zfs.DestroySnapshot(ctx, snapshots[0]), "destroying an absent snapshot is a no-op")
+
+	_, err := zfs.Creation(ctx, snapshots[0])
+	require.ErrorContains(t, err, zfs.ErrNotExist.Error())
+
+	require.Error(t, zfs.DestroySnapshot(ctx, second), "a dataset is never destroyed")
+
+	_, err = zfs.Mountpoint(ctx, second)
+	require.NoError(t, err, "the dataset survives")
+}
+
+// TestLocalPropertyIntegration (#419): only locally set values are listed, a
+// root limits the search, and ContainingFilesystem finds a path's dataset.
+func TestLocalPropertyIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	ctx := t.Context()
+	root := poolRoot(t) + "/local prop"
+	createDataset(t, root)
+	requireZFS(t, ctx, "create", root+"/a")
+	requireZFS(t, ctx, "create", root+"/a/child")
+	requireZFS(t, ctx, "set", "tape-archiver-test:archive=yes", root+"/a")
+
+	records, err := zfs.LocalProperty(ctx, "tape-archiver-test:archive", "filesystem", root)
+	require.NoError(t, err)
+	assert.Equal(t, []zfs.PropertyRecord{{Name: root + "/a", Value: "yes"}}, records,
+		"an inherited value is not listed")
+
+	source, err := zfs.PropertySource(ctx, root+"/a/child", "tape-archiver-test:archive")
+	require.NoError(t, err)
+	assert.Equal(t, "inherited from "+root+"/a", source)
+
+	all, err := zfs.LocalProperty(ctx, "tape-archiver-test:archive", "filesystem", "")
+	require.NoError(t, err)
+	assert.Contains(t, all, zfs.PropertyRecord{Name: root + "/a", Value: "yes"})
+
+	filesystems, err := zfs.Filesystems(ctx)
+	require.NoError(t, err)
+
+	mount, err := zfs.Mountpoint(ctx, root+"/a/child")
+	require.NoError(t, err)
+	assert.Equal(t, root+"/a/child", zfs.ContainingFilesystem(filesystems, filepath.Join(mount, ".tape-staging")))
+}
+
 func requireZFS(t *testing.T, ctx context.Context, args ...string) {
 	t.Helper()
 

@@ -196,11 +196,13 @@ A guided, sectioned builder covering the whole config surface an operator normal
 needs (see [`docs/configuration.md`](configuration.md) for what every field means):
 
 - **Sources** — repeatable cards, each either a raw **ZFS** dataset/snapshot name
-  (archived as named, or its **newest snapshot** with an optional name prefix) or a
-  **k8s** snapshot resource (`VolumeSnapshot` / `VolumeGroupSnapshot`, selected by
-  namespace+name or by label selector — all matches or the **newest per PVC** — the
-  matching `apiVersion` is filled in for you), with a per-source zstd compression
-  toggle and an optional label.
+  (archived as named — a bare dataset from a snapshot the run takes — or its **newest
+  snapshot** with an optional name prefix), a **ZFS property** selector (user property,
+  value, optional root dataset; every dataset with it set locally becomes its own
+  archive, so the label field is disabled), or a **k8s** snapshot resource
+  (`VolumeSnapshot` / `VolumeGroupSnapshot`, selected by namespace+name or by label
+  selector — all matches or the **newest per PVC** — the matching `apiVersion` is filled
+  in for you), with a per-source zstd compression toggle and an optional label.
 - **Copies & redundancy** — tape copy count, slice size, and the PAR2 policy (fixed
   target percentage, or fill-to-capacity with a floor).
 - **Library** — the changer device and drive device list, shown **read-only** from

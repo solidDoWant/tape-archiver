@@ -3,7 +3,8 @@
 Long-term cold storage is only as good as its upkeep. tape-archiver produces offline
 artifacts — LTO tapes and optical recovery discs — that must stay readable for ~20 years
 (SPEC §2). This guide covers the recurring operator tasks that keep them recoverable:
-recovery-disc refresh, tape rotation, and the barcode labelling convention.
+recovery-disc refresh, tape rotation, and the barcode labelling convention, plus clearing
+anything a dead run leaked (holds, run-scoped snapshots, staging directories).
 
 None of these tasks touch a running workflow; they are physical-media housekeeping done
 between runs. For the run-time operator loops (restocking blanks after a Load/Write
@@ -140,6 +141,57 @@ fully observable and clearable by hand; there is no hidden state to reconcile:
 
 Only release a hold whose run has ended — releasing an in-flight run's hold removes the
 very protection this feature provides.
+
+A leaked hold on a **run-scoped** snapshot (`@tape-archiver-<run-id>`) needs no manual
+release: the next run that takes run-scoped snapshots releases it and destroys the
+snapshot (below).
+
+---
+
+## Removing leaked run-scoped snapshots
+
+A bare `zfsPath` dataset, and every dataset a `zfsProperty` source selects, is archived
+from a snapshot the run takes itself, `<dataset>@tape-archiver-<run-id>`, created with the
+user property `tape-archiver:run-id=<run-id>` ([configuration.md](configuration.md#run-scoped-snapshots)).
+The run destroys it on every exit (success, failure, cancellation) after releasing its
+hold. It can still be leaked by a hard **Terminate**, or by a destroy that keeps failing
+for its whole retry window (1 s doubling to 1 min, up to 10 attempts and 15 minutes). The
+control worker then logs `failed to destroy run-scoped snapshots`, and a failed run's alert
+ends with `also: destroy run-scoped snapshots [...] (leaked; ...)`.
+
+Leaks clean themselves up: only one run is ever active (the fixed workflow id), so the next
+run that takes run-scoped snapshots destroys every snapshot whose local
+`tape-archiver:run-id` names another run and whose name is `tape-archiver-<that id>`,
+releasing tape-archiver's own `tape-archiver-hold-*` holds on it first. It never touches a
+snapshot without that property or one held by anything else; such a snapshot is logged and
+left for you.
+
+To remove leaks by hand (e.g. before a long gap between runs, or one held by another
+tool):
+
+1. **Confirm no run is active** — `tapectl status`, or the Temporal UI shows no running
+   `backup` workflow. Destroying an in-flight run's snapshot fails its Prepare.
+
+2. **List tape-archiver's snapshots** (only those carrying the property locally):
+
+   ```
+   zfs get -H -s local -t snapshot -o name,value tape-archiver:run-id
+   ```
+
+   Each line is `<snapshot>  <run-id>`; with no run active, every line is a leak. Check
+   the snapshot name is `<dataset>@tape-archiver-<run-id>` for the listed run id.
+
+3. **Release its holds, then destroy it**:
+
+   ```
+   zfs holds bulk-pool-01/archive@tape-archiver-<run-id>
+   zfs release tape-archiver-hold-<run-id> bulk-pool-01/archive@tape-archiver-<run-id>
+   zfs destroy bulk-pool-01/archive@tape-archiver-<run-id>
+   ```
+
+   Release a hold from another tool only if you know why it is there. Never destroy a
+   `tape-archiver-*` snapshot that lacks the `tape-archiver:run-id` property — someone else
+   made it.
 
 ---
 
