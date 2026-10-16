@@ -38,6 +38,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
@@ -548,10 +549,7 @@ func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 
 	// Registered before install so a partial install can't leave a stray
 	// ScaledJob spawning pollers into later tests.
-	t.Cleanup(func() {
-		_, _ = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", scaledJobRelease,
-			"--namespace", namespace, "--wait", "--timeout", "2m", "--ignore-not-found")
-	})
+	t.Cleanup(func() { h.removeScaledJobWorker(t) })
 
 	// No --wait: helm's readiness wait trips on the ScaledJob's transient
 	// "InProgress" status, and no Job exists until there is a backlog.
@@ -567,6 +565,40 @@ func (h *e2eHarness) installScaledJobWorker(t *testing.T) {
 		"--set", imagePath+".pullPolicy=Never",
 	)
 	require.NoError(t, err, "helm install scaledjob worker")
+}
+
+// removeScaledJobWorker tears the ScaledJob release down and blocks until none
+// of its Jobs or pods remain (#424). KEDA's Jobs are garbage-collected in the
+// background once the ScaledJob goes, so a bare `helm uninstall --wait` can
+// return while a worker pod still polls the shared control queue and runs later
+// tests' activities with its deleted ServiceAccount's token. Removing the
+// ScaledJob and Jobs before the release also keeps that token valid until the
+// pods are gone.
+func (h *e2eHarness) removeScaledJobWorker(t *testing.T) {
+	t.Helper()
+
+	selector := "app.kubernetes.io/instance=" + scaledJobRelease
+
+	// Stop KEDA spawning Jobs before removing the existing ones.
+	_, err := execOut(h.repoRoot, h.kubeEnv(), "kubectl", "delete", "scaledjobs.keda.sh",
+		"-n", namespace, "-l", selector, "--wait", "--timeout=2m", "--ignore-not-found")
+	assert.NoError(t, err, "delete the autoscaling ScaledJob")
+
+	// Foreground: a Job is only gone once its pods are.
+	_, err = execOut(h.repoRoot, h.kubeEnv(), "kubectl", "delete", "jobs",
+		"-n", namespace, "-l", selector, "--cascade=foreground", "--wait", "--timeout=3m", "--ignore-not-found")
+	assert.NoError(t, err, "delete the autoscaling ScaledJob's Jobs")
+
+	assert.Eventuallyf(t, func() bool {
+		out, listErr := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "get", "pods",
+			"-n", namespace, "-l", selector, "-o", "name")
+
+		return listErr == nil && strings.TrimSpace(out) == ""
+	}, 3*time.Minute, 2*time.Second, "no %s pod may outlive the autoscaling test to poll later tests' control queue", scaledJobRelease)
+
+	_, err = execOut(h.repoRoot, h.kubeEnv(), "helm", "uninstall", scaledJobRelease,
+		"--namespace", namespace, "--wait", "--timeout", "2m", "--ignore-not-found")
+	assert.NoError(t, err, "uninstall the autoscaling release")
 }
 
 // scaleControlDeployment scales the shared control Deployment and waits for it to settle.
