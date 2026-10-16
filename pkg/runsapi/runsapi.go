@@ -231,6 +231,9 @@ func newHandler(temporalClient TemporalClient, getenv func(string) string, opts 
 		opt(h)
 	}
 
+	// Validated after options so presets merge with the final deploy config.
+	h.presets = h.validatePresets()
+
 	// Built after options so it captures the final drain context.
 	h.broker = newRunBroker(h.fetchRunDetailUntilDrain, h.drain)
 
@@ -299,6 +302,9 @@ type handler struct {
 	deploySlotCount      int
 	deployCleaningSlots  []int
 	deployIOStationSlots []int
+	// rawPresets are as supplied (issue #417); presets are the valid ones offered.
+	rawPresets []Preset
+	presets    []uiPreset
 }
 
 // listRuns implements GET /api/runs, newest first.

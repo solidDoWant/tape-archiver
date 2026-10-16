@@ -183,6 +183,50 @@ chart — it has no `ScaledJob` path.
 | `sessionKey.secretKeyRef.{name,key}` | `""` (optional) | Override the auto-generated session-cookie key with one from an existing `Secret` — see [Session key](#session-key-auto-generated-by-default). Set both together or leave both empty. |
 | `dryRun.mhvtlChangerDev` / `dryRun.mhvtlDrive0Dev` / `dryRun.mhvtlDrive1Dev` | `""` | mhvtl device nodes a dry-run `POST /api/runs` submission redirects to (`MHVTL_CHANGER_DEV`/`MHVTL_DRIVE0_DEV`/`MHVTL_DRIVE1_DEV`). Leave all three empty (the default, appropriate for a production deployment against a real library) to make dry-run submissions fail closed with `400`. Must be set together or not at all — rendering fails otherwise. |
 | `library.changer` / `library.drives` / `delivery.webhookUrl` | `""` / `[]` / `""` | Deploy-owned library device targets and Discord webhook the guided config form ("Start new run" → Form mode) has **no field for** — they are filled into the submitted run config from deploy config and enforced server-side, not typed per run (`LIBRARY_CHANGER` / `LIBRARY_DRIVES` / `DELIVERY_WEBHOOK_URL` — [Web UI environment variables](configuration.md#web-ui-environment-variables-cmdweb)). `library.drives` is a list (rendered comma-separated). Each is optional and independent; `cmd/web` overwrites any set value onto every submitted run config (so no submission path can override it), while an unset one has no form control and can still be supplied per run via JSON / paste mode. These are the real-hardware analogue of `dryRun.mhvtl*` — the actual library a submitted run targets. |
+| `presets` | `[]` | Named run presets the "Start new run" page offers — see [Run presets](#run-presets-configwebpresets) below. |
+
+#### Run presets (`config.web.presets`)
+
+Each entry is `{name, description, config}`: a unique, non-empty `name`, an optional
+`description`, and a `config` holding any subset of the run config
+(`schemas/run-config.schema.json`). The chart renders the list as JSON into a
+`<release>-run-presets` ConfigMap mounted at `/etc/tape-archiver/presets/presets.json`
+and points `RUN_PRESETS_FILE` at it; with no presets nothing is mounted or set. The
+pod template's ConfigMap checksum annotation rolls the pods when the presets change,
+since `cmd/web` reads them once at startup. The chart's `values.schema.json` checks
+the entry shape and rejects `config.encryption.identity` and `config.delivery.webhookUrl`
+at render time (secrets never belong in a ConfigMap served to browsers); `cmd/web`
+then validates each preset merged with the deploy-owned fields above and logs and
+drops any invalid one rather than failing startup — check the web pod's logs for
+`run preset is invalid` after changing presets. See
+[`docs/web-ui.md`](web-ui.md#run-presets) for how they appear in the UI.
+
+```yaml
+config:
+  web:
+    presets:
+      - name: host-archive
+        description: Host datasets on the bulk pool
+        config:
+          sources:
+            - zfsPath:
+                name: bulk-pool-01/archive
+          copies: 2
+          redundancy:
+            fillToCapacity:
+              floor: 10
+          encryption:
+            recipients:
+              - age1pq1...
+      - name: nightly-apps
+        description: Nightly backup-tool app snapshots
+        config:
+          sources:
+            - k8s:
+                apiVersion: snapshot.storage.k8s.io/v1
+                kind: VolumeSnapshot
+                labelSelector: backup=nightly
+```
 
 ### Kubernetes resources (`resources`)
 

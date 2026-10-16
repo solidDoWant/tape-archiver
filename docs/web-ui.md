@@ -157,6 +157,39 @@ backup runs are a singleton (SPEC §4.2), so a submission could only fail anyway
 server still independently rejects a conflicting submission with a conflict error, so
 nothing depends on the page-level check.)
 
+### Run presets
+
+A deployment can supply named **run presets** — partial run configs for the things it
+archives regularly (e.g. the nightly app snapshots, or host datasets such as
+`bulk-pool-01/archive`), managed in git alongside the deployment (the web chart's
+`config.web.presets`, see [`docs/web-helm.md`](web-helm.md#run-presets-configwebpresets)).
+When any are configured, the config page shows a **Presets** card listing each one by
+name and description; **Load** fills the form with that preset's values. Fields the
+preset leaves out reset to the form's defaults, the deploy-owned fields (changer,
+drives, burner drives, webhook) still come from deploy config, and every other field
+stays editable before **Review →**. Loading a preset changes nothing else: the
+submission is the same `POST /api/runs`, and the submitted config remains the run's
+single source of truth — nothing records which preset (if any) a run started from
+(SPEC §4.2). With no presets configured the card is not shown.
+
+A preset's `config` is any subset of the run config
+([`schemas/run-config.schema.json`](configuration.md)), typically `sources` plus
+`copies`, `redundancy`, `encryption.recipients`, `library.blankSlots`/`tapeCapacityBytes`
+or a `delivery.opticalBurn` block. `cmd/web` reads the presets once at startup
+(`RUN_PRESETS_FILE` — [configuration](configuration.md#web-ui-environment-variables-cmdweb))
+and validates each one merged with the deploy-owned fields, checking every field the
+preset sets with the same rules a submission gets (strict decoding, run-config
+validation, and the blank slots against the library topology); fields it omits are
+left to the operator. A preset that fails — including a duplicate or empty name, or
+one that sets `encryption.identity` or `delivery.webhookUrl` (secrets: presets are
+served to every signed-in browser) — is logged at startup with its name and the
+validation error and is **not offered**; the web UI still starts. Presets carry fields
+the form has no controls for the same way a restart does: a notice names any that were
+dropped.
+
+`tapectl` has no `--preset` flag: it never sees the web deployment's config. Keep a
+checked-in run-config file for CLI submissions instead.
+
 ### Form mode
 
 A guided, sectioned builder covering the whole config surface an operator normally

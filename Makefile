@@ -283,6 +283,9 @@ WEB_CHART_LINT_ARGS := --set config.temporal.address=$(CHART_LINT_ADDRESS) \
 WEB_CHART_LINT_SESSIONKEY_ARGS := --set config.web.sessionKey.secretKeyRef.name=chart-lint-placeholder \
 	--set config.web.sessionKey.secretKeyRef.key=sessionKey
 
+# Render args for the web chart's optional run presets (issue #417).
+WEB_CHART_LINT_PRESETS_ARGS := --set-json 'config.web.presets=[{"name":"host-archive","description":"Host datasets","config":{"sources":[{"zfsPath":{"name":"bulk-pool-01/archive"}}],"copies":2,"library":{"tapeCapacityBytes":18000000000000}}}]'
+
 # Render args for the web chart's optional Ingress shape.
 WEB_CHART_LINT_INGRESS_ARGS := --set resources.ingress.main.enabled=true \
 	--set resources.ingress.main.className=nginx \
@@ -352,6 +355,17 @@ chart-lint: ## Fetch chart deps, lint, and render the control-worker chart shape
 	# Opt-in Ingress shape: must render an Ingress alongside the Deployment + Service.
 	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_INGRESS_ARGS) \
 		| grep -q '^kind: Ingress' || { echo "chart-lint: Ingress not rendered by the web chart when enabled"; exit 1; }
+	# Run presets (issue #417): mounted + RUN_PRESETS_FILE only when configured; a
+	# preset carrying a secret fails the values schema.
+	helm lint $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_PRESETS_ARGS)
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_PRESETS_ARGS) \
+		| grep -q '^  presets.json: ' || { echo "chart-lint: run presets ConfigMap not rendered"; exit 1; }
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) $(WEB_CHART_LINT_PRESETS_ARGS) \
+		| grep -q 'RUN_PRESETS_FILE' || { echo "chart-lint: RUN_PRESETS_FILE not set with presets configured"; exit 1; }
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) \
+		| grep -q 'RUN_PRESETS_FILE' && { echo "chart-lint: RUN_PRESETS_FILE set without presets"; exit 1; } || true
+	helm template $(WEB_CHART) $(WEB_CHART_LINT_ARGS) --set-json 'config.web.presets=[{"name":"x","config":{"encryption":{"identity":"AGE-SECRET-KEY-1X"}}}]' >/dev/null 2>&1 \
+		&& { echo "chart-lint: a preset carrying encryption.identity must fail the values schema"; exit 1; } || true
 
 DATA_WORKER_UNIT := deploy/data-worker/tape-archiver-data-worker.service
 

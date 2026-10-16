@@ -740,7 +740,11 @@ refinement as issues are implemented.
   releases its hold, posts the failure/cancellation alert, and closes as
   `Canceled` — never `TerminateWorkflow`, which would skip that cleanup), and `GET
   /api/events/runs/{runID}` (Server-Sent Events live view over the same state,
-  including pause changes). The same API is self-described by an OpenAPI 3.1
+  including pause changes). `GET /api/config/ui` also serves the deployment's named
+  run presets (`RUN_PRESETS_FILE`; partial run configs validated at startup, invalid
+  ones logged and dropped) that the "Start new run" page loads into its form — they
+  only pre-fill it; the submitted config stays the run's single source of truth
+  (§4.2). The same API is self-described by an OpenAPI 3.1
   document (`GET /api/openapi.json`/`.yaml`) with a browsable reference page (`GET
   /api/docs`) — generated from the handlers' own Go request/response types via
   `huma` as a description-only layer that leaves how each endpoint is served

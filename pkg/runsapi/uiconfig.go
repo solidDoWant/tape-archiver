@@ -16,6 +16,8 @@ type uiConfigResponse struct {
 	Library uiLibraryConfig `json:"library"`
 	// Delivery holds the webhook flag (issue #304) and burner drives (issue #317).
 	Delivery uiDeliveryConfig `json:"delivery"`
+	// Presets are the deployment's valid run presets (issue #417); [] when none.
+	Presets []uiPreset `json:"presets"`
 }
 
 // uiLibraryConfig holds the deploy-owned devices (issue #304) and physical
@@ -56,5 +58,6 @@ func (h *handler) getUIConfig(w http.ResponseWriter, _ *http.Request) {
 			// Same [] normalization as Drives.
 			OpticalBurnDrives: append([]string{}, h.deployOpticalBurnerDrives...),
 		},
+		Presets: append([]uiPreset{}, h.presets...),
 	})
 }

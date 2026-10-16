@@ -13,7 +13,8 @@ import {
   type FormState,
   type RunConfig,
 } from './configModel'
-import { deployConfigFrom, useUiConfig } from './uiConfig'
+import { deployConfigFrom, presetsFrom, useUiConfig, type RunPreset } from './uiConfig'
+import PresetPicker from './PresetPicker'
 import { fetchConfigSchema, validateAgainstSchema, type ValidationIssue } from './configSchema'
 import ConfigForm from './ConfigForm'
 import ConfigReview from './ConfigReview'
@@ -110,7 +111,12 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
   // pattern as the run overview's Temporal-UI link.
   const uiConfigState = useUiConfig()
   const deploy = deployConfigFrom(uiConfigState)
+  const presets = presetsFrom(uiConfigState)
 
+  const [loadedPreset, setLoadedPreset] = useState<string | null>(null)
+  // formRevision remounts ConfigForm on a preset load: its number inputs are
+  // uncontrolled, so an in-place form replacement would not reach them.
+  const [formRevision, setFormRevision] = useState(0)
   const [mode, setMode] = useState<Mode>('form')
   const [step, setStep] = useState<Step>('edit')
   const [form, setForm] = useState<FormState>(defaultFormState)
@@ -225,6 +231,52 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
       cancelled = true
     }
   }, [restartFromRunId])
+
+  // loadPreset fills the form from a deployment preset (issue #417). Fields the
+  // preset omits reset to the form defaults; deploy-owned fields still come
+  // from deploy config, and the submit path is unchanged.
+  const loadPreset = (preset: RunPreset) => {
+    const config = preset.config as RunConfig
+    const presetForm = configToFormState(config)
+
+    setForm(presetForm)
+    setFormRevision((revision) => revision + 1)
+    setMode('form')
+    setStep('edit')
+    setReviewIssues([])
+    setSubmitState({ status: 'idle' })
+    setLoadedPreset(preset.name)
+
+    const notices = [`Loaded preset "${preset.name}" — review and edit any field before submitting.`]
+
+    const dropped = unmodeledFields(config)
+    if (dropped.length > 0) {
+      notices.push(
+        `The form has no controls for ${dropped.join(', ')}, so ${dropped.length === 1 ? 'it was' : 'they were'} dropped — switch to Paste / upload mode to set ${dropped.length === 1 ? 'it' : 'them'}.`,
+      )
+    }
+
+    const deployOwned = deployOwnedFields(config)
+    if (deployOwned.length > 0) {
+      notices.push(`Form mode sources ${deployOwned.join(', ')} from this deployment's config, not the preset.`)
+    }
+
+    const unmatchedCapacity = unmatchedTapeCapacity(config)
+    if (unmatchedCapacity !== null) {
+      notices.push(
+        `The preset's tape capacity (${unmatchedCapacity.toLocaleString()} bytes) matches no known LTO generation, so the form set it to ${presetForm.tapeGeneration}.`,
+      )
+    }
+
+    const unrepresentableK8s = unrepresentableK8sSources(config)
+    if (unrepresentableK8s.length > 0) {
+      notices.push(
+        `Form mode only offers the standard VolumeSnapshot / VolumeGroupSnapshot kinds, so it changed ${unrepresentableK8s.join(', ')} to a supported value.`,
+      )
+    }
+
+    setModeSwitchNotice(notices.join(' '))
+  }
 
   const switchToJson = () => {
     // Clicking the already-active tab must be a no-op: re-serializing
@@ -511,13 +563,15 @@ function ConfigPage({ onViewRun, restartFromRunId }: ConfigPageProps) {
         </div>
       ) : null}
 
+      {step === 'edit' ? <PresetPicker presets={presets} loaded={loadedPreset} onLoad={loadPreset} /> : null}
+
       {modeSwitchNotice ? (
         <p role="status" className="text-[11.5px] text-amber">
           {modeSwitchNotice}
         </p>
       ) : null}
 
-      {step === 'edit' && mode === 'form' ? <ConfigForm form={form} setForm={setForm} deploy={deploy} deployStatus={uiConfigState.status} /> : null}
+      {step === 'edit' && mode === 'form' ? <ConfigForm key={formRevision} form={form} setForm={setForm} deploy={deploy} deployStatus={uiConfigState.status} /> : null}
       {step === 'edit' && mode === 'json' ? <ConfigJsonMode text={jsonText} onTextChange={setJsonText} /> : null}
       {step === 'review' && reviewConfig ? <ConfigReview config={reviewConfig} dryRun={dryRun} /> : null}
 

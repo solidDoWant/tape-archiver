@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "tape-archiver-web values",
+  "description": "Describes config.web.presets only; every other value is documented in values.yaml.",
+  "type": "object",
+  "properties": {
+    "config": {
+      "type": "object",
+      "properties": {
+        "web": {
+          "type": "object",
+          "properties": {
+            "presets": {
+              "description": "Named partial run configs offered by the \"Start new run\" page (issue #417, docs/web-ui.md \"Run presets\").",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "config"],
+                "properties": {
+                  "name": {
+                    "description": "Unique preset name shown in the picker.",
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": {
+                    "description": "Optional operator-facing description shown under the name.",
+                    "type": "string"
+                  },
+                  "config": {
+                    "description": "Any subset of the run config (schemas/run-config.schema.json). cmd/web validates it at startup merged with the deploy-owned fields. Secrets are not allowed.",
+                    "type": "object",
+                    "properties": {
+                      "encryption": {
+                        "type": "object",
+                        "not": { "required": ["identity"] },
+                        "description": "encryption.identity is a private key and must be entered per run, never in a preset."
+                      },
+                      "delivery": {
+                        "type": "object",
+                        "not": { "required": ["webhookUrl"] },
+                        "description": "delivery.webhookUrl is a deploy-owned credential (config.web.delivery.webhookUrl)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

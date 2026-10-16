@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
@@ -54,6 +55,10 @@ const (
 	// webLibrarySlotCount mirrors mhvtl's 47 storage slots so the Form-mode slot
 	// grid (issue #305/#310) can select webFormBlankSlot.
 	webLibrarySlotCount = 47
+
+	// Run presets installed via the chart (issue #417); the invalid one must be dropped.
+	webValidPreset   = "e2e-preset"
+	webInvalidPreset = "e2e-invalid-preset"
 )
 
 // webE2EPrereqReason returns a skip reason for missing Playwright-specific
@@ -187,11 +192,19 @@ func TestWebUIEndToEnd(t *testing.T) {
 		"--set", "config.web.library.drives={"+testutil.Drive0Dev(t)+","+testutil.Drive1Dev(t)+"}",
 		// Without a slot count the Form-mode grid has no slot to click (issue #305/#310).
 		"--set", "config.web.library.topology.slotCount="+strconv.Itoa(webLibrarySlotCount),
+		// One valid and one invalid run preset (issue #417); presets.spec.ts checks the UI.
+		"--set-json", `config.web.presets=[{"name":"`+webValidPreset+`","description":"E2E preset","config":{"sources":[{"zfsPath":{"name":"`+source+`"}}],"copies":1}},{"name":"`+webInvalidPreset+`","config":{"copies":0}}]`,
 		"--set-string", imagePath+".repository="+webRepo,
 		"--set-string", imagePath+".tag="+imageVersion,
 		"--set", imagePath+".pullPolicy=Never",
 	)
 	require.NoError(t, err, "helm install web chart")
+
+	// An invalid preset is logged at startup by name with its validation error.
+	webLogs, err := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "logs",
+		"-n", webK8sNamespace, "-l", "app.kubernetes.io/instance="+webHelmRelease, "--tail=-1")
+	require.NoError(t, err, "read web UI logs")
+	assert.Regexp(t, `run preset is invalid.*`+webInvalidPreset+`.*copies: must be at least 1`, webLogs)
 
 	svcName, err := execStdout(h.repoRoot, h.kubeEnv(), "kubectl", "get", "svc",
 		"-n", webK8sNamespace, "-l", "app.kubernetes.io/instance="+webHelmRelease,
@@ -214,6 +227,8 @@ func TestWebUIEndToEnd(t *testing.T) {
 		"RUN_CONFIG_PATH="+configPath,
 		"FORM_ZFS_SOURCE="+source,
 		"FORM_BLANK_SLOT="+strconv.Itoa(formFixture.slotAddr),
+		"VALID_PRESET="+webValidPreset,
+		"INVALID_PRESET="+webInvalidPreset,
 	)
 
 	out, err := cmd.CombinedOutput()
