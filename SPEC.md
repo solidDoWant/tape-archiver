@@ -744,7 +744,16 @@ modified to pass — the code is fixed instead.
   and a lagging drive re-reads from its own page-cache window. Re-reading a logical tape's
   staged tree across successive copy-sets is expected and acceptable.
 - The prepare phase (`tar`/`age`/PAR2) must, in aggregate, keep ahead of the planned
-  write throughput; PAR2 uses the multithreaded par2cmdline-turbo. Because prepare and
+  write throughput; PAR2 uses the multithreaded par2cmdline-turbo. par2 holds the
+  whole recovery set in memory or else makes one strided pass over the input per
+  slice of the block it can hold, and its built-in default (128 MiB in the bundled
+  build) turned a 117 GB archive into ~100 passes of ~600 KB seek-bound reads. The
+  worker therefore sets par2's memory limit explicitly: enough to cover each block in
+  par2's largest 32 MiB processing chunk, capped at half the available memory and
+  8 GiB. Archives with blocks of at most 32 MiB (up to ~65 GB at ~2,000 blocks) are
+  read once, sequentially; larger ones are read twice (a sequential hash pass, then
+  32 MiB strided reads). The recovery set is byte-for-byte standard PAR2 2.0 either
+  way. Because prepare and
   write are decoupled by staging, prepare throughput affects total run time but never
   the streaming guarantee. The `tar` stage reads small files (under 1 MiB) ahead of the
   stream with a bounded worker pool and memory budget, so a tree of small files keeps

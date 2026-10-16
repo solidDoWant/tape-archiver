@@ -34,7 +34,8 @@ type ProgressFunc func(fraction float64)
 type Option func(*options)
 
 type options struct {
-	onProgress ProgressFunc
+	onProgress   ProgressFunc
+	memoryBudget int64
 }
 
 // WithProgress reports par2's completion fraction to onProgress. par2 then runs
@@ -43,12 +44,22 @@ func WithProgress(onProgress ProgressFunc) Option {
 	return func(o *options) { o.onProgress = onProgress }
 }
 
+// WithMemoryBudget caps par2's working memory at budget bytes in place of the
+// host-derived MemoryBudget.
+func WithMemoryBudget(budget int64) Option {
+	return func(o *options) { o.memoryBudget = budget }
+}
+
 // Generate produces a PAR2 recovery set named after recoverySetPath covering
 // dataFiles at redundancyPercent (1-100), using the same par2 binary that ships
 // on the recovery disc (SPEC §8, §10).
 //
 // Every data file must share recoverySetPath's directory: par2 is given bare
 // basenames so the set stays valid when restored into any directory.
+//
+// par2's memory limit is set explicitly (PlanMemory) so the input streams in
+// as few, large reads as the memory budget allows. It changes only how par2
+// computes the set, never the PAR2 2.0 output format.
 func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, redundancyPercent int, opts ...Option) error {
 	if redundancyPercent < 1 || redundancyPercent > 100 {
 		return fmt.Errorf("redundancy percentage must be in [1, 100], got %d", redundancyPercent)
@@ -65,9 +76,8 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 
 	dir := filepath.Dir(recoverySetPath)
 
-	var totalSize int64
-
 	names := make([]string, len(dataFiles))
+	sizes := make([]int64, len(dataFiles))
 
 	for index, dataFile := range dataFiles {
 		if fileDir := filepath.Dir(dataFile); fileDir != dir {
@@ -79,19 +89,27 @@ func Generate(ctx context.Context, recoverySetPath string, dataFiles []string, r
 			return fmt.Errorf("stat data file %q: %w", dataFile, err)
 		}
 
-		totalSize += info.Size()
+		sizes[index] = info.Size()
 		names[index] = filepath.Base(dataFile)
 	}
 
-	blockSize := ComputeBlockSize(totalSize, len(dataFiles))
+	budget := cfg.memoryBudget
+	if budget <= 0 {
+		budget = MemoryBudget()
+	}
+
+	plan := PlanMemory(sizes, redundancyPercent, budget)
 
 	args := []string{"create"}
 	if cfg.onProgress == nil {
 		args = append(args, "-qq")
 	}
 
+	// -t and -T stay at par2's defaults: every core for the GF16 compute, and two
+	// files hashed at once in the separate hash pass.
 	args = append(args,
-		"-s"+strconv.FormatInt(blockSize, 10),
+		"-s"+strconv.FormatInt(plan.BlockSize, 10),
+		"-m"+strconv.FormatInt(plan.Limit/mebibyte, 10),
 		"-r"+strconv.Itoa(redundancyPercent),
 		"-a", filepath.Base(recoverySetPath),
 		"--",
