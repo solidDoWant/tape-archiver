@@ -199,8 +199,10 @@ write window.
    alert or the run from closing. Run-scoped snapshots are held like any other source
    snapshot.
 2. **Prepare.** For each archive: `tar` the snapshot contents → optional `zstd`
-   compression → `age`-encrypt → split into fixed-size slices → compute SHA-256
-   checksums. All output is staged to disk and its exact size measured.
+   compression → `age`-encrypt → split into fixed-size slices. Each slice's SHA-256
+   checksum and exact size are computed from the bytes as they are written, so staging
+   needs no second read pass; Verify (step 5) independently re-reads them from disk.
+   All output is staged to disk before any tape write.
 3. **Pack.** Bin-pack the prepared archives onto tapes by their *measured* size
    (≤ tape capacity, accounting for PAR2 and LTFS overhead), replicated across N copies
    (N = configured copy count). The copy count is **not** bounded by the drive count:

@@ -466,13 +466,9 @@ func TestPrepareProgressTracker(t *testing.T) {
 	}, tracker.snapshot())
 
 	tracker.addSourceBytes(50)
-	tracker.startChecksums(4)
-	tracker.finishSlice()
 
 	got := tracker.snapshot()
-	assert.Equal(t, prepareStageChecksumming, got.CurrentStage)
-	assert.Equal(t, 1, got.ChecksummedSlices)
-	assert.Equal(t, 4, got.TotalSlices)
+	assert.Equal(t, prepareStageStreaming, got.CurrentStage)
 	assert.Equal(t, 100.0, got.CurrentArchivePercent, "every source byte of the archive has been read")
 
 	tracker.finishArchive()
@@ -502,8 +498,6 @@ func TestPrepareProgressTracker(t *testing.T) {
 	assert.NotPanics(t, func() {
 		nilTracker.startArchive(1, "none", 100)
 		nilTracker.addSourceBytes(10)
-		nilTracker.startChecksums(2)
-		nilTracker.finishSlice()
 		nilTracker.finishArchive()
 	})
 
@@ -535,16 +529,6 @@ func TestPrepareProgressMessage(t *testing.T) {
 				EstimatedTimeRemaining: 90 * time.Minute,
 			},
 			want: `prepare: progress 61.3% overall (1/3 archives staged, streaming "db" at 42.5%), eta 1h30m0s`,
-		},
-		{
-			name: "checksumming an archive's slices",
-			progress: PrepareProgress{
-				TotalArchives: 3, CompletedArchives: 1,
-				CurrentSourceIndex: 1, CurrentLabel: "db", CurrentStage: prepareStageChecksumming,
-				CurrentArchivePercent: 100, ChecksummedSlices: 3, TotalSlices: 12,
-				OverallPercent: 66.6,
-			},
-			want: `prepare: progress 66.6% overall (1/3 archives staged, checksumming "db" slice 3/12)`,
 		},
 	}
 

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/solidDoWant/tape-archiver/pkg/archive"
+	"github.com/solidDoWant/tape-archiver/pkg/checksum"
 )
 
 func TestSplit(t *testing.T) {
@@ -43,6 +44,12 @@ func TestSplit(t *testing.T) {
 			dataLen:   100,
 			sliceSize: 256,
 			wantSizes: []int64{100},
+		},
+		{
+			name:      "input exactly one slice",
+			dataLen:   256,
+			sliceSize: 256,
+			wantSizes: []int64{256},
 		},
 		{
 			name:      "empty input produces no slices",
@@ -79,27 +86,29 @@ func TestSplit(t *testing.T) {
 
 			dir := t.TempDir()
 
-			paths, err := archive.Split(t.Context(), bytes.NewReader(data), test.sliceSize, dir, "archive")
+			slices, err := archive.Split(t.Context(), bytes.NewReader(data), test.sliceSize, dir, "archive")
 			test.assertErr(t, err)
 
 			if err != nil {
-				assert.Nil(t, paths)
+				assert.Nil(t, slices)
 
 				return
 			}
 
-			require.Len(t, paths, len(test.wantSizes))
+			require.Len(t, slices, len(test.wantSizes))
 
 			var reconstructed []byte
 
-			for index, path := range paths {
-				assert.Equal(t, filepath.Join(dir, "archive."+pad(index)), path)
+			for index, slice := range slices {
+				assert.Equal(t, filepath.Join(dir, "archive."+pad(index)), slice.Path)
+				assert.Equal(t, test.wantSizes[index], slice.SizeBytes)
+				assertDigestMatchesFile(t, slice)
 
-				slice, readErr := os.ReadFile(path)
+				contents, readErr := os.ReadFile(slice.Path)
 				require.NoError(t, readErr)
-				assert.Len(t, slice, int(test.wantSizes[index]))
+				assert.Len(t, contents, int(test.wantSizes[index]))
 
-				reconstructed = append(reconstructed, slice...)
+				reconstructed = append(reconstructed, contents...)
 			}
 
 			assert.True(t, bytes.Equal(data, reconstructed),
@@ -107,7 +116,7 @@ func TestSplit(t *testing.T) {
 
 			remaining, readErr := os.ReadDir(dir)
 			require.NoError(t, readErr)
-			assert.Len(t, remaining, len(paths))
+			assert.Len(t, remaining, len(slices))
 		})
 	}
 }
@@ -127,12 +136,19 @@ func TestSplitUniformWidthBeyond999(t *testing.T) {
 
 	dir := t.TempDir()
 
-	paths, err := archive.Split(t.Context(), bytes.NewReader(data), 1, dir, "archive")
+	slices, err := archive.Split(t.Context(), bytes.NewReader(data), 1, dir, "archive")
 	require.NoError(t, err)
-	require.Len(t, paths, sliceCount)
+	require.Len(t, slices, sliceCount)
 
-	for index, path := range paths {
-		assert.Equal(t, filepath.Join(dir, fmt.Sprintf("archive.%04d", index)), path)
+	paths := make([]string, 0, len(slices))
+
+	for index, slice := range slices {
+		assert.Equal(t, filepath.Join(dir, fmt.Sprintf("archive.%04d", index)), slice.Path)
+		assert.Equal(t, int64(1), slice.SizeBytes)
+		// The digest must follow its slice through the width-normalizing rename.
+		assertDigestMatchesFile(t, slice)
+
+		paths = append(paths, slice.Path)
 	}
 
 	sorted := append([]string(nil), paths...)
@@ -147,10 +163,10 @@ func TestSplitUniformWidthBeyond999(t *testing.T) {
 	var reconstructed []byte
 
 	for _, match := range matches {
-		slice, readErr := os.ReadFile(match)
+		contents, readErr := os.ReadFile(match)
 		require.NoError(t, readErr)
 
-		reconstructed = append(reconstructed, slice...)
+		reconstructed = append(reconstructed, contents...)
 	}
 
 	assert.True(t, bytes.Equal(data, reconstructed),
@@ -169,21 +185,21 @@ func TestSplitCancelledMidSlice(t *testing.T) {
 	src := &cancelThenBlockReader{cancel: cancel, chunk: make([]byte, 64<<10)}
 
 	type result struct {
-		paths []string
-		err   error
+		slices []archive.Slice
+		err    error
 	}
 
 	done := make(chan result, 1)
 
 	go func() {
-		paths, err := archive.Split(ctx, src, sliceSize, t.TempDir(), "archive")
-		done <- result{paths: paths, err: err}
+		slices, err := archive.Split(ctx, src, sliceSize, t.TempDir(), "archive")
+		done <- result{slices: slices, err: err}
 	}()
 
 	select {
 	case got := <-done:
 		require.ErrorIs(t, got.err, context.Canceled)
-		assert.Nil(t, got.paths)
+		assert.Nil(t, got.slices)
 	case <-time.After(5 * time.Second):
 		t.Fatal("Split did not return after cancellation; per-read cancellation is not working")
 	}
@@ -206,6 +222,16 @@ func (r *cancelThenBlockReader) Read(p []byte) (int, error) {
 	}
 
 	select {} // unreachable unless the context is not checked before reading
+}
+
+// assertDigestMatchesFile: Split's inline digest must equal an independent
+// re-read of the slice on disk.
+func assertDigestMatchesFile(t *testing.T, slice archive.Slice) {
+	t.Helper()
+
+	want, err := checksum.SHA256File(slice.Path)
+	require.NoError(t, err)
+	assert.Equal(t, want, slice.SHA256, "digest of %s", slice.Path)
 }
 
 func pad(index int) string {

@@ -2,6 +2,8 @@ package archive
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,17 +12,26 @@ import (
 	"strconv"
 )
 
+// Slice is one file written by Split.
+type Slice struct {
+	Path string
+	// SHA256 is the lowercase hex digest, computed from the bytes as they were
+	// written so staging needs no second read pass (#448).
+	SHA256    string
+	SizeBytes int64
+}
+
 // Split writes src to dir as sliceSize-byte files "baseName.NNN" and returns
-// their paths in order. All slices share one zero-padded width (at least three
+// them in order. All slices share one zero-padded width (at least three
 // digits) so lexical order equals numeric order and the recovery procedure's
 // sorted reassembly is correct. Slicing bounds a damaged tape region's
 // blast radius to one slice (SPEC §8).
-func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName string) ([]string, error) {
+func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName string) ([]Slice, error) {
 	if sliceSize <= 0 {
 		return nil, fmt.Errorf("slice size must be positive, got %d", sliceSize)
 	}
 
-	var paths []string
+	var slices []Slice
 
 	for index := 0; ; index++ {
 		if err := ctx.Err(); err != nil {
@@ -29,7 +40,7 @@ func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName st
 
 		path := filepath.Join(dir, fmt.Sprintf("%s.%03d", baseName, index))
 
-		written, err := writeSlice(ctx, path, src, sliceSize)
+		written, digest, err := writeSlice(ctx, path, src, sliceSize)
 		if err != nil {
 			return nil, err
 		}
@@ -43,28 +54,30 @@ func Split(ctx context.Context, src io.Reader, sliceSize int64, dir, baseName st
 			break
 		}
 
-		paths = append(paths, path)
+		slices = append(slices, Slice{Path: path, SHA256: digest, SizeBytes: written})
 
 		if written < sliceSize {
 			break
 		}
 	}
 
-	return normalizeWidth(paths, dir, baseName)
+	return normalizeWidth(slices, dir, baseName)
 }
 
 // normalizeWidth renames slices to a uniform pad once the count exceeds 1000.
-func normalizeWidth(paths []string, dir, baseName string) ([]string, error) {
-	if len(paths) == 0 {
-		return paths, nil
+func normalizeWidth(slices []Slice, dir, baseName string) ([]Slice, error) {
+	if len(slices) == 0 {
+		return slices, nil
 	}
 
-	width := len(strconv.Itoa(len(paths) - 1))
+	width := len(strconv.Itoa(len(slices) - 1))
 	if width <= 3 {
-		return paths, nil
+		return slices, nil
 	}
 
-	for index, oldPath := range paths {
+	for index := range slices {
+		oldPath := slices[index].Path
+
 		newPath := filepath.Join(dir, fmt.Sprintf("%s.%0*d", baseName, width, index))
 		if newPath == oldPath {
 			continue
@@ -74,30 +87,33 @@ func normalizeWidth(paths []string, dir, baseName string) ([]string, error) {
 			return nil, fmt.Errorf("rename slice %s to uniform width %s: %w", oldPath, newPath, err)
 		}
 
-		paths[index] = newPath
+		slices[index].Path = newPath
 	}
 
-	return paths, nil
+	return slices, nil
 }
 
-// writeSlice copies up to sliceSize bytes; a short count means EOF.
-func writeSlice(ctx context.Context, path string, src io.Reader, sliceSize int64) (int64, error) {
+// writeSlice copies up to sliceSize bytes, hashing them as they are written,
+// and returns the count and hex digest; a short count means EOF.
+func writeSlice(ctx context.Context, path string, src io.Reader, sliceSize int64) (int64, string, error) {
 	file, err := os.Create(path)
 	if err != nil {
-		return 0, fmt.Errorf("create slice %s: %w", path, err)
+		return 0, "", fmt.Errorf("create slice %s: %w", path, err)
 	}
 
-	written, copyErr := io.CopyN(file, ctxReader{ctx: ctx, r: src}, sliceSize)
+	hasher := sha256.New()
+
+	written, copyErr := io.CopyN(io.MultiWriter(file, hasher), ctxReader{ctx: ctx, r: src}, sliceSize)
 
 	closeErr := file.Close()
 
 	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
-		return written, fmt.Errorf("write slice %s: %w", path, copyErr)
+		return written, "", fmt.Errorf("write slice %s: %w", path, copyErr)
 	}
 
 	if closeErr != nil {
-		return written, fmt.Errorf("close slice %s: %w", path, closeErr)
+		return written, "", fmt.Errorf("close slice %s: %w", path, closeErr)
 	}
 
-	return written, nil
+	return written, hex.EncodeToString(hasher.Sum(nil)), nil
 }
