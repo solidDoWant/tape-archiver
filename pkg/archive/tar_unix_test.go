@@ -332,5 +332,7 @@ func TestMetadataFidelityDocumented(t *testing.T) {
 		assert.Contains(t, text, "extended attribute", "%s must state the xattr fate", docPath)
 		assert.Contains(t, text, "acl", "%s must state the POSIX ACL fate", docPath)
 		assert.Contains(t, text, "capabilit", "%s must state the file-capability fate", docPath)
+		assert.Contains(t, text, "nanosecond", "%s must state the mtime precision", docPath)
+		assert.Contains(t, text, "change time", "%s must state the atime/ctime fate", docPath)
 	}
 }

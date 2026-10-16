@@ -429,7 +429,11 @@ All formats are open and widely implemented, for 20-year recoverability.
   without ZFS. Optional `zstd` compression (open, RFC 8878) is applied before
   encryption; its binary and source are bundled on the recovery disc.
   - **What the archive captures:** regular files, directories, and symlinks, with
-    their permission bits, ownership (uid/gid), and modification time. This includes
+    their permission bits, ownership (uid/gid), and modification time — the latter to
+    the nanosecond, as a POSIX PAX `mtime` record that GNU `tar` restores (USTAR's
+    whole-second field alone would round it). Access and change times (atime/ctime)
+    are deliberately not recorded: atime would make the archive vary with every read
+    of the source, and ctime cannot be set on restore. This includes
     the source root itself: a single-volume archive's first entry is `./` (a group
     archive's is each member's `<subdir>/`), so `tar -xpf … -C TARGET` run as root
     restores the root's mode, owner, and mtime onto `TARGET`. Hardlinked

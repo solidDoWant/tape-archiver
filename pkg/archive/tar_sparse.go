@@ -137,18 +137,11 @@ func buildSparseMap(regions []sparseRegion, realSize int64) []byte {
 	return encoded
 }
 
-// appendTimeRecords keeps sub-second timestamp fidelity matching archive/tar.
+// appendTimeRecords records mtime to the nanosecond, matching writeEntry's PAX
+// headers, which likewise carry no atime or ctime.
 func appendTimeRecords(records []paxRecord, header *tar.Header) []paxRecord {
 	if !header.ModTime.IsZero() {
 		records = append(records, paxRecord{"mtime", formatPaxTime(header.ModTime)})
-	}
-
-	if !header.AccessTime.IsZero() {
-		records = append(records, paxRecord{"atime", formatPaxTime(header.AccessTime)})
-	}
-
-	if !header.ChangeTime.IsZero() {
-		records = append(records, paxRecord{"ctime", formatPaxTime(header.ChangeTime)})
 	}
 
 	return records
