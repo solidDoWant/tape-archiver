@@ -19,7 +19,7 @@ import (
 type readAhead struct {
 	workers int   // concurrent file reads; 0 disables read-ahead (serial path)
 	maxFile int64 // files smaller than this are read ahead; larger ones stream from their fd
-	memory  int64 // total bytes buffered ahead; must exceed maxFile
+	memory  int64 // total bytes buffered ahead; larger files are not read ahead
 	window  int   // walk entries queued ahead of the writer
 }
 
@@ -37,6 +37,7 @@ type prefetch struct {
 	done     chan struct{}
 	weight   int64
 	data     []byte
+	sparse   bool     // file was handed back; it holds a worker slot until release
 	file     *os.File // a sparse file, handed back open for writeSparseEntry
 	regions  []sparseRegion
 	openErr  error
@@ -70,7 +71,7 @@ func (p *prefetch) load(ctx context.Context, path string, size int64) {
 	}
 
 	if sparse {
-		p.file, p.regions = file, regions
+		p.sparse, p.file, p.regions = true, file, regions
 
 		return
 	}
@@ -88,13 +89,18 @@ func (p *prefetch) load(ctx context.Context, path string, size int64) {
 	p.closeErr = file.Close()
 }
 
-// release frees the buffer and any unconsumed fd once the load finishes.
-func (p *prefetch) release(memory *semaphore.Weighted) {
+// release frees the buffer, any unconsumed fd, and a handed-back file's worker
+// slot once the load finishes.
+func (p *prefetch) release(memory, workers *semaphore.Weighted) {
 	<-p.done
 
 	if p.file != nil {
 		_ = p.file.Close()
 		p.file = nil
+	}
+
+	if p.sparse {
+		workers.Release(1)
 	}
 
 	p.data = nil
@@ -143,9 +149,9 @@ type queuedEntry struct {
 	err      error
 }
 
-func (q queuedEntry) release(memory *semaphore.Weighted) {
+func (q queuedEntry) release(memory, workers *semaphore.Weighted) {
 	if q.prefetch != nil {
-		q.prefetch.release(memory)
+		q.prefetch.release(memory, workers)
 	}
 }
 
@@ -166,7 +172,7 @@ func (w *tarWriter) treeReadAhead(ctx context.Context, srcDir, prefix string) er
 		case queue <- queued:
 			return nil
 		case <-walkCtx.Done():
-			queued.release(memory)
+			queued.release(memory, workers)
 
 			return walkCtx.Err()
 		}
@@ -200,7 +206,7 @@ func (w *tarWriter) treeReadAhead(ctx context.Context, srcDir, prefix string) er
 		cancel()
 
 		for queued := range queue {
-			queued.release(memory)
+			queued.release(memory, workers)
 		}
 
 		loads.Wait()
@@ -212,13 +218,13 @@ func (w *tarWriter) treeReadAhead(ctx context.Context, srcDir, prefix string) er
 		}
 
 		if err := ctx.Err(); err != nil {
-			queued.release(memory)
+			queued.release(memory, workers)
 
 			return err
 		}
 
 		err := w.writeEntry(ctx, srcDir, prefix, queued.walkEntry, queued.prefetch)
-		queued.release(memory)
+		queued.release(memory, workers)
 
 		if err != nil {
 			return err
@@ -232,7 +238,7 @@ func (w *tarWriter) treeReadAhead(ctx context.Context, srcDir, prefix string) er
 // eligible reports whether item is a small regular file worth reading ahead.
 // Hardlinks are left to the writer, which may store them as link entries.
 func (r readAhead) eligible(item walkEntry) bool {
-	if item.infoErr != nil || !item.info.Mode().IsRegular() || item.info.Size() >= r.maxFile {
+	if item.infoErr != nil || !item.info.Mode().IsRegular() || item.info.Size() >= min(r.maxFile, r.memory) {
 		return false
 	}
 
@@ -243,7 +249,8 @@ func (r readAhead) eligible(item walkEntry) bool {
 
 // startPrefetch reserves memory and a worker in walk order, then loads item in
 // the background. Reserving in order guarantees the writer's next entry always
-// fits, so the budget cannot deadlock.
+// fits, so the budget cannot deadlock. A handed-back sparse file keeps its
+// worker slot until released, so open fds stay bounded by workers.
 func startPrefetch(ctx context.Context, item walkEntry, memory, workers *semaphore.Weighted, loads *sync.WaitGroup) (*prefetch, error) {
 	size := item.info.Size()
 	weight := size + 1
@@ -261,9 +268,11 @@ func startPrefetch(ctx context.Context, item walkEntry, memory, workers *semapho
 	pre := &prefetch{done: make(chan struct{}), weight: weight}
 
 	loads.Go(func() {
-		defer workers.Release(1)
-
 		pre.load(ctx, item.path, size)
+
+		if !pre.sparse {
+			workers.Release(1)
+		}
 	})
 
 	return pre, nil

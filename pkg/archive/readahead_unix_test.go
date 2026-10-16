@@ -34,6 +34,7 @@ var readAheadConfigs = []struct {
 	{name: "one worker", config: archive.ReadAhead{Workers: 1, MaxFile: 64 << 10, Memory: 64 << 10, Window: 4}},
 	{name: "tight memory", config: archive.ReadAhead{Workers: 8, MaxFile: 16 << 10, Memory: 20 << 10, Window: 16}},
 	{name: "many workers", config: archive.ReadAhead{Workers: 64, MaxFile: 256 << 10, Memory: 1 << 20, Window: 1}},
+	{name: "memory below max file", config: archive.ReadAhead{Workers: 4, MaxFile: 1 << 20, Memory: 8 << 10, Window: 64}},
 }
 
 // buildMixedTree writes small files of varying sizes, files at and above the
@@ -236,12 +237,14 @@ func (w *cancellingWriter) Write(p []byte) (int, error) {
 }
 
 // TestTarReadAheadCancelled checks cancellation mid-stream stops the run and
-// leaves no read-ahead goroutines behind. Not parallel: it counts goroutines.
+// leaves no read-ahead goroutines or open files behind. Not parallel: it
+// counts goroutines and fds.
 func TestTarReadAheadCancelled(t *testing.T) {
 	src := t.TempDir()
 	buildMixedTree(t, src)
 
 	baseline := runtime.NumGoroutine()
+	baselineFDs := openFDs(t)
 
 	for _, readAhead := range readAheadConfigs {
 		for _, limit := range []int{1, 100_000, 2_000_000} {
@@ -250,6 +253,7 @@ func TestTarReadAheadCancelled(t *testing.T) {
 
 			err := archive.TarWith(ctx, writer, src, readAhead.config)
 			require.ErrorIs(t, err, context.Canceled, "%s, limit %d", readAhead.name, limit)
+			assert.Equal(t, baselineFDs, openFDs(t), "%s, limit %d: files left open", readAhead.name, limit)
 
 			cancel()
 		}
@@ -262,6 +266,55 @@ func TestTarReadAheadCancelled(t *testing.T) {
 	}
 
 	assert.LessOrEqual(t, runtime.NumGoroutine(), baseline, "read-ahead goroutines leaked")
+}
+
+// fdCountingWriter records the most fds open during any write, pausing on the
+// first so the read-ahead runs as far ahead as it can.
+type fdCountingWriter struct {
+	t       *testing.T
+	writes  int
+	maxFDs  int
+	pauseOn int
+}
+
+func (w *fdCountingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == w.pauseOn {
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	w.maxFDs = max(w.maxFDs, openFDs(w.t))
+
+	return len(p), nil
+}
+
+// TestTarReadAheadBoundsOpenFiles checks handed-back sparse files count against
+// the worker limit, so read-ahead never holds more than Workers files open.
+// Not parallel: it counts fds.
+func TestTarReadAheadBoundsOpenFiles(t *testing.T) {
+	src := t.TempDir()
+	writeSparseFixture(t, filepath.Join(src, "sparse0000"), 48<<10, []dataExtent{{offset: 0, data: []byte("head")}})
+
+	for index := 1; index < 200; index++ {
+		writeSparse(t, filepath.Join(src, fmt.Sprintf("sparse%04d", index)), 48<<10, []dataExtent{{offset: 0, data: []byte("head")}})
+	}
+
+	config := archive.ReadAhead{Workers: 4, MaxFile: 1 << 20, Memory: 64 << 20, Window: 1024}
+	baseline := openFDs(t)
+	writer := &fdCountingWriter{t: t, pauseOn: 1}
+
+	require.NoError(t, archive.TarWith(t.Context(), writer, src, config))
+	// Workers' files plus one directory or file the walker may hold open.
+	assert.LessOrEqual(t, writer.maxFDs, baseline+config.Workers+1)
+}
+
+func openFDs(t *testing.T) int {
+	t.Helper()
+
+	entries, err := os.ReadDir("/dev/fd")
+	require.NoError(t, err)
+
+	return len(entries)
 }
 
 func TestTarReadAheadCancelledBeforeStart(t *testing.T) {
