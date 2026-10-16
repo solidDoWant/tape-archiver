@@ -127,6 +127,9 @@ type writeHealthMetrics struct {
 	repositions *prometheus.GaugeVec
 	tapeAlerts  *prometheus.GaugeVec
 	belowFloor  *prometheus.GaugeVec
+	// measuredAt is the Unix time of the last measurement, so alerts can bound
+	// the other gauges (which never expire) by recency (#445).
+	measuredAt *prometheus.GaugeVec
 }
 
 // newWriteHealthMetrics registers the gauges; a nil reg yields nil.
@@ -160,10 +163,16 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 			Name:      "below_floor",
 			Help:      "1 when the measured throughput was below the tape generation's speed-matching floor, else 0 (including a write too small to measure). Unset when the generation has no known floor.",
 		}, writeHealthLabels),
+		measuredAt: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "tape_archiver",
+			Subsystem: "write",
+			Name:      "measured_timestamp_seconds",
+			Help:      "Unix time at which the other tape_archiver_write_* gauges were last set for this barcode and dry_run. Those gauges persist for the worker's lifetime, so alerts should require a recent measurement.",
+		}, writeHealthLabels),
 	}
 
 	for _, collector := range []prometheus.Collector{
-		metrics.throughput, metrics.repositions, metrics.tapeAlerts, metrics.belowFloor,
+		metrics.throughput, metrics.repositions, metrics.tapeAlerts, metrics.belowFloor, metrics.measuredAt,
 	} {
 		if err := reg.Register(collector); err != nil {
 			return nil, fmt.Errorf("register write-health metric: %w", err)
@@ -173,8 +182,9 @@ func newWriteHealthMetrics(reg prometheus.Registerer) (*writeHealthMetrics, erro
 	return metrics, nil
 }
 
-// record sets one tape's gauges; a no-op on nil or an unmeasured tape.
-func (m *writeHealthMetrics) record(barcode string, dryRun bool, health WriteHealth) {
+// record sets one tape's gauges, stamped measuredAt; a no-op on nil or an
+// unmeasured tape.
+func (m *writeHealthMetrics) record(barcode string, dryRun bool, health WriteHealth, measuredAt time.Time) {
 	if m == nil || !health.Measured {
 		return
 	}
@@ -199,6 +209,8 @@ func (m *writeHealthMetrics) record(barcode string, dryRun bool, health WriteHea
 	if health.FloorKnown {
 		m.belowFloor.With(labels).Set(boolToFloat(health.BelowFloor))
 	}
+
+	m.measuredAt.With(labels).Set(float64(measuredAt.UnixNano()) / float64(time.Second))
 }
 
 func boolToFloat(b bool) float64 {
@@ -212,6 +224,8 @@ func boolToFloat(b bool) float64 {
 // WriteHealthActivities hosts the data-side MeasureWriteHealth activity.
 type WriteHealthActivities struct {
 	metrics *writeHealthMetrics
+	// now stamps measurements; injectable for tests.
+	now func() time.Time
 }
 
 // newWriteHealthActivities degrades to metrics-off on a registration failure
@@ -224,7 +238,7 @@ func newWriteHealthActivities(reg prometheus.Registerer) *WriteHealthActivities 
 		metrics = nil
 	}
 
-	return &WriteHealthActivities{metrics: metrics}
+	return &WriteHealthActivities{metrics: metrics, now: time.Now}
 }
 
 // MeasureWriteHealthInput is the payload for the MeasureWriteHealth activity.
@@ -266,7 +280,7 @@ func (a *WriteHealthActivities) MeasureWriteHealth(ctx context.Context, input Me
 
 	health := evaluateWriteHealth(input.BytesWritten, input.Elapsed, logs, input.FloorMBps, input.FloorKnown)
 
-	a.metrics.record(string(input.Barcode), input.DryRun, health)
+	a.metrics.record(string(input.Barcode), input.DryRun, health, a.now())
 
 	generation, err := tape.MediumGeneration(ctx, input.Device)
 	if err != nil {

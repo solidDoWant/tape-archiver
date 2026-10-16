@@ -734,7 +734,9 @@ modified to pass — the code is fixed instead.
   are fixed overheads unrelated to streaming), its
   reposition/back-hitch count (`total_suspended_writes` from the SCSI Tape usage log page
   `0x30`, LTO-5/6), and any
-  TapeAlert flags (log page `0x2e`) in the PDF report (§9) and as Prometheus gauges, and
+  TapeAlert flags (log page `0x2e`) in the PDF report (§9) and as Prometheus gauges
+  (labelled `barcode` and `dry_run`, with a measurement-timestamp gauge so alerts can
+  require a recent write, since the gauges persist for the worker's lifetime), and
   flags any tape that streamed below the floor or back-hitched. The floor is the tape
   **generation's** speed-matching floor (the write format governs the drive's
   speed-matching range), derived from the configured native capacity — LTO-5 40, LTO-6
