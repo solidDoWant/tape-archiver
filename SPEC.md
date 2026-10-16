@@ -743,7 +743,10 @@ modified to pass — the code is fixed instead.
 - The prepare phase (`tar`/`age`/PAR2) must, in aggregate, keep ahead of the planned
   write throughput; PAR2 uses the multithreaded par2cmdline-turbo. Because prepare and
   write are decoupled by staging, prepare throughput affects total run time but never
-  the streaming guarantee.
+  the streaming guarantee. The `tar` stage reads small files (under 1 MiB) ahead of the
+  stream with a bounded worker pool and memory budget, so a tree of small files keeps
+  many reads in flight instead of one seek-bound read at a time; entries are still
+  emitted strictly in walk order, and the archive is byte-identical to a serial read.
 - **Defer the LTFS index sync to unmount** (`-o sync_type=unmount`), so the index is
   written a single time, just before Eject, instead of periodically during the write.
   Each periodic index sync forces the drive to reposition and write to the index
