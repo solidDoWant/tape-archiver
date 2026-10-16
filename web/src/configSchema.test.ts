@@ -169,6 +169,17 @@ describe('validateAgainstSchema', () => {
     })
     expect(issues).toContainEqual({ path: 'sources[0].zfsPath.snapshot', message: 'must be one of newest' })
   })
+
+  it('accepts a zfsProperty source and requires its value', () => {
+    const property = { ...validConfig, sources: [{ zfsProperty: { name: 'tape:archive', value: 'true', under: 'pool' } }] }
+    expect(validateAgainstSchema(testRunConfigSchema, property)).toEqual([])
+
+    const issues = validateAgainstSchema(testRunConfigSchema, {
+      ...validConfig,
+      sources: [{ zfsProperty: { name: 'tape:archive' } }],
+    })
+    expect(issues.map((issue) => issue.path)).toContain('sources[0].zfsProperty.value')
+  })
 })
 
 describe('fetchConfigSchema', () => {

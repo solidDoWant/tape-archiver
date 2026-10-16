@@ -40,7 +40,7 @@ Versions are pinned by the flake's `nixpkgs` revision and recorded as image labe
 | `mt` | `mt-st` | — | drive control (non-rewinding `nst` nodes) |
 | `sg_logs` / `sg_turs` | `sg3_utils` | — | TapeAlert / log pages, drive readiness (SPEC §3) |
 | `lsscsi` | `lsscsi` | — | enumerate SCSI tape/changer devices |
-| `zfs` | `zfs` | — | read dataset properties + locate `.zfs/snapshot/` (needs `/dev/zfs`) |
+| `zfs` | `zfs` | — | read dataset properties, locate `.zfs/snapshot/`, hold/release and create/destroy run snapshots (needs `/dev/zfs`) |
 
 `age`, `par2`, `zstd`, and `tar` are the tools the recovery disc also stages; their
 versions are identical to the disc by construction (build-time assert). `xorriso` is the
@@ -99,10 +99,18 @@ must provide:
   (`bulk-pool-01/archive/.tape-staging/`); the worker never runs `zfs create`.
 - **`/dev/zfs` passthrough.** The data-side Resolve/Verify/Prepare activities read ZFS
   dataset properties (`logicalreferenced`, `mountpoint`, user properties) and locate the
-  `.zfs/snapshot/` tree through the `zfs` CLI (`pkg/zfs`). `zfs get` issues read-only
-  ioctls against `/dev/zfs`, so the device must be passed through even though the worker
-  never mutates the pool. The pool bind mount must use `shared`/`rslave` propagation so
-  the on-demand `.zfs/snapshot/<snap>/` automounts are visible inside the container.
+  `.zfs/snapshot/` tree through the `zfs` CLI (`pkg/zfs`). The worker also **writes to
+  the pool**, snapshots only: it places and releases `zfs hold`s on source snapshots, and
+  it creates and destroys its own run-scoped snapshots (`zfs snapshot -o
+  tape-archiver:run-id=<run id> <dataset>@tape-archiver-<run id>`, `zfs destroy` of that
+  snapshot only — never a dataset; see
+  [configuration.md](configuration.md#run-scoped-snapshots)). All of these are ioctls on
+  `/dev/zfs`, run as root in the container with the `CAP_SYS_ADMIN` the LTFS mount
+  already needs, so no further privilege is required; a deployment that delegated only
+  `zfs allow ... hold,release` would also need `snapshot,destroy,mount,userprop`. The
+  worker never creates or destroys a dataset. The pool bind mount must use
+  `shared`/`rslave` propagation so the on-demand `.zfs/snapshot/<snap>/` automounts are
+  visible inside the container.
 
 The entrypoint is `/bin/worker`; run configuration is supplied via the environment and
 the Temporal workflow payload (SPEC §4.1, §5).

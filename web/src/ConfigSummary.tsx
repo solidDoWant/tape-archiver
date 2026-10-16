@@ -13,6 +13,7 @@ export interface RunConfigSource {
   compression?: boolean
   label?: string
   zfsPath?: { name: string; snapshot?: string; prefix?: string }
+  zfsProperty?: { name: string; value: string; under?: string }
   k8s?: { kind: string; namespace: string; name?: string; labelSelector?: string; select?: string }
 }
 

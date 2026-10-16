@@ -23,6 +23,13 @@ describe('sourceLabel', () => {
     ).toBe('k8s · VolumeSnapshot/app=db (newest per PVC)')
   })
 
+  it('renders a zfs property selector', () => {
+    expect(sourceLabel({ zfsProperty: { name: 'tape:archive', value: 'true' } })).toBe('tape:archive=true')
+    expect(sourceLabel({ zfsProperty: { name: 'tape:archive', value: 'true', under: 'pool' } })).toBe(
+      'tape:archive=true under pool',
+    )
+  })
+
   it('renders a k8s ref by name in detail mode', () => {
     expect(
       sourceLabel({ k8s: { kind: 'VolumeSnapshot', name: 'snap', namespace: 'media' } }, { detail: true }),

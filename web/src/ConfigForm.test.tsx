@@ -108,6 +108,24 @@ describe('ConfigForm', () => {
     })
   })
 
+  it('builds a ZFS-property source with no label', () => {
+    let latest: FormState | undefined
+    render(<Wrapper onForm={(form) => (latest = form)} />)
+
+    fireEvent.change(screen.getByLabelText('Source 1 label'), { target: { value: 'ignored' } })
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 type/i })).getByText('ZFS property'))
+    expect(screen.getByLabelText('Source 1 label')).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText('tape.home.arpa:archive'), { target: { value: 'tape.home.arpa:archive' } })
+    fireEvent.change(screen.getByPlaceholderText('true'), { target: { value: 'true' } })
+    fireEvent.change(screen.getByPlaceholderText('bulk-pool-01'), { target: { value: 'bulk-pool-01' } })
+
+    const source = buildConfig(latest as FormState, testDeploy).sources[0]
+    expect(source.zfsProperty).toEqual({ name: 'tape.home.arpa:archive', value: 'true', under: 'bulk-pool-01' })
+    expect(source.label).toBeUndefined()
+    expect(source.zfsPath).toBeUndefined()
+  })
+
   it('lets a label-selector k8s source keep only the newest snapshot per PVC', () => {
     let latest: FormState | undefined
     render(<Wrapper onForm={(form) => (latest = form)} />)

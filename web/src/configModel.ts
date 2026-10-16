@@ -31,10 +31,17 @@ export interface K8sRef {
   select?: 'all' | 'newestPerPVC'
 }
 
+export interface ZFSPropertySource {
+  name: string
+  value: string
+  under?: string
+}
+
 export interface Source {
   compression?: boolean
   k8s?: K8sRef
   zfsPath?: ZFSPathSource
+  zfsProperty?: ZFSPropertySource
   label?: string
 }
 
@@ -108,12 +115,15 @@ export function newSourceID(): string {
 
 export interface SourceFormState {
   id: string
-  type: 'zfs' | 'k8s'
+  type: 'zfs' | 'zfsProperty' | 'k8s'
   label: string
   zfsName: string
-  // 'live' archives zfsName as given; 'newest' picks its newest snapshot (zfsPrefix-filtered).
-  zfsSnapshot: 'live' | 'newest'
+  // 'named' archives zfsName as given (a bare dataset from a snapshot the run takes); 'newest' picks its newest snapshot (zfsPrefix-filtered).
+  zfsSnapshot: 'named' | 'newest'
   zfsPrefix: string
+  zfsPropertyName: string
+  zfsPropertyValue: string
+  zfsPropertyUnder: string
   k8sKind: 'VolumeSnapshot' | 'VolumeGroupSnapshot'
   k8sSelection: 'name' | 'labelSelector'
   k8sNamespace: string
@@ -129,8 +139,11 @@ export function newSourceFormState(): SourceFormState {
     type: 'zfs',
     label: '',
     zfsName: '',
-    zfsSnapshot: 'live',
+    zfsSnapshot: 'named',
     zfsPrefix: '',
+    zfsPropertyName: '',
+    zfsPropertyValue: '',
+    zfsPropertyUnder: '',
     k8sKind: 'VolumeSnapshot',
     k8sSelection: 'name',
     k8sNamespace: '',
@@ -239,9 +252,9 @@ export function blankSlotsCopiesIssue(copies: number, blankSlotCount: number): s
 }
 
 // buildSource converts one Form-mode source row into a schema-shaped Source.
-// The ZFS/k8s toggle and (within k8s) the by-name/by-label-selector toggle
+// The ZFS/ZFS-property/k8s toggle and (within k8s) the by-name/by-label-selector toggle
 // are each a single-choice UI control, so the built object always carries
-// exactly one of zfsPath/k8s, and a k8s ref always carries exactly one of
+// exactly one of zfsPath/zfsProperty/k8s, and a k8s ref always carries exactly one of
 // name/labelSelector, by construction — the same invariant
 // docs/configuration.md documents (Source/K8sRef "exactly one of ... must be
 // set") without configSchema.ts's generic validator needing to re-check it
@@ -249,6 +262,18 @@ export function blankSlotsCopiesIssue(copies: number, blankSlotCount: number): s
 // see configSchema.ts's doc comment).
 function buildSource(source: SourceFormState): Source {
   const built: Source = { compression: source.compression }
+
+  // A zfsProperty source takes no label: each matched dataset is labelled by
+  // its own name.
+  if (source.type === 'zfsProperty') {
+    built.zfsProperty = { name: source.zfsPropertyName.trim(), value: source.zfsPropertyValue.trim() }
+
+    if (source.zfsPropertyUnder.trim() !== '') {
+      built.zfsProperty.under = source.zfsPropertyUnder.trim()
+    }
+
+    return built
+  }
 
   if (source.label.trim() !== '') {
     built.label = source.label.trim()
@@ -406,8 +431,17 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
   if (safe.zfsPath) {
     base.type = 'zfs'
     base.zfsName = asText(safe.zfsPath.name)
-    base.zfsSnapshot = safe.zfsPath.snapshot === 'newest' ? 'newest' : 'live'
+    base.zfsSnapshot = safe.zfsPath.snapshot === 'newest' ? 'newest' : 'named'
     base.zfsPrefix = asText(safe.zfsPath.prefix)
+
+    return base
+  }
+
+  if (safe.zfsProperty) {
+    base.type = 'zfsProperty'
+    base.zfsPropertyName = asText(safe.zfsProperty.name)
+    base.zfsPropertyValue = asText(safe.zfsProperty.value)
+    base.zfsPropertyUnder = asText(safe.zfsProperty.under)
 
     return base
   }

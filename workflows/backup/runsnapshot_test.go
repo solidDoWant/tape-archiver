@@ -59,6 +59,7 @@ func TestPlanRunScopedSnapshots(t *testing.T) {
 	want := ResolvedSnapshot{
 		ZFSPath: "pool/live@tape-archiver-run-1", Dataset: "pool/live", SnapshotName: "tape-archiver-run-1", RunScoped: true,
 	}
+
 	assert.Equal(t, []string{"pool/live@tape-archiver-run-1", "other/media@tape-archiver-run-1"}, paths)
 	assert.Equal(t, want, resolved[0].Snapshots[0])
 	assert.Equal(t, []ResolvedSnapshot{{ZFSPath: "pool/archive@daily"}, k8s}, resolved[1].Snapshots)
@@ -225,6 +226,7 @@ func (f *fakeZFS) Release(_ context.Context, tag, snapshot string) error {
 
 	if existing, ok := f.snapshots[snapshot]; ok {
 		existing.holds = slices.DeleteFunc(existing.holds, func(held string) bool { return held == tag })
+
 		f.released = append(f.released, tag+" "+snapshot)
 	}
 
@@ -499,6 +501,7 @@ func TestBackupRunScopedSnapshotLifecycle(t *testing.T) {
 
 					return nil, nil
 				})
+
 			if test.mode == "cancel" {
 				// Cancelled while Pack is in flight, after staging from the snapshot.
 				env.OnActivity((&PackActivities{}).Pack, mock.Anything, mock.Anything).
