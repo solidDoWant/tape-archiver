@@ -124,6 +124,13 @@
         "labelSelector": {
           "type": "string",
           "minLength": 1
+        },
+        "select": {
+          "type": "string",
+          "enum": [
+            "all",
+            "newestPerPVC"
+          ]
         }
       },
       "additionalProperties": false,
@@ -242,6 +249,16 @@
     "ZFSPathSource": {
       "properties": {
         "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot": {
+          "type": "string",
+          "enum": [
+            "newest"
+          ]
+        },
+        "prefix": {
           "type": "string",
           "minLength": 1
         }

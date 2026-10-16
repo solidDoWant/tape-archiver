@@ -5,8 +5,8 @@
 // internal/config.Source sets exactly one of zfsPath/k8s.
 export interface LabeledSource {
   label?: string
-  zfsPath?: { name: string }
-  k8s?: { kind: string; namespace?: string; name?: string; labelSelector?: string }
+  zfsPath?: { name: string; snapshot?: string; prefix?: string }
+  k8s?: { kind: string; namespace?: string; name?: string; labelSelector?: string; select?: string }
 }
 
 // sourceLabel renders one config source's display identity: its own label when
@@ -36,10 +36,15 @@ export function sourceLabel(source: LabeledSource, opts?: { detail?: boolean }):
   }
 
   if (source.zfsPath?.name) {
+    if (source.zfsPath.snapshot === 'newest') {
+      return `${source.zfsPath.name} (newest${source.zfsPath.prefix ? ` ${source.zfsPath.prefix}*` : ''})`
+    }
+
     return source.zfsPath.name
   }
 
-  const k8sName = source.k8s?.name || source.k8s?.labelSelector || ''
+  const newestPerPVC = source.k8s?.labelSelector && source.k8s.select === 'newestPerPVC' ? ' (newest per PVC)' : ''
+  const k8sName = (source.k8s?.name || source.k8s?.labelSelector || '') + newestPerPVC
 
   if (opts?.detail && source.k8s) {
     const kind = source.k8s.kind || ''

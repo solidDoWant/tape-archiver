@@ -91,6 +91,40 @@ describe('ConfigForm', () => {
     })
   })
 
+  it('lets a ZFS source archive its newest snapshot with an optional prefix', () => {
+    let latest: FormState | undefined
+    render(<Wrapper onForm={(form) => (latest = form)} />)
+
+    fireEvent.change(screen.getByPlaceholderText('bulk-pool-01/dataset'), { target: { value: 'bulk-pool-01/archive' } })
+    expect(screen.queryByPlaceholderText('daily-')).not.toBeInTheDocument()
+
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 zfs snapshot/i })).getByText('Newest snapshot'))
+    fireEvent.change(screen.getByPlaceholderText('daily-'), { target: { value: 'daily-' } })
+
+    expect(buildConfig(latest as FormState, testDeploy).sources[0].zfsPath).toEqual({
+      name: 'bulk-pool-01/archive',
+      snapshot: 'newest',
+      prefix: 'daily-',
+    })
+  })
+
+  it('lets a label-selector k8s source keep only the newest snapshot per PVC', () => {
+    let latest: FormState | undefined
+    render(<Wrapper onForm={(form) => (latest = form)} />)
+
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 type/i })).getByText('k8s'))
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 selection mode/i })).getByText('By label selector'))
+    fireEvent.change(screen.getByPlaceholderText('app=media,tier=cold'), { target: { value: 'app=db' } })
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 snapshots per pvc/i })).getByText('Newest per PVC'))
+
+    expect(buildConfig(latest as FormState, testDeploy).sources[0].k8s).toEqual({
+      apiVersion: 'snapshot.storage.k8s.io/v1',
+      kind: 'VolumeSnapshot',
+      labelSelector: 'app=db',
+      select: 'newestPerPVC',
+    })
+  })
+
   it('adds and removes sources, never allowing the last one to be removed', () => {
     let latest: FormState | undefined
     render(<Wrapper onForm={(form) => (latest = form)} />)

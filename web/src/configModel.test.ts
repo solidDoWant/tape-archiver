@@ -95,6 +95,36 @@ describe('buildConfig', () => {
     })
   })
 
+  it('builds the newest-snapshot selections only when chosen, and round-trips them', () => {
+    const form = defaultFormState()
+    form.sources = [
+      { ...newSourceFormState(), type: 'zfs', zfsName: 'pool/data', zfsSnapshot: 'newest', zfsPrefix: ' daily- ' },
+      { ...newSourceFormState(), type: 'zfs', zfsName: 'pool/raw', zfsPrefix: 'ignored-' },
+      {
+        ...newSourceFormState(),
+        type: 'k8s',
+        k8sSelection: 'labelSelector',
+        k8sLabelSelector: 'app=db',
+        k8sSelect: 'newestPerPVC',
+      },
+      { ...newSourceFormState(), type: 'k8s', k8sSelection: 'name', k8sName: 'x', k8sSelect: 'newestPerPVC' },
+    ]
+
+    const config = buildConfig(form, testDeploy)
+
+    expect(config.sources[0].zfsPath).toEqual({ name: 'pool/data', snapshot: 'newest', prefix: 'daily-' })
+    expect(config.sources[1].zfsPath).toEqual({ name: 'pool/raw' })
+    expect(config.sources[2].k8s?.select).toBe('newestPerPVC')
+    expect(config.sources[3].k8s?.select).toBeUndefined()
+
+    const roundTripped = configToFormState(config)
+
+    expect(roundTripped.sources[0].zfsSnapshot).toBe('newest')
+    expect(roundTripped.sources[0].zfsPrefix).toBe('daily-')
+    expect(roundTripped.sources[1].zfsSnapshot).toBe('live')
+    expect(roundTripped.sources[2].k8sSelect).toBe('newestPerPVC')
+  })
+
   it('builds fillToCapacity redundancy instead of targetPercentage when that mode is selected', () => {
     const form = defaultFormState()
     form.redundancyMode = 'fillToCapacity'

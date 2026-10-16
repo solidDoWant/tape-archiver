@@ -273,3 +273,56 @@ func TestParseLogicalReferenced(t *testing.T) {
 		})
 	}
 }
+
+func TestParseSnapshots(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		out       string
+		want      []SnapshotInfo
+		assertErr require.ErrorAssertionFunc
+	}{
+		{
+			name: "parses name, creation and createtxg",
+			out:  "tank/media disc@daily 1\t1700000000\t42\ntank/media disc@daily-2\t1700000100\t50\n",
+			want: []SnapshotInfo{
+				{Name: "daily 1", Creation: 1700000000, CreateTXG: 42},
+				{Name: "daily-2", Creation: 1700000100, CreateTXG: 50},
+			},
+		},
+		{
+			name: "drops snapshots of other datasets",
+			out:  "tank/media disc/child@x\t1700000000\t42\ntank/media disc@y\t1700000001\t43\n",
+			want: []SnapshotInfo{{Name: "y", Creation: 1700000001, CreateTXG: 43}},
+		},
+		{
+			name: "no snapshots",
+			out:  "",
+		},
+		{
+			name:      "wrong field count",
+			out:       "tank/media disc@y\t1700000001\n",
+			assertErr: require.Error,
+		},
+		{
+			name:      "non-numeric creation",
+			out:       "tank/media disc@y\tMon Oct 16\t43\n",
+			assertErr: require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if test.assertErr == nil {
+				test.assertErr = require.NoError
+			}
+
+			got, err := parseSnapshots("tank/media disc", []byte(test.out))
+			test.assertErr(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}

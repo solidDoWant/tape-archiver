@@ -77,6 +77,7 @@ Exactly one of `name` or `labelSelector` must be set.
 | `namespace` | `string` | no† | Kubernetes namespace containing the resource. |
 | `name` | `string` | no* | Name of a specific resource. |
 | `labelSelector` | `string` | no* | Label selector matching one or more resources (e.g. `app=myapp`). Matches within `namespace` when set; when `namespace` is omitted, it matches across all namespaces (cluster-wide, SPEC §5). |
+| `select` | `string` | no | Which `labelSelector` matches to archive: `all` (default) or `newestPerPVC`. Only valid with `labelSelector`. See [Selecting the newest snapshot per PVC](#selecting-the-newest-snapshot-per-pvc). |
 
 \* Exactly one of `name` or `labelSelector` must be provided.
 
@@ -103,6 +104,27 @@ Example entries:
 The third entry omits `namespace`, so its `labelSelector` matches `VolumeSnapshot`
 resources across all namespaces (cluster-wide).
 
+#### Selecting the newest snapshot per PVC
+
+By default (`select` unset or `all`) every snapshot the selector matches goes into the
+archive. Producers that snapshot on a schedule keep many snapshots per PVC, so
+`"select": "newestPerPVC"` instead keeps, for each source PVC (its namespace plus
+`spec.source.persistentVolumeClaimName`), only the `ReadyToUse` snapshot with the newest
+`status.creationTime` (equal times: the greatest snapshot name). The choice is made once,
+at Resolve, and the chosen snapshots are recorded in the run and named in the report.
+
+- A snapshot that is not yet `ReadyToUse` is ignored for the choice, so the PVC's newest
+  ready snapshot is archived instead. A PVC with no ready snapshot is skipped with a
+  warning in the Resolve log.
+- A matched snapshot with no source PVC (e.g. pre-provisioned from a
+  `VolumeSnapshotContent`) fails Resolve: narrow the selector to exclude it.
+- If no ready snapshot matches at all, the run fails at Resolve naming the source.
+
+```json
+{ "apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshot",
+  "labelSelector": "tape.home.arpa/archive=true", "select": "newestPerPVC" }
+```
+
 ### ZFSPathSource
 
 An explicit ZFS dataset or snapshot by name.
@@ -110,8 +132,21 @@ An explicit ZFS dataset or snapshot by name.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | `string` | yes | ZFS dataset or snapshot name, e.g. `bulk-pool-01/archive@snap-20240101` or `bulk-pool-01/media`. |
+| `snapshot` | `string` | no | `newest` archives the bare dataset `name`'s newest snapshot instead of its live mountpoint. Requires a bare dataset name (no `@`). |
+| `prefix` | `string` | no | With `snapshot: newest`, consider only snapshots whose name (after `@`) starts with this prefix, e.g. `daily-`. Requires `snapshot`. |
 
-A bare dataset name (no `@`) is archived from the dataset's live mountpoint. The dataset
+With `"snapshot": "newest"` the data worker lists the dataset's own snapshots (not its
+children's) at Resolve and picks the one with the newest ZFS `creation` time (equal
+times: the higher `createtxg`) among those matching `prefix`. The chosen
+`dataset@snapshot` is recorded in the run, so it is held, staged and named in the report
+exactly like an explicitly named snapshot. If no snapshot matches, the run fails at
+Resolve naming the source.
+
+```json
+{ "zfsPath": { "name": "bulk-pool-01/archive", "snapshot": "newest", "prefix": "daily-" } }
+```
+
+Without `snapshot`, a bare dataset name (no `@`) is archived from the dataset's live mountpoint. The dataset
 must be mounted: if it is not, the run fails during Prepare — before any tape is written —
 rather than archiving whatever directory shadows the (unmounted) mountpoint, which would
 silently certify a stale or empty archive. Only the dataset itself is archived, matching

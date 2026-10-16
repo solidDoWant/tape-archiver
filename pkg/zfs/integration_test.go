@@ -292,6 +292,41 @@ func TestHoldReleaseIntegration(t *testing.T) {
 	require.NoError(t, zfs.Release(ctx, tag, snapshot), "a destroyed snapshot holds nothing to release")
 }
 
+// TestSnapshotsIntegration checks Snapshots lists only the dataset's own
+// snapshots with creation/createtxg in creation order.
+func TestSnapshotsIntegration(t *testing.T) {
+	testutil.SkipIfPoolUnavailable(t)
+	testutil.SkipIfZFSUnavailable(t)
+
+	ctx := t.Context()
+	dataset := poolRoot(t) + "/newest snap"
+	createDataset(t, dataset)
+	requireZFS(t, ctx, "create", dataset+"/child")
+	requireZFS(t, ctx, "snapshot", dataset+"/child@child-only")
+
+	for _, name := range []string{"daily-1", "weekly-1", "daily-2"} {
+		requireZFS(t, ctx, "snapshot", dataset+"@"+name)
+	}
+
+	snapshots, err := zfs.Snapshots(ctx, dataset)
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(snapshots))
+	for index, snapshot := range snapshots {
+		names = append(names, snapshot.Name)
+		assert.Equal(t, zfsGetRaw(t, "creation", dataset+"@"+snapshot.Name), strconv.FormatInt(snapshot.Creation, 10))
+
+		if index > 0 {
+			assert.Greater(t, snapshot.CreateTXG, snapshots[index-1].CreateTXG)
+		}
+	}
+
+	assert.Equal(t, []string{"daily-1", "weekly-1", "daily-2"}, names)
+
+	_, err = zfs.Snapshots(ctx, poolRoot(t)+"/does-not-exist")
+	require.Error(t, err)
+}
+
 func requireZFS(t *testing.T, ctx context.Context, args ...string) {
 	t.Helper()
 

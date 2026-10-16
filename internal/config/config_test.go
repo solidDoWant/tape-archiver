@@ -208,6 +208,83 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "sources[0].k8s",
 		},
 		{
+			name: "k8s select newestPerPVC with selector",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot",
+					LabelSelector: "app=foo", Select: SelectNewestPerPVC,
+				}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "k8s select all with selector",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot",
+					LabelSelector: "app=foo", Select: SelectAll,
+				}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "k8s select with name",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot",
+					Namespace: "ns", Name: "s", Select: SelectNewestPerPVC,
+				}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.select",
+		},
+		{
+			name: "k8s select unknown",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = nil
+				c.Sources[0].K8s = &K8sRef{
+					APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot",
+					LabelSelector: "app=foo", Select: "oldest",
+				}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.select",
+		},
+		{
+			name: "zfsPath snapshot newest with prefix",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = &ZFSPathSource{Name: "pool/data", Snapshot: SnapshotNewest, Prefix: "daily-"}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "zfsPath snapshot newest on a snapshot name",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = &ZFSPathSource{Name: "pool/data@snap", Snapshot: SnapshotNewest}
+			},
+			wantErr:     require.Error,
+			errContains: "bare dataset",
+		},
+		{
+			name: "zfsPath snapshot unknown",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = &ZFSPathSource{Name: "pool/data", Snapshot: "oldest"}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].zfsPath.snapshot",
+		},
+		{
+			name: "zfsPath prefix without snapshot",
+			mutate: func(c *Config) {
+				c.Sources[0].ZFSPath = &ZFSPathSource{Name: "pool/data", Prefix: "daily-"}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].zfsPath.prefix",
+		},
+		{
 			name:        "copies zero",
 			mutate:      func(c *Config) { c.Copies = 0 },
 			wantErr:     require.Error,
@@ -690,4 +767,20 @@ func TestSchemaValidation(t *testing.T) {
 	var badInst interface{}
 	require.NoError(t, json.Unmarshal([]byte(`{"copies": 2}`), &badInst))
 	assert.Error(t, sch.Validate(badInst), "known-bad config must fail schema validation")
+
+	modeConfig := validConfig()
+	modeConfig.Sources = []Source{
+		{ZFSPath: &ZFSPathSource{Name: "pool/data", Snapshot: SnapshotNewest, Prefix: "daily-"}},
+		{K8s: &K8sRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: "VolumeSnapshot", LabelSelector: "a=b", Select: SelectNewestPerPVC}},
+	}
+	modeJSON, err := json.Marshal(modeConfig)
+	require.NoError(t, err)
+
+	var modeInst interface{}
+	require.NoError(t, json.Unmarshal(modeJSON, &modeInst))
+	assert.NoError(t, sch.Validate(modeInst), "snapshot selection modes must validate against schema")
+
+	var badModeInst interface{}
+	require.NoError(t, json.Unmarshal(bytes.Replace(modeJSON, []byte(`"newestPerPVC"`), []byte(`"oldest"`), 1), &badModeInst))
+	assert.Error(t, sch.Validate(badModeInst), "unknown select mode must fail schema validation")
 }

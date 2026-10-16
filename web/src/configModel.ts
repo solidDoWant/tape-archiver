@@ -18,6 +18,8 @@ import { defaultLtoGeneration, ltoGenerationForCapacity, ltoGenerations } from '
 
 export interface ZFSPathSource {
   name: string
+  snapshot?: 'newest'
+  prefix?: string
 }
 
 export interface K8sRef {
@@ -26,6 +28,7 @@ export interface K8sRef {
   namespace?: string
   name?: string
   labelSelector?: string
+  select?: 'all' | 'newestPerPVC'
 }
 
 export interface Source {
@@ -108,11 +111,15 @@ export interface SourceFormState {
   type: 'zfs' | 'k8s'
   label: string
   zfsName: string
+  // 'live' archives zfsName as given; 'newest' picks its newest snapshot (zfsPrefix-filtered).
+  zfsSnapshot: 'live' | 'newest'
+  zfsPrefix: string
   k8sKind: 'VolumeSnapshot' | 'VolumeGroupSnapshot'
   k8sSelection: 'name' | 'labelSelector'
   k8sNamespace: string
   k8sName: string
   k8sLabelSelector: string
+  k8sSelect: 'all' | 'newestPerPVC'
   compression: boolean
 }
 
@@ -122,11 +129,14 @@ export function newSourceFormState(): SourceFormState {
     type: 'zfs',
     label: '',
     zfsName: '',
+    zfsSnapshot: 'live',
+    zfsPrefix: '',
     k8sKind: 'VolumeSnapshot',
     k8sSelection: 'name',
     k8sNamespace: '',
     k8sName: '',
     k8sLabelSelector: '',
+    k8sSelect: 'all',
     compression: true,
   }
 }
@@ -247,6 +257,14 @@ function buildSource(source: SourceFormState): Source {
   if (source.type === 'zfs') {
     built.zfsPath = { name: source.zfsName.trim() }
 
+    if (source.zfsSnapshot === 'newest') {
+      built.zfsPath.snapshot = 'newest'
+
+      if (source.zfsPrefix.trim() !== '') {
+        built.zfsPath.prefix = source.zfsPrefix.trim()
+      }
+    }
+
     return built
   }
 
@@ -263,6 +281,10 @@ function buildSource(source: SourceFormState): Source {
     k8s.name = source.k8sName.trim()
   } else {
     k8s.labelSelector = source.k8sLabelSelector.trim()
+
+    if (source.k8sSelect === 'newestPerPVC') {
+      k8s.select = 'newestPerPVC'
+    }
   }
 
   built.k8s = k8s
@@ -384,6 +406,8 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
   if (safe.zfsPath) {
     base.type = 'zfs'
     base.zfsName = asText(safe.zfsPath.name)
+    base.zfsSnapshot = safe.zfsPath.snapshot === 'newest' ? 'newest' : 'live'
+    base.zfsPrefix = asText(safe.zfsPath.prefix)
 
     return base
   }
@@ -396,6 +420,7 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
     if (safe.k8s.labelSelector) {
       base.k8sSelection = 'labelSelector'
       base.k8sLabelSelector = asText(safe.k8s.labelSelector)
+      base.k8sSelect = safe.k8s.select === 'newestPerPVC' ? 'newestPerPVC' : 'all'
     } else {
       base.k8sSelection = 'name'
       base.k8sName = asText(safe.k8s.name)
