@@ -247,10 +247,11 @@ func decodePayloads(payloads *commonpb.Payloads, target interface{}) error {
 	return converter.GetDefaultDataConverter().FromPayloads(payloads, target)
 }
 
-// normalizeFailingPhase reports a Hold failure as Resolve, since Hold is not one
-// of the 11 reported phases (issue #273); the summary still names Hold.
+// normalizeFailingPhase reports a Snapshot or Hold failure as Resolve, since
+// neither is one of the 11 reported phases (issue #273); the summary still
+// names it.
 func normalizeFailingPhase(phase string) string {
-	if phase == backup.PhaseHold {
+	if phase == backup.PhaseHold || phase == backup.PhaseSnapshot {
 		return backup.PhaseResolve
 	}
 

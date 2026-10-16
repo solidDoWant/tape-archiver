@@ -515,6 +515,78 @@ func TestBuildPhaseTimeline(t *testing.T) {
 		assert.Contains(t, byName[backup.PhaseResolve].Error, "zfs hold: dataset busy")
 	})
 
+	t.Run("a run-scoped Snapshot failure surfaces as a Resolve failure (issue #419)", func(t *testing.T) {
+		b := newEventBuilder()
+		b.started(t, testConfig)
+
+		resolveCheck := b.scheduled(t, "ResolveAndCheck", nil)
+		b.completed(t, resolveCheck, []backup.ResolvedArchive{{SourceIndex: 0}})
+
+		create := b.scheduled(t, "CreateRunSnapshots", nil)
+		b.failed(create, "zfs snapshot: out of space")
+
+		destroy := b.scheduled(t, "DestroyRunSnapshots", nil)
+		b.completed(t, destroy, nil)
+
+		notify := b.scheduled(t, "NotifyFailure", backup.FailureInput{
+			RunID: "run-5", Phase: backup.PhaseSnapshot, ErrorSummary: "phase Snapshot: zfs snapshot: out of space",
+		})
+		b.completed(t, notify, nil)
+
+		b.runFailed("phase Snapshot: zfs snapshot: out of space")
+
+		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: b.events}
+		}}, "run-5")
+		require.NoError(t, err)
+
+		phases := buildPhaseTimeline(history, nil)
+
+		byName := make(map[string]PhaseInfo, len(phases))
+		for _, phase := range phases {
+			byName[phase.Name] = phase
+		}
+
+		assert.Equal(t, PhaseFailed, byName[backup.PhaseResolve].Status)
+		assert.Contains(t, byName[backup.PhaseResolve].Error, "zfs snapshot: out of space")
+	})
+
+	t.Run("destroying run-scoped snapshots at exit does not stretch Resolve (issue #419)", func(t *testing.T) {
+		b := newEventBuilder()
+		b.started(t, testConfig)
+
+		resolveCheck := b.scheduled(t, "ResolveAndCheck", nil)
+		b.completed(t, resolveCheck, []backup.ResolvedArchive{{SourceIndex: 0}})
+
+		create := b.scheduled(t, "CreateRunSnapshots", nil)
+		b.completed(t, create, []backup.CreatedSnapshot{{ZFSPath: "pool/a@tape-archiver-run-6"}})
+
+		prepare := b.scheduled(t, "PrepareArchives", nil)
+		b.failed(prepare, "boom")
+
+		destroy := b.scheduled(t, "DestroyRunSnapshots", nil)
+		b.completed(t, destroy, nil)
+
+		b.runFailed("phase Prepare: boom")
+
+		history, err := fetchRunHistory(t.Context(), &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator {
+			return &fakeHistoryIterator{events: b.events}
+		}}, "run-6")
+		require.NoError(t, err)
+
+		phases := buildPhaseTimeline(history, nil)
+
+		byName := make(map[string]PhaseInfo, len(phases))
+		for _, phase := range phases {
+			byName[phase.Name] = phase
+		}
+
+		require.NotNil(t, byName[backup.PhaseResolve].EndTime)
+		require.NotNil(t, byName[backup.PhasePrepare].StartTime)
+		assert.False(t, byName[backup.PhaseResolve].EndTime.After(*byName[backup.PhasePrepare].StartTime),
+			"Resolve ends before Prepare starts")
+	})
+
 	t.Run("an older-code-version run with no NotifyFailure input falls back to the terminal message", func(t *testing.T) {
 		b := newEventBuilder()
 		b.started(t, testConfig)
