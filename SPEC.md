@@ -227,8 +227,13 @@ write window.
    copies of one logical tape tend to share a set and read a single staged tree. A Load or
    Write failure within a set does not fail the whole run: the set's successfully written
    tapes are ejected and recorded, the failed tapes are ejected too (freeing their drives
-   and emptying their blank slots), and the run **pauses for operator approval** — it alerts
-   the operator (§11) and waits on a resume or abort signal. On resume it re-drives only the
+   and emptying their blank slots). An LTFS mount that cannot be cleanly unmounted is
+   killed; the worker then lazily detaches its stale FUSE mountpoint and issues ALLOW
+   MEDIUM REMOVAL to the drive — the lock `ltfs` sets at mount and clears only on a clean
+   exit — so the killed tape still unloads instead of staying stuck in the drive. The
+   lock is cleared only after `ltfs` is gone, never before a generic unload: it is what
+   stops the changer pulling a tape out from under a live mount. The run then **pauses
+   for operator approval** — it alerts the operator (§11) and waits on a resume or abort signal. On resume it re-drives only the
    failed (logical tape, copy) pairs onto fresh blanks in the same slots — never
    re-formatting a tape already written (step 6's blank-check gates that), so the blast
    radius is the failed tapes, not the whole set or the whole run. On abort — or if the

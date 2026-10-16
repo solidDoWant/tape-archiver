@@ -4,7 +4,8 @@ Long-term cold storage is only as good as its upkeep. tape-archiver produces off
 artifacts — LTO tapes and optical recovery discs — that must stay readable for ~20 years
 (SPEC §2). This guide covers the recurring operator tasks that keep them recoverable:
 recovery-disc refresh, tape rotation, and the barcode labelling convention, plus clearing
-anything a dead run leaked (holds, run-scoped snapshots, staging directories).
+anything a dead run leaked (holds, run-scoped snapshots, staging directories, a tape locked
+in a drive).
 
 None of these tasks touch a running workflow; they are physical-media housekeeping done
 between runs. For the run-time operator loops (restocking blanks after a Load/Write
@@ -235,6 +236,29 @@ until removed. It is fully observable and clearable by hand:
 
 Only reclaim a directory whose run has truly ended — removing an in-flight run's staging
 tree destroys work the Write phase has not yet read onto tape.
+
+---
+
+## Releasing a tape stuck in a drive
+
+`ltfs` sets the drive's medium-removal lock (PREVENT MEDIUM REMOVAL) when it mounts a tape
+and clears it only when it exits cleanly. When the Write phase cannot unmount a tape it
+kills `ltfs`, then detaches the dead FUSE mountpoint and clears the lock itself, so the
+tape is still ejected (SPEC §4.3). A data worker that dies with a mount live (container
+restart, host crash) cannot do that, so the changer then refuses to unload the tape (sense
+ASC/ASCQ 53/02 or 53/03, "medium removal prevented"). That tape's write did not complete
+and must be re-written anyway. The dead worker's FUSE mount lived only in its container's
+mount namespace (the pool is bind-mounted `rslave`), so there is no stale mountpoint to
+clean up on the host. Find the stuck drive's sg node with `lsscsi -g`, then on the storage
+host, with no run using the drive:
+
+```
+sg_prevent --allow /dev/sgN          # N: the stuck drive's sg node
+mtx -f /dev/sch0 unload SLOT DRIVE   # DRIVE: mtx's 0-based drive number
+```
+
+Clear the lock only once nothing is using the drive: it is what stops the changer pulling
+a tape out from under a live mount.
 
 ---
 

@@ -211,3 +211,91 @@ func TestUnmountFusermountFailureBenignAfterProcessExit(t *testing.T) {
 	require.NoError(t, m.Unmount(t.Context()),
 		"a fusermount failure after the process exited must be treated as benign")
 }
+
+// startSupervised starts a stand-in ltfs process supervised like Volume.Mount's.
+func startSupervised(t *testing.T, name string, args ...string) *Mount {
+	t.Helper()
+
+	cmd := exec.Command(name, args...)
+	require.NoError(t, cmd.Start())
+
+	m := &Mount{
+		device:     "/dev/null", // opens, but rejects SG_IO
+		mountpoint: t.TempDir(), // exists but is not a mount point
+		cmd:        cmd,
+		stderr:     &bytes.Buffer{},
+		done:       make(chan struct{}),
+	}
+
+	go func() {
+		m.waitErr = cmd.Wait()
+		close(m.done)
+	}()
+
+	return m
+}
+
+// TestAbortKillsThenReleasesDrive: Abort must kill ltfs and still attempt the
+// drive release, surfacing its failure; an already-exited ltfs is not an error
+// (#442).
+func TestAbortKillsThenReleasesDrive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cmd  []string
+	}{
+		{name: "live ltfs is killed", cmd: []string{"sleep", "600"}},
+		{name: "already-exited ltfs", cmd: []string{"true"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			m := startSupervised(t, test.cmd[0], test.cmd[1:]...)
+			if test.cmd[0] == "true" {
+				<-m.done
+			}
+
+			err := m.Abort(t.Context())
+
+			select {
+			case <-m.done:
+			default:
+				t.Fatal("Abort returned before ltfs exited")
+			}
+
+			// The release ran and its failure is reported, naming the drive.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "release drive /dev/null")
+			assert.Contains(t, err.Error(), "ALLOW MEDIUM REMOVAL")
+			assert.NotContains(t, err.Error(), "kill ltfs", "an exited process is not a kill failure")
+		})
+	}
+}
+
+// TestExitedBySignal: Volume.Mount releases the drive after an ltfs that died by
+// a signal mid-mount (it skipped its own unlock), but not after an orderly exit.
+func TestExitedBySignal(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		cmd  []string
+		want bool
+	}{
+		"exit 0":         {cmd: []string{"true"}, want: false},
+		"exit 1":         {cmd: []string{"false"}, want: false},
+		"crash SIGSEGV":  {cmd: []string{"sh", "-c", "kill -SEGV $$"}, want: true},
+		"killed SIGKILL": {cmd: []string{"sh", "-c", "kill -KILL $$"}, want: true},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := exec.Command(test.cmd[0], test.cmd[1:]...).Run()
+			assert.Equal(t, test.want, exitedBySignal(err))
+		})
+	}
+}
