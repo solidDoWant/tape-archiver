@@ -226,17 +226,35 @@ file** out of an archive:
    bin/zstd -d /scratch/archive.tar.zst -o /scratch/archive.tar
    ```
 
-8. **Extract the specific file** you need (omit the path to extract everything).
-   An archive holding several member volumes — a `VolumeGroupSnapshot` — unpacks to
-   one subdirectory per member volume. An archive of a single volume unpacks that
-   volume's own contents directly, with no wrapping directory:
+8. **Extract the specific file** you need (omit the path to extract everything)
+   into an empty restore directory. An archive holding several member volumes — a
+   `VolumeGroupSnapshot` — unpacks to one subdirectory per member volume. An
+   archive of a single volume unpacks that volume's own contents directly, with no
+   wrapping directory:
 
    ```
-   bin/tar -xf /scratch/archive.tar path/inside/the/archive
+   mkdir -p /scratch/restore
+   bin/tar -xpf /scratch/archive.tar -C /scratch/restore path/inside/the/archive
    ```
 
-   **What a `tar`-level restore reproduces:** regular files, directories, and
-   symlinks, with their permission bits, ownership, and modification time.
+   Run it **as root** to restore file ownership (GNU `tar` applies the archived
+   owners only for root, as if `--same-owner` were given; as another user every
+   file is owned by you). `-p` keeps the archived permission bits exactly instead
+   of masking them with your umask. The archive's first entry, `./`, carries the
+   source volume's root directory — its mode, owner, and modification time — and
+   a full extract applies it to the `-C` directory itself, so extract into the
+   directory that should become the volume root (e.g. a fresh PVC's mount point),
+   never into a shared directory such as `/` or your home whose own permissions
+   you want to keep. In an archive holding several member volumes each member's
+   subdirectory entry carries that member root's metadata. As a non-root user,
+   extract into a directory you own (such as the one `mkdir` just made): `tar`
+   cannot change the mode or time of a `-C` directory owned by someone else, so
+   it reports `Cannot change mode` / `Cannot utime` for `.` and exits non-zero,
+   although every file is still extracted.
+
+   **What a `tar`-level restore reproduces:** regular files, directories
+   (including the volume root), and symlinks, with their permission bits,
+   ownership, and modification time.
    Hardlinked files are restored as hardlinks (stored once in the archive), and
    sparse files are restored with their holes intact — the bundled `bin/tar`
    decodes the GNU sparse 1.0 encoding used to write them. **Not** reproduced:

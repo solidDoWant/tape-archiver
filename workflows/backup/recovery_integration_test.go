@@ -143,7 +143,7 @@ func TestRecoveryFromReportAlone(t *testing.T) {
 	// Printed step 8: unpack.
 	unpacked := filepath.Join(work, "unpacked")
 	require.NoError(t, os.Mkdir(unpacked, 0o755))
-	runRecoveryStep(t, work, "tar", "-xf", tarball, "-C", unpacked)
+	runRecoveryStep(t, work, "tar", "-xpf", tarball, "-C", unpacked)
 
 	// The only assertion outside the report: the recovered tree equals the source,
 	// with no wrapping directory, as step 8 says.

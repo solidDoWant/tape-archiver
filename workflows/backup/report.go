@@ -93,8 +93,10 @@ on this disc.
     one was, decompress it:
         bin/zstd -d archive.tar.zst -o archive.tar
     (An archive the manifest records as uncompressed is already a tar after step 6.)
-8.  Unpack the tar:
-        bin/tar -xf archive.tar
+8.  Unpack the tar, as root, into an empty directory that becomes the volume root:
+        mkdir restore && bin/tar -xpf archive.tar -C restore
+    As root, -p restores exact permission bits and ownership; the archive's ./
+    entry applies the source root's mode, owner and mtime to restore itself.
     An archive holding several member volumes unpacks to one subdirectory per volume.
     A single-volume archive unpacks that volume's own contents directly, with no
     wrapping directory — the report's contents manifest names its member volume.
