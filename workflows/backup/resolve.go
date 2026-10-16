@@ -2,9 +2,11 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/temporal"
@@ -45,6 +47,7 @@ type poolInspector interface {
 	UserProperties(ctx context.Context, dataset string) (map[string]string, error)
 	UserProperty(ctx context.Context, dataset, property string) (string, error)
 	LogicalReferenced(ctx context.Context, dataset string) (int64, error)
+	Snapshots(ctx context.Context, dataset string) ([]zfs.SnapshotInfo, error)
 }
 
 // zfsPool is the production poolInspector over the zfs CLI.
@@ -60,6 +63,10 @@ func (zfsPool) UserProperty(ctx context.Context, dataset, property string) (stri
 
 func (zfsPool) LogicalReferenced(ctx context.Context, dataset string) (int64, error) {
 	return zfs.LogicalReferenced(ctx, dataset)
+}
+
+func (zfsPool) Snapshots(ctx context.Context, dataset string) ([]zfs.SnapshotInfo, error) {
+	return zfs.Snapshots(ctx, dataset)
 }
 
 // ResolveControlActivities hosts the control-side Resolve activity.
@@ -122,13 +129,23 @@ func (a *ResolveControlActivities) ResolveK8sSources(ctx context.Context, cfg co
 
 func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int, source config.Source) (ResolvedArchive, error) {
 	k8s := source.K8s
-	ref := k8ssnap.Ref{Namespace: k8s.Namespace, Name: k8s.Name, LabelSelector: k8s.LabelSelector}
+	ref := k8ssnap.Ref{
+		Namespace:     k8s.Namespace,
+		Name:          k8s.Name,
+		LabelSelector: k8s.LabelSelector,
+		NewestPerPVC:  k8s.Select == config.SelectNewestPerPVC,
+	}
 	archive := ResolvedArchive{SourceIndex: index, Label: sourceLabel(source), Compression: compressionEnabled(source)}
 
 	if k8s.LabelSelector != "" {
 		group, err := resolver.ResolveGroup(ctx, ref)
 		if err != nil {
 			return ResolvedArchive{}, fmt.Errorf("resolve sources[%d] k8s group: %w", index, err)
+		}
+
+		if len(group.UnreadyPVCs) > 0 {
+			slog.WarnContext(ctx, "resolve: skipping PVCs with no ready snapshot",
+				"sourceIndex", index, "pvcs", group.UnreadyPVCs)
 		}
 
 		for _, member := range group.Members {
@@ -348,8 +365,18 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 		return archive, nil
 	}
 
-	// Existence check: zfs exits non-zero for an absent dataset or snapshot.
 	name := source.ZFSPath.Name
+	if source.ZFSPath.Snapshot == config.SnapshotNewest {
+		newest, err := a.newestSnapshot(ctx, name, source.ZFSPath.Prefix)
+		if err != nil {
+			return ResolvedArchive{}, fmt.Errorf("resolve raw zfs sources[%d] %q newest snapshot: %w", index, name, err)
+		}
+
+		name = newest
+		slog.InfoContext(ctx, "resolve: selected newest snapshot", "sourceIndex", index, "snapshot", name)
+	}
+
+	// Existence check: zfs exits non-zero for an absent dataset or snapshot.
 	if _, err := a.pool.UserProperties(ctx, name); err != nil {
 		return ResolvedArchive{}, fmt.Errorf("validate raw zfs sources[%d] %q: %w", index, name, err)
 	}
@@ -360,6 +387,38 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 		Compression: compressionEnabled(source),
 		Snapshots:   []ResolvedSnapshot{{ZFSPath: name}},
 	}, nil
+}
+
+// newestSnapshot returns "dataset@snap" for the newest (creation, then createtxg)
+// snapshot whose name starts with prefix.
+func (a *ResolveDataActivities) newestSnapshot(ctx context.Context, dataset, prefix string) (string, error) {
+	snapshots, err := a.pool.Snapshots(ctx, dataset)
+	if err != nil {
+		return "", err
+	}
+
+	var newest *zfs.SnapshotInfo
+
+	for index := range snapshots {
+		snapshot := &snapshots[index]
+		if !strings.HasPrefix(snapshot.Name, prefix) {
+			continue
+		}
+
+		if newest == nil || snapshot.Creation > newest.Creation ||
+			(snapshot.Creation == newest.Creation && snapshot.CreateTXG > newest.CreateTXG) {
+			newest = snapshot
+		}
+	}
+
+	switch {
+	case newest == nil && prefix != "":
+		return "", fmt.Errorf("no snapshot name starts with prefix %q", prefix)
+	case newest == nil:
+		return "", errors.New("dataset has no snapshots")
+	}
+
+	return dataset + "@" + newest.Name, nil
 }
 
 // estimate returns the summed logicalreferenced (Prepare's progress denominator)

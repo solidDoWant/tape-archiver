@@ -152,6 +152,23 @@ describe('validateAgainstSchema', () => {
 
     expect(issues).toEqual([])
   })
+
+  it('accepts the newest-snapshot selection modes and rejects an unknown one (enum)', () => {
+    const modes = {
+      ...validConfig,
+      sources: [
+        { zfsPath: { name: 'bulk-pool-01/archive', snapshot: 'newest', prefix: 'daily-' } },
+        { k8s: { apiVersion: 'snapshot.storage.k8s.io/v1', kind: 'VolumeSnapshot', labelSelector: 'a=b', select: 'newestPerPVC' } },
+      ],
+    }
+    expect(validateAgainstSchema(testRunConfigSchema, modes)).toEqual([])
+
+    const issues = validateAgainstSchema(testRunConfigSchema, {
+      ...validConfig,
+      sources: [{ zfsPath: { name: 'bulk-pool-01/archive', snapshot: 'oldest' } }],
+    })
+    expect(issues).toContainEqual({ path: 'sources[0].zfsPath.snapshot', message: 'must be one of newest' })
+  })
 })
 
 describe('fetchConfigSchema', () => {

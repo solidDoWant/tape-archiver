@@ -141,9 +141,27 @@ func (s Source) validate(index int) error {
 	case hasK8s:
 		return s.K8s.validate(index)
 	default:
-		if s.ZFSPath.Name == "" {
-			return fmt.Errorf("sources[%d].zfsPath.name: must not be empty", index)
+		return s.ZFSPath.validate(index)
+	}
+}
+
+func (z *ZFSPathSource) validate(index int) error {
+	if z.Name == "" {
+		return fmt.Errorf("sources[%d].zfsPath.name: must not be empty", index)
+	}
+
+	switch z.Snapshot {
+	case "":
+		if z.Prefix != "" {
+			return fmt.Errorf("sources[%d].zfsPath.prefix: requires snapshot %q", index, SnapshotNewest)
 		}
+	case SnapshotNewest:
+		if strings.Contains(z.Name, "@") {
+			return fmt.Errorf("sources[%d].zfsPath: snapshot %q needs a bare dataset name, got snapshot %q",
+				index, z.Snapshot, z.Name)
+		}
+	default:
+		return fmt.Errorf("sources[%d].zfsPath.snapshot: must be %q when set, got %q", index, SnapshotNewest, z.Snapshot)
 	}
 
 	return nil
@@ -166,6 +184,16 @@ func (k *K8sRef) validate(index int) error {
 		return fmt.Errorf("sources[%d].k8s: one of name or labelSelector must be set", index)
 	case hasName && hasSelector:
 		return fmt.Errorf("sources[%d].k8s: name and labelSelector are mutually exclusive", index)
+	}
+
+	switch k.Select {
+	case "":
+	case SelectAll, SelectNewestPerPVC:
+		if !hasSelector {
+			return fmt.Errorf("sources[%d].k8s.select: requires labelSelector", index)
+		}
+	default:
+		return fmt.Errorf("sources[%d].k8s.select: must be %q or %q, got %q", index, SelectAll, SelectNewestPerPVC, k.Select)
 	}
 
 	// An empty namespace is valid only with a labelSelector (cluster-wide).

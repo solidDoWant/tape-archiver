@@ -66,7 +66,19 @@ type K8sRef struct {
 	// pass schema validation.
 	Name          string `json:"name,omitempty" jsonschema:"minLength=1"`
 	LabelSelector string `json:"labelSelector,omitempty" jsonschema:"minLength=1"`
+	// Select narrows a LabelSelector match; empty means SelectAll.
+	Select K8sSelect `json:"select,omitempty" jsonschema:"enum=all,enum=newestPerPVC"`
 }
+
+// K8sSelect chooses which LabelSelector matches a k8s source archives.
+type K8sSelect string
+
+const (
+	// SelectAll archives every matching snapshot.
+	SelectAll K8sSelect = "all"
+	// SelectNewestPerPVC archives only the newest ready snapshot of each source PVC.
+	SelectNewestPerPVC K8sSelect = "newestPerPVC"
+)
 
 // JSONSchemaExtend requires namespace only for a named snapshot; an empty
 // namespace with a labelSelector selects cluster-wide.
@@ -79,7 +91,17 @@ func (K8sRef) JSONSchemaExtend(schema *jsonschema.Schema) {
 // ZFSPathSource is an explicit ZFS snapshot or dataset on the pool.
 type ZFSPathSource struct {
 	Name string `json:"name" jsonschema:"minLength=1"`
+	// Snapshot picks a snapshot of the bare dataset Name at Resolve; empty archives Name as given.
+	Snapshot ZFSSnapshotMode `json:"snapshot,omitempty" jsonschema:"enum=newest"`
+	// Prefix limits Snapshot to snapshots whose short name starts with it.
+	Prefix string `json:"prefix,omitempty" jsonschema:"minLength=1"`
 }
+
+// ZFSSnapshotMode chooses which snapshot of a zfsPath dataset is archived.
+type ZFSSnapshotMode string
+
+// SnapshotNewest archives the dataset's newest snapshot by creation time.
+const SnapshotNewest ZFSSnapshotMode = "newest"
 
 // Library specifies the tape library hardware and the blank tapes to use.
 type Library struct {

@@ -163,6 +163,70 @@ func UserProperty(ctx context.Context, dataset, property string) (string, error)
 	return strings.TrimSpace(string(out)), nil
 }
 
+// SnapshotInfo is one snapshot of a dataset with its ordering properties.
+type SnapshotInfo struct {
+	Name      string // short name, after "@"
+	Creation  int64  // creation property, Unix seconds
+	CreateTXG uint64 // createtxg; strictly orders snapshots created in the same second
+}
+
+// Snapshots lists the dataset's own snapshots (not its children's), oldest first.
+func Snapshots(ctx context.Context, dataset string) ([]SnapshotInfo, error) {
+	cmd := exec.CommandContext(ctx, "zfs", "list", "-Hp", "-t", "snapshot", "-d", "1",
+		"-s", "createtxg", "-o", "name,creation,createtxg", dataset)
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return nil, fmt.Errorf("%s: %w: %s", cmd, err, msg)
+		}
+
+		return nil, fmt.Errorf("%s: %w", cmd, err)
+	}
+
+	return parseSnapshots(dataset, out)
+}
+
+// parseSnapshots parses "zfs list -Hp -o name,creation,createtxg" output,
+// keeping only snapshots of dataset itself.
+func parseSnapshots(dataset string, out []byte) ([]SnapshotInfo, error) {
+	var snapshots []SnapshotInfo
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" {
+			continue
+		}
+
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("unexpected zfs list output line: %q", line)
+		}
+
+		owner, name, found := strings.Cut(fields[0], "@")
+		if !found || owner != dataset {
+			continue
+		}
+
+		creation, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse creation of %s: %w", fields[0], err)
+		}
+
+		txg, err := strconv.ParseUint(fields[2], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse createtxg of %s: %w", fields[0], err)
+		}
+
+		snapshots = append(snapshots, SnapshotInfo{Name: name, Creation: creation, CreateTXG: txg})
+	}
+
+	return snapshots, nil
+}
+
 // ErrNotExist reports that the named dataset or snapshot does not exist.
 var ErrNotExist = errors.New("dataset does not exist")
 

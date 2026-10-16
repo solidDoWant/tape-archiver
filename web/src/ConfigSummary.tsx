@@ -12,8 +12,8 @@ import { sourceLabel } from './sourceLabel'
 export interface RunConfigSource {
   compression?: boolean
   label?: string
-  zfsPath?: { name: string }
-  k8s?: { kind: string; namespace: string; name?: string; labelSelector?: string }
+  zfsPath?: { name: string; snapshot?: string; prefix?: string }
+  k8s?: { kind: string; namespace: string; name?: string; labelSelector?: string; select?: string }
 }
 
 export interface RunConfig {

@@ -155,7 +155,10 @@ write window.
 1. **Resolve.** Expand the config into a concrete work list: resolve k8s
    `VolumeSnapshot`/snapshot-group references to ZFS snapshots (cross-checked against
    the democratic-csi `managed_resource` property to confirm ownership before staging),
-   and validate raw ZFS snapshot/dataset paths. Run a cheap
+   and validate raw ZFS snapshot/dataset paths. "Newest snapshot" selections (§5) are
+   decided here, once, and recorded in the work list, so the rest of the run and the
+   report use exactly the chosen snapshots; a selection with no match fails Resolve
+   naming the source. Run a cheap
    feasibility pre-check from `zfs` properties (`logicalreferenced`, inflated by a small
    `tar` overhead and the configured PAR2 %) purely to reject any single archive that
    cannot fit on one tape *before* doing real work. From the same resolved sizes it also
@@ -307,8 +310,13 @@ The config defines, at minimum:
   - **k8s snapshots:** `VolumeSnapshot` / snapshot-group references (by name/namespace
     and/or label selector across namespaces). A snapshot **group is archived as a
     single tar** (one subdirectory per member volume), giving cross-volume consistency.
+    A label selector archives every match by default; `select: newestPerPVC` keeps only
+    each source PVC's newest `ReadyToUse` snapshot by `status.creationTime`, ignoring
+    not-yet-ready ones.
   - **Raw ZFS paths:** explicit ZFS snapshot or dataset paths on the pool not visible
-    to k8s (e.g. `bulk-pool-01/archive`, `bulk-pool-01/media`). A raw **dataset** path is
+    to k8s (e.g. `bulk-pool-01/archive`, `bulk-pool-01/media`). `snapshot: newest` (with
+    an optional name `prefix`) on a bare dataset archives its newest snapshot by ZFS
+    `creation` instead. Otherwise a raw **dataset** path is
     archived from its live mountpoint; if the dataset is not mounted (its `mounted`
     property is `no`), the run fails during Prepare rather than archiving whatever
     directory shadows the mountpoint — a stale or empty shadow would otherwise be

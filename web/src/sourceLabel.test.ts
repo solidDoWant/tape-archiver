@@ -10,6 +10,19 @@ describe('sourceLabel', () => {
     expect(sourceLabel({ zfsPath: { name: 'pool/a' } })).toBe('pool/a')
   })
 
+  it('marks newest-snapshot selections', () => {
+    expect(sourceLabel({ zfsPath: { name: 'pool/a', snapshot: 'newest' } })).toBe('pool/a (newest)')
+    expect(sourceLabel({ zfsPath: { name: 'pool/a', snapshot: 'newest', prefix: 'daily-' } })).toBe(
+      'pool/a (newest daily-*)',
+    )
+    expect(sourceLabel({ k8s: { kind: 'VolumeSnapshot', labelSelector: 'app=db', select: 'newestPerPVC' } })).toBe(
+      'app=db (newest per PVC)',
+    )
+    expect(
+      sourceLabel({ k8s: { kind: 'VolumeSnapshot', labelSelector: 'app=db', select: 'newestPerPVC' } }, { detail: true }),
+    ).toBe('k8s · VolumeSnapshot/app=db (newest per PVC)')
+  })
+
   it('renders a k8s ref by name in detail mode', () => {
     expect(
       sourceLabel({ k8s: { kind: 'VolumeSnapshot', name: 'snap', namespace: 'media' } }, { detail: true }),

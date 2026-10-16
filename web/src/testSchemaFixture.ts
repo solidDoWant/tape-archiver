@@ -64,6 +64,7 @@ export const testRunConfigSchema: JSONSchema = {
         namespace: { type: 'string' },
         name: { type: 'string', minLength: 1 },
         labelSelector: { type: 'string', minLength: 1 },
+        select: { type: 'string', enum: ['all', 'newestPerPVC'] },
       },
     },
     Library: {
@@ -115,6 +116,8 @@ export const testRunConfigSchema: JSONSchema = {
       required: ['name'],
       properties: {
         name: { type: 'string', minLength: 1 },
+        snapshot: { type: 'string', enum: ['newest'] },
+        prefix: { type: 'string', minLength: 1 },
       },
     },
   },

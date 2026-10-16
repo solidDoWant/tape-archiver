@@ -12,6 +12,7 @@ import (
 
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/k8ssnap"
+	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 )
 
 // testTapeCapacity is a roomy 2.5 TB; capacity-limit cases set their own.
@@ -54,6 +55,15 @@ type fakePool struct {
 	properties map[string]map[string]string
 	sizes      map[string]int64
 	sizeErr    error
+	snapshots  map[string][]zfs.SnapshotInfo
+}
+
+func (f fakePool) Snapshots(_ context.Context, dataset string) ([]zfs.SnapshotInfo, error) {
+	if _, ok := f.properties[dataset]; !ok {
+		return nil, errors.New("dataset does not exist")
+	}
+
+	return f.snapshots[dataset], nil
 }
 
 func (f fakePool) UserProperties(_ context.Context, dataset string) (map[string]string, error) {
@@ -227,6 +237,125 @@ func TestResolveK8sSourcesClusterWide(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, resolver.gotRef.Namespace, "empty namespace must pass through to ResolveGroup for cluster-wide resolution")
 	assert.Equal(t, "backup=nightly", resolver.gotRef.LabelSelector)
+}
+
+// TestResolveK8sSourcesSelectMode: select maps to Ref.NewestPerPVC; unset keeps all matches.
+func TestResolveK8sSourcesSelectMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		mode   config.K8sSelect
+		newest bool
+	}{
+		{name: "unset", mode: "", newest: false},
+		{name: "all", mode: config.SelectAll, newest: false},
+		{name: "newestPerPVC", mode: config.SelectNewestPerPVC, newest: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			resolver := &capturingResolver{}
+			activities := &ResolveControlActivities{
+				newResolver: func() (snapshotResolver, error) { return resolver, nil },
+			}
+
+			source := k8sGroupSource("backup=nightly")
+			source.K8s.Select = test.mode
+
+			_, err := activities.ResolveK8sSources(t.Context(), config.Config{Sources: []config.Source{source}})
+			require.NoError(t, err)
+			assert.Equal(t, test.newest, resolver.gotRef.NewestPerPVC)
+		})
+	}
+}
+
+func newestSource(dataset, prefix string) config.Source {
+	return config.Source{ZFSPath: &config.ZFSPathSource{Name: dataset, Snapshot: config.SnapshotNewest, Prefix: prefix}}
+}
+
+// TestResolveAndCheckNewestSnapshot: snapshot: newest resolves the dataset to
+// its newest (prefix-matching) snapshot, recorded in the resolved archive.
+func TestResolveAndCheckNewestSnapshot(t *testing.T) {
+	t.Parallel()
+
+	pool := fakePool{
+		properties: map[string]map[string]string{
+			"pool/data": {}, "pool/data@daily-1": {}, "pool/data@daily-2": {}, "pool/data@weekly-1": {},
+			"pool/data@same-a": {}, "pool/data@same-b": {}, "pool/empty": {},
+		},
+		sizes: map[string]int64{"pool/data@daily-2": 100, "pool/data@weekly-1": 100, "pool/data@same-a": 100},
+		snapshots: map[string][]zfs.SnapshotInfo{
+			"pool/data": {
+				{Name: "same-a", Creation: 50, CreateTXG: 9},
+				{Name: "daily-1", Creation: 10, CreateTXG: 1},
+				{Name: "weekly-1", Creation: 30, CreateTXG: 3},
+				{Name: "daily-2", Creation: 20, CreateTXG: 2},
+				{Name: "same-b", Creation: 50, CreateTXG: 8},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		source      config.Source
+		want        string
+		assertErr   require.ErrorAssertionFunc
+		errContains string
+	}{
+		{name: "newest overall, createtxg breaks a creation tie", source: newestSource("pool/data", ""), want: "pool/data@same-a"},
+		{name: "newest with prefix", source: newestSource("pool/data", "daily-"), want: "pool/data@daily-2"},
+		{
+			name:        "no snapshot matches the prefix",
+			source:      newestSource("pool/data", "monthly-"),
+			assertErr:   require.Error,
+			errContains: `sources[0] "pool/data"`,
+		},
+		{
+			name:        "dataset without snapshots",
+			source:      newestSource("pool/empty", ""),
+			assertErr:   require.Error,
+			errContains: `sources[0] "pool/empty"`,
+		},
+		{
+			name:        "missing dataset",
+			source:      newestSource("pool/missing", ""),
+			assertErr:   require.Error,
+			errContains: `sources[0] "pool/missing"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if test.assertErr == nil {
+				test.assertErr = require.NoError
+			}
+
+			activities := &ResolveDataActivities{pool: pool}
+			cfg := config.Config{
+				Sources:    []config.Source{test.source},
+				Library:    config.Library{TapeCapacityBytes: testTapeCapacity},
+				Redundancy: config.Redundancy{TargetPercentage: floatPtr(10)},
+			}
+
+			got, err := activities.ResolveAndCheck(t.Context(), ResolveDataInput{Config: cfg})
+			test.assertErr(t, err)
+
+			if err != nil {
+				assert.Contains(t, err.Error(), test.errContains)
+
+				return
+			}
+
+			require.Len(t, got, 1)
+			assert.Equal(t, []ResolvedSnapshot{{ZFSPath: test.want}}, got[0].Snapshots)
+			assert.Equal(t, "data", got[0].Label)
+		})
+	}
 }
 
 // TestResolveK8sSourcesEmptyGroupFails (#132 AC1): an empty-match group fails at

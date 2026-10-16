@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
@@ -216,4 +217,149 @@ func TestResolveGroup(t *testing.T) {
 		_, err := resolver.ResolveGroup(t.Context(), Ref{LabelSelector: "app=db"})
 		require.Error(t, err)
 	})
+}
+
+// datedSnapshot is a VolumeSnapshot of pvc created hoursAgo before a fixed instant, with its content.
+func datedSnapshot(namespace, name, pvc string, hoursAgo int, ready bool) (snapshotv1.VolumeSnapshot, *snapshotv1.VolumeSnapshotContent) {
+	handle := fmt.Sprintf("pvc-%s@snapshot-%08d-2349-4611-8b2f-67388602233b", pvc, len(name)*100+hoursAgo)
+	snapshot, content := readySnapshot(namespace, name, pvc, "content-"+namespace+"-"+name, handle)
+	created := metav1.NewTime(time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC).Add(-time.Duration(hoursAgo) * time.Hour))
+	snapshot.Status.CreationTime = &created
+	snapshot.Status.ReadyToUse = &ready
+
+	return *snapshot, content
+}
+
+func TestResolveGroupNewestPerPVC(t *testing.T) {
+	t.Parallel()
+
+	type spec struct {
+		namespace, name, pvc string
+		hoursAgo             int
+		ready                bool
+	}
+
+	tests := []struct {
+		name        string
+		snapshots   []spec
+		want        []string
+		wantUnready []string
+		wantErr     require.ErrorAssertionFunc
+		errContains string
+	}{
+		{
+			name: "keeps the newest ready snapshot of each PVC",
+			snapshots: []spec{
+				{"app", "a-1", "claim-a", 48, true},
+				{"app", "a-3", "claim-a", 0, true},
+				{"app", "a-2", "claim-a", 24, true},
+				{"app", "b-1", "claim-b", 30, true},
+				{"app", "b-2", "claim-b", 6, true},
+			},
+			want:    []string{"app/a-3", "app/b-2"},
+			wantErr: require.NoError,
+		},
+		{
+			name: "skips a newer snapshot that is not ready",
+			snapshots: []spec{
+				{"app", "a-1", "claim-a", 24, true},
+				{"app", "a-2", "claim-a", 0, false},
+			},
+			want:    []string{"app/a-1"},
+			wantErr: require.NoError,
+		},
+		{
+			name: "same PVC name in two namespaces is two PVCs",
+			snapshots: []spec{
+				{"one", "x-1", "data", 5, true},
+				{"two", "x-1", "data", 9, true},
+				{"two", "x-2", "data", 1, true},
+			},
+			want:    []string{"one/x-1", "two/x-2"},
+			wantErr: require.NoError,
+		},
+		{
+			name: "creation-time tie breaks by greatest name",
+			snapshots: []spec{
+				{"app", "a-2", "claim-a", 3, true},
+				{"app", "a-1", "claim-a", 3, true},
+			},
+			want:    []string{"app/a-2"},
+			wantErr: require.NoError,
+		},
+		{
+			name: "PVC with no ready snapshot is reported and skipped",
+			snapshots: []spec{
+				{"app", "a-1", "claim-a", 1, true},
+				{"app", "b-1", "claim-b", 1, false},
+			},
+			want:        []string{"app/a-1"},
+			wantUnready: []string{"app/claim-b"},
+			wantErr:     require.NoError,
+		},
+		{
+			name:        "no ready snapshot at all fails naming the selector",
+			snapshots:   []spec{{"app", "a-1", "claim-a", 1, false}},
+			wantErr:     require.Error,
+			errContains: "app=db",
+		},
+		{
+			name:        "snapshot without a source PVC fails",
+			snapshots:   []spec{{"app", "a-1", "", 1, true}},
+			wantErr:     require.Error,
+			errContains: "app/a-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &fakeSnapshotClient{contents: map[string]*snapshotv1.VolumeSnapshotContent{}}
+
+			for _, snapshot := range tt.snapshots {
+				listed, content := datedSnapshot(snapshot.namespace, snapshot.name, snapshot.pvc, snapshot.hoursAgo, snapshot.ready)
+				if snapshot.pvc == "" {
+					listed.Spec.Source.PersistentVolumeClaimName = nil
+				}
+
+				client.listed = append(client.listed, listed)
+				client.contents[content.Name] = content
+			}
+
+			group, err := NewResolver(client, testParent).ResolveGroup(t.Context(), Ref{LabelSelector: "app=db", NewestPerPVC: true})
+			tt.wantErr(t, err)
+
+			if err != nil {
+				assert.Contains(t, err.Error(), tt.errContains)
+
+				return
+			}
+
+			got := make([]string, 0, len(group.Members))
+			for _, member := range group.Members {
+				got = append(got, member.Namespace+"/"+member.VolumeSnapshot)
+			}
+
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantUnready, group.UnreadyPVCs)
+		})
+	}
+}
+
+func TestResolveGroupWithoutNewestPerPVCKeepsAllMatches(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSnapshotClient{contents: map[string]*snapshotv1.VolumeSnapshotContent{}}
+
+	for index, name := range []string{"a-1", "a-2", "a-3"} {
+		listed, content := datedSnapshot("app", name, "claim-a", index, true)
+		client.listed = append(client.listed, listed)
+		client.contents[content.Name] = content
+	}
+
+	group, err := NewResolver(client, testParent).ResolveGroup(t.Context(), Ref{LabelSelector: "app=db"})
+	require.NoError(t, err)
+	assert.Len(t, group.Members, 3)
+	assert.Empty(t, group.UnreadyPVCs)
 }

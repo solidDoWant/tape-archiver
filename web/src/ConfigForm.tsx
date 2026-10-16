@@ -392,14 +392,47 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
               </div>
 
               {source.type === 'zfs' ? (
-                <div>
-                  <label className={fieldLabelClass}>ZFS dataset</label>
-                  <input
-                    value={source.zfsName}
-                    placeholder="bulk-pool-01/dataset"
-                    onChange={(event) => updateSource(source.id, { zfsName: event.target.value })}
-                    className={inputClass}
-                  />
+                <div className="flex flex-col gap-2.5">
+                  <div>
+                    <label className={fieldLabelClass}>ZFS dataset</label>
+                    <input
+                      value={source.zfsName}
+                      placeholder="bulk-pool-01/dataset"
+                      onChange={(event) => updateSource(source.id, { zfsName: event.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div className={segmentedWrapClass} role="group" aria-label={`Source ${index + 1} ZFS snapshot`}>
+                    <button
+                      type="button"
+                      className={segmentButtonClass(source.zfsSnapshot === 'live')}
+                      onClick={() => updateSource(source.id, { zfsSnapshot: 'live' })}
+                    >
+                      As named
+                    </button>
+                    <button
+                      type="button"
+                      className={segmentButtonClass(source.zfsSnapshot === 'newest')}
+                      onClick={() => updateSource(source.id, { zfsSnapshot: 'newest' })}
+                    >
+                      Newest snapshot
+                    </button>
+                  </div>
+
+                  {source.zfsSnapshot === 'newest' && (
+                    <div>
+                      <label className={fieldLabelClass}>
+                        snapshot name prefix <span className="text-text-faint">(optional)</span>
+                      </label>
+                      <input
+                        value={source.zfsPrefix}
+                        placeholder="daily-"
+                        onChange={(event) => updateSource(source.id, { zfsPrefix: event.target.value })}
+                        className={inputClass}
+                      />
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="flex flex-col gap-2.5">
@@ -482,6 +515,24 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                           }
                           className={inputClass}
                         />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <div className={segmentedWrapClass} role="group" aria-label={`Source ${index + 1} snapshots per PVC`}>
+                          <button
+                            type="button"
+                            className={segmentButtonClass(source.k8sSelect === 'all')}
+                            onClick={() => updateSource(source.id, { k8sSelect: 'all' })}
+                          >
+                            All matches
+                          </button>
+                          <button
+                            type="button"
+                            className={segmentButtonClass(source.k8sSelect === 'newestPerPVC')}
+                            onClick={() => updateSource(source.id, { k8sSelect: 'newestPerPVC' })}
+                          >
+                            Newest per PVC
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}

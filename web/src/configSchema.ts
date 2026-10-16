@@ -11,7 +11,7 @@
 // object/array/string/integer/number/boolean "type", "properties",
 // "required", "additionalProperties: false", "items", "$ref" (to a
 // "$defs" sibling), "if"/"then" (used once, by K8sRef), the numeric
-// "multipleOf"/"minimum"/"maximum" keywords, and the non-empty
+// "multipleOf"/"minimum"/"maximum" keywords, string "enum", and the non-empty
 // "minLength"/"minItems" keywords (issue #321 — the schema declares these on
 // every field internal/config/validate.go requires to be non-empty, since
 // "required" alone only catches a missing key, not a present-but-empty ""/[])
@@ -51,6 +51,7 @@ export interface JSONSchema {
   maximum?: number
   minLength?: number
   minItems?: number
+  enum?: string[]
 }
 
 export interface ValidationIssue {
@@ -190,6 +191,10 @@ function validateValue(
           path,
           message: resolved.minLength === 1 ? 'must not be empty' : `must be at least ${resolved.minLength} characters`,
         })
+      }
+
+      if (resolved.enum !== undefined && !resolved.enum.includes(value)) {
+        issues.push({ path, message: `must be one of ${resolved.enum.join(', ')}` })
       }
 
       return
