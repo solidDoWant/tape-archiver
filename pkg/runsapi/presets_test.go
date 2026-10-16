@@ -63,7 +63,7 @@ func TestGetUIConfigPresets(t *testing.T) {
 			name: "valid partial presets are offered in order",
 			opts: deploy,
 			presets: []Preset{
-				{Name: "nightly", Description: "Nightly app snapshots", Config: json.RawMessage(`{"sources":[{"k8s":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshot","labelSelector":"backup=nightly"}}]}`)},
+				{Name: "nightly", Description: "Nightly app snapshots", Config: json.RawMessage(`{"sources":[{"k8s":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshot","labelSelector":"backup=nightly","select":"newestPerPVC"}},{"zfsPath":{"name":"bulk-pool-01/archive","snapshot":"newest","prefix":"daily-"}}]}`)},
 				{Name: "archive", Config: json.RawMessage(`{"sources":[{"zfsPath":{"name":"bulk-pool-01/archive"}}],"copies":2,"library":{"blankSlots":[1,2,3,4]},"redundancy":{"fillToCapacity":{"floor":5}},"encryption":{"recipients":["age1abc"]},"delivery":{"opticalBurn":{"copies":1}}}`)},
 			},
 			expectedNames: []string{"nightly", "archive"},
@@ -83,6 +83,8 @@ func TestGetUIConfigPresets(t *testing.T) {
 				{Name: "empty-sources-other-case", Config: json.RawMessage(`{"Sources":[]}`)},
 				{Name: "empty-sources", Config: json.RawMessage(`{"sources":[]}`)},
 				{Name: "bad-source", Config: json.RawMessage(`{"sources":[{"zfsPath":{"name":""}}]}`)},
+				{Name: "prefix-without-snapshot", Config: json.RawMessage(`{"sources":[{"zfsPath":{"name":"bulk-pool-01/archive","prefix":"daily-"}}]}`)},
+				{Name: "select-without-selector", Config: json.RawMessage(`{"sources":[{"k8s":{"apiVersion":"snapshot.storage.k8s.io/v1","kind":"VolumeSnapshot","namespace":"apps","name":"db","select":"newestPerPVC"}}]}`)},
 				{Name: "slots-not-multiple", Config: json.RawMessage(`{"copies":2,"library":{"blankSlots":[1,2,3]}}`)},
 				{Name: "slot-outside-library", Config: json.RawMessage(`{"library":{"blankSlots":[11]}}`)},
 				{Name: "reserved-slot", Config: json.RawMessage(`{"library":{"blankSlots":[9]}}`)},
