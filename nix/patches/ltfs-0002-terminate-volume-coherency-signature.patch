@@ -1,0 +1,13 @@
+--- a/src/libltfs/tape.c	2026-10-16 17:24:45.369160621 +0000
++++ b/src/libltfs/tape.c	2026-10-16 17:24:56.223517313 +0000
+@@ -1772,6 +1772,10 @@
+ 	CHECK_ARG_NULL(dev, -LTFS_NULL_ARG);
+ 	CHECK_ARG_NULL(dev->backend, -LTFS_NULL_ARG);
+ 
++	/* The signature copy below writes only "LTFS", not its NUL; zero the buffer
++	   so the NUL that tape_get_cart_coherency() compares is not stack garbage. */
++	memset(coh_data, 0, sizeof(coh_data));
++
+ 	ltfs_u16tobe(coh_data, TC_MAM_PAGE_COHERENCY);
+ 	coh_data[2]  = 0;
+ 	ltfs_u16tobe(coh_data + 3, TC_MAM_PAGE_COHERENCY_SIZE);
