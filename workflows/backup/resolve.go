@@ -48,7 +48,17 @@ const (
 	// resolveMemberCollisionErrorType marks two group members that would share
 	// one in-archive subdirectory.
 	resolveMemberCollisionErrorType = "resolve-member-collision"
+
+	// resolveMemberNameTooLongErrorType marks a group member whose in-archive
+	// subdirectory name is too long to extract.
+	resolveMemberNameTooLongErrorType = "resolve-member-name-too-long"
 )
+
+// maxMemberNameBytes is the longest member subdirectory most filesystems can
+// create (NAME_MAX on ext4, XFS, and ZFS). A namespace (63) plus "_" plus a PVC
+// name (253) can exceed it, and such a name would archive and verify cleanly
+// but fail to extract with "File name too long".
+const maxMemberNameBytes = 255
 
 // snapshotResolver is the seam *k8ssnap.Resolver satisfies, injected for tests.
 type snapshotResolver interface {
@@ -344,8 +354,9 @@ func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int,
 	return archive, nil
 }
 
-// checkMemberNames fails a group whose members would share a subdirectory here,
-// before any snapshot is held, rather than in archive.TarMembers at Prepare.
+// checkMemberNames fails a group whose members would share a subdirectory, or
+// whose subdirectory could not be extracted, here, before any snapshot is held,
+// rather than in archive.TarMembers at Prepare or at restore.
 func checkMemberNames(index int, snapshots []ResolvedSnapshot) error {
 	owners := make(map[string]string, len(snapshots))
 
@@ -355,6 +366,14 @@ func checkMemberNames(index int, snapshots []ResolvedSnapshot) error {
 		owner := snapshot.ZFSPath
 		if snapshot.VolumeSnapshot != "" {
 			owner = fmt.Sprintf("VolumeSnapshot %s/%s (%s)", snapshot.Namespace, snapshot.VolumeSnapshot, snapshot.ZFSPath)
+		}
+
+		if len(name) > maxMemberNameBytes {
+			return temporal.NewNonRetryableApplicationError(fmt.Sprintf(
+				"sources[%d]: %s would be archived as member subdirectory %q, %d bytes; "+
+					"a restore cannot create a directory name over %d bytes, so shorten the namespace or PVC name",
+				index, owner, name, len(name), maxMemberNameBytes,
+			), resolveMemberNameTooLongErrorType, nil)
 		}
 
 		if prior, ok := owners[name]; ok {

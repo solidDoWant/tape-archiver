@@ -123,7 +123,9 @@ always separates the namespace from the volume.
 
 If two matched snapshots would still share a subdirectory — two snapshots of the same PVC,
 as `select: all` keeps every match — the run fails at Resolve, before any snapshot is held,
-naming both snapshots. Use `"select": "newestPerPVC"` or narrow the selector.
+naming both snapshots. Use `"select": "newestPerPVC"` or narrow the selector. A member
+whose `<namespace>_<pvc>` name is longer than 255 bytes also fails Resolve, since a
+restore could not create a directory with that name.
 
 #### Selecting the newest snapshot per PVC
 

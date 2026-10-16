@@ -231,8 +231,10 @@ file** out of an archive:
    `VolumeGroupSnapshot` — unpacks to one subdirectory per member volume, named
    `<namespace>_<pvc>` after the Kubernetes namespace and PersistentVolumeClaim
    it came from (e.g. `media_data/`; the report lists these names as the
-   archive's member volumes), so start the path inside the archive with it. An
-   archive of a single volume unpacks that volume's own contents directly, with no
+   archive's member volumes), so start the path inside the archive with it.
+   Archives written by tape-archiver v0.0.19 and earlier name it after the
+   PersistentVolumeClaim alone (e.g. `data/`); `bin/tar -tf /scratch/archive.tar`
+   lists the names an archive actually holds. An archive of a single volume unpacks that volume's own contents directly, with no
    wrapping directory:
 
    ```

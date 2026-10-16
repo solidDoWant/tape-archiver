@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -292,6 +293,7 @@ func TestResolveK8sSourcesMemberNames(t *testing.T) {
 		assertErr    require.ErrorAssertionFunc
 		wantSubdirs  []string
 		wantErrParts []string
+		wantErrType  string
 	}{
 		{
 			name: "same PVC name in different namespaces",
@@ -317,6 +319,23 @@ func TestResolveK8sSourcesMemberNames(t *testing.T) {
 			},
 			assertErr:    require.Error,
 			wantErrParts: []string{"sources[0]", "apps/data-1", "apps/data-2", `"apps_data"`, "newestPerPVC"},
+			wantErrType:  resolveMemberCollisionErrorType,
+		},
+		{
+			name: "longest extractable subdirectory resolves",
+			members: []k8ssnap.Snapshot{
+				member("apps", "long-1", strings.Repeat("a", 250), "pool/pvc-a"),
+			},
+			wantSubdirs: []string{"apps_" + strings.Repeat("a", 250)},
+		},
+		{
+			name: "subdirectory too long to extract fails",
+			members: []k8ssnap.Snapshot{
+				member("apps", "long-1", strings.Repeat("a", 251), "pool/pvc-a"),
+			},
+			assertErr:    require.Error,
+			wantErrParts: []string{"sources[0]", "apps/long-1", "256 bytes", "over 255 bytes"},
+			wantErrType:  resolveMemberNameTooLongErrorType,
 		},
 	}
 
@@ -349,8 +368,8 @@ func TestResolveK8sSourcesMemberNames(t *testing.T) {
 			if err != nil {
 				var applicationErr *temporal.ApplicationError
 				require.ErrorAs(t, err, &applicationErr)
-				assert.True(t, applicationErr.NonRetryable(), "a member collision is deterministic; retrying cannot fix it")
-				assert.Equal(t, resolveMemberCollisionErrorType, applicationErr.Type())
+				assert.True(t, applicationErr.NonRetryable(), "a member name failure is deterministic; retrying cannot fix it")
+				assert.Equal(t, test.wantErrType, applicationErr.Type())
 
 				return
 			}
