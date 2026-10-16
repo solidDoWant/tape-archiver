@@ -20,7 +20,6 @@ import (
 	"github.com/solidDoWant/tape-archiver/internal/config"
 	"github.com/solidDoWant/tape-archiver/pkg/agewrap"
 	"github.com/solidDoWant/tape-archiver/pkg/archive"
-	"github.com/solidDoWant/tape-archiver/pkg/checksum"
 	"github.com/solidDoWant/tape-archiver/pkg/zfs"
 )
 
@@ -48,10 +47,9 @@ const (
 	// own directory.
 	sliceBaseName = "archive"
 
-	// The two per-archive stages reported in progress, so a long archive is
-	// distinguishable from a stalled one.
-	prepareStageStreaming    = "streaming"
-	prepareStageChecksumming = "checksumming"
+	// The per-archive stage reported in progress. Slices are checksummed inline
+	// while streaming (#448), so there is no separate checksum stage.
+	prepareStageStreaming = "streaming"
 )
 
 // snapshotLocator resolves a snapshot to the directory Prepare tars; injected so
@@ -129,11 +127,6 @@ type PrepareProgress struct {
 	CurrentStage          string  `json:"currentStage"`
 	CurrentArchivePercent float64 `json:"currentArchivePercent"`
 
-	// Source bytes stop moving during the checksum pass, so these show it is
-	// progressing.
-	ChecksummedSlices int `json:"checksummedSlices"`
-	TotalSlices       int `json:"totalSlices"`
-
 	SourceBytesRead  int64 `json:"sourceBytesRead"`
 	TotalSourceBytes int64 `json:"totalSourceBytes"`
 
@@ -164,8 +157,6 @@ type prepareCurrentArchive struct {
 	logicalBytes int64
 	readBytes    int64
 	stage        string
-	totalSlices  int
-	doneSlices   int
 }
 
 func newPrepareProgressTracker(archives []ResolvedArchive, now func() time.Time) *prepareProgressTracker {
@@ -210,30 +201,6 @@ func (p *prepareProgressTracker) addSourceBytes(n int64) {
 	p.current.readBytes += n
 }
 
-func (p *prepareProgressTracker) startChecksums(totalSlices int) {
-	if p == nil {
-		return
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.current.stage = prepareStageChecksumming
-	p.current.totalSlices = totalSlices
-	p.current.doneSlices = 0
-}
-
-func (p *prepareProgressTracker) finishSlice() {
-	if p == nil {
-		return
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.current.doneSlices++
-}
-
 // finishArchive credits the archive's full logical size rather than the bytes
 // read, so a tree that tars smaller (sparse files) still ends at 100%.
 func (p *prepareProgressTracker) finishArchive() {
@@ -271,8 +238,6 @@ func (p *prepareProgressTracker) snapshot() PrepareProgress {
 		CurrentSourceIndex: p.current.sourceIndex,
 		CurrentLabel:       p.current.label,
 		CurrentStage:       p.current.stage,
-		ChecksummedSlices:  p.current.doneSlices,
-		TotalSlices:        p.current.totalSlices,
 		SourceBytesRead:    doneBytes,
 		TotalSourceBytes:   p.totalBytes,
 	}
@@ -386,12 +351,8 @@ func prepareProgressMessage(progress PrepareProgress) string {
 	msg := fmt.Sprintf("prepare: progress %.1f%% overall (%d/%d archives staged",
 		progress.OverallPercent, progress.CompletedArchives, progress.TotalArchives)
 
-	switch progress.CurrentStage {
-	case prepareStageStreaming:
+	if progress.CurrentStage == prepareStageStreaming {
 		msg += fmt.Sprintf(", streaming %q at %.1f%%", progress.CurrentLabel, progress.CurrentArchivePercent)
-	case prepareStageChecksumming:
-		msg += fmt.Sprintf(", checksumming %q slice %d/%d", progress.CurrentLabel,
-			progress.ChecksummedSlices, progress.TotalSlices)
 	}
 
 	msg += ")"
@@ -442,8 +403,9 @@ func (a *PrepareActivities) prepare(ctx context.Context, stagingDir string, inpu
 	return staged, nil
 }
 
-// stageArchive runs one archive's pipeline into its staging directory, then
-// measures and checksums each slice.
+// stageArchive runs one archive's pipeline into its staging directory. Each
+// slice's size and SHA-256 come from Split, measured as it is written, so there
+// is no second read pass; Verify independently re-reads before any tape write.
 func (a *PrepareActivities) stageArchive(ctx context.Context, stagingDir string, resolvedArchive ResolvedArchive, recipients []string, sliceSize int64, progress *prepareProgressTracker) (StagedArchive, error) {
 	archiveDir := filepath.Join(stagingDir, fmt.Sprintf("%03d", resolvedArchive.SourceIndex))
 	if err := os.MkdirAll(archiveDir, stagingDirPerm); err != nil {
@@ -455,32 +417,18 @@ func (a *PrepareActivities) stageArchive(ctx context.Context, stagingDir string,
 		return StagedArchive{}, err
 	}
 
-	slicePaths, err := runPipeline(ctx, archiveDir, members, resolvedArchive.Compression, recipients, sliceSize, progress)
+	written, err := runPipeline(ctx, archiveDir, members, resolvedArchive.Compression, recipients, sliceSize, progress)
 	if err != nil {
 		return StagedArchive{}, err
 	}
 
-	slices := make([]StagedSlice, 0, len(slicePaths))
+	slices := make([]StagedSlice, 0, len(written))
 
 	var total int64
 
-	progress.startChecksums(len(slicePaths))
-
-	for _, slicePath := range slicePaths {
-		info, err := os.Stat(slicePath)
-		if err != nil {
-			return StagedArchive{}, fmt.Errorf("measure slice %q: %w", slicePath, err)
-		}
-
-		digest, err := checksum.SHA256File(slicePath)
-		if err != nil {
-			return StagedArchive{}, fmt.Errorf("checksum slice %q: %w", slicePath, err)
-		}
-
-		slices = append(slices, StagedSlice{Path: slicePath, SHA256: digest, SizeBytes: info.Size()})
-		total += info.Size()
-
-		progress.finishSlice()
+	for _, slice := range written {
+		slices = append(slices, StagedSlice{Path: slice.Path, SHA256: slice.SHA256, SizeBytes: slice.SizeBytes})
+		total += slice.SizeBytes
 	}
 
 	return StagedArchive{SourceIndex: resolvedArchive.SourceIndex, Slices: slices, SizeBytes: total}, nil
@@ -502,8 +450,8 @@ func (a *PrepareActivities) resolveMembers(ctx context.Context, resolvedArchive 
 }
 
 // runPipeline streams tar → optional zstd → age → split through io.Pipes, so
-// only the final slices touch disk. It returns the slice paths in order.
-func runPipeline(ctx context.Context, archiveDir string, members []archive.Member, compress bool, recipients []string, sliceSize int64, progress *prepareProgressTracker) ([]string, error) {
+// only the final slices touch disk. It returns the slices in order.
+func runPipeline(ctx context.Context, archiveDir string, members []archive.Member, compress bool, recipients []string, sliceSize int64, progress *prepareProgressTracker) ([]archive.Slice, error) {
 	// Otherwise this surfaces only as a broken-pipe error from upstream stages.
 	if sliceSize <= 0 {
 		return nil, fmt.Errorf("slice size must be positive, got %d", sliceSize)
@@ -527,7 +475,7 @@ func runPipeline(ctx context.Context, archiveDir string, members []archive.Membe
 		return agewrap.Encrypt(groupCtx, w, encryptInput, recipients...)
 	})
 
-	slicePaths, splitErr := archive.Split(groupCtx, encryptReader, sliceSize, archiveDir, sliceBaseName)
+	slices, splitErr := archive.Split(groupCtx, encryptReader, sliceSize, archiveDir, sliceBaseName)
 
 	// Unblock the encrypt stage if Split stopped reading early.
 	encryptReader.CloseWithError(splitErr)
@@ -540,7 +488,7 @@ func runPipeline(ctx context.Context, archiveDir string, members []archive.Membe
 		return nil, fmt.Errorf("split archive: %w", splitErr)
 	}
 
-	return slicePaths, nil
+	return slices, nil
 }
 
 // pipeStage runs produce into a fresh pipe and returns its read end. It also

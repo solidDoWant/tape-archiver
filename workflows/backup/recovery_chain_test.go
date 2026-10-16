@@ -132,9 +132,14 @@ func buildArchive(t *testing.T, dir, recipient string) (slices []string, payload
 	var encrypted bytes.Buffer
 	require.NoError(t, agewrap.Encrypt(t.Context(), &encrypted, &compressed, recipient))
 
-	slices, err := archive.Split(t.Context(), &encrypted, recoverySliceSize, dir, "archive")
+	written, err := archive.Split(t.Context(), &encrypted, recoverySliceSize, dir, "archive")
 	require.NoError(t, err)
-	require.NotEmpty(t, slices)
+	require.NotEmpty(t, written)
+
+	slices = make([]string, 0, len(written))
+	for _, slice := range written {
+		slices = append(slices, slice.Path)
+	}
 
 	require.NoError(t, par2.Generate(t.Context(), filepath.Join(dir, "archive.par2"), slices, recoveryRedundancyPercent))
 
