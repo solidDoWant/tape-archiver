@@ -29,6 +29,10 @@ const (
 // not a pipeline phase and only appears in failure alerts.
 const PhaseHold = "Hold"
 
+// PhaseSnapshot labels taking the run-scoped snapshots between Resolve and
+// Hold. Like PhaseHold it only appears in failure alerts.
+const PhaseSnapshot = "Snapshot"
+
 // defaultActivityTimeout bounds a single-activity phase that sets no timeout of
 // its own.
 const defaultActivityTimeout = 24 * time.Hour
@@ -144,21 +148,37 @@ func Backup(ctx workflow.Context, cfg config.Config) (result Result, err error) 
 		state.lastCompletedPhase = currentPhase.name
 		result.CompletedPhases = append(result.CompletedPhases, currentPhase.name)
 
-		// Pin the source snapshots with a run-scoped `zfs hold` before hours of
-		// Prepare work; a hold failure fails the run here. The release is armed
-		// before the hold because HoldSnapshots aborts on the first failure,
-		// leaving earlier holds in place that would otherwise leak past the run
-		// (SPEC §4.2). Releasing a never-held snapshot is a no-op.
+		// Take the run-scoped snapshots of live datasets, then pin every source
+		// snapshot with a run-scoped `zfs hold` before hours of Prepare work; a
+		// failure of either fails the run here. Cleanup is armed first because
+		// both stop at the first failure, leaving earlier snapshots and holds
+		// that would otherwise leak past the run (SPEC §4.2). Releasing a
+		// never-held snapshot and destroying a never-taken one are no-ops.
 		if currentPhase.name == PhaseResolve {
-			failingPhase = PhaseHold
+			if state.sources != nil {
+				cfg.Sources = state.sources
+			}
 
 			// Runs before the alert defer, so a failed run's alert names a
-			// leaked hold; a successful run only logs it.
+			// leaked hold or snapshot; a successful run only logs it. Holds
+			// are released first, or destroy would fail on a held snapshot.
 			defer func() {
-				if releaseErr := releaseSnapshots(ctx, state); releaseErr != nil && err != nil {
-					err = fmt.Errorf("%w; also: %w", err, releaseErr)
+				for _, cleanupErr := range []error{releaseSnapshots(ctx, state), destroyRunSnapshots(ctx, state)} {
+					if cleanupErr != nil && err != nil {
+						err = fmt.Errorf("%w; also: %w", err, cleanupErr)
+					}
 				}
 			}()
+
+			failingPhase = PhaseSnapshot
+
+			if err = createRunSnapshots(ctx, state); err != nil {
+				err = fmt.Errorf("phase %s: %w", PhaseSnapshot, err)
+
+				return Result{}, err
+			}
+
+			failingPhase = PhaseHold
 
 			if err = holdSnapshots(ctx, state); err != nil {
 				err = fmt.Errorf("phase %s: %w", PhaseHold, err)

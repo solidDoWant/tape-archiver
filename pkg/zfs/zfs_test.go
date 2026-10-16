@@ -326,3 +326,92 @@ func TestParseSnapshots(t *testing.T) {
 		})
 	}
 }
+
+func TestParsePropertyRecords(t *testing.T) {
+	t.Parallel()
+
+	got := parsePropertyRecords([]byte("tank/a b\ttrue\ntank/c\tyes\n\nnot-a-record\n"))
+	assert.Equal(t, []PropertyRecord{{Name: "tank/a b", Value: "true"}, {Name: "tank/c", Value: "yes"}}, got)
+}
+
+func TestParseFilesystems(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		out       string
+		want      []Filesystem
+		assertErr require.ErrorAssertionFunc
+	}{
+		{
+			name: "mounted and not",
+			out:  "tank\t/tank\tyes\ntank/legacy\tlegacy\tno\n",
+			want: []Filesystem{{Name: "tank", Mountpoint: "/tank", Mounted: true}, {Name: "tank/legacy", Mountpoint: "legacy"}},
+		},
+		{
+			name:      "wrong field count",
+			out:       "tank\t/tank\n",
+			assertErr: require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if test.assertErr == nil {
+				test.assertErr = require.NoError
+			}
+
+			got, err := parseFilesystems([]byte(test.out))
+			test.assertErr(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestContainingFilesystem(t *testing.T) {
+	t.Parallel()
+
+	filesystems := []Filesystem{
+		{Name: "tank", Mountpoint: "/mnt/tank", Mounted: true},
+		{Name: "tank/archive", Mountpoint: "/mnt/tank/archive", Mounted: true},
+		{Name: "tank/archive-two", Mountpoint: "/mnt/tank/archive-two", Mounted: true},
+		{Name: "tank/unmounted", Mountpoint: "/mnt/tank/archive/.tape-staging", Mounted: false},
+		{Name: "tank/legacy", Mountpoint: "legacy", Mounted: true},
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "subdirectory of nested dataset", path: "/mnt/tank/archive/.tape-staging", want: "tank/archive"},
+		{name: "mountpoint itself", path: "/mnt/tank/archive/", want: "tank/archive"},
+		{name: "sibling sharing a name prefix", path: "/mnt/tank/archive-two/x", want: "tank/archive-two"},
+		{name: "pool root", path: "/mnt/tank/other", want: "tank"},
+		{name: "not on zfs", path: "/var/tmp/staging", want: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, test.want, ContainingFilesystem(filesystems, test.path))
+		})
+	}
+}
+
+// TestDestroySnapshotRefusesNonSnapshots asserts no dataset, range or list
+// destroy ever reaches zfs.
+func TestDestroySnapshotRefusesNonSnapshots(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"tank/archive", "tank/archive@", "@snap", "tank@a%b", "tank@a,b", "tank@a@b"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			require.ErrorContains(t, DestroySnapshot(t.Context(), name), "refusing to destroy")
+		})
+	}
+}

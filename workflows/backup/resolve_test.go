@@ -828,6 +828,189 @@ func TestResolveFailureAbortsBeforePrepare(t *testing.T) {
 	assert.Empty(t, lastCompleted)
 }
 
+// fakeSelector serves a canned `zfs get -s local` listing plus the true
+// per-dataset values and sources, which the listing may contradict.
+type fakeSelector struct {
+	records     []zfs.PropertyRecord
+	values      map[string]string
+	sources     map[string]string
+	filesystems []zfs.Filesystem
+	gotRoot     string
+}
+
+func (f *fakeSelector) LocalProperty(_ context.Context, _, datasetType, root string) ([]zfs.PropertyRecord, error) {
+	if datasetType != "filesystem" {
+		return nil, fmt.Errorf("unexpected type %q", datasetType)
+	}
+
+	f.gotRoot = root
+
+	return f.records, nil
+}
+
+func (f *fakeSelector) UserProperty(_ context.Context, name, _ string) (string, error) {
+	return f.values[name], nil
+}
+
+func (f *fakeSelector) PropertySource(_ context.Context, name, _ string) (string, error) {
+	return f.sources[name], nil
+}
+
+func (f *fakeSelector) Filesystems(context.Context) ([]zfs.Filesystem, error) {
+	return f.filesystems, nil
+}
+
+// TestResolvePropertySources (#419): a zfsProperty source selects datasets
+// whose property is set locally to the value, never the staging dataset or
+// anything under it, and fails naming the source when nothing matches.
+func TestResolvePropertySources(t *testing.T) {
+	t.Parallel()
+
+	property := &config.ZFSPropertySource{Name: "tape.home.arpa:archive", Value: "true", Under: "pool"}
+	filesystems := []zfs.Filesystem{
+		{Name: "pool", Mountpoint: "/mnt/pool", Mounted: true},
+		{Name: "pool/archive", Mountpoint: "/mnt/pool/archive", Mounted: true},
+	}
+	local := func(names ...string) (map[string]string, map[string]string) {
+		values, sources := map[string]string{}, map[string]string{}
+		for _, name := range names {
+			values[name], sources[name] = "true", "local"
+		}
+
+		return values, sources
+	}
+
+	tests := []struct {
+		name        string
+		records     []zfs.PropertyRecord
+		trueLocal   []string
+		stagingRoot string
+		want        []PropertyMatches
+		assertErr   require.ErrorAssertionFunc
+		errContains string
+	}{
+		{
+			name:      "local matches selected, other values not",
+			records:   []zfs.PropertyRecord{{Name: "pool/a", Value: "true"}, {Name: "pool/b", Value: "false"}, {Name: "pool/c", Value: "true"}},
+			trueLocal: []string{"pool/a", "pool/c"},
+			want:      []PropertyMatches{{SourceIndex: 1, Datasets: []string{"pool/a", "pool/c"}}},
+		},
+		{
+			name:        "staging dataset and its descendants excluded",
+			records:     []zfs.PropertyRecord{{Name: "pool/archive", Value: "true"}, {Name: "pool/archive/kid", Value: "true"}, {Name: "pool/archive-2", Value: "true"}},
+			trueLocal:   []string{"pool/archive", "pool/archive/kid", "pool/archive-2"},
+			stagingRoot: "/mnt/pool/archive/.tape-staging",
+			want:        []PropertyMatches{{SourceIndex: 1, Datasets: []string{"pool/archive-2"}}},
+		},
+		{
+			name:      "fabricated or non-local records rejected",
+			records:   []zfs.PropertyRecord{{Name: "pool/a", Value: "true"}, {Name: "pool/fake", Value: "true"}},
+			trueLocal: []string{"pool/a"},
+			want:      []PropertyMatches{{SourceIndex: 1, Datasets: []string{"pool/a"}}},
+		},
+		{
+			name:        "no match fails naming the source",
+			records:     []zfs.PropertyRecord{{Name: "pool/archive", Value: "true"}},
+			trueLocal:   []string{"pool/archive"},
+			stagingRoot: "/mnt/pool/archive/.tape-staging",
+			assertErr:   require.Error,
+			errContains: "sources[1] zfsProperty tape.home.arpa:archive=true",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if test.assertErr == nil {
+				test.assertErr = require.NoError
+			}
+
+			values, sources := local(test.trueLocal...)
+			// pool/fake's listed record is contradicted by its real property.
+			values["pool/fake"], sources["pool/fake"] = "true", "inherited from pool"
+
+			selector := &fakeSelector{records: test.records, values: values, sources: sources, filesystems: filesystems}
+			activities := &ResolveDataActivities{selector: selector, stagingRoot: test.stagingRoot}
+
+			cfg := config.Config{Sources: []config.Source{k8sSource("snap"), {ZFSProperty: property}}}
+
+			got, err := activities.ResolvePropertySources(t.Context(), cfg)
+			test.assertErr(t, err)
+
+			if test.errContains != "" {
+				assert.ErrorContains(t, err, test.errContains)
+			}
+
+			assert.Equal(t, test.want, got)
+			assert.Equal(t, "pool", selector.gotRoot)
+		})
+	}
+}
+
+func TestExpandPropertySources(t *testing.T) {
+	t.Parallel()
+
+	off := boolPtr(false)
+	sources := []config.Source{
+		{ZFSPath: &config.ZFSPathSource{Name: "pool/x"}},
+		{ZFSProperty: &config.ZFSPropertySource{Name: "a:b", Value: "1"}, Compression: off},
+		k8sSource("snap"),
+	}
+
+	got := expandPropertySources(sources, []PropertyMatches{{SourceIndex: 1, Datasets: []string{"pool/a", "pool/b"}}})
+
+	assert.Equal(t, []config.Source{
+		{ZFSPath: &config.ZFSPathSource{Name: "pool/x"}},
+		{ZFSPath: &config.ZFSPathSource{Name: "pool/a"}, Compression: off},
+		{ZFSPath: &config.ZFSPathSource{Name: "pool/b"}, Compression: off},
+		k8sSource("snap"),
+	}, got)
+}
+
+// TestBackupExpandsPropertySources: each matched dataset becomes its own
+// source, and so its own archive, for the rest of the run.
+func TestBackupExpandsPropertySources(t *testing.T) {
+	t.Parallel()
+
+	env := newBackupEnv(t)
+
+	env.OnActivity((&ResolveDataActivities{}).ResolvePropertySources, mock.Anything, mock.Anything).
+		Return([]PropertyMatches{{SourceIndex: 0, Datasets: []string{"pool/a", "pool/b"}}}, nil)
+	env.OnActivity((&ResolveControlActivities{}).ResolveK8sSources, mock.Anything, mock.Anything).
+		Return([]ResolvedArchive(nil), nil)
+
+	var resolveInput ResolveDataInput
+
+	env.OnActivity((&ResolveDataActivities{}).ResolveAndCheck, mock.Anything, mock.Anything).
+		Return(func(_ context.Context, input ResolveDataInput) ([]ResolvedArchive, error) {
+			resolveInput = input
+
+			return nil, nil
+		})
+
+	var reportInput ReportInput
+
+	env.OnActivity((&DeliverActivities{}).Deliver, mock.Anything, mock.Anything).Return(&DeliverResult{}, nil)
+	env.OnActivity((&ReportActivities{}).BuildReport, mock.Anything, mock.Anything).
+		Return(func(_ context.Context, input ReportInput) (ReportOutput, error) {
+			reportInput = input
+
+			return ReportOutput{}, nil
+		})
+
+	cfg := validBackupConfig()
+	cfg.Sources = []config.Source{{ZFSProperty: &config.ZFSPropertySource{Name: "tape:archive", Value: "true"}}}
+
+	env.ExecuteWorkflow(Backup, cfg)
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+
+	want := []config.Source{{ZFSPath: &config.ZFSPathSource{Name: "pool/a"}}, {ZFSPath: &config.ZFSPathSource{Name: "pool/b"}}}
+	assert.Equal(t, want, resolveInput.Config.Sources)
+	assert.Equal(t, want, reportInput.Config.Sources, "later phases see the expanded sources")
+}
+
 var _ snapshotResolver = (*k8ssnap.Resolver)(nil)
 
 // zfsPool also doubles as the k8ssnap.PropertyReader for verification.

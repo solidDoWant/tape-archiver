@@ -72,9 +72,10 @@ func (zfsLocator) SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (s
 		return "", fmt.Errorf("resolve mountpoint for %q: %w", dataset, err)
 	}
 
-	if snapName == "" {
+	if snapName == "" || snapshot.RunScoped {
 		// An unmounted dataset's mountpoint can survive as a "shadow" directory,
-		// so archiving it would silently certify empty or stale contents (#135).
+		// so archiving it would silently certify empty or stale contents (#135),
+		// and a run-scoped snapshot of it is reachable only through its mount.
 		// Fail here, before any tape is written.
 		mounted, err := zfs.Mounted(ctx, dataset)
 		if err != nil {
@@ -87,7 +88,9 @@ func (zfsLocator) SnapshotDir(ctx context.Context, snapshot ResolvedSnapshot) (s
 				datasetNotMountedErrorType, nil)
 		}
 
-		return mount, nil
+		if snapName == "" {
+			return mount, nil
+		}
 	}
 
 	return zfs.SnapshotDir(mount, snapName)

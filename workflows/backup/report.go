@@ -464,10 +464,18 @@ func memberVolumes(resolved ResolvedArchive) []string {
 	return volumes
 }
 
-// sourceSnapshots lists the ZFS snapshot path of each snapshot in the archive.
+// sourceSnapshots lists the ZFS snapshot path of each snapshot in the archive,
+// noting when a run-scoped one was taken.
 func sourceSnapshots(resolved ResolvedArchive) []string {
 	snapshots := make([]string, 0, len(resolved.Snapshots))
 	for _, snapshot := range resolved.Snapshots {
+		if snapshot.RunScoped {
+			snapshots = append(snapshots, fmt.Sprintf("%s (taken by this run at %s; destroyed after it)",
+				snapshot.ZFSPath, snapshot.CreatedAt.UTC().Format("2006-01-02 15:04:05 UTC")))
+
+			continue
+		}
+
 		snapshots = append(snapshots, snapshot.ZFSPath)
 	}
 

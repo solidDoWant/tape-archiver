@@ -239,6 +239,9 @@
         "zfsPath": {
           "$ref": "#/$defs/ZFSPathSource"
         },
+        "zfsProperty": {
+          "$ref": "#/$defs/ZFSPropertySource"
+        },
         "label": {
           "type": "string"
         }
@@ -267,6 +270,28 @@
       "type": "object",
       "required": [
         "name"
+      ]
+    },
+    "ZFSPropertySource": {
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "under": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "name",
+        "value"
       ]
     }
   }

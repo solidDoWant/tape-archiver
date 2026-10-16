@@ -51,7 +51,8 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 
 // RegisterData registers the bulk-data activities (SPEC §4.1) on w.
 func RegisterData(w worker.Worker, cfg DataConfig) {
-	w.RegisterActivity(newResolveDataActivities())
+	w.RegisterActivity(newResolveDataActivities(cfg.StagingDir))
+	w.RegisterActivity(newRunSnapshotActivities())
 	w.RegisterActivity(newHoldActivities())
 	w.RegisterActivity(newPrepareActivities(cfg.StagingDir))
 	w.RegisterActivity(newGeneratePAR2Activities())
