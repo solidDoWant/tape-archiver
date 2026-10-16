@@ -1,9 +1,9 @@
 package par2
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -112,12 +112,19 @@ func BudgetFor(available int64) int64 {
 }
 
 // MemoryBudget is BudgetFor the memory available to this process now: the
-// smaller of /proc/meminfo's MemAvailable and the cgroup v2 limit's headroom.
-// When neither is readable it is MinMemoryLimit, par2's own default.
+// smallest of /proc/meminfo's MemAvailable and the headroom (limit minus usage)
+// of each memory-limited cgroup enclosing it, v2 or v1. When none is readable
+// it is MinMemoryLimit, par2's own default.
 func MemoryBudget() int64 {
-	available, ok := memAvailable()
+	return MemoryBudgetFrom("/")
+}
 
-	if headroom, limited := cgroupHeadroom(); limited && (!ok || headroom < available) {
+// MemoryBudgetFrom is MemoryBudget reading proc/ and sys/fs/cgroup/ under root
+// in place of the live filesystem.
+func MemoryBudgetFrom(root string) int64 {
+	available, ok := memAvailable(root)
+
+	if headroom, limited := cgroupHeadroom(root); limited && (!ok || headroom < available) {
 		available, ok = headroom, true
 	}
 
@@ -128,8 +135,8 @@ func MemoryBudget() int64 {
 	return BudgetFor(available)
 }
 
-func memAvailable() (int64, bool) {
-	meminfo, err := os.ReadFile("/proc/meminfo")
+func memAvailable(root string) (int64, bool) {
+	meminfo, err := os.ReadFile(filepath.Join(root, "proc", "meminfo"))
 	if err != nil {
 		return 0, false
 	}
@@ -149,33 +156,82 @@ func memAvailable() (int64, bool) {
 	return 0, false
 }
 
-// cgroupHeadroom returns memory.max minus memory.current for this process's
-// cgroup v2, if it has a limit.
-func cgroupHeadroom() (int64, bool) {
-	membership, err := os.ReadFile("/proc/self/cgroup")
+// headroomMin accumulates the smallest headroom seen; negative headroom (usage
+// over the limit) counts as zero.
+type headroomMin struct {
+	value   int64
+	limited bool
+}
+
+func (h *headroomMin) add(headroom int64, ok bool) {
+	if ok && (!h.limited || headroom < h.value) {
+		h.value, h.limited = max(headroom, 0), true
+	}
+}
+
+// cgroupHeadroom returns the smallest limit-minus-usage across this process's
+// memory-limited cgroups, if any has a limit.
+func cgroupHeadroom(root string) (int64, bool) {
+	membership, err := os.ReadFile(filepath.Join(root, "proc", "self", "cgroup"))
 	if err != nil {
 		return 0, false
 	}
 
-	// cgroup v2 has a single "0::/path" line.
-	path, found := bytes.CutPrefix(bytes.TrimSpace(membership), []byte("0::"))
-	if !found {
-		return 0, false
+	var smallest headroomMin
+
+	// Each line is "hierarchy-ID:controllers:path": cgroup v2's is "0::path";
+	// a cgroup v1 memory hierarchy lists "memory" among its controllers.
+	for line := range strings.Lines(string(membership)) {
+		fields := strings.SplitN(strings.TrimSpace(line), ":", 3)
+		if len(fields) != 3 {
+			continue
+		}
+
+		switch {
+		case fields[0] == "0" && fields[1] == "":
+			smallest.add(cgroupV2Headroom(filepath.Join(root, "sys", "fs", "cgroup"), fields[2]))
+		case slices.Contains(strings.Split(fields[1], ","), "memory"):
+			smallest.add(cgroupV1Headroom(filepath.Join(root, "sys", "fs", "cgroup", "memory"), fields[2]))
+		}
 	}
 
-	dir := filepath.Join("/sys/fs/cgroup", string(path))
+	return smallest.value, smallest.limited
+}
 
-	limit, ok := readCgroupInt(filepath.Join(dir, "memory.max"))
-	if !ok {
-		return 0, false
+// cgroupV2Headroom walks from the process's cgroup up to the mount root, since
+// an ancestor's memory.max bounds it too. A container in its own cgroup
+// namespace sees its cgroup as "/", the mount root.
+func cgroupV2Headroom(mount, path string) (int64, bool) {
+	var smallest headroomMin
+
+	for dir := filepath.Join(mount, path); ; dir = filepath.Dir(dir) {
+		if limit, ok := readCgroupInt(filepath.Join(dir, "memory.max")); ok {
+			current, ok := readCgroupInt(filepath.Join(dir, "memory.current"))
+			smallest.add(limit-current, ok)
+		}
+
+		if dir == mount || !strings.HasPrefix(dir, mount) {
+			return smallest.value, smallest.limited
+		}
+	}
+}
+
+// cgroupV1Headroom reads the v1 memory controller at the process's cgroup path,
+// else at the mount root, where a container sees its own cgroup bind-mounted.
+// An unlimited v1 cgroup reports a huge limit, which never wins the minimum.
+func cgroupV1Headroom(mount, path string) (int64, bool) {
+	for _, dir := range []string{filepath.Join(mount, path), mount} {
+		limit, ok := readCgroupInt(filepath.Join(dir, "memory.limit_in_bytes"))
+		if !ok {
+			continue
+		}
+
+		if usage, ok := readCgroupInt(filepath.Join(dir, "memory.usage_in_bytes")); ok {
+			return limit - usage, true
+		}
 	}
 
-	current, ok := readCgroupInt(filepath.Join(dir, "memory.current"))
-	if !ok {
-		return 0, false
-	}
-
-	return max(limit-current, 0), true
+	return 0, false
 }
 
 // readCgroupInt parses a cgroup integer file; "max" (no limit) reports false.

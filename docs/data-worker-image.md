@@ -113,8 +113,8 @@ must provide:
   visible inside the container.
 - **Memory headroom for PAR2.** Generate PAR2 passes `par2` an explicit memory limit
   (`-m`): enough to hold the recovery data for the fewest passes over the archive,
-  capped at half the memory available to the container (`MemAvailable`, or the cgroup
-  v2 limit's headroom when that is smaller) and at 8 GiB. At ~2,000 source blocks and
+  capped at half the memory available to the container (`MemAvailable`, or the headroom
+  under the tightest enclosing cgroup v2 or v1 memory limit when that is smaller) and at 8 GiB. At ~2,000 source blocks and
   10% redundancy, an archive over ~65 GB uses about 7 GiB. With less memory, `par2`
   makes more, smaller strided passes over the archive, which is slower on a spinning
   pool but produces the same output. A container memory limit should leave this

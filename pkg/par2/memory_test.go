@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -248,6 +249,155 @@ func TestMemoryBudget(t *testing.T) {
 
 	assert.GreaterOrEqual(t, budget, int64(par2.MinMemoryLimit))
 	assert.LessOrEqual(t, budget, int64(par2.MaxMemoryBudget))
+}
+
+// meminfo is a /proc/meminfo with availableGiB GiB available.
+func meminfo(availableGiB int64) string {
+	return "MemTotal:       65000000 kB\nMemFree:         1000000 kB\nMemAvailable:   " +
+		strconv.FormatInt(availableGiB<<20, 10) + " kB\n"
+}
+
+func TestMemoryBudgetFrom(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  int64
+	}{
+		{
+			name: "nothing readable falls back to par2's default",
+			want: par2.MinMemoryLimit,
+		},
+		{
+			name:  "meminfo without MemAvailable",
+			files: map[string]string{"proc/meminfo": "MemTotal: 65000000 kB\n"},
+			want:  par2.MinMemoryLimit,
+		},
+		{
+			name:  "half of MemAvailable",
+			files: map[string]string{"proc/meminfo": meminfo(10)},
+			want:  5 * gibibyte,
+		},
+		{
+			name:  "MemAvailable capped",
+			files: map[string]string{"proc/meminfo": meminfo(40)},
+			want:  par2.MaxMemoryBudget,
+		},
+		{
+			name: "unlimited cgroup v2 container",
+			files: map[string]string{
+				"proc/meminfo":                 meminfo(40),
+				"proc/self/cgroup":             "0::/\n",
+				"sys/fs/cgroup/memory.max":     "max\n",
+				"sys/fs/cgroup/memory.current": "1000\n",
+			},
+			want: par2.MaxMemoryBudget,
+		},
+		{
+			name: "cgroup v2 container limit",
+			files: map[string]string{
+				"proc/meminfo":                 meminfo(40),
+				"proc/self/cgroup":             "0::/\n",
+				"sys/fs/cgroup/memory.max":     strconv.Itoa(8 * gibibyte),
+				"sys/fs/cgroup/memory.current": strconv.Itoa(2 * gibibyte),
+			},
+			want: 3 * gibibyte,
+		},
+		{
+			name: "cgroup v2 ancestor limit bounds an unlimited leaf",
+			files: map[string]string{
+				"proc/meminfo":     meminfo(40),
+				"proc/self/cgroup": "0::/system.slice/worker.service\n",
+				"sys/fs/cgroup/system.slice/worker.service/memory.max":     "max\n",
+				"sys/fs/cgroup/system.slice/worker.service/memory.current": "1000\n",
+				"sys/fs/cgroup/system.slice/memory.max":                    strconv.Itoa(6 * gibibyte),
+				"sys/fs/cgroup/system.slice/memory.current":                strconv.Itoa(2 * gibibyte),
+			},
+			want: 2 * gibibyte,
+		},
+		{
+			name: "cgroup v2 without meminfo",
+			files: map[string]string{
+				"proc/self/cgroup":             "0::/\n",
+				"sys/fs/cgroup/memory.max":     strconv.Itoa(4 * gibibyte),
+				"sys/fs/cgroup/memory.current": "0\n",
+			},
+			want: 2 * gibibyte,
+		},
+		{
+			name: "cgroup over its limit floors at par2's default",
+			files: map[string]string{
+				"proc/meminfo":                 meminfo(40),
+				"proc/self/cgroup":             "0::/\n",
+				"sys/fs/cgroup/memory.max":     strconv.Itoa(gibibyte),
+				"sys/fs/cgroup/memory.current": strconv.Itoa(2 * gibibyte),
+			},
+			want: par2.MinMemoryLimit,
+		},
+		{
+			name: "cgroup v1 container limit",
+			files: map[string]string{
+				"proc/meminfo":     meminfo(40),
+				"proc/self/cgroup": "12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n1:name=systemd:/docker/abc\n",
+				"sys/fs/cgroup/memory/memory.limit_in_bytes": strconv.Itoa(4 * gibibyte),
+				"sys/fs/cgroup/memory/memory.usage_in_bytes": "0\n",
+			},
+			want: 2 * gibibyte,
+		},
+		{
+			name: "cgroup v1 unlimited",
+			files: map[string]string{
+				"proc/meminfo":     meminfo(10),
+				"proc/self/cgroup": "4:memory:/\n",
+				"sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712\n",
+				"sys/fs/cgroup/memory/memory.usage_in_bytes": strconv.Itoa(gibibyte),
+			},
+			want: 5 * gibibyte,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := t.TempDir()
+
+			for name, content := range test.files {
+				path := filepath.Join(root, name)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+			}
+
+			assert.Equal(t, test.want, par2.MemoryBudgetFrom(root))
+		})
+	}
+}
+
+// TestGeneratePassesPlannedMemoryLimit proves Generate hands par2 the planned
+// -m rather than leaving par2 at its 128 MiB default. A wrapper on PATH records
+// the arguments and runs the real par2.
+func TestGeneratePassesPlannedMemoryLimit(t *testing.T) {
+	realPar2, err := exec.LookPath("par2")
+	require.NoError(t, err)
+
+	binDir := t.TempDir()
+	argsLog := filepath.Join(t.TempDir(), "args")
+	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsLog + "'\nexec '" + realPar2 + "' \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "par2"), []byte(wrapper), 0o700)) //nolint:gosec // test wrapper must be executable
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	sizes := []int{1_000_000, 1_000_000, 1_000_000, 1_000_000}
+	budget := int64(300 * mebibyte)
+
+	dir := t.TempDir()
+	paths, _ := writeSlices(t, dir, sizes)
+
+	require.NoError(t, par2.Generate(t.Context(), filepath.Join(dir, "archive.par2"), paths, 30, par2.WithMemoryBudget(budget)))
+
+	plan := par2.PlanMemory(sliceSizes(sizes), 30, budget)
+	assert.Contains(t, strings.Split(string(readFile(t, argsLog)), "\n"), "-m"+strconv.FormatInt(plan.Limit/mebibyte, 10))
 }
 
 // BenchmarkGenerate compares par2's old 128 MiB default against the planned

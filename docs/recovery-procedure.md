@@ -158,6 +158,13 @@ file** out of an archive:
    bin/par2 repair /scratch/NNN-<label>/archive.par2
    ```
 
+   For a large archive (tens of GB or more) that needs repair, also pass a memory
+   limit in MiB, e.g. `-m8192` for 8 GiB, or about half of the machine's RAM:
+   `bin/par2 repair -m8192 /scratch/NNN-<label>/archive.par2`. The disc's `par2`
+   otherwise uses only 128 MiB and rebuilds the damaged blocks in many small
+   passes over the archive, which is correct but can be very slow. The limit
+   changes only speed, never the repaired bytes.
+
    As an independent SHA-256 cross-check, use the disc's `manifest.sha256` — it
    needs no further tape access. It is a single file spanning **every** tape, and
    each of its lines is prefixed with the source tape's barcode —
