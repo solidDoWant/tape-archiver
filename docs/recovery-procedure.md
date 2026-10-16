@@ -365,6 +365,7 @@ below are **recovery-time**.
 | A file's digest does not match `manifest.sha256` / on-tape `manifest.json` | That file is corrupt | Repair its archive with step 4's `par2 repair` (no `-p`) and reassemble with step 5, or use another copy if the run wrote one. |
 | A tape has **no `manifest.json`** at its LTFS root | The tape was **not completely written** (the manifest is written last as the completeness signal) | Discard that tape and recover from another copy if the run wrote one. |
 | The barcode label is unreadable | You cannot identify the tape by its label | The LTFS **volume name equals the barcode** (`mkltfs` sets it); read it from the mounted volume or the captured index, then cross-reference the report. |
+| A read-only `ltfs` mount logs `LTFS12062W` / `LTFS11016W` / `LTFS11017W` and `Performing a full medium consistency check` | The tape's volume coherency record in cartridge memory is unusable. Stock `ltfs` 2.4.8.3 through 2.4.9.0 writes it malformed on Linux, so tapes written by those builds (including this project's runs before issue #426 was fixed) show this on every mount | Harmless: the data is intact and the mount completes; it only takes longer because LTFS scans the medium. Let it finish, and do not mount the tape read-write just to clear the warning. |
 
 ## See also
 

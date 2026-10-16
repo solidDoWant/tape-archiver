@@ -16,11 +16,14 @@ stdenv.mkDerivation (finalAttrs: {
   pname = "mhvtl";
   version = "1.8.0";
 
+  # One commit past the kernel module's pin (userspace-only): stores LTFS's
+  # 70-byte per-partition volume coherency info and bumps the volume change
+  # reference, so mhvtl mounts can skip the full consistency check (#426).
   src = fetchFromGitHub {
     owner = "markh794";
     repo = "mhvtl";
-    rev = "8e79aa898381797afac596160dae2b74533e426d";
-    hash = "sha256-L6suy9PZZvPcDFyD/G/v4IGZr/+obnpqqXldzlBJHFQ=";
+    rev = "bf7fc5461b819dc8741e7577b3b9401f707766eb";
+    hash = "sha256-y8OrlODTMJFfqb2G8cZRtIc8oJuUS6fDVHWFdkHLGtA=";
   };
 
   nativeBuildInputs = [

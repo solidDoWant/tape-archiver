@@ -31,6 +31,11 @@ stdenv.mkDerivation (finalAttrs: {
     # back to write-anywhere unloads the cartridge while LTFS holds PREVENT MEDIUM
     # REMOVAL, so mkltfs fails with EDEV_MEDIUM_LOCKED on real drives.
     ./patches/ltfs-0001-release-medium-lock-before-write-mode-unload.patch
+    # Upstream bug (2.4.8.3 through 2.4.9.0, from 1f1ee3c): the volume coherency
+    # MAM attribute's "LTFS" signature is written without its NUL into an
+    # uninitialized buffer, so mounts reject it (LTFS12062W) and run a full
+    # medium consistency check (issue #426; upstream PRs #623/#644, unmerged).
+    ./patches/ltfs-0002-terminate-volume-coherency-signature.patch
   ];
 
   nativeBuildInputs = [

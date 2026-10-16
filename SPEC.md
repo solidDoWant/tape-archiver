@@ -882,6 +882,10 @@ The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
   (IBM-maintained, multi-vendor, Apache-2.0), pinned at **v2.4.8.4** (selected in issue #12)
   and built from a Nix
   derivation (`nix/ltfs.nix`); the worker image and recovery disc ship the same version.
+  The derivation carries small upstream bug-fix patches (`nix/patches/ltfs-*.patch`),
+  among them one that terminates the volume coherency (VCI) signature in MAM. Without it
+  every mount rejects the VCI and runs a full medium consistency check (issue #426).
+  The on-tape format is unchanged.
   The vendor-locked `hpe-ltfs` was rejected: it refuses non-HPE drives (so it cannot be
   tested against the mhvtl IBM-emulated drive), and the production LTO-6 drives are IBM.
   The reference `ltfs` drives the tape through its **`sg` backend (the `/dev/sg*` node)**,
