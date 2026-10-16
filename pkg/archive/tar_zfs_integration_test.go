@@ -43,7 +43,7 @@ func TestTarLiveDatasetStaysInDataset(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, archive.Tar(t.Context(), &buf, mount))
 
-	assert.Equal(t, []string{"child/", "live.txt"}, tarEntryNames(t, &buf))
+	assert.Equal(t, []string{"./", "child/", "live.txt"}, tarEntryNames(t, &buf))
 }
 
 func runZFS(t *testing.T, args ...string) string {

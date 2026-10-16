@@ -238,8 +238,12 @@ file** out of an archive:
    a full extract applies it to the `-C` directory itself, so extract into the
    directory that should become the volume root (e.g. a fresh PVC's mount point),
    never into a shared directory such as `/` or your home whose own permissions
-   you want to keep. In a multi-volume archive each member's subdirectory entry
-   carries that member root's metadata.
+   you want to keep. In an archive holding several member volumes each member's
+   subdirectory entry carries that member root's metadata. As a non-root user,
+   extract into a directory you own (such as the one `mkdir` just made): `tar`
+   cannot change the mode or time of a `-C` directory owned by someone else, so
+   it reports `Cannot change mode` / `Cannot utime` for `.` and exits non-zero,
+   although every file is still extracted.
 
    **What a `tar`-level restore reproduces:** regular files, directories
    (including the volume root), and symlinks, with their permission bits,
