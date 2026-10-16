@@ -402,12 +402,12 @@ func TestContainingFilesystem(t *testing.T) {
 	}
 }
 
-// TestDestroySnapshotRefusesNonSnapshots asserts no dataset, range or list
+// TestDestroySnapshotRefusesNonSnapshots asserts no dataset, range, list or flag
 // destroy ever reaches zfs.
 func TestDestroySnapshotRefusesNonSnapshots(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"tank/archive", "tank/archive@", "@snap", "tank@a%b", "tank@a,b", "tank@a@b"} {
+	for _, name := range []string{"tank/archive", "tank/archive@", "@snap", "tank@a%b", "tank@a,b", "tank@a@b", "-R@snap"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 

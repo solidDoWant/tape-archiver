@@ -417,11 +417,11 @@ func CreateSnapshots(ctx context.Context, properties map[string]string, snapshot
 }
 
 // DestroySnapshot destroys one snapshot. It refuses anything but a single plain
-// snapshot name (no dataset, range or list syntax). An absent snapshot is
+// snapshot name (no dataset, range, list or option syntax). An absent snapshot is
 // success, so it can run on every exit path.
 func DestroySnapshot(ctx context.Context, snapshot string) error {
 	dataset, name, found := strings.Cut(snapshot, "@")
-	if !found || dataset == "" || name == "" || strings.ContainsAny(name, "@%,") {
+	if !found || dataset == "" || name == "" || strings.HasPrefix(dataset, "-") || strings.ContainsAny(name, "@%,") {
 		return fmt.Errorf("refusing to destroy %q: not a single snapshot name", snapshot)
 	}
 

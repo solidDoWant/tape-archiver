@@ -909,6 +909,12 @@ func TestResolvePropertySources(t *testing.T) {
 			want:      []PropertyMatches{{SourceIndex: 1, Datasets: []string{"pool/a"}}},
 		},
 		{
+			name:      "records outside under or naming a snapshot rejected",
+			records:   []zfs.PropertyRecord{{Name: "pool/a", Value: "true"}, {Name: "other/b", Value: "true"}, {Name: "pool2/c", Value: "true"}, {Name: "pool/a@snap", Value: "true"}},
+			trueLocal: []string{"pool/a", "other/b", "pool2/c", "pool/a@snap"},
+			want:      []PropertyMatches{{SourceIndex: 1, Datasets: []string{"pool/a"}}},
+		},
+		{
 			name:        "no match fails naming the source",
 			records:     []zfs.PropertyRecord{{Name: "pool/archive", Value: "true"}},
 			trueLocal:   []string{"pool/archive"},

@@ -295,7 +295,8 @@ func (a *ResolveDataActivities) selectDatasets(ctx context.Context, property con
 	var datasets []string
 
 	for _, record := range records {
-		if record.Value != property.Value {
+		// A fabricated record may name a snapshot or a dataset outside Under.
+		if record.Value != property.Value || !datasetWithin(record.Name, property.Under) {
 			continue
 		}
 
@@ -326,6 +327,16 @@ func (a *ResolveDataActivities) selectDatasets(ctx context.Context, property con
 	}
 
 	return datasets, nil
+}
+
+// datasetWithin reports whether name is a dataset (not a snapshot) at or below
+// root, or anywhere when root is empty.
+func datasetWithin(name, root string) bool {
+	if strings.Contains(name, "@") {
+		return false
+	}
+
+	return root == "" || name == root || strings.HasPrefix(name, root+"/")
 }
 
 // expandPropertySources replaces each zfsProperty source with one bare zfsPath
