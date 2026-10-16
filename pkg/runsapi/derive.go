@@ -5,6 +5,8 @@
 package runsapi
 
 import (
+	"context"
+
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
 
@@ -103,8 +105,10 @@ func pauseFromAlert(record activityRecord) backup.CurrentPause {
 // deriveLastCompletedPhase reuses the phase timeline so it stays consistent
 // with GET /api/runs/{runID}/phases.
 func deriveLastCompletedPhase(history runHistory) string {
-	timeline := buildPhaseTimeline(history, deriveTapeOutcomes(history.Activities))
+	return lastCompletedPhase(buildPhaseTimeline(history, deriveTapeOutcomes(history.Activities)))
+}
 
+func lastCompletedPhase(timeline []PhaseInfo) string {
 	last := ""
 
 	for _, phase := range timeline {
@@ -114,4 +118,34 @@ func deriveLastCompletedPhase(history runHistory) string {
 	}
 
 	return last
+}
+
+// RunPhases is a run's phase position derived from its workflow history.
+type RunPhases struct {
+	// LastCompleted is the last completed phase; empty if none has completed.
+	LastCompleted string
+	// Active are the in-progress phases in pipeline order; empty once the run
+	// has closed. The interleaved tape path can hold more than one.
+	Active []PhaseInfo
+}
+
+// DeriveRunPhases reads runID's history and derives the same phase position
+// the web UI shows, for callers that cannot rely on live queries (issue #430).
+func DeriveRunPhases(ctx context.Context, historyReader HistoryReader, runID string) (RunPhases, error) {
+	history, err := fetchRunHistory(ctx, historyReader, runID)
+	if err != nil {
+		return RunPhases{}, err
+	}
+
+	timeline := buildPhaseTimeline(history, deriveTapeOutcomes(history.Activities))
+
+	phases := RunPhases{LastCompleted: lastCompletedPhase(timeline)}
+
+	for _, phase := range timeline {
+		if phase.Status == PhaseActive {
+			phases.Active = append(phases.Active, phase)
+		}
+	}
+
+	return phases, nil
 }

@@ -1,10 +1,13 @@
 package runsapi
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	historypb "go.temporal.io/api/history/v1"
+	"go.temporal.io/sdk/client"
 
 	"github.com/solidDoWant/tape-archiver/workflows/backup"
 )
@@ -162,4 +165,54 @@ func TestDeriveLastCompletedPhase(t *testing.T) {
 
 		assert.Equal(t, "", deriveLastCompletedPhase(historyFromEvents(builder.events)))
 	})
+}
+
+func TestDeriveRunPhases(t *testing.T) {
+	openPrepare := newEventBuilder()
+	openPrepare.started(t, testConfig)
+	resolveID := openPrepare.scheduled(t, "ResolveAndCheck", struct{}{})
+	openPrepare.completed(t, resolveID, struct{}{})
+	openPrepare.scheduled(t, "PrepareArchives", struct{}{})
+
+	tests := []struct {
+		name              string
+		iterator          *fakeHistoryIterator
+		wantLastCompleted string
+		wantActive        []string
+		errorAssertion    require.ErrorAssertionFunc
+	}{
+		{
+			name:              "an open run in Prepare",
+			iterator:          &fakeHistoryIterator{events: openPrepare.events},
+			wantLastCompleted: backup.PhaseResolve,
+			wantActive:        []string{backup.PhasePrepare},
+		},
+		{
+			name:           "an unreadable history",
+			iterator:       &fakeHistoryIterator{err: errors.New("history unavailable")},
+			errorAssertion: require.Error,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.errorAssertion == nil {
+				test.errorAssertion = require.NoError
+			}
+
+			temporalClient := &fakeTemporalClient{historyFunc: func(string) client.HistoryEventIterator { return test.iterator }}
+
+			phases, err := DeriveRunPhases(t.Context(), temporalClient, "run-1")
+			test.errorAssertion(t, err)
+
+			assert.Equal(t, test.wantLastCompleted, phases.LastCompleted)
+
+			var active []string
+			for _, phase := range phases.Active {
+				active = append(active, phase.Name)
+			}
+
+			assert.Equal(t, test.wantActive, active)
+		})
+	}
 }
