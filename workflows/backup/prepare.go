@@ -137,7 +137,8 @@ type PrepareProgress struct {
 	SourceBytesRead  int64 `json:"sourceBytesRead"`
 	TotalSourceBytes int64 `json:"totalSourceBytes"`
 
-	// EstimatedTimeRemaining is zero until there is enough progress to estimate.
+	// EstimatedTimeRemaining projects the rate over the last etaWindow; zero
+	// until there is progress to estimate from, or while progress is stalled.
 	OverallPercent         float64       `json:"overallPercent"`
 	EstimatedTimeRemaining time.Duration `json:"estimatedTimeRemaining"`
 }
@@ -147,11 +148,11 @@ type PrepareProgress struct {
 type prepareProgressTracker struct {
 	// Set at construction and read without the lock.
 	now           func() time.Time
-	startedAt     time.Time
 	totalArchives int
 	totalBytes    int64
 
 	mu             sync.Mutex
+	eta            *etaEstimator
 	completedCount int
 	completedBytes int64
 	current        prepareCurrentArchive
@@ -175,7 +176,7 @@ func newPrepareProgressTracker(archives []ResolvedArchive, now func() time.Time)
 
 	return &prepareProgressTracker{
 		now:           now,
-		startedAt:     now(),
+		eta:           newETAEstimator(now(), etaWindow),
 		totalArchives: len(archives),
 		totalBytes:    totalBytes,
 	}
@@ -283,11 +284,7 @@ func (p *prepareProgressTracker) snapshot() PrepareProgress {
 	if p.totalBytes > 0 {
 		progress.OverallPercent = roundPercent(float64(doneBytes) / float64(p.totalBytes) * 100)
 
-		if elapsed := p.now().Sub(p.startedAt); elapsed > 0 && doneBytes > 0 {
-			remaining := p.totalBytes - doneBytes
-			eta := time.Duration(float64(remaining) / float64(doneBytes) * float64(elapsed))
-			progress.EstimatedTimeRemaining = eta.Round(time.Second)
-		}
+		progress.EstimatedTimeRemaining = p.eta.estimate(p.now(), doneBytes, p.totalBytes)
 	}
 
 	return progress
