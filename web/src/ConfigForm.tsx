@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import AgeKeygenPanel, { type AgeKeypair } from './AgeKeygenPanel'
 import {
   blankSlotsCopiesIssue,
+  isClaimSelector,
   k8sApiVersions,
   newSourceFormState,
   type DeployConfig,
@@ -349,7 +350,7 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
         <div className="mb-3.5 flex items-center gap-2">
           <span className={sectionTitleClass}>Sources</span>
           <span className="font-mono text-[11px] text-text-faint">
-            ZFS datasets, datasets marked by a ZFS property, or k8s VolumeSnapshots
+            ZFS datasets, datasets marked by a ZFS property, or k8s VolumeSnapshots / PVCs
           </span>
         </div>
 
@@ -382,10 +383,16 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                 </div>
 
                 <input
-                  value={source.type === 'zfsProperty' ? '' : source.label}
-                  placeholder={source.type === 'zfsProperty' ? 'labelled per dataset' : 'label (optional)'}
+                  value={source.type === 'zfsProperty' || isClaimSelector(source) ? '' : source.label}
+                  placeholder={
+                    source.type === 'zfsProperty'
+                      ? 'labelled per dataset'
+                      : isClaimSelector(source)
+                        ? 'labelled per claim'
+                        : 'label (optional)'
+                  }
                   aria-label={`Source ${index + 1} label`}
-                  disabled={source.type === 'zfsProperty'}
+                  disabled={source.type === 'zfsProperty' || isClaimSelector(source)}
                   onChange={(event) => updateSource(source.id, { label: event.target.value })}
                   className="min-w-0 flex-1 rounded-lg border border-border-strong bg-surface px-2.5 py-1.5 font-mono text-[12px] text-text outline-none disabled:opacity-50"
                 />
@@ -571,6 +578,12 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                           className={inputClass}
                         />
                       </div>
+                      {source.k8sKind === 'PersistentVolumeClaim' ? (
+                        <span className="font-mono text-[11px] text-text-faint sm:col-span-2">
+                          each matched claim becomes its own archive, from a snapshot this run takes of its
+                          democratic-csi volume
+                        </span>
+                      ) : (
                       <div className="sm:col-span-2">
                         <div className={segmentedWrapClass} role="group" aria-label={`Source ${index + 1} snapshots per PVC`}>
                           <button
@@ -589,6 +602,7 @@ function ConfigForm({ form, setForm, deploy, deployStatus }: ConfigFormProps) {
                           </button>
                         </div>
                       </div>
+                      )}
                     </div>
                   )}
                 </div>

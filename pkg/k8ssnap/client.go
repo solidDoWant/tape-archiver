@@ -6,19 +6,28 @@ import (
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	versioned "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// clientset adapts the typed external-snapshotter clientset to SnapshotClient.
-type clientset struct {
-	snapshots versioned.Interface
+// Client reads the snapshot and volume objects k8s sources resolve through.
+type Client interface {
+	SnapshotClient
+	VolumeClient
 }
 
-// NewClient builds a SnapshotClient from the in-cluster config, falling back to
-// the ambient kubeconfig.
-func NewClient() (SnapshotClient, error) {
+// clientset adapts the typed external-snapshotter and core clientsets to Client.
+type clientset struct {
+	snapshots versioned.Interface
+	core      kubernetes.Interface
+}
+
+// NewClient builds a Client from the in-cluster config, falling back to the
+// ambient kubeconfig.
+func NewClient() (Client, error) {
 	config, err := restConfig()
 	if err != nil {
 		return nil, err
@@ -29,7 +38,30 @@ func NewClient() (SnapshotClient, error) {
 		return nil, fmt.Errorf("build snapshot clientset: %w", err)
 	}
 
-	return &clientset{snapshots: snapshots}, nil
+	core, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("build core clientset: %w", err)
+	}
+
+	return &clientset{snapshots: snapshots, core: core}, nil
+}
+
+func (c *clientset) GetPersistentVolumeClaim(ctx context.Context, namespace, name string) (*corev1.PersistentVolumeClaim, error) {
+	return c.core.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// ListPersistentVolumeClaims lists claims matching labelSelector (empty namespace = all).
+func (c *clientset) ListPersistentVolumeClaims(ctx context.Context, namespace, labelSelector string) ([]corev1.PersistentVolumeClaim, error) {
+	list, err := c.core.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		return nil, err
+	}
+
+	return list.Items, nil
+}
+
+func (c *clientset) GetPersistentVolume(ctx context.Context, name string) (*corev1.PersistentVolume, error) {
+	return c.core.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{})
 }
 
 func restConfig() (*rest.Config, error) {

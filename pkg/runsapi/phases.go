@@ -238,7 +238,7 @@ func activitySpan(records []activityRecord) (start, end time.Time) {
 // end of the run.
 func phaseForActivity(name string, input *commonpb.Payloads) (string, bool) {
 	switch name {
-	case "ResolvePropertySources", "ResolveK8sSources", "ResolveAndCheck", "CreateRunSnapshots", "HoldSnapshots":
+	case "ResolvePropertySources", "ListClaimSources", "ResolveK8sSources", "ResolveAndCheck", "CreateRunSnapshots", "HoldSnapshots":
 		return backup.PhaseResolve, true
 	case "PrepareArchives":
 		return backup.PhasePrepare, true

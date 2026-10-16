@@ -36,6 +36,14 @@ const (
 
 	// resolveNoMatchErrorType marks a selector source that matched nothing.
 	resolveNoMatchErrorType = "resolve-no-match"
+
+	// resolveUnsupportedClaimErrorType marks a PersistentVolumeClaim that is not
+	// a bound democratic-csi zfs-generic-nfs volume.
+	resolveUnsupportedClaimErrorType = "resolve-unsupported-claim"
+
+	// resolveLabelCollisionErrorType marks two claims whose derived archive
+	// labels collide.
+	resolveLabelCollisionErrorType = "resolve-label-collision"
 )
 
 // snapshotResolver is the seam *k8ssnap.Resolver satisfies, injected for tests.
@@ -73,14 +81,21 @@ func (zfsPool) Snapshots(ctx context.Context, dataset string) ([]zfs.SnapshotInf
 	return zfs.Snapshots(ctx, dataset)
 }
 
-// ResolveControlActivities hosts the control-side Resolve activity.
-type ResolveControlActivities struct {
-	// newResolver is a factory so the Kubernetes client is built only when a run
-	// has k8s sources; raw-ZFS-only runs need no cluster access.
-	newResolver func() (snapshotResolver, error)
+// claimResolver is the seam *k8ssnap.ClaimResolver satisfies, injected for tests.
+type claimResolver interface {
+	ListClaims(ctx context.Context, namespace, labelSelector string) ([]k8ssnap.ClaimRef, error)
+	ResolveClaim(ctx context.Context, ref k8ssnap.ClaimRef) (k8ssnap.Claim, error)
 }
 
-func newResolveControlActivities(datasetParent string) *ResolveControlActivities {
+// ResolveControlActivities hosts the control-side Resolve activities.
+type ResolveControlActivities struct {
+	// The factories build the Kubernetes client only when a run has k8s
+	// sources; raw-ZFS-only runs need no cluster access.
+	newResolver      func() (snapshotResolver, error)
+	newClaimResolver func() (claimResolver, error)
+}
+
+func newResolveControlActivities(datasetParent, csiDriver string) *ResolveControlActivities {
 	return &ResolveControlActivities{
 		newResolver: func() (snapshotResolver, error) {
 			client, err := k8ssnap.NewClient()
@@ -90,19 +105,171 @@ func newResolveControlActivities(datasetParent string) *ResolveControlActivities
 
 			return k8ssnap.NewResolver(client, datasetParent), nil
 		},
+		newClaimResolver: func() (claimResolver, error) {
+			client, err := k8ssnap.NewClient()
+			if err != nil {
+				return nil, err
+			}
+
+			return k8ssnap.NewClaimResolver(client, datasetParent, csiDriver), nil
+		},
 	}
+}
+
+// ClaimMatches is the claims one PersistentVolumeClaim labelSelector source
+// matched.
+type ClaimMatches struct {
+	SourceIndex int
+	Claims      []k8ssnap.ClaimRef
+}
+
+// ListClaimSources lists the claims every PersistentVolumeClaim labelSelector
+// source matches; a source matching nothing fails naming it.
+func (a *ResolveControlActivities) ListClaimSources(ctx context.Context, cfg config.Config) ([]ClaimMatches, error) {
+	var (
+		resolver claimResolver
+		matches  []ClaimMatches
+	)
+
+	for index, source := range cfg.Sources {
+		if !isClaimSelector(source) {
+			continue
+		}
+
+		if resolver == nil {
+			built, err := a.newClaimResolver()
+			if err != nil {
+				return nil, fmt.Errorf("build k8s resolver: %w", err)
+			}
+
+			resolver = built
+		}
+
+		claims, err := resolver.ListClaims(ctx, source.K8s.Namespace, source.K8s.LabelSelector)
+		if err != nil {
+			err = fmt.Errorf("resolve sources[%d] %s: %w", index, config.KindPVC, err)
+			if errors.Is(err, k8ssnap.ErrNoClaims) {
+				return nil, temporal.NewNonRetryableApplicationError(err.Error(), resolveNoMatchErrorType, err)
+			}
+
+			return nil, err
+		}
+
+		slog.InfoContext(ctx, "resolve: selected PersistentVolumeClaims", "sourceIndex", index, "claims", claims)
+
+		matches = append(matches, ClaimMatches{SourceIndex: index, Claims: claims})
+	}
+
+	return matches, nil
+}
+
+func isClaim(source config.Source) bool {
+	return source.K8s != nil && source.K8s.Kind == config.KindPVC
+}
+
+func isClaimSelector(source config.Source) bool {
+	return isClaim(source) && source.K8s.LabelSelector != ""
+}
+
+// expandClaimSources replaces each PersistentVolumeClaim labelSelector source
+// with one named source per matched claim, then labels every unlabelled claim
+// source whose name another namespace also uses "<namespace>-<name>". Derived
+// labels that still collide (truncation) fail rather than leave two archives a
+// recoverer cannot tell apart.
+func expandClaimSources(sources []config.Source, matches []ClaimMatches) ([]config.Source, error) {
+	byIndex := make(map[int][]k8ssnap.ClaimRef, len(matches))
+	for _, match := range matches {
+		byIndex[match.SourceIndex] = match.Claims
+	}
+
+	expanded := make([]config.Source, 0, len(sources))
+
+	for index, source := range sources {
+		if !isClaimSelector(source) {
+			expanded = append(expanded, source)
+
+			continue
+		}
+
+		for _, claim := range byIndex[index] {
+			expanded = append(expanded, config.Source{
+				Compression: source.Compression,
+				K8s:         &config.K8sRef{APIVersion: source.K8s.APIVersion, Kind: config.KindPVC, Namespace: claim.Namespace, Name: claim.Name},
+			})
+		}
+	}
+
+	namespaces := make(map[string]map[string]struct{})
+
+	for _, source := range expanded {
+		if isClaim(source) {
+			if namespaces[source.K8s.Name] == nil {
+				namespaces[source.K8s.Name] = make(map[string]struct{})
+			}
+
+			namespaces[source.K8s.Name][source.K8s.Namespace] = struct{}{}
+		}
+	}
+
+	labelOwner := make(map[string]string)
+
+	for index, source := range expanded {
+		// An operator-chosen label is theirs to keep distinct.
+		if !isClaim(source) || source.Label != nil {
+			continue
+		}
+
+		claim := source.K8s.Namespace + "/" + source.K8s.Name
+
+		if len(namespaces[source.K8s.Name]) > 1 {
+			label := source.K8s.Namespace + "-" + source.K8s.Name
+			expanded[index].Label = &label
+		}
+
+		label := sourceLabel(expanded[index])
+		if owner, ok := labelOwner[label]; ok && owner != claim {
+			return nil, fmt.Errorf("PersistentVolumeClaims %s and %s would both be archived as %q; "+
+				"name one of them as its own source with a distinct label", owner, claim, label)
+		}
+
+		labelOwner[label] = claim
+	}
+
+	return expanded, nil
 }
 
 // ResolveK8sSources resolves every k8s source to its ZFS snapshot(s); a
 // LabelSelector source becomes one grouped archive (SPEC §5). Raw ZFS sources are
 // left to the data worker.
 func (a *ResolveControlActivities) ResolveK8sSources(ctx context.Context, cfg config.Config) ([]ResolvedArchive, error) {
-	var resolver snapshotResolver
-
-	var resolved []ResolvedArchive
+	var (
+		resolver       snapshotResolver
+		claimsResolver claimResolver
+		resolved       []ResolvedArchive
+	)
 
 	for index, source := range cfg.Sources {
 		if source.K8s == nil {
+			continue
+		}
+
+		if isClaim(source) {
+			if claimsResolver == nil {
+				built, err := a.newClaimResolver()
+				if err != nil {
+					return nil, fmt.Errorf("build k8s resolver: %w", err)
+				}
+
+				claimsResolver = built
+			}
+
+			archive, err := resolveClaimSource(ctx, claimsResolver, index, source)
+			if err != nil {
+				return nil, err
+			}
+
+			resolved = append(resolved, archive)
+
 			continue
 		}
 
@@ -167,6 +334,35 @@ func resolveK8sSource(ctx context.Context, resolver snapshotResolver, index int,
 	archive.Snapshots = append(archive.Snapshots, snapshotFromK8s(snapshot))
 
 	return archive, nil
+}
+
+// resolveClaimSource resolves a named PersistentVolumeClaim source to its live
+// dataset, which the run then snapshots (planRunScopedSnapshots). A claim the
+// resolver rejects fails the run without retrying.
+func resolveClaimSource(ctx context.Context, resolver claimResolver, index int, source config.Source) (ResolvedArchive, error) {
+	if source.K8s.Name == "" {
+		return ResolvedArchive{}, fmt.Errorf("internal: sources[%d] %s labelSelector was not expanded", index, config.KindPVC)
+	}
+
+	claim, err := resolver.ResolveClaim(ctx, k8ssnap.ClaimRef{Namespace: source.K8s.Namespace, Name: source.K8s.Name})
+	if err != nil {
+		err = fmt.Errorf("resolve sources[%d] %s: %w", index, config.KindPVC, err)
+		if errors.Is(err, k8ssnap.ErrUnsupportedClaim) {
+			return ResolvedArchive{}, temporal.NewNonRetryableApplicationError(err.Error(), resolveUnsupportedClaimErrorType, err)
+		}
+
+		return ResolvedArchive{}, err
+	}
+
+	slog.InfoContext(ctx, "resolve: resolved PersistentVolumeClaim to its dataset",
+		"sourceIndex", index, "namespace", claim.Namespace, "pvc", claim.Name, "volume", claim.Volume, "dataset", claim.Dataset)
+
+	return ResolvedArchive{
+		SourceIndex: index,
+		Label:       sourceLabel(source),
+		Compression: compressionEnabled(source),
+		Snapshots:   []ResolvedSnapshot{{ZFSPath: claim.Dataset, Namespace: claim.Namespace, PVC: claim.Name}},
+	}, nil
 }
 
 func snapshotFromK8s(snapshot k8ssnap.Snapshot) ResolvedSnapshot {
@@ -531,6 +727,17 @@ func (a *ResolveDataActivities) resolveDataSource(ctx context.Context, index int
 		}
 
 		for _, snapshot := range archive.Snapshots {
+			// A PersistentVolumeClaim resolves to its live dataset, verified
+			// before the run snapshots it.
+			if snapshot.SnapshotName == "" {
+				if err := k8ssnap.VerifyDataset(ctx, a.pool, snapshot.ZFSPath); err != nil {
+					return ResolvedArchive{}, fmt.Errorf("verify sources[%d] PersistentVolumeClaim %s/%s dataset: %w",
+						index, snapshot.Namespace, snapshot.PVC, err)
+				}
+
+				continue
+			}
+
 			verifySnapshot := k8ssnap.Snapshot{Dataset: snapshot.Dataset, SnapshotName: snapshot.SnapshotName}
 			if err := k8ssnap.Verify(ctx, a.pool, verifySnapshot); err != nil {
 				return ResolvedArchive{}, fmt.Errorf("verify sources[%d] snapshot %s: %w", index, snapshot.ZFSPath, err)
@@ -674,6 +881,23 @@ func resolvePhase(ctx workflow.Context, cfg config.Config, state *runState) erro
 	})
 
 	var control *ResolveControlActivities
+
+	if slices.ContainsFunc(cfg.Sources, isClaim) {
+		var matches []ClaimMatches
+		if slices.ContainsFunc(cfg.Sources, isClaimSelector) {
+			if err := workflow.ExecuteActivity(controlCtx, control.ListClaimSources, cfg).Get(controlCtx, &matches); err != nil {
+				return err
+			}
+		}
+
+		expanded, err := expandClaimSources(cfg.Sources, matches)
+		if err != nil {
+			return temporal.NewNonRetryableApplicationError(err.Error(), resolveLabelCollisionErrorType, nil)
+		}
+
+		cfg.Sources = expanded
+		state.sources = cfg.Sources
+	}
 
 	var k8sArchives []ResolvedArchive
 	if err := workflow.ExecuteActivity(controlCtx, control.ResolveK8sSources, cfg).Get(controlCtx, &k8sArchives); err != nil {
