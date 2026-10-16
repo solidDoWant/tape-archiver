@@ -154,7 +154,7 @@ type walkEntry struct {
 }
 
 // walkTree visits srcDir's entries in archive order, applying tree's rules.
-// Without a prefix the root itself is not visited.
+// The root is visited first so its own metadata is archived.
 func walkTree(ctx context.Context, srcDir, prefix string, visit func(walkEntry) error) error {
 	rootDev, err := dirDevice(srcDir)
 	if err != nil {
@@ -168,10 +168,6 @@ func walkTree(ctx context.Context, srcDir, prefix string, visit func(walkEntry) 
 
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-
-		if path == srcDir && prefix == "" {
-			return nil
 		}
 
 		if !entry.IsDir() || path == srcDir {
@@ -228,8 +224,10 @@ func dirDevice(dir string) (uint64, error) {
 	return dev, nil
 }
 
-// writeEntry writes one entry; the root becomes the member directory entry so
-// empty members are preserved. pre, if set, is the file's read-ahead.
+// writeEntry writes one entry. The root becomes "./" (or the member directory
+// under a prefix), so `tar -xp -C TARGET` restores its mode, owner, and mtime
+// onto TARGET and empty members are preserved. pre, if set, is the file's
+// read-ahead.
 func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix string, item walkEntry, pre *prefetch) error {
 	path := item.path
 
@@ -238,7 +236,7 @@ func (w *tarWriter) writeEntry(ctx context.Context, srcDir, prefix string, item 
 		return err
 	}
 
-	if rel == "." {
+	if rel == "." && prefix != "" {
 		rel = ""
 	}
 

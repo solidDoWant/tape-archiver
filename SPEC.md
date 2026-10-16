@@ -429,7 +429,10 @@ All formats are open and widely implemented, for 20-year recoverability.
   without ZFS. Optional `zstd` compression (open, RFC 8878) is applied before
   encryption; its binary and source are bundled on the recovery disc.
   - **What the archive captures:** regular files, directories, and symlinks, with
-    their permission bits, ownership (uid/gid), and modification time. Hardlinked
+    their permission bits, ownership (uid/gid), and modification time. This includes
+    the source root itself: a single-volume archive's first entry is `./` (a group
+    archive's is each member's `<subdir>/`), so `tar -xpf … -C TARGET` run as root
+    restores the root's mode, owner, and mtime onto `TARGET`. Hardlinked
     regular files are stored once and reproduced as `tar` hardlink entries, so a
     logically deduplicated dataset (e.g. the *arr-managed media dataset) is not written
     twice. Sparse files are stored in **GNU sparse 1.0** (PAX `GNU.sparse.*`) form —

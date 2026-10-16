@@ -162,7 +162,7 @@ func recoverArchive(t *testing.T, scratch, identityPath, repairCommand string) [
 	runRecoveryCmd(t, scratch, "zstd", "-d", "-f", zstPath, "-o", tarPath)
 
 	out := t.TempDir()
-	runRecoveryCmd(t, scratch, "tar", "-xf", tarPath, "-C", out)
+	runRecoveryCmd(t, scratch, "tar", "-xpf", tarPath, "-C", out)
 
 	got, err := os.ReadFile(filepath.Join(out, "payload.bin"))
 	require.NoError(t, err)

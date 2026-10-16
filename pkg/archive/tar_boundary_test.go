@@ -27,7 +27,7 @@ func TestTarSkipsRootZFSControlDir(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, archive.Tar(t.Context(), &buf, src))
 
-	assert.Equal(t, []string{"data/", "data/.zfs/", "data/.zfs/kept.txt", "data/file.txt"}, tarEntryNames(t, &buf))
+	assert.Equal(t, []string{"./", "data/", "data/.zfs/", "data/.zfs/kept.txt", "data/file.txt"}, tarEntryNames(t, &buf))
 }
 
 // TestTarMembersSkipsRootZFSControlDir: the same holds for each member root.
