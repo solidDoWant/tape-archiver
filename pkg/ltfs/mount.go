@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/solidDoWant/tape-archiver/pkg/tape"
 )
 
 // mountPollInterval is how often Mount polls for the FUSE mount to come live.
@@ -19,8 +21,9 @@ const mountPollInterval = 100 * time.Millisecond
 
 // Mount is a live LTFS FUSE mount of a Volume. The ltfs process is not bound to
 // the context passed to Volume.Mount, so a later activity can finalize it with
-// Unmount or Kill.
+// Unmount, Kill, or Abort.
 type Mount struct {
+	device     string
 	mountpoint string
 	workDir    string
 
@@ -87,6 +90,7 @@ func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount,
 	}
 
 	m := &Mount{
+		device:     v.device,
 		mountpoint: absMount,
 		workDir:    workDir,
 		mountStart: mountStart,
@@ -101,11 +105,18 @@ func (v *Volume) Mount(ctx context.Context, mountpoint, workDir string) (*Mount,
 	}()
 
 	if err := m.waitForMount(ctx); err != nil {
-		_ = cmd.Process.Kill()
+		select {
+		case <-m.done:
+			// ltfs exited on its own, releasing whatever it held.
+			return nil, err
+		default:
+		}
 
-		<-m.done
+		// Killed mid-mount, possibly after ltfs locked the drive.
+		abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), AbortTimeout)
+		defer cancel()
 
-		return nil, err
+		return nil, errors.Join(err, m.Abort(abortCtx))
 	}
 
 	return m, nil
@@ -215,6 +226,60 @@ func (m *Mount) Kill() error {
 	<-m.done
 
 	return err
+}
+
+// AbortTimeout is a sensible bound for Abort's cleanup (a lazy unmount and one
+// SCSI command).
+const AbortTimeout = time.Minute
+
+// Abort is Kill plus releasing what the killed ltfs held (#442): it lazily
+// detaches the orphaned FUSE mountpoint (fusermount -uz) and clears the drive's
+// medium-removal lock, which ltfs sets at mount and clears only on a clean exit;
+// left set, the changer refuses to unload the tape. As with Kill, the tape must
+// be re-written. Every step runs even if an earlier one fails; errors are
+// joined. Pass a live ctx: callers usually reach Abort because theirs expired.
+func (m *Mount) Abort(ctx context.Context) error {
+	var errs []error
+
+	if err := m.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		errs = append(errs, fmt.Errorf("kill ltfs: %w", err))
+	}
+
+	if err := m.detachStale(ctx); err != nil {
+		errs = append(errs, err)
+	}
+
+	// Safe only now that ltfs is gone: the lock guards a live mount.
+	if err := tape.AllowMediumRemoval(ctx, m.device); err != nil {
+		errs = append(errs, fmt.Errorf("release drive %s after killing ltfs: %w", m.device, err))
+	}
+
+	return errors.Join(errs...)
+}
+
+// detachStale lazily unmounts the mountpoint if a killed ltfs left it mounted.
+func (m *Mount) detachStale(ctx context.Context) error {
+	inUse, err := mountpointInUse(m.mountpoint)
+	if err != nil {
+		return fmt.Errorf("check for a stale mount at %s: %w", m.mountpoint, err)
+	}
+
+	if !inUse {
+		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, "fusermount", "-uz", m.mountpoint)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("detach stale mount: %s: %w: %s", cmd, err, msg)
+		}
+
+		return fmt.Errorf("detach stale mount: %s: %w", cmd, err)
+	}
+
+	m.detached = true
+
+	return nil
 }
 
 // ltfsArgs builds the ltfs mount arguments: -f for supervision, a single index

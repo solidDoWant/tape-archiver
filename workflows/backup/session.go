@@ -26,7 +26,7 @@ const (
 	teardownTimeout = 5 * time.Minute
 	// teardownUnmountTimeout bounds the per-mount Unmount wait under the
 	// WithoutCancel teardown context. It is shorter than teardownTimeout so a
-	// wedged ltfs index-write still reaches the Kill fallback and releases the
+	// wedged ltfs index-write still reaches the Abort fallback and releases the
 	// registry mutex within the same attempt.
 	teardownUnmountTimeout = 3 * time.Minute
 	// writeTimeoutSafetyFactor scales the floor-speed write duration into the
@@ -138,7 +138,7 @@ func (r *MountRegistry) Delete(device string) {
 	delete(r.mounts, device)
 }
 
-// Teardown unmounts every live mount, falling back to Kill when Unmount fails,
+// Teardown unmounts every live mount, falling back to Abort when Unmount fails,
 // and clears the registry; errors are joined. A data-worker restart loses
 // in-memory mounts entirely (SPEC §14).
 func (r *MountRegistry) Teardown(ctx context.Context) error {
@@ -156,12 +156,18 @@ func (r *MountRegistry) Teardown(ctx context.Context) error {
 		}
 
 		if err := entry.mount.Unmount(ctx); err != nil {
-			// os.ErrProcessDone is harmless: FUSE cleans up when its server dies.
-			if killErr := entry.mount.Kill(); killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w; kill: %v", device, err, killErr))
+			// Abort also clears the drive lock and stale mountpoint the killed ltfs
+			// leaves, so Eject can unload the tape (#442). Fresh ctx: ctx's expiry is
+			// often why Unmount failed.
+			abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ltfs.AbortTimeout)
+
+			if abortErr := entry.mount.Abort(abortCtx); abortErr != nil {
+				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w; abort: %w", device, err, abortErr))
 			} else {
 				errs = append(errs, fmt.Errorf("teardown %s: unmount: %w", device, err))
 			}
+
+			cancel()
 		}
 
 		delete(r.mounts, device)
@@ -364,7 +370,7 @@ func newTeardownActivities(registry *MountRegistry) *TeardownActivities {
 func (a *TeardownActivities) TeardownSession(ctx context.Context, _ TeardownInput) error {
 	// Detach from cancellation (that is often why we are here), then re-arm a
 	// deadline: without one a wedged index write would block Unmount forever
-	// holding the registry mutex, and the Kill fallback would never run.
+	// holding the registry mutex, and the Abort fallback would never run.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teardownUnmountTimeout)
 	defer cancel()
 
