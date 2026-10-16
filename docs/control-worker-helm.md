@@ -94,7 +94,8 @@ so a forgotten `enabled` flag never silently disables mTLS or CA verification.
 | `logLevel` | `info` | `LOG_LEVEL` for the worker. |
 | `discordFailureWebhookUrl.value` | `""` | Discord failure-alert webhook, inline (dev only). Mutually exclusive with `secretKeyRef`. |
 | `discordFailureWebhookUrl.secretKeyRef.{name,key}` | `""` | Webhook URL from a `Secret`. Surfaced as `DISCORD_FAILURE_WEBHOOK_URL` (SPEC §11). Leave both empty to disable failure alerting. |
-| `k8sDatasetParent` | `""` | democratic-csi `datasetParentName`, prepended to a relative CSI `snapshotHandle` during k8s resolution (SPEC §3). Surfaced as `TAPE_K8S_DATASET_PARENT`. Only needed when a run names k8s sources. |
+| `k8sDatasetParent` | `""` | democratic-csi `datasetParentName`, prepended to a relative CSI `snapshotHandle` or `volumeHandle` during k8s resolution (SPEC §3). Surfaced as `TAPE_K8S_DATASET_PARENT`. Only needed when a run names k8s sources. |
+| `k8sCSIDriver` | `""` | CSI driver name of the democratic-csi zfs-generic-nfs deployment (its `csiDriver.name`; `kubectl get csidrivers`). A `PersistentVolumeClaim` source is accepted only when its bound PV uses this driver. Surfaced as `TAPE_K8S_CSI_DRIVER`; empty uses the worker default `org.democratic-csi.nfs`. |
 | `metrics.enabled` | `false` | Emit a `PodMonitor` for the always-on `/metrics` endpoint (port 9090). Requires prometheus-operator CRDs. |
 | `metricsScrapeWaitSeconds` | `null` | Seconds shutdown waits for a final scrape (`METRICS_SCRAPE_WAIT_TIMEOUT`). Null means `0` when `metrics.enabled` is false and `60` when it is true. The pod's `terminationGracePeriodSeconds` is set to this plus 30, so the worker exits before the kubelet sends SIGKILL. |
 
@@ -125,7 +126,9 @@ resources:
 ### Snapshot RBAC
 
 Snapshot discovery reads `VolumeSnapshot` resources from the Kubernetes API via an
-in-cluster client and follows each to its bound `VolumeSnapshotContent`, so the chart
+in-cluster client and follows each to its bound `VolumeSnapshotContent`, and a
+`PersistentVolumeClaim` source reads claims and follows each to its bound
+`PersistentVolume` (a cluster-scoped resource), so the chart
 mounts the pod's ServiceAccount token (`automountServiceAccountToken: true`) and, **by
 default**, grants that ServiceAccount the RBAC it needs. The chart renders a dedicated
 `ServiceAccount`, a `ClusterRole` granting strictly read-only access, and a
@@ -135,6 +138,7 @@ default**, grants that ServiceAccount the RBAC it needs. The chart renders a ded
 | --- | --- | --- |
 | `snapshot.storage.k8s.io` | `volumesnapshots` | `get`, `list` |
 | `snapshot.storage.k8s.io` | `volumesnapshotcontents` | `get` |
+| `""` (core) | `persistentvolumeclaims`, `persistentvolumes` | `get`, `list` |
 
 It is a `ClusterRole` rather than a namespaced `Role` because the access is inherently
 cluster-scoped: a label-selector group lists `VolumeSnapshot`s across all namespaces (an
@@ -266,7 +270,7 @@ and, when enabled, a metrics scrape.
 | Destination | Port | When | Purpose |
 | --- | --- | --- | --- |
 | Temporal frontend (`config.temporal.address`) | `7233` gRPC (`443` for Temporal Cloud) | always | Poll the `control` queue; drive workflows/activities. |
-| Kubernetes API server | `443` (`6443` on some distros) | runs naming k8s sources | `VolumeSnapshot` discovery (SPEC §3). |
+| Kubernetes API server | `443` (`6443` on some distros) | runs naming k8s sources | `VolumeSnapshot` and `PersistentVolumeClaim` discovery (SPEC §3). Same endpoint for both, so no new rule. |
 | Discord (`discord.com`) | `443` HTTPS | `discordFailureWebhookUrl` set | Run-failure alerts (SPEC §11). |
 | Cluster DNS (CoreDNS/kube-dns) | `53` UDP+TCP | always | Resolve all of the above. |
 

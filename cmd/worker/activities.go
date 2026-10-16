@@ -23,6 +23,7 @@ func registerControlActivities(w worker.Worker, env envvar.Config) {
 	backup.RegisterControl(w, backup.ControlConfig{
 		FailureWebhookURL: env.DiscordFailureWebhookURL,
 		K8sDatasetParent:  env.K8sDatasetParent,
+		K8sCSIDriver:      env.K8sCSIDriver,
 	})
 }
 

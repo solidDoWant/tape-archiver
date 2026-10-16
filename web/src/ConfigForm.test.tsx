@@ -126,6 +126,24 @@ describe('ConfigForm', () => {
     expect(source.zfsPath).toBeUndefined()
   })
 
+  it('builds a PersistentVolumeClaim label-selector source with no label or select mode', () => {
+    let latest: FormState | undefined
+    render(<Wrapper onForm={(form) => (latest = form)} />)
+
+    fireEvent.change(screen.getByLabelText('Source 1 label'), { target: { value: 'ignored' } })
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 type/i })).getByText('k8s'))
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 k8s kind/i })).getByText('PersistentVolumeClaim'))
+    fireEvent.click(within(screen.getByRole('group', { name: /source 1 selection mode/i })).getByText('By label selector'))
+    fireEvent.change(screen.getByPlaceholderText('app=media,tier=cold'), { target: { value: 'tape=true' } })
+
+    expect(screen.getByLabelText('Source 1 label')).toBeDisabled()
+    expect(screen.queryByRole('group', { name: /source 1 snapshots per pvc/i })).not.toBeInTheDocument()
+
+    const source = buildConfig(latest as FormState, testDeploy).sources[0]
+    expect(source.k8s).toEqual({ apiVersion: 'v1', kind: 'PersistentVolumeClaim', labelSelector: 'tape=true' })
+    expect(source.label).toBeUndefined()
+  })
+
   it('lets a label-selector k8s source keep only the newest snapshot per PVC', () => {
     let latest: FormState | undefined
     render(<Wrapper onForm={(form) => (latest = form)} />)

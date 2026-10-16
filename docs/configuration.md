@@ -52,14 +52,14 @@ size produced by the Prepare phase, never this estimate.
 
 ## Source
 
-Each element of `sources` archives a Kubernetes snapshot resource, a raw ZFS
-dataset/snapshot, or every dataset marked by a ZFS user property. Exactly one of `k8s`,
-`zfsPath` or `zfsProperty` must be set.
+Each element of `sources` archives a Kubernetes snapshot resource or
+PersistentVolumeClaim(s), a raw ZFS dataset/snapshot, or every dataset marked by a ZFS
+user property. Exactly one of `k8s`, `zfsPath` or `zfsProperty` must be set.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `compression` | `boolean` | no | Enable zstd compression before encryption. Defaults to `true` when absent. |
-| `k8s` | `K8sRef` | no* | Reference to a Kubernetes snapshot resource. |
+| `k8s` | `K8sRef` | no* | Reference to a Kubernetes snapshot resource or PersistentVolumeClaim(s). |
 | `zfsPath` | `ZFSPathSource` | no* | Explicit ZFS dataset or snapshot name. |
 | `zfsProperty` | `ZFSPropertySource` | no* | Every dataset with a ZFS user property set locally to a value; each becomes its own archive. |
 | `label` | `string` | no | Overrides the descriptive on-tape archive directory name (`archives/NNN-<label>/`). When absent, a label is derived from the source's identity (a raw ZFS source's dataset last component, a named k8s resource's name, or its label selector). The value is lowercased and sanitized to `[a-z0-9._-]` (`/`, `@`, `:`, and whitespace become `-`) and truncated to 40 characters, so it need not already be filesystem-safe. It must not be blank when set. It need not be unique — the zero-padded archive-index prefix keeps directories distinct. Not allowed with `zfsProperty`, whose matches are each labelled by their dataset's last component. |
@@ -67,7 +67,8 @@ dataset/snapshot, or every dataset marked by a ZFS user property. Exactly one of
 \* Exactly one of `k8s`, `zfsPath` or `zfsProperty` must be set.
 
 The `NNN` directory prefix is the archive's position in the run's resolved work list. It
-equals the source's index in `sources` unless an earlier `zfsProperty` source expanded
+equals the source's index in `sources` unless an earlier `zfsProperty` source or
+`PersistentVolumeClaim` `labelSelector` expanded
 into several archives; the report lists each archive's directory.
 
 ### K8sRef
@@ -78,12 +79,12 @@ Exactly one of `name` or `labelSelector` must be set.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `apiVersion` | `string` | yes | API group and version, e.g. `snapshot.storage.k8s.io/v1` or `groupsnapshot.storage.k8s.io/v1alpha1`. |
-| `kind` | `string` | yes | Resource kind, e.g. `VolumeSnapshot` or `VolumeGroupSnapshot`. A `VolumeGroupSnapshot` is archived as a single tar stream (one subdirectory per member volume). |
+| `apiVersion` | `string` | yes | API group and version, e.g. `snapshot.storage.k8s.io/v1`, `groupsnapshot.storage.k8s.io/v1alpha1`, or `v1` (required for `PersistentVolumeClaim`). |
+| `kind` | `string` | yes | Resource kind: `VolumeSnapshot`, `VolumeGroupSnapshot`, or `PersistentVolumeClaim`. A `VolumeGroupSnapshot` is archived as a single tar stream (one subdirectory per member volume). A `PersistentVolumeClaim` is archived from a run-scoped snapshot, one archive per claim — see [PersistentVolumeClaim sources](#persistentvolumeclaim-sources). |
 | `namespace` | `string` | no† | Kubernetes namespace containing the resource. |
 | `name` | `string` | no* | Name of a specific resource. |
 | `labelSelector` | `string` | no* | Label selector matching one or more resources (e.g. `app=myapp`). Matches within `namespace` when set; when `namespace` is omitted, it matches across all namespaces (cluster-wide, SPEC §5). |
-| `select` | `string` | no | Which `labelSelector` matches to archive: `all` (default) or `newestPerPVC`. Only valid with `labelSelector`. See [Selecting the newest snapshot per PVC](#selecting-the-newest-snapshot-per-pvc). |
+| `select` | `string` | no | Which `labelSelector` matches to archive: `all` (default) or `newestPerPVC`. Only valid with `labelSelector`, and not with `PersistentVolumeClaim`. See [Selecting the newest snapshot per PVC](#selecting-the-newest-snapshot-per-pvc). |
 
 \* Exactly one of `name` or `labelSelector` must be provided.
 
@@ -130,6 +131,48 @@ at Resolve, and the chosen snapshots are recorded in the run and named in the re
 { "apiVersion": "snapshot.storage.k8s.io/v1", "kind": "VolumeSnapshot",
   "labelSelector": "tape.home.arpa/archive=true", "select": "newestPerPVC" }
 ```
+
+#### PersistentVolumeClaim sources
+
+`"apiVersion": "v1", "kind": "PersistentVolumeClaim"` archives a claim's volume directly,
+with no snapshot producer needed: the run takes its own
+[run-scoped snapshot](#run-scoped-snapshots) of the volume's dataset, exactly as for a
+bare `zfsPath` dataset. Select one claim by `name` + `namespace`, or any number by
+`labelSelector` (with `namespace`, or cluster-wide without it). Each matched claim becomes
+its **own archive**, labelled by the claim name.
+
+At Resolve the control worker follows each claim to its bound PersistentVolume and reads
+`spec.csi.volumeHandle`, prefixed with `TAPE_K8S_DATASET_PARENT`, as the ZFS dataset. Only
+**democratic-csi zfs-generic-nfs** volumes are accepted, recognised by the PV's CSI driver
+name: `TAPE_K8S_CSI_DRIVER` (chart value `config.controlWorker.k8sCSIDriver`), default
+`org.democratic-csi.nfs`. Set it to your deployment's `csiDriver.name`
+(`kubectl get csidrivers`) if that differs. The run fails at Resolve, naming the claim, for:
+
+- a claim that is not `Bound`, or whose PV does not point back at it;
+- a PV that is not a CSI volume, or uses another CSI driver;
+- an unusable `volumeHandle` (empty, absolute, containing `..`, `@`, `%` or `,`).
+
+A `labelSelector` matching no claims fails Resolve naming the source. The data worker then
+re-checks that the dataset carries `democratic-csi:managed_resource=true` before
+snapshotting it. The report names each archive by `namespace/name`, its member volume by
+claim name, and its run-scoped snapshot.
+
+When two archived claims share a name in different namespaces, each is labelled
+`<namespace>-<name>` instead (an explicit `label` on a named source is kept as is). If those
+labels still collide after sanitizing and the 40-character limit, the run fails at Resolve
+naming both claims; name one as its own source with a distinct `label`.
+
+`select` does not apply (each claim is its own archive, with no snapshot to choose), and
+`label` is not allowed with a `labelSelector`. Both are rejected by validation.
+
+```json
+{ "apiVersion": "v1", "kind": "PersistentVolumeClaim", "namespace": "immich", "name": "library" }
+
+{ "apiVersion": "v1", "kind": "PersistentVolumeClaim", "labelSelector": "tape.home.arpa/archive=true" }
+```
+
+A run-scoped snapshot on a democratic-csi dataset is held for the run, so deleting the
+claim mid-run (which makes democratic-csi destroy the dataset) fails until the run ends.
 
 ### ZFSPathSource
 
@@ -521,7 +564,8 @@ alerting works even when config parsing fails.
 | `LOG_LEVEL` | no | Logging verbosity for the worker: `debug`, `info`, `warn` (or `warning`), or `error`. Case-insensitive; defaults to `info`, and an unrecognized value also falls back to `info`. |
 | `WORKER_IDLE_EXIT_AFTER` | no | **Control worker only.** Go duration (e.g. `15m`); when set to a positive value, the control worker drains in-flight work and exits `0` once it has run no activity for this long, letting a KEDA-spawned Job scale back to zero — see [Control-worker idle-exit](#control-worker-idle-exit). Empty/unset (the default) disables it: the worker runs until `SIGINT`/`SIGTERM`. A negative or unparseable value fails startup. Ignored (inert) for the `data` role. |
 | `DISCORD_FAILURE_WEBHOOK_URL` | no | Discord webhook URL for run failure alerts. When absent, failure alerting is silently disabled. |
-| `TAPE_K8S_DATASET_PARENT` | no | democratic-csi's `datasetParentName` (e.g. `bulk-pool-01/k8s/democratic-csi/nfs/pvcs`), prepended to a relative CSI `snapshotHandle` to rebuild the absolute ZFS snapshot path during k8s resolution on the control worker. Only needed when a run names k8s sources; when absent, handles are treated as already absolute. |
+| `TAPE_K8S_DATASET_PARENT` | no | democratic-csi's `datasetParentName` (e.g. `bulk-pool-01/k8s/democratic-csi/nfs/pvcs`), prepended to a relative CSI `snapshotHandle` (or a PersistentVolume's `volumeHandle`) to rebuild the absolute ZFS path during k8s resolution on the control worker. Only needed when a run names k8s sources; when absent, handles are treated as already absolute. |
+| `TAPE_K8S_CSI_DRIVER` | no | CSI driver name of the democratic-csi zfs-generic-nfs deployment, read by the control worker. A `PersistentVolumeClaim` source is accepted only when its bound PV uses this driver; anything else fails Resolve naming the claim. Default `org.democratic-csi.nfs` (democratic-csi's example `csiDriver.name`); set it when your deployment names the driver differently. |
 | `TAPE_STAGING_DIR` | yes (data worker) | Directory the Prepare phase stages prepared archives into — a plain subdirectory of an existing dataset on the storage host (e.g. `/mnt/bulk-pool-01/archive/.tape-staging`), bind-mounted into the data worker container. Each run isolates its output in a subdirectory keyed by run id. Required on the data worker; the Prepare activity fails when it is empty. Ignored by the control worker. On every run exit — success, failure, or cancellation — the run's staged archive slices and PAR2 recovery files are removed, retaining only `report.pdf` and, when optical burning is enabled, `recovery.iso`/`disc-manifest.sha256` (see [maintenance.md](maintenance.md#reclaiming-a-leaked-staging-directory)); those retained artifacts accumulate across runs by design and are an operator-pruned archive, not something the run itself expires. A hard `Terminate` (as opposed to a cancel) skips this cleanup, the same way it skips releasing the run's snapshot hold. |
 | `TAPE_RECOVERY_BINARIES_DIR` | image default | Directory holding the statically linked recovery binaries (`age`, `par2`, `zstd`, `tar`) staged into the recovery ISO's `/bin` (SPEC §10). Every top-level regular file must be a statically linked native executable; the Report phase fails the run otherwise. The data worker image bakes the recovery set in at `/recovery/bin` and defaults this variable there — from the same pinned nixpkgs as the rest of the tooling, so the disc cannot drift from the write path. Override only to relocate the set. Ignored by the control worker. |
 | `TAPE_RECOVERY_SOURCES_DIR` | image default | Directory holding the recovery tools' upstream source archives staged into the recovery ISO's `/src` (SPEC §2, §10 — "…plus their source"). It is the sibling `$out/src` of `TAPE_RECOVERY_BINARIES_DIR`'s `$out/bin` from `nix/recovery-binaries.nix`. Its top-level regular files are staged verbatim (not linkage-checked — these are archives, not executables); the Report phase fails the run if it is empty or yields no files, so a disc can never silently ship without the source needed to rebuild the tools on future hardware. The data worker image bakes it in at `/recovery/src` and defaults this variable there, alongside the binaries. Override only to relocate the set. Ignored by the control worker. |

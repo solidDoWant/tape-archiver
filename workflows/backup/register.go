@@ -16,6 +16,9 @@ type ControlConfig struct {
 	// absolute ZFS snapshot paths (SPEC §3, §16). Empty treats snapshotHandles as
 	// absolute.
 	K8sDatasetParent string
+	// K8sCSIDriver is the democratic-csi zfs-generic-nfs CSI driver name a
+	// PersistentVolumeClaim source must use; empty means k8ssnap.DefaultCSIDriver.
+	K8sCSIDriver string
 }
 
 // DataConfig is the data worker's operational configuration, parsed from the
@@ -45,7 +48,7 @@ func RegisterControl(w worker.Worker, cfg ControlConfig) {
 
 	w.RegisterActivity(&FailureActivities{WebhookURL: cfg.FailureWebhookURL})
 
-	w.RegisterActivity(newResolveControlActivities(cfg.K8sDatasetParent))
+	w.RegisterActivity(newResolveControlActivities(cfg.K8sDatasetParent, cfg.K8sCSIDriver))
 	w.RegisterActivity(newPackActivities())
 }
 

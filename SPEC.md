@@ -155,7 +155,8 @@ write window.
 1. **Resolve.** Expand the config into a concrete work list: resolve k8s
    `VolumeSnapshot`/snapshot-group references to ZFS snapshots (cross-checked against
    the democratic-csi `managed_resource` property to confirm ownership before staging),
-   resolve ZFS-property sources to their matching datasets (on the data worker), and
+   resolve PersistentVolumeClaims to their volumes' datasets (cross-checked the same
+   way), resolve ZFS-property sources to their matching datasets (on the data worker), and
    validate raw ZFS snapshot/dataset paths. "Newest snapshot" selections and
    ZFS-property matches (§5) are decided here, once, and recorded in the work list, so
    the rest of the run and the report use exactly the chosen snapshots and datasets; a
@@ -332,6 +333,17 @@ The config defines, at minimum:
     A label selector archives every match by default; `select: newestPerPVC` keeps only
     each source PVC's newest `ReadyToUse` snapshot by `status.creationTime`, ignoring
     not-yet-ready ones.
+  - **k8s PersistentVolumeClaims:** `kind: PersistentVolumeClaim` by name/namespace or
+    label selector (empty namespace = cluster-wide), for volumes with no snapshot
+    producer. The control worker follows each claim to its bound PV and takes
+    `spec.csi.volumeHandle`, prefixed with democratic-csi's `datasetParentName`, as the
+    dataset. Only democratic-csi zfs-generic-nfs volumes are accepted (by the PV's CSI
+    driver name, configurable); an unbound claim, a non-CSI volume or another driver
+    fails Resolve naming the claim, and a selector matching nothing fails naming the
+    source. The data worker re-checks `managed_resource` on the dataset. Each claim is
+    its own archive (label = claim name, `<namespace>-<name>` when two archived claims
+    share a name), archived from a run-scoped snapshot (§4.3 phase 1) that keeps the
+    claim's namespace and name for the report.
   - **Raw ZFS paths:** explicit ZFS snapshot or dataset paths on the pool not visible
     to k8s (e.g. `bulk-pool-01/archive`, `bulk-pool-01/media`). `dataset@snap` archives
     that snapshot. `snapshot: newest` (with an optional name `prefix`) on a bare dataset
@@ -823,8 +835,9 @@ The following were settled during bootstrap (see §3, §4.3, §6, §8, §10):
 - **Compression** — `zstd` before encryption, uniform default-on with a per-source
   override; safe because `age` + PAR2 already bound blast radius (§8).
 - **k8s resolution ownership** — control worker resolves (label selectors →
-  `snapshotHandle` → ZFS name); data worker verifies the resolved snapshot exists and is
-  democratic-csi-managed (`managed_resource`); raw ZFS sources are data-worker-only.
+  `snapshotHandle`, or PVC → PV → `volumeHandle`, → ZFS name); data worker verifies the
+  resolved snapshot or dataset exists and is democratic-csi-managed
+  (`managed_resource`); raw ZFS sources are data-worker-only.
 - **Recovery disc** — M-DISC DVD, ≥2 copies, verify after burn; optical is a redundancy
   layer, not a hard dependency.
 - **Sizing** — cheap `zfs logicalreferenced` feasibility pre-check; authoritative

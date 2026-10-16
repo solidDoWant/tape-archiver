@@ -128,6 +128,11 @@ config:
     # (SPEC §3). Surfaced as TAPE_K8S_DATASET_PARENT. Only needed when a run names k8s
     # sources; leave empty to treat handles as already absolute.
     k8sDatasetParent: ""
+    # k8sCSIDriver is the CSI driver name of the democratic-csi zfs-generic-nfs deployment
+    # (its csiDriver.name; `kubectl get csidrivers` lists it). A PersistentVolumeClaim source
+    # is only accepted when its bound PV uses this driver. Surfaced as TAPE_K8S_CSI_DRIVER;
+    # leave empty for the worker's default, org.democratic-csi.nfs.
+    k8sCSIDriver: ""
     # The worker always exposes /metrics on port 9090 regardless of this value. The toggle
     # controls whether a PodMonitor is created for cluster-side scraping. Leave false when
     # running without prometheus-operator CRDs installed.
@@ -209,7 +214,10 @@ serviceAccount:
 # rbac grants the control worker's ServiceAccount the Kubernetes API access it needs to
 # resolve k8s snapshot sources, following the bjw-s app-template schema. The control
 # worker reads VolumeSnapshot objects and follows each to its bound VolumeSnapshotContent
-# to recover the CSI snapshotHandle (pkg/k8ssnap). The access is strictly read-only
+# to recover the CSI snapshotHandle, and reads PersistentVolumeClaims and follows each to
+# its bound PersistentVolume to recover the CSI volumeHandle (pkg/k8ssnap). Both
+# PersistentVolumes and a cluster-wide claim selector need the ClusterRole. The access is
+# strictly read-only
 # (get/list) and is enabled by default: every run that names a k8s source needs it, and a
 # run that names only raw ZFS sources simply never exercises it — so there is no
 # deployment where granting it causes harm.
@@ -238,6 +246,9 @@ rbac:
         - apiGroups: ["snapshot.storage.k8s.io"]
           resources: ["volumesnapshotcontents"]
           verbs: ["get"]
+        - apiGroups: [""]
+          resources: ["persistentvolumeclaims", "persistentvolumes"]
+          verbs: ["get", "list"]
   bindings:
     snapshot-reader:
       enabled: true

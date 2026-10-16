@@ -144,6 +144,10 @@ func (s Source) validate(index int) error {
 
 	switch {
 	case s.K8s != nil:
+		if s.Label != nil && s.K8s.Kind == KindPVC && s.K8s.LabelSelector != "" {
+			return fmt.Errorf("sources[%d].label: not allowed on a %s labelSelector source; each claim is labelled by its name", index, KindPVC)
+		}
+
 		return s.K8s.validate(index)
 	case s.ZFSPath != nil:
 		return s.ZFSPath.validate(index)
@@ -216,6 +220,16 @@ func (k *K8sRef) validate(index int) error {
 		return fmt.Errorf("sources[%d].k8s: one of name or labelSelector must be set", index)
 	case hasName && hasSelector:
 		return fmt.Errorf("sources[%d].k8s: name and labelSelector are mutually exclusive", index)
+	}
+
+	if k.Kind == KindPVC {
+		if k.APIVersion != "v1" {
+			return fmt.Errorf("sources[%d].k8s.apiVersion: must be \"v1\" for %s, got %q", index, KindPVC, k.APIVersion)
+		}
+
+		if k.Select != "" {
+			return fmt.Errorf("sources[%d].k8s.select: not supported for %s; each matched claim is its own archive", index, KindPVC)
+		}
 	}
 
 	switch k.Select {

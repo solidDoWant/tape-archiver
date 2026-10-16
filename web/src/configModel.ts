@@ -91,13 +91,14 @@ export interface RunConfig {
   feasibilityOverhead?: number
 }
 
-// k8sApiVersions maps the two k8s resource kinds the Form mode's source
+// k8sApiVersions maps the k8s resource kinds the Form mode's source
 // editor offers to their standard apiVersion (docs/configuration.md's own
 // K8sRef examples), so the operator only ever picks a kind, never has to
 // know or type the matching API group/version.
 export const k8sApiVersions: Record<string, string> = {
   VolumeSnapshot: 'snapshot.storage.k8s.io/v1',
   VolumeGroupSnapshot: 'groupsnapshot.storage.k8s.io/v1alpha1',
+  PersistentVolumeClaim: 'v1',
 }
 
 let nextSourceID = 0
@@ -124,7 +125,7 @@ export interface SourceFormState {
   zfsPropertyName: string
   zfsPropertyValue: string
   zfsPropertyUnder: string
-  k8sKind: 'VolumeSnapshot' | 'VolumeGroupSnapshot'
+  k8sKind: 'VolumeSnapshot' | 'VolumeGroupSnapshot' | 'PersistentVolumeClaim'
   k8sSelection: 'name' | 'labelSelector'
   k8sNamespace: string
   k8sName: string
@@ -275,7 +276,8 @@ function buildSource(source: SourceFormState): Source {
     return built
   }
 
-  if (source.label.trim() !== '') {
+  // A PVC label selector takes no label either: each claim is its own archive.
+  if (source.label.trim() !== '' && !isClaimSelector(source)) {
     built.label = source.label.trim()
   }
 
@@ -307,7 +309,7 @@ function buildSource(source: SourceFormState): Source {
   } else {
     k8s.labelSelector = source.k8sLabelSelector.trim()
 
-    if (source.k8sSelect === 'newestPerPVC') {
+    if (source.k8sSelect === 'newestPerPVC' && source.k8sKind !== 'PersistentVolumeClaim') {
       k8s.select = 'newestPerPVC'
     }
   }
@@ -315,6 +317,12 @@ function buildSource(source: SourceFormState): Source {
   built.k8s = k8s
 
   return built
+}
+
+// isClaimSelector reports a PersistentVolumeClaim label-selector row, which
+// takes neither a label nor a select mode (internal/config rejects both).
+export function isClaimSelector(source: SourceFormState): boolean {
+  return source.type === 'k8s' && source.k8sKind === 'PersistentVolumeClaim' && source.k8sSelection === 'labelSelector'
 }
 
 // buildConfig assembles a schema-shaped RunConfig from the guided Form
@@ -448,7 +456,8 @@ function sourceFormStateFromSource(source: Source): SourceFormState {
 
   if (safe.k8s) {
     base.type = 'k8s'
-    base.k8sKind = safe.k8s.kind === 'VolumeGroupSnapshot' ? 'VolumeGroupSnapshot' : 'VolumeSnapshot'
+    base.k8sKind =
+      safe.k8s.kind === 'VolumeGroupSnapshot' || safe.k8s.kind === 'PersistentVolumeClaim' ? safe.k8s.kind : 'VolumeSnapshot'
     base.k8sNamespace = asText(safe.k8s.namespace)
 
     if (safe.k8s.labelSelector) {

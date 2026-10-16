@@ -58,8 +58,9 @@ type Source struct {
 	Label *string `json:"label,omitempty"`
 }
 
-// K8sRef identifies a Kubernetes snapshot resource by GVK, namespace, and either
-// Name or LabelSelector (exactly one must be set).
+// K8sRef identifies a Kubernetes snapshot resource, or a PersistentVolumeClaim
+// (KindPVC), by GVK, namespace, and either Name or LabelSelector (exactly one
+// must be set). Each PVC a KindPVC ref matches is its own archive.
 type K8sRef struct {
 	APIVersion string `json:"apiVersion" jsonschema:"minLength=1"`
 	Kind       string `json:"kind" jsonschema:"minLength=1"`
@@ -71,6 +72,10 @@ type K8sRef struct {
 	// Select narrows a LabelSelector match; empty means SelectAll.
 	Select K8sSelect `json:"select,omitempty" jsonschema:"enum=all,enum=newestPerPVC"`
 }
+
+// KindPVC selects PersistentVolumeClaims (apiVersion "v1"), archived from a
+// run-scoped snapshot of each bound volume's dataset.
+const KindPVC = "PersistentVolumeClaim"
 
 // K8sSelect chooses which LabelSelector matches a k8s source archives.
 type K8sSelect string

@@ -125,6 +125,47 @@ describe('buildConfig', () => {
     expect(roundTripped.sources[2].k8sSelect).toBe('newestPerPVC')
   })
 
+  it('builds PersistentVolumeClaim sources with apiVersion v1 and round-trips them', () => {
+    const form = defaultFormState()
+    form.sources = [
+      {
+        ...newSourceFormState(),
+        type: 'k8s',
+        k8sKind: 'PersistentVolumeClaim',
+        k8sNamespace: 'immich',
+        k8sName: 'library',
+        label: 'photos',
+      },
+      {
+        ...newSourceFormState(),
+        type: 'k8s',
+        k8sKind: 'PersistentVolumeClaim',
+        k8sSelection: 'labelSelector',
+        k8sLabelSelector: 'tape=true',
+        k8sSelect: 'newestPerPVC',
+        label: 'dropped',
+      },
+    ]
+
+    const config = buildConfig(form, testDeploy)
+
+    expect(config.sources[0]).toEqual({
+      compression: true,
+      label: 'photos',
+      k8s: { apiVersion: 'v1', kind: 'PersistentVolumeClaim', namespace: 'immich', name: 'library' },
+    })
+    expect(config.sources[1]).toEqual({
+      compression: true,
+      k8s: { apiVersion: 'v1', kind: 'PersistentVolumeClaim', labelSelector: 'tape=true' },
+    })
+
+    const roundTripped = configToFormState(config)
+
+    expect(roundTripped.sources[0].k8sKind).toBe('PersistentVolumeClaim')
+    expect(roundTripped.sources[1].k8sKind).toBe('PersistentVolumeClaim')
+    expect(roundTripped.sources[1].k8sSelection).toBe('labelSelector')
+  })
+
   it('builds a zfsProperty source (root optional) and round-trips it', () => {
     const form = defaultFormState()
     form.sources = [

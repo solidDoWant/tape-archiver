@@ -285,6 +285,52 @@ func TestConfigValidate(t *testing.T) {
 			errContains: "sources[0].zfsPath.prefix",
 		},
 		{
+			name: "pvc by name",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{K8s: &K8sRef{APIVersion: "v1", Kind: KindPVC, Namespace: "media", Name: "library"}, Label: ptr("photos")}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "pvc by cluster-wide selector",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{K8s: &K8sRef{APIVersion: "v1", Kind: KindPVC, LabelSelector: "tape=true"}}
+			},
+			wantErr: require.NoError,
+		},
+		{
+			name: "pvc with select",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{K8s: &K8sRef{APIVersion: "v1", Kind: KindPVC, LabelSelector: "tape=true", Select: SelectNewestPerPVC}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.select",
+		},
+		{
+			name: "pvc with wrong apiVersion",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{K8s: &K8sRef{APIVersion: "snapshot.storage.k8s.io/v1", Kind: KindPVC, Namespace: "a", Name: "b"}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.apiVersion",
+		},
+		{
+			name: "pvc selector with label",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{K8s: &K8sRef{APIVersion: "v1", Kind: KindPVC, LabelSelector: "tape=true"}, Label: ptr("x")}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].label",
+		},
+		{
+			name: "pvc by name without namespace",
+			mutate: func(c *Config) {
+				c.Sources[0] = Source{K8s: &K8sRef{APIVersion: "v1", Kind: KindPVC, Name: "library"}}
+			},
+			wantErr:     require.Error,
+			errContains: "sources[0].k8s.namespace",
+		},
+		{
 			name: "zfsProperty with root",
 			mutate: func(c *Config) {
 				c.Sources[0] = Source{ZFSProperty: &ZFSPropertySource{Name: "tape.home.arpa:archive", Value: "true", Under: "pool"}}
