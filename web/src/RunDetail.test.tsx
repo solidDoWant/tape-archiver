@@ -163,6 +163,12 @@ async function renderReady(overrides: Record<string, { status: number; body: unk
     expect(screen.getByRole('button', { name: /run overview/i })).toBeInTheDocument()
   })
 
+  // waitFor can resolve once the rail is committed but before React has run
+  // the newly mounted panels' effects (and their fetches) — on a loaded host
+  // those could otherwise land on a fetch stub a test swaps in afterwards
+  // (issue #450). Flush them here so every mount-time fetch hits this stub.
+  await act(async () => {})
+
   return fetchMock
 }
 
@@ -209,7 +215,8 @@ describe('RunDetail', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Pack' })).toBeInTheDocument()
     })
-    expect(screen.getByRole('log')).toBeInTheDocument()
+    // The heading renders at once; the log only once LogPanel's fetch lands.
+    expect(await screen.findByRole('log')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /^par2/i }))
 
@@ -258,22 +265,25 @@ describe('RunDetail', () => {
     })
 
     // The refetch the next SSE event triggers fails outright (e.g. a
-    // transient 500 or cmd/web blip)...
-    const failingFetch = vi.fn((input: RequestInfo | URL) => {
-      const path = (typeof input === 'string' ? input : String(input)).split('?')[0]
-
-      if (path.endsWith('/phases')) {
-        return Promise.resolve(jsonResponse(500, { error: 'boom' }))
-      }
-
-      return Promise.resolve(jsonResponse(200, { runId: 'run-abc', lines: [], live: false }))
-    })
-    vi.stubGlobal('fetch', failingFetch)
+    // transient 500 or cmd/web blip). Every other endpoint keeps its
+    // well-formed default, so a panel fetch that happens to fire after this
+    // swap cannot crash the page and masquerade as the rail being lost.
+    const failingFetch = stub({ '/api/runs/run-abc/phases': { status: 500, body: { error: 'boom' } } })
 
     FakeEventSource.instances[0].emit('update', runningDetail)
 
     await waitFor(() => {
       expect(failingFetch).toHaveBeenCalledWith('/api/runs/run-abc/phases', undefined)
+    })
+
+    // The call alone does not mean the failure was handled: wait for the 500
+    // to reach RunDetail's catch (a few promise hops) and its state update to
+    // flush, so the assertions below observe the post-failure page rather
+    // than the pre-failure one.
+    const phasesCall = failingFetch.mock.calls.findIndex(([input]) => input === '/api/runs/run-abc/phases')
+    await act(async () => {
+      await failingFetch.mock.results[phasesCall].value
+      await new Promise((resolve) => setTimeout(resolve, 0))
     })
 
     // ...but the rail the page already showed is kept, not clobbered into
