@@ -69,7 +69,7 @@ services:
   # as up: vector exits on a config error, and without a healthcheck compose
   # counts a just-started (about-to-crash) container as ready.
   vector:
-    image: timberio/vector:0.59.0-alpine@sha256:0e36bc2a290039e9b6a5e92f04bd2f133223506f72d09682c1df16c015172b7a
+    image: timberio/vector:0.62.0-alpine@sha256:149c77c09aabf16a3aa543abf9cea2e2152c1d9a7d4a45669fe7ad05f4ed8b27
     restart: on-failure
     network_mode: host
     depends_on:
