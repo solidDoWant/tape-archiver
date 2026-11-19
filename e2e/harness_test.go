@@ -81,7 +81,7 @@ const (
 	kedaNamespace    = "keda"
 	kedaRelease      = "keda"
 	kedaChartName    = "keda"
-	kedaChartVersion = "2.21.0"
+	kedaChartVersion = "2.21.1"
 	// kedaChartRepo is used via --repo so no global helm repo entry is added.
 	kedaChartRepo = "https://kedacore.github.io/charts"
 )
